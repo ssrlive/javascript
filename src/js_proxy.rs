@@ -158,7 +158,7 @@ fn is_constructor_target(val: &Value) -> bool {
 
 /// Handle Proxy constructor calls (arguments already evaluated)
 pub(crate) fn handle_proxy_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -204,7 +204,7 @@ pub(crate) fn handle_proxy_constructor<'gc>(
     };
 
     let proxy = Gc::new(
-        mc,
+        ctx,
         JSProxy {
             target: Box::new(target),
             handler: Box::new(handler),
@@ -213,23 +213,23 @@ pub(crate) fn handle_proxy_constructor<'gc>(
     );
 
     // Create a wrapper object for the Proxy
-    let proxy_obj = new_js_object_data(mc);
+    let proxy_obj = new_js_object_data(ctx);
     // Store the actual proxy data
-    slot_set(mc, &proxy_obj, InternalSlot::Proxy, &Value::Proxy(proxy));
+    slot_set(ctx, &proxy_obj, InternalSlot::Proxy, &Value::Proxy(proxy));
 
     // Per spec: If IsCallable(target), set P.[[Call]]; if IsConstructor(target), set P.[[Construct]]
     if target_is_callable {
-        slot_set(mc, &proxy_obj, InternalSlot::Callable, &Value::Boolean(true));
+        slot_set(ctx, &proxy_obj, InternalSlot::Callable, &Value::Boolean(true));
     }
     if target_is_constructor {
-        slot_set(mc, &proxy_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+        slot_set(ctx, &proxy_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
     }
 
     Ok(Value::Object(proxy_obj))
 }
 
 pub(crate) fn handle_proxy_revocable<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -274,7 +274,7 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     };
 
     let proxy = Gc::new(
-        mc,
+        ctx,
         JSProxy {
             target: Box::new(target.clone()),
             handler: Box::new(handler.clone()),
@@ -291,67 +291,67 @@ pub(crate) fn handle_proxy_revocable<'gc>(
         ))),
     ];
 
-    let revoke_env = new_js_object_data(mc);
-    slot_set(mc, &revoke_env, InternalSlot::RevokeProxy, &Value::Proxy(proxy));
+    let revoke_env = new_js_object_data(ctx);
+    slot_set(ctx, &revoke_env, InternalSlot::RevokeProxy, &Value::Proxy(proxy));
 
     // Create a wrapper object for the Proxy
-    let proxy_wrapper = new_js_object_data(mc);
+    let proxy_wrapper = new_js_object_data(ctx);
     // Store the actual proxy data
-    slot_set(mc, &proxy_wrapper, InternalSlot::Proxy, &Value::Proxy(proxy));
+    slot_set(ctx, &proxy_wrapper, InternalSlot::Proxy, &Value::Proxy(proxy));
 
     // Per spec: If IsCallable(target), set P.[[Call]]; if IsConstructor(target), set P.[[Construct]]
     if target_is_callable {
-        slot_set(mc, &proxy_wrapper, InternalSlot::Callable, &Value::Boolean(true));
+        slot_set(ctx, &proxy_wrapper, InternalSlot::Callable, &Value::Boolean(true));
     }
     if target_is_constructor {
-        slot_set(mc, &proxy_wrapper, InternalSlot::IsConstructor, &Value::Boolean(true));
+        slot_set(ctx, &proxy_wrapper, InternalSlot::IsConstructor, &Value::Boolean(true));
     }
 
     // Also capture the wrapper object so the internal revoke helper can replace the stored proxy
-    slot_set(mc, &revoke_env, InternalSlot::ProxyWrapper, &Value::Object(proxy_wrapper));
+    slot_set(ctx, &revoke_env, InternalSlot::ProxyWrapper, &Value::Object(proxy_wrapper));
 
     // Provide a callable function in the revoke env that dispatches to the internal revoke helper
     slot_set(
-        mc,
+        ctx,
         &revoke_env,
         InternalSlot::InternalFn("revoke".to_string()),
         &Value::Function("Proxy.__internal_revoke".to_string()),
     );
 
     let revoke_closure = Gc::new(
-        mc,
+        ctx,
         ClosureData {
             is_arrow: true, // Arrow functions are NOT constructable
             ..ClosureData::new(&[], &revoke_body, Some(revoke_env), None)
         },
     );
-    let revoke_func_obj = new_js_object_data(mc);
+    let revoke_func_obj = new_js_object_data(ctx);
     let revoke_closure_val = Value::Closure(revoke_closure);
     revoke_func_obj
-        .borrow_mut(mc)
-        .set_closure(Some(crate::core::new_gc_cell_ptr(mc, revoke_closure_val)));
+        .borrow_mut(ctx)
+        .set_closure(Some(crate::core::new_gc_cell_ptr(ctx, revoke_closure_val)));
     // Per spec: revoke.length = 0 (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &revoke_func_obj, "length", &Value::Number(0.0))?;
-    revoke_func_obj.borrow_mut(mc).set_non_writable("length");
-    revoke_func_obj.borrow_mut(mc).set_non_enumerable("length");
+    object_set_key_value(ctx, &revoke_func_obj, "length", &Value::Number(0.0))?;
+    revoke_func_obj.borrow_mut(ctx).set_non_writable("length");
+    revoke_func_obj.borrow_mut(ctx).set_non_enumerable("length");
     // Per spec: revoke.name = "" (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &revoke_func_obj, "name", &Value::String(utf8_to_utf16("")))?;
-    revoke_func_obj.borrow_mut(mc).set_non_writable("name");
-    revoke_func_obj.borrow_mut(mc).set_non_enumerable("name");
+    object_set_key_value(ctx, &revoke_func_obj, "name", &Value::String(utf8_to_utf16("")))?;
+    revoke_func_obj.borrow_mut(ctx).set_non_writable("name");
+    revoke_func_obj.borrow_mut(ctx).set_non_enumerable("name");
     // Per spec: [[Prototype]] of revocation function = Function.prototype
     if let Some(func_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_val.borrow()
         && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        revoke_func_obj.borrow_mut(mc).prototype = Some(*func_proto);
+        revoke_func_obj.borrow_mut(ctx).prototype = Some(*func_proto);
     }
     let revoke_func = Value::Object(revoke_func_obj);
 
     // Create the revocable result object
-    let result_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &result_obj, "proxy", &Value::Object(proxy_wrapper))?;
-    object_set_key_value(mc, &result_obj, "revoke", &revoke_func)?;
+    let result_obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &result_obj, "proxy", &Value::Object(proxy_wrapper))?;
+    object_set_key_value(ctx, &result_obj, "revoke", &revoke_func)?;
 
     Ok(Value::Object(result_obj))
 }
@@ -374,17 +374,17 @@ fn get_object_prototype<'gc>(proxy: &Gc<'gc, JSProxy<'gc>>) -> Option<JSObjectDa
 
 /// Create a plain object with Object.prototype as its [[Prototype]],
 /// matching spec's ObjectCreate(%ObjectPrototype%).
-fn new_object_with_proto<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> JSObjectDataPtr<'gc> {
-    let obj = new_js_object_data(mc);
+fn new_object_with_proto<'gc>(ctx: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> JSObjectDataPtr<'gc> {
+    let obj = new_js_object_data(ctx);
     if let Some(proto) = get_object_prototype(proxy) {
-        obj.borrow_mut(mc).prototype = Some(proto);
+        obj.borrow_mut(ctx).prototype = Some(proto);
     }
     obj
 }
 
 /// Apply a proxy trap if available, otherwise fall back to default behavior
 pub(crate) fn apply_proxy_trap<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     trap_name: &str,
     args: Vec<Value<'gc>>,
@@ -402,7 +402,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
         let trap_opt = if let Some(inner_proxy_cell) = crate::core::slot_get(handler_obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            proxy_get_property(mc, inner_proxy, &trap_key)?
+            proxy_get_property(ctx, inner_proxy, &trap_key)?
         } else if let Some(trap_val) = object_get_key_value(handler_obj, trap_name) {
             let unwrapped = match &*trap_val.borrow() {
                 Value::Property { value: Some(v), .. } => v.borrow().clone(),
@@ -413,13 +413,13 @@ pub(crate) fn apply_proxy_trap<'gc>(
                 } => {
                     // Accessor property (Property variant): invoke the getter with handler as this
                     let getter_fn = (**getter).clone();
-                    call_accessor(mc, handler_obj, handler_obj, &getter_fn)?
+                    call_accessor(ctx, handler_obj, handler_obj, &getter_fn)?
                 }
                 Value::Getter(..) => {
                     // Bare Getter variant (object literal with only `get` accessor):
                     // invoke via call_accessor so the body is evaluated correctly
                     let getter_fn = trap_val.borrow().clone();
-                    call_accessor(mc, handler_obj, handler_obj, &getter_fn)?
+                    call_accessor(ctx, handler_obj, handler_obj, &getter_fn)?
                 }
                 other => other.clone(),
             };
@@ -437,7 +437,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
             // If trap property exists it must be callable; invoke via normal call dispatch
             // so return semantics and `this` binding are correct.
             let handler_this = Value::Object(*handler_obj);
-            return evaluate_call_dispatch(mc, handler_obj, &trap, Some(&handler_this), &args);
+            return evaluate_call_dispatch(ctx, handler_obj, &trap, Some(&handler_this), &args);
         }
     }
 
@@ -449,7 +449,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
 /// such that getters are invoked with the *Receiver* as `this` (not with the target).
 /// This is used by the proxy [[Get]] default when no trap is defined.
 fn proxy_ordinary_get<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &crate::core::JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
     receiver: &Option<Value<'gc>>,
@@ -481,14 +481,14 @@ fn proxy_ordinary_get<'gc>(
                     Some(Value::Object(o)) => *o,
                     _ => *obj,
                 };
-                return call_accessor(mc, obj, &recv_obj, getter);
+                return call_accessor(ctx, obj, &recv_obj, getter);
             }
             Value::Getter(..) => {
                 let recv_obj = match receiver {
                     Some(Value::Object(o)) => *o,
                     _ => *obj,
                 };
-                return call_accessor(mc, obj, &recv_obj, &val);
+                return call_accessor(ctx, obj, &recv_obj, &val);
             }
             // Accessor with no getter
             Value::Property {
@@ -513,12 +513,12 @@ fn proxy_ordinary_get<'gc>(
         if let Some(inner_proxy_cell) = crate::core::slot_get(&parent, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            return match proxy_get_property_with_receiver(mc, inner_proxy, key, receiver.clone(), None)? {
+            return match proxy_get_property_with_receiver(ctx, inner_proxy, key, receiver.clone(), None)? {
                 Some(v) => Ok(v),
                 None => Ok(Value::Undefined),
             };
         }
-        return proxy_ordinary_get(mc, &parent, key, receiver);
+        return proxy_ordinary_get(ctx, &parent, key, receiver);
     }
 
     Ok(Value::Undefined)
@@ -529,7 +529,7 @@ fn proxy_ordinary_get<'gc>(
 /// This is used to implement CreateListFromArrayLike semantics where
 /// getters on the trap result must be observable.
 fn read_property_invoking_getters<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<crate::core::PropertyKey<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -541,8 +541,8 @@ fn read_property_invoking_getters<'gc>(
                 getter: Some(getter),
                 value: None,
                 ..
-            } => call_accessor(mc, obj, obj, getter),
-            Value::Getter(..) => call_accessor(mc, obj, obj, &raw),
+            } => call_accessor(ctx, obj, obj, getter),
+            Value::Getter(..) => call_accessor(ctx, obj, obj, &raw),
             _ => Ok(raw),
         }
     } else {
@@ -553,35 +553,35 @@ fn read_property_invoking_getters<'gc>(
 /// Proxy [[Call]] internal method (spec §10.5.12)
 /// Called when a proxy-wrapped callable is invoked as a function.
 pub(crate) fn proxy_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     this_arg: &Value<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Build the argArray as an array-like object
-    let args_array = crate::core::new_js_object_data(mc);
+    let args_array = crate::core::new_js_object_data(ctx);
     for (i, arg) in args.iter().enumerate() {
-        object_set_key_value(mc, &args_array, i, arg)?;
+        object_set_key_value(ctx, &args_array, i, arg)?;
     }
-    object_set_key_value(mc, &args_array, "length", &Value::Number(args.len() as f64))?;
+    object_set_key_value(ctx, &args_array, "length", &Value::Number(args.len() as f64))?;
     // Try to set Array.prototype on the args array
     if let Some(array_val) = crate::core::env_get(env, "Array")
         && let Value::Object(array_ctor) = &*array_val.borrow()
         && let Some(proto_val) = crate::core::object_get_key_value(array_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        args_array.borrow_mut(mc).prototype = Some(*proto);
+        args_array.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     let result = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "apply",
         vec![(*proxy.target).clone(), this_arg.clone(), Value::Object(args_array)],
         || {
             // Default: call the target function directly
-            evaluate_call_dispatch(mc, env, &proxy.target, Some(this_arg), args)
+            evaluate_call_dispatch(ctx, env, &proxy.target, Some(this_arg), args)
         },
     )?;
 
@@ -591,28 +591,28 @@ pub(crate) fn proxy_call<'gc>(
 /// Proxy [[Construct]] internal method (spec §10.5.13)
 /// Called when a proxy-wrapped constructor is invoked with `new`.
 pub(crate) fn proxy_construct<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     args: &[Value<'gc>],
     new_target: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Build the argArray as an array-like object
-    let args_array = crate::core::new_js_object_data(mc);
+    let args_array = crate::core::new_js_object_data(ctx);
     for (i, arg) in args.iter().enumerate() {
-        object_set_key_value(mc, &args_array, i, arg)?;
+        object_set_key_value(ctx, &args_array, i, arg)?;
     }
-    object_set_key_value(mc, &args_array, "length", &Value::Number(args.len() as f64))?;
+    object_set_key_value(ctx, &args_array, "length", &Value::Number(args.len() as f64))?;
     if let Some(array_val) = crate::core::env_get(env, "Array")
         && let Value::Object(array_ctor) = &*array_val.borrow()
         && let Some(proto_val) = crate::core::object_get_key_value(array_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        args_array.borrow_mut(mc).prototype = Some(*proto);
+        args_array.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     let result = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "construct",
         vec![(*proxy.target).clone(), Value::Object(args_array), new_target.clone()],
@@ -623,10 +623,10 @@ pub(crate) fn proxy_construct<'gc>(
                 && let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                 && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
             {
-                return proxy_construct(mc, inner_proxy, args, new_target, env);
+                return proxy_construct(ctx, inner_proxy, args, new_target, env);
             }
             // Use js_class::evaluate_new which handles most constructor patterns
-            crate::js_class::evaluate_new(mc, env, &proxy.target, args, Some(new_target))
+            crate::js_class::evaluate_new(ctx, env, &proxy.target, args, Some(new_target))
         },
     )?;
 
@@ -640,32 +640,32 @@ pub(crate) fn proxy_construct<'gc>(
 /// Obtain the "ownKeys" result for a proxy by invoking the trap (if present)
 /// and converting the returned array-like into a vector of PropertyKey.
 pub(crate) fn proxy_own_keys<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
 ) -> Result<Vec<crate::core::PropertyKey<'gc>>, EvalError<'gc>> {
     log::trace!("proxy_own_keys: proxy_ptr={:p}", Gc::as_ptr(*proxy));
     // If trap exists it will be invoked; default behavior returns the target's own keys
-    let res = apply_proxy_trap(mc, proxy, "ownKeys", vec![(*proxy.target).clone()], || {
+    let res = apply_proxy_trap(ctx, proxy, "ownKeys", vec![(*proxy.target).clone()], || {
         // Default: collect own property keys from target (string and symbol keys)
         if let Value::Object(obj) = &*proxy.target {
             // If target is itself a proxy, recurse
             if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                 && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
             {
-                let inner_keys = proxy_own_keys(mc, inner_proxy)?;
-                let result_obj = crate::core::new_js_object_data(mc);
+                let inner_keys = proxy_own_keys(ctx, inner_proxy)?;
+                let result_obj = crate::core::new_js_object_data(ctx);
                 let keys_len = inner_keys.len();
                 for (i, key) in inner_keys.into_iter().enumerate() {
-                    crate::core::object_set_key_value(mc, &result_obj, i, &property_key_to_value(&key))?;
+                    crate::core::object_set_key_value(ctx, &result_obj, i, &property_key_to_value(&key))?;
                 }
-                crate::core::object_set_key_value(mc, &result_obj, "length", &Value::Number(keys_len as f64))?;
+                crate::core::object_set_key_value(ctx, &result_obj, "length", &Value::Number(keys_len as f64))?;
                 return Ok(Value::Object(result_obj));
             }
         }
 
         let mut keys: Vec<Value> = Vec::new();
         if let Value::Object(obj) = &*proxy.target {
-            let ordered = crate::core::ordinary_own_property_keys_mc(mc, obj)?;
+            let ordered = crate::core::ordinary_own_property_keys_mc(ctx, obj)?;
             for k in ordered {
                 match k {
                     crate::core::PropertyKey::String(s) => keys.push(Value::String(utf8_to_utf16(&s))),
@@ -676,12 +676,12 @@ pub(crate) fn proxy_own_keys<'gc>(
         }
 
         // Build an array-like result object without needing an `env`
-        let result_obj = crate::core::new_js_object_data(mc);
+        let result_obj = crate::core::new_js_object_data(ctx);
         let keys_len = keys.len();
         for (i, key) in keys.into_iter().enumerate() {
-            crate::core::object_set_key_value(mc, &result_obj, i, &key)?;
+            crate::core::object_set_key_value(ctx, &result_obj, i, &key)?;
         }
-        crate::core::object_set_key_value(mc, &result_obj, "length", &Value::Number(keys_len as f64))?;
+        crate::core::object_set_key_value(ctx, &result_obj, "length", &Value::Number(keys_len as f64))?;
         Ok(Value::Object(result_obj))
     })?;
 
@@ -694,7 +694,7 @@ pub(crate) fn proxy_own_keys<'gc>(
         Value::Object(arr_obj) => {
             // Read `length` through accessor-aware path
             let len = {
-                let len_val = read_property_invoking_getters(mc, &arr_obj, "length")?;
+                let len_val = read_property_invoking_getters(ctx, &arr_obj, "length")?;
                 match len_val {
                     Value::Number(n) => n as usize,
                     _ => 0,
@@ -702,7 +702,7 @@ pub(crate) fn proxy_own_keys<'gc>(
             };
             let mut out: Vec<crate::core::PropertyKey<'gc>> = Vec::new();
             for i in 0..len {
-                let elem = read_property_invoking_getters(mc, &arr_obj, i)?;
+                let elem = read_property_invoking_getters(ctx, &arr_obj, i)?;
                 match elem {
                     Value::String(s) => out.push(crate::core::PropertyKey::String(utf16_to_utf8(&s))),
                     Value::Symbol(sd) => out.push(crate::core::PropertyKey::Symbol(sd)),
@@ -769,26 +769,26 @@ pub(crate) fn proxy_own_keys<'gc>(
 
 /// Get property from proxy target, applying get trap if available
 pub(crate) fn proxy_get_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
-    proxy_get_property_with_receiver(mc, proxy, key, None, None)
+    proxy_get_property_with_receiver(ctx, proxy, key, None, None)
 }
 
 /// Get property from proxy target with explicit wrapper and receiver
 pub(crate) fn proxy_get_property_with_wrapper<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     wrapper: &crate::core::JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
-    proxy_get_property_with_receiver(mc, proxy, key, Some(Value::Object(*wrapper)), None)
+    proxy_get_property_with_receiver(ctx, proxy, key, Some(Value::Object(*wrapper)), None)
 }
 
 /// Get property from proxy target with explicit receiver, applying get trap if available
 pub(crate) fn proxy_get_property_with_receiver<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     receiver: Option<Value<'gc>>,
@@ -798,7 +798,7 @@ pub(crate) fn proxy_get_property_with_receiver<'gc>(
     let receiver_val = receiver.clone().unwrap_or(Value::Undefined);
     let receiver_for_default = receiver.clone();
     let result = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "get",
         vec![(*proxy.target).clone(), property_key_to_value(key), receiver_val],
@@ -810,7 +810,7 @@ pub(crate) fn proxy_get_property_with_receiver<'gc>(
                     if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(inner_proxy) = &*proxy_cell.borrow()
                     {
-                        return match proxy_get_property_with_receiver(mc, inner_proxy, &key_clone, receiver_for_default.clone(), None)? {
+                        return match proxy_get_property_with_receiver(ctx, inner_proxy, &key_clone, receiver_for_default.clone(), None)? {
                             Some(v) => Ok(v),
                             None => Ok(Value::Undefined),
                         };
@@ -819,7 +819,7 @@ pub(crate) fn proxy_get_property_with_receiver<'gc>(
                     // 1. Check own property
                     // 2. If accessor, call getter with Receiver as this
                     // 3. If not found, walk prototype chain
-                    proxy_ordinary_get(mc, obj, &key_clone, &receiver_for_default)
+                    proxy_ordinary_get(ctx, obj, &key_clone, &receiver_for_default)
                 }
                 // For function-like targets, resolve Function.prototype methods
                 Value::Function(name) => {
@@ -925,7 +925,7 @@ pub(crate) fn proxy_get_property_with_receiver<'gc>(
 /// `desc` is the new descriptor object, `current` is the current target property descriptor object.
 /// Returns true if the new descriptor is compatible with the current one.
 fn is_compatible_property_descriptor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     _extensible: bool,
     desc: &crate::core::JSObjectDataPtr<'gc>,
     current: &crate::core::JSObjectDataPtr<'gc>,
@@ -993,7 +993,7 @@ fn is_compatible_property_descriptor<'gc>(
             // 7a.ii: If Desc.value is present and SameValue(Desc.value, current.value) is false
             if let Some(desc_val) = get_val(desc, "value") {
                 let current_val = get_val(current, "value").unwrap_or(Value::Undefined);
-                if !crate::core::values_equal(mc, &desc_val, &current_val) {
+                if !crate::core::values_equal(ctx, &desc_val, &current_val) {
                     return false;
                 }
             }
@@ -1006,14 +1006,14 @@ fn is_compatible_property_descriptor<'gc>(
         // 8a: If Desc.set is present and SameValue(Desc.set, current.set) is false
         if let Some(desc_set) = get_val(desc, "set") {
             let current_set = get_val(current, "set").unwrap_or(Value::Undefined);
-            if !crate::core::values_equal(mc, &desc_set, &current_set) {
+            if !crate::core::values_equal(ctx, &desc_set, &current_set) {
                 return false;
             }
         }
         // 8b: If Desc.get is present  and SameValue(Desc.get, current.get) is false
         if let Some(desc_get) = get_val(desc, "get") {
             let current_get = get_val(current, "get").unwrap_or(Value::Undefined);
-            if !crate::core::values_equal(mc, &desc_get, &current_get) {
+            if !crate::core::values_equal(ctx, &desc_get, &current_get) {
                 return false;
             }
         }
@@ -1024,25 +1024,25 @@ fn is_compatible_property_descriptor<'gc>(
 
 /// Public wrapper for is_compatible_property_descriptor
 pub(crate) fn is_compatible_property_descriptor_pub<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     extensible: bool,
     desc: &crate::core::JSObjectDataPtr<'gc>,
     current: &crate::core::JSObjectDataPtr<'gc>,
 ) -> bool {
-    is_compatible_property_descriptor(mc, extensible, desc, current)
+    is_compatible_property_descriptor(ctx, extensible, desc, current)
 }
 
 /// Call the getOwnPropertyDescriptor trap (or default) and return the descriptor's [[Enumerable]] value
 /// as Some(true/false) if descriptor exists, or None if it is undefined.
 pub(crate) fn proxy_get_own_property_descriptor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &crate::core::PropertyKey<'gc>,
 ) -> Result<Option<crate::core::JSObjectDataPtr<'gc>>, EvalError<'gc>> {
     let proxy_gc = *proxy;
     let key_clone = key.clone();
     let res = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "getOwnPropertyDescriptor",
         vec![(*proxy.target).clone(), property_key_to_value(key)],
@@ -1054,7 +1054,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                     if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                     {
-                        match proxy_get_own_property_descriptor(mc, inner_proxy, &key_clone)? {
+                        match proxy_get_own_property_descriptor(ctx, inner_proxy, &key_clone)? {
                             Some(desc_obj) => Ok(Value::Object(desc_obj)),
                             None => Ok(Value::Undefined),
                         }
@@ -1092,18 +1092,18 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                                     Value::Number(n)
                                 }
                             };
-                            let desc_obj = crate::core::new_js_object_data(mc);
-                            object_set_key_value(mc, &desc_obj, "value", &value)?;
-                            object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
-                            object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(true))?;
-                            object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                            let desc_obj = crate::core::new_js_object_data(ctx);
+                            object_set_key_value(ctx, &desc_obj, "value", &value)?;
+                            object_set_key_value(ctx, &desc_obj, "writable", &Value::Boolean(true))?;
+                            object_set_key_value(ctx, &desc_obj, "enumerable", &Value::Boolean(true))?;
+                            object_set_key_value(ctx, &desc_obj, "configurable", &Value::Boolean(true))?;
                             Ok(Value::Object(desc_obj))
                         } else {
                             Ok(Value::Undefined)
                         }
                     } else if let Some(val_rc) = crate::core::get_own_property(obj, &key_clone) {
                         let val = val_rc.borrow().clone();
-                        let desc_obj = crate::core::new_js_object_data(mc);
+                        let desc_obj = crate::core::new_js_object_data(ctx);
 
                         // Check if this is an accessor property
                         let is_accessor = matches!(&val, Value::Getter(..) | Value::Setter(..) | Value::Property { value: None, .. });
@@ -1113,17 +1113,17 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                             match &val {
                                 Value::Getter(body, env, home) => {
                                     crate::core::object_set_key_value(
-                                        mc,
+                                        ctx,
                                         &desc_obj,
                                         "get",
                                         &Value::Getter(body.clone(), *env, home.clone()),
                                     )?;
-                                    crate::core::object_set_key_value(mc, &desc_obj, "set", &Value::Undefined)?;
+                                    crate::core::object_set_key_value(ctx, &desc_obj, "set", &Value::Undefined)?;
                                 }
                                 Value::Setter(params, body, env, home) => {
-                                    crate::core::object_set_key_value(mc, &desc_obj, "get", &Value::Undefined)?;
+                                    crate::core::object_set_key_value(ctx, &desc_obj, "get", &Value::Undefined)?;
                                     crate::core::object_set_key_value(
-                                        mc,
+                                        ctx,
                                         &desc_obj,
                                         "set",
                                         &Value::Setter(params.clone(), body.clone(), *env, home.clone()),
@@ -1131,14 +1131,14 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                                 }
                                 Value::Property { getter, setter, .. } => {
                                     if let Some(g) = getter {
-                                        crate::core::object_set_key_value(mc, &desc_obj, "get", g)?;
+                                        crate::core::object_set_key_value(ctx, &desc_obj, "get", g)?;
                                     } else {
-                                        crate::core::object_set_key_value(mc, &desc_obj, "get", &Value::Undefined)?;
+                                        crate::core::object_set_key_value(ctx, &desc_obj, "get", &Value::Undefined)?;
                                     }
                                     if let Some(s) = setter {
-                                        crate::core::object_set_key_value(mc, &desc_obj, "set", s)?;
+                                        crate::core::object_set_key_value(ctx, &desc_obj, "set", s)?;
                                     } else {
-                                        crate::core::object_set_key_value(mc, &desc_obj, "set", &Value::Undefined)?;
+                                        crate::core::object_set_key_value(ctx, &desc_obj, "set", &Value::Undefined)?;
                                     }
                                 }
                                 _ => {}
@@ -1149,15 +1149,15 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                                 Value::Property { value: Some(v), .. } => v.borrow().clone(),
                                 other => other.clone(),
                             };
-                            crate::core::object_set_key_value(mc, &desc_obj, "value", &actual_val)?;
+                            crate::core::object_set_key_value(ctx, &desc_obj, "value", &actual_val)?;
                             let is_writable = obj.borrow().is_writable(&key_clone);
-                            crate::core::object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(is_writable))?;
+                            crate::core::object_set_key_value(ctx, &desc_obj, "writable", &Value::Boolean(is_writable))?;
                         }
 
                         let is_enum = obj.borrow().is_enumerable(&key_clone);
-                        crate::core::object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(is_enum))?;
+                        crate::core::object_set_key_value(ctx, &desc_obj, "enumerable", &Value::Boolean(is_enum))?;
                         let is_conf = obj.borrow().is_configurable(&key_clone);
-                        crate::core::object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(is_conf))?;
+                        crate::core::object_set_key_value(ctx, &desc_obj, "configurable", &Value::Boolean(is_conf))?;
                         Ok(Value::Object(desc_obj))
                     } else {
                         Ok(Value::Undefined)
@@ -1177,7 +1177,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                 let target_desc = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    proxy_get_own_property_descriptor(mc, inner_proxy, key)?
+                    proxy_get_own_property_descriptor(ctx, inner_proxy, key)?
                 } else {
                     crate::core::get_own_property(target_obj, key).map(|_| *target_obj) // dummy: just need Some/None
                 };
@@ -1188,7 +1188,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                         && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                     {
                         // Get from the descriptor object returned by inner proxy
-                        match proxy_get_own_property_descriptor(mc, inner_proxy, key)? {
+                        match proxy_get_own_property_descriptor(ctx, inner_proxy, key)? {
                             Some(d) => crate::core::object_get_key_value(&d, "configurable")
                                 .map(|v| v.borrow().to_truthy())
                                 .unwrap_or(false),
@@ -1203,7 +1203,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                     let extensible = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                         && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                     {
-                        proxy_is_extensible(mc, inner_proxy)?
+                        proxy_is_extensible(ctx, inner_proxy)?
                     } else {
                         target_obj.borrow().is_extensible()
                     };
@@ -1222,7 +1222,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                     crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    match proxy_get_own_property_descriptor(mc, inner_proxy, key)? {
+                    match proxy_get_own_property_descriptor(ctx, inner_proxy, key)? {
                         Some(d) => {
                             let conf = crate::core::object_get_key_value(&d, "configurable")
                                 .map(|v| v.borrow().to_truthy())
@@ -1243,7 +1243,7 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
                 let extensible_target = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    proxy_is_extensible(mc, inner_proxy)?
+                    proxy_is_extensible(ctx, inner_proxy)?
                 } else {
                     target_obj.borrow().is_extensible()
                 };
@@ -1303,11 +1303,11 @@ pub(crate) fn proxy_get_own_property_descriptor<'gc>(
 
 /// Convenience: call proxy_get_own_property_descriptor and extract just the enumerable flag.
 pub(crate) fn proxy_get_own_property_is_enumerable<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &crate::core::PropertyKey<'gc>,
 ) -> Result<Option<bool>, EvalError<'gc>> {
-    match proxy_get_own_property_descriptor(mc, proxy, key)? {
+    match proxy_get_own_property_descriptor(ctx, proxy, key)? {
         None => Ok(None),
         Some(desc_obj) => {
             let enumerable = crate::core::object_get_key_value(&desc_obj, "enumerable")
@@ -1321,7 +1321,7 @@ pub(crate) fn proxy_get_own_property_is_enumerable<'gc>(
 /// OrdinarySet(O, P, V, Receiver) — spec 10.1.9 / 10.1.9.2
 /// Used by Reflect.set when the target is an ordinary (non-proxy) object.
 pub(crate) fn ordinary_set<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     target_obj: &crate::core::JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -1342,7 +1342,7 @@ pub(crate) fn ordinary_set<'gc>(
     {
         if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
             // Synthesize a writable data property — go to create/update on receiver
-            return ordinary_set_create_or_update(mc, key, value, receiver, env);
+            return ordinary_set_create_or_update(ctx, key, value, receiver, env);
         } else {
             // Invalid numeric index: just return true (silently ignore)
             return Ok(true);
@@ -1377,9 +1377,9 @@ pub(crate) fn ordinary_set<'gc>(
             };
             if let Some(setter) = setter_fn {
                 if let Value::Object(recv_obj) = receiver {
-                    crate::core::call_setter(mc, recv_obj, &setter, value, Some(env))?;
+                    crate::core::call_setter(ctx, recv_obj, &setter, value, Some(env))?;
                 } else {
-                    crate::core::call_setter(mc, target_obj, &setter, value, Some(env))?;
+                    crate::core::call_setter(ctx, target_obj, &setter, value, Some(env))?;
                 }
                 return Ok(true);
             } else {
@@ -1390,7 +1390,7 @@ pub(crate) fn ordinary_set<'gc>(
             if !target_obj.borrow().is_writable(key) {
                 return Ok(false);
             }
-            return ordinary_set_create_or_update(mc, key, value, receiver, env);
+            return ordinary_set_create_or_update(ctx, key, value, receiver, env);
         }
     }
 
@@ -1401,7 +1401,7 @@ pub(crate) fn ordinary_set<'gc>(
         if let Some(inner_proxy_cell) = crate::core::slot_get(&parent_obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            return proxy_set_property_with_receiver(mc, inner_proxy, key, value, Some(receiver));
+            return proxy_set_property_with_receiver(ctx, inner_proxy, key, value, Some(receiver));
         }
 
         // TypedArray parent: apply TypedArray [[Set]] semantics per ES2024 §10.4.5.5
@@ -1418,14 +1418,14 @@ pub(crate) fn ordinary_set<'gc>(
             if same {
                 // TypedArraySetElement: coerce value, then set if valid index
                 if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
-                    let n = crate::js_typedarray::to_bigint_i64(mc, env, value)?;
+                    let n = crate::js_typedarray::to_bigint_i64(ctx, env, value)?;
                     if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
-                        ta.set_bigint(mc, num_idx as usize, n)?;
+                        ta.set_bigint(ctx, num_idx as usize, n)?;
                     }
                 } else {
-                    let n = crate::core::to_number_with_env(mc, env, value)?;
+                    let n = crate::core::to_number_with_env(ctx, env, value)?;
                     if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
-                        ta.set(mc, num_idx as usize, n)?;
+                        ta.set(ctx, num_idx as usize, n)?;
                     }
                 }
                 return Ok(true);
@@ -1435,7 +1435,7 @@ pub(crate) fn ordinary_set<'gc>(
                     return Ok(true); // invalid index → silently succeed
                 }
                 // Valid index, different receiver → OrdinarySet → create on receiver
-                return ordinary_set_create_or_update(mc, key, value, receiver, env);
+                return ordinary_set_create_or_update(ctx, key, value, receiver, env);
             }
         }
 
@@ -1465,7 +1465,7 @@ pub(crate) fn ordinary_set<'gc>(
                 };
                 if let Some(setter) = setter_fn {
                     if let Value::Object(recv_obj) = receiver {
-                        crate::core::call_setter(mc, recv_obj, &setter, value, Some(env))?;
+                        crate::core::call_setter(ctx, recv_obj, &setter, value, Some(env))?;
                     }
                     return Ok(true);
                 } else {
@@ -1483,12 +1483,12 @@ pub(crate) fn ordinary_set<'gc>(
 
     // Default ownDesc = {value: undefined, writable: true, enumerable: true, configurable: true}
     // → CreateDataProperty(Receiver, P, V)
-    ordinary_set_create_or_update(mc, key, value, receiver, env)
+    ordinary_set_create_or_update(ctx, key, value, receiver, env)
 }
 
 /// Helper for OrdinarySet steps 3.c–3.e: operate on Receiver to create or update property.
 fn ordinary_set_create_or_update<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
     receiver: &Value<'gc>,
@@ -1500,12 +1500,12 @@ fn ordinary_set_create_or_update<'gc>(
             if let Some(inner_proxy_cell) = crate::core::slot_get(recv_obj, &InternalSlot::Proxy)
                 && let Value::Proxy(recv_proxy) = &*inner_proxy_cell.borrow()
             {
-                let recv_has = proxy_get_own_property_descriptor(mc, recv_proxy, key)?;
+                let recv_has = proxy_get_own_property_descriptor(ctx, recv_proxy, key)?;
                 if recv_has.is_some() {
-                    let ok = proxy_define_property_value_only(mc, recv_proxy, key, value)?;
+                    let ok = proxy_define_property_value_only(ctx, recv_proxy, key, value)?;
                     Ok(ok)
                 } else {
-                    let ok = proxy_define_data_property(mc, recv_proxy, key, value)?;
+                    let ok = proxy_define_data_property(ctx, recv_proxy, key, value)?;
                     Ok(ok)
                 }
             } else {
@@ -1519,11 +1519,11 @@ fn ordinary_set_create_or_update<'gc>(
                     if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
                         // Existing writable data property → IntegerIndexedElementSet
                         if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
-                            let n = crate::js_typedarray::to_bigint_i64(mc, env, value)?;
-                            ta.set_bigint(mc, num_idx as usize, n)?;
+                            let n = crate::js_typedarray::to_bigint_i64(ctx, env, value)?;
+                            ta.set_bigint(ctx, num_idx as usize, n)?;
                         } else {
-                            let n = crate::core::to_number_with_env(mc, env, value)?;
-                            ta.set(mc, num_idx as usize, n)?;
+                            let n = crate::core::to_number_with_env(ctx, env, value)?;
+                            ta.set(ctx, num_idx as usize, n)?;
                         }
                         return Ok(true);
                     } else {
@@ -1562,11 +1562,11 @@ fn ordinary_set_create_or_update<'gc>(
                     // then re-check writable (coercion may make it non-writable via side effects).
                     if let PropertyKey::String(s) = key
                         && s == "length"
-                        && crate::js_array::is_array(mc, recv_obj)
+                        && crate::js_array::is_array(ctx, recv_obj)
                         && !matches!(value, Value::Property { .. })
                     {
-                        let uint32_len = crate::core::to_uint32_value_with_env(mc, env, value)?;
-                        let number_len = crate::core::to_number_with_env(mc, env, value)?;
+                        let uint32_len = crate::core::to_uint32_value_with_env(ctx, env, value)?;
+                        let number_len = crate::core::to_number_with_env(ctx, env, value)?;
                         if (uint32_len as f64) != number_len {
                             return Err(raise_range_error!("Invalid array length").into());
                         }
@@ -1574,16 +1574,16 @@ fn ordinary_set_create_or_update<'gc>(
                         if !recv_obj.borrow().is_writable(key) {
                             return Ok(false);
                         }
-                        crate::core::object_set_length(mc, recv_obj, uint32_len as usize).map_err(EvalError::from)?;
+                        crate::core::object_set_length(ctx, recv_obj, uint32_len as usize).map_err(EvalError::from)?;
                         return Ok(true);
                     }
-                    object_set_key_value(mc, recv_obj, key, value)?;
+                    object_set_key_value(ctx, recv_obj, key, value)?;
                 } else {
                     // Step 3.e: CreateDataProperty — check extensibility
                     if !recv_obj.borrow().is_extensible() {
                         return Ok(false);
                     }
-                    object_set_key_value(mc, recv_obj, key, value)?;
+                    object_set_key_value(ctx, recv_obj, key, value)?;
                 }
                 Ok(true)
             }
@@ -1594,27 +1594,27 @@ fn ordinary_set_create_or_update<'gc>(
 
 /// Set property on proxy target, applying set trap if available
 pub(crate) fn proxy_set_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
-    proxy_set_property_with_receiver(mc, proxy, key, value, None)
+    proxy_set_property_with_receiver(ctx, proxy, key, value, None)
 }
 
 /// Set property on proxy target with explicit wrapper (receiver = proxy wrapper)
 pub(crate) fn proxy_set_property_with_wrapper<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
     wrapper: &crate::core::JSObjectDataPtr<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
-    proxy_set_property_with_receiver(mc, proxy, key, value, Some(&Value::Object(*wrapper)))
+    proxy_set_property_with_receiver(ctx, proxy, key, value, Some(&Value::Object(*wrapper)))
 }
 
 pub(crate) fn proxy_set_property_with_receiver<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
@@ -1630,7 +1630,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
     let receiver_val = receiver.cloned().unwrap_or_else(|| (*proxy.target).clone());
     let trap_args = vec![(*proxy.target).clone(), property_key_to_value(key), value.clone(), receiver_val];
 
-    let result = apply_proxy_trap(mc, proxy, "set", trap_args, || {
+    let result = apply_proxy_trap(ctx, proxy, "set", trap_args, || {
         // Default behavior: target.[[Set]](P, V, Receiver) — OrdinarySet
         // Per spec 10.5.9 step 5: If trap is undefined, return ? target.[[Set]](P, V, Receiver).
         // OrdinarySet (10.1.2.2) delegates back through Receiver for
@@ -1642,7 +1642,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
                     return Ok(Value::Boolean(proxy_set_property_with_receiver(
-                        mc,
+                        ctx,
                         inner_proxy,
                         &key_clone,
                         &value_clone,
@@ -1668,12 +1668,12 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                             if let Some(rp_cell) = crate::core::slot_get(recv_obj, &InternalSlot::Proxy)
                                 && let Value::Proxy(recv_proxy) = &*rp_cell.borrow()
                             {
-                                let recv_has = proxy_get_own_property_descriptor(mc, recv_proxy, &key_clone)?;
+                                let recv_has = proxy_get_own_property_descriptor(ctx, recv_proxy, &key_clone)?;
                                 if recv_has.is_some() {
-                                    let ok = proxy_define_property_value_only(mc, recv_proxy, &key_clone, &value_clone)?;
+                                    let ok = proxy_define_property_value_only(ctx, recv_proxy, &key_clone, &value_clone)?;
                                     return Ok(Value::Boolean(ok));
                                 } else {
-                                    let ok = proxy_define_data_property(mc, recv_proxy, &key_clone, &value_clone)?;
+                                    let ok = proxy_define_data_property(ctx, recv_proxy, &key_clone, &value_clone)?;
                                     return Ok(Value::Boolean(ok));
                                 }
                             } else {
@@ -1685,18 +1685,18 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                     if crate::js_typedarray::is_valid_integer_index(rta, ri) {
                                         let renv = target_obj.borrow().definition_env.unwrap_or(*target_obj);
                                         if crate::js_typedarray::is_bigint_typed_array(&rta.kind) {
-                                            let n = crate::js_typedarray::to_bigint_i64(mc, &renv, &value_clone)?;
-                                            rta.set_bigint(mc, ri as usize, n)?;
+                                            let n = crate::js_typedarray::to_bigint_i64(ctx, &renv, &value_clone)?;
+                                            rta.set_bigint(ctx, ri as usize, n)?;
                                         } else {
-                                            let n = crate::core::to_number_with_env(mc, &renv, &value_clone)?;
-                                            rta.set(mc, ri as usize, n)?;
+                                            let n = crate::core::to_number_with_env(ctx, &renv, &value_clone)?;
+                                            rta.set(ctx, ri as usize, n)?;
                                         }
                                         return Ok(Value::Boolean(true));
                                     } else {
                                         return Ok(Value::Boolean(false));
                                     }
                                 }
-                                object_set_key_value(mc, recv_obj, &key_clone, &value_clone)?;
+                                object_set_key_value(ctx, recv_obj, &key_clone, &value_clone)?;
                                 return Ok(Value::Boolean(true));
                             }
                         }
@@ -1739,10 +1739,10 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                             let recv = receiver_clone.clone().unwrap_or(Value::Object(*target_obj));
                             match &recv {
                                 Value::Object(recv_obj) => {
-                                    crate::core::call_setter(mc, recv_obj, &setter, &value_clone, None)?;
+                                    crate::core::call_setter(ctx, recv_obj, &setter, &value_clone, None)?;
                                 }
                                 _ => {
-                                    crate::core::call_setter(mc, target_obj, &setter, &value_clone, None)?;
+                                    crate::core::call_setter(ctx, target_obj, &setter, &value_clone, None)?;
                                 }
                             }
                             Ok(Value::Boolean(true))
@@ -1763,12 +1763,12 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                 && let Value::Proxy(recv_proxy) = &*inner_proxy_cell.borrow()
                             {
                                 // Receiver is a proxy → use its traps
-                                let recv_has = proxy_get_own_property_descriptor(mc, recv_proxy, &key_clone)?;
+                                let recv_has = proxy_get_own_property_descriptor(ctx, recv_proxy, &key_clone)?;
                                 if recv_has.is_some() {
-                                    let ok = proxy_define_property_value_only(mc, recv_proxy, &key_clone, &value_clone)?;
+                                    let ok = proxy_define_property_value_only(ctx, recv_proxy, &key_clone, &value_clone)?;
                                     return Ok(Value::Boolean(ok));
                                 } else {
-                                    let ok = proxy_define_data_property(mc, recv_proxy, &key_clone, &value_clone)?;
+                                    let ok = proxy_define_data_property(ctx, recv_proxy, &key_clone, &value_clone)?;
                                     return Ok(Value::Boolean(ok));
                                 }
                             } else {
@@ -1777,7 +1777,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                 // Array exotic [[DefineOwnProperty]] for "length": coerce, then re-check writable
                                 if let PropertyKey::String(s) = &key_clone
                                     && s == "length"
-                                    && crate::js_array::is_array(mc, recv_obj)
+                                    && crate::js_array::is_array(ctx, recv_obj)
                                     && !matches!(value_clone, Value::Property { .. })
                                 {
                                     if !recv_obj.borrow().is_writable(&key_clone) {
@@ -1788,33 +1788,33 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                         .definition_env
                                         .or(target_obj.borrow().definition_env)
                                         .unwrap_or(*target_obj);
-                                    let uint32_len = crate::core::to_uint32_value_with_env(mc, &call_env, &value_clone)?;
-                                    let number_len = crate::core::to_number_with_env(mc, &call_env, &value_clone)?;
+                                    let uint32_len = crate::core::to_uint32_value_with_env(ctx, &call_env, &value_clone)?;
+                                    let number_len = crate::core::to_number_with_env(ctx, &call_env, &value_clone)?;
                                     if (uint32_len as f64) != number_len {
                                         return Err(raise_range_error!("Invalid array length").into());
                                     }
                                     if !recv_obj.borrow().is_writable(&key_clone) {
                                         return Ok(Value::Boolean(false));
                                     }
-                                    crate::core::object_set_length(mc, recv_obj, uint32_len as usize).map_err(EvalError::from)?;
+                                    crate::core::object_set_length(ctx, recv_obj, uint32_len as usize).map_err(EvalError::from)?;
                                     return Ok(Value::Boolean(true));
                                 }
                                 // if recv_has.is_some() {
-                                object_set_key_value(mc, recv_obj, &key_clone, &value_clone)?;
+                                object_set_key_value(ctx, recv_obj, &key_clone, &value_clone)?;
                                 // } else {
-                                // object_set_key_value(mc, recv_obj, &key_clone, &value_clone)?;
+                                // object_set_key_value(ctx, recv_obj, &key_clone, &value_clone)?;
                                 // }
                                 return Ok(Value::Boolean(true));
                             }
                         }
 
                         // Fallback: Receiver is the proxy itself (original behavior)
-                        let receiver_has = proxy_get_own_property_descriptor(mc, &proxy_gc, &key_clone)?;
+                        let receiver_has = proxy_get_own_property_descriptor(ctx, &proxy_gc, &key_clone)?;
                         if receiver_has.is_some() {
-                            let ok = proxy_define_property_value_only(mc, &proxy_gc, &key_clone, &value_clone)?;
+                            let ok = proxy_define_property_value_only(ctx, &proxy_gc, &key_clone, &value_clone)?;
                             Ok(Value::Boolean(ok))
                         } else {
-                            let ok = proxy_define_data_property(mc, &proxy_gc, &key_clone, &value_clone)?;
+                            let ok = proxy_define_data_property(ctx, &proxy_gc, &key_clone, &value_clone)?;
                             Ok(Value::Boolean(ok))
                         }
                     }
@@ -1828,7 +1828,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                         {
                             return Ok(Value::Boolean(proxy_set_property_with_receiver(
-                                mc,
+                                ctx,
                                 inner_proxy,
                                 &key_clone,
                                 &value_clone,
@@ -1849,14 +1849,14 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                 // TypedArraySetElement: coerce then set if valid
                                 let env_for_coerce = target_obj.borrow().definition_env.unwrap_or(*target_obj);
                                 if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
-                                    let n = crate::js_typedarray::to_bigint_i64(mc, &env_for_coerce, &value_clone)?;
+                                    let n = crate::js_typedarray::to_bigint_i64(ctx, &env_for_coerce, &value_clone)?;
                                     if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
-                                        ta.set_bigint(mc, num_idx as usize, n)?;
+                                        ta.set_bigint(ctx, num_idx as usize, n)?;
                                     }
                                 } else {
-                                    let n = crate::core::to_number_with_env(mc, &env_for_coerce, &value_clone)?;
+                                    let n = crate::core::to_number_with_env(ctx, &env_for_coerce, &value_clone)?;
                                     if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
-                                        ta.set(mc, num_idx as usize, n)?;
+                                        ta.set(ctx, num_idx as usize, n)?;
                                     }
                                 }
                                 return Ok(Value::Boolean(true));
@@ -1900,7 +1900,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                                 if let Some(setter) = setter_fn {
                                     let recv = receiver_clone.clone().unwrap_or(Value::Object(*target_obj));
                                     if let Value::Object(recv_obj) = &recv {
-                                        crate::core::call_setter(mc, recv_obj, &setter, &value_clone, None)?;
+                                        crate::core::call_setter(ctx, recv_obj, &setter, &value_clone, None)?;
                                     }
                                     return Ok(Value::Boolean(true));
                                 } else {
@@ -1924,22 +1924,22 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
                             && let Value::Proxy(recv_proxy) = &*inner_proxy_cell.borrow()
                         {
                             // Receiver is a proxy → call its GOPD trap first (spec step 3.c)
-                            let recv_has = proxy_get_own_property_descriptor(mc, recv_proxy, &key_clone)?;
+                            let recv_has = proxy_get_own_property_descriptor(ctx, recv_proxy, &key_clone)?;
                             if recv_has.is_some() {
                                 // Step 3.d: existingDescriptor is not undefined → DefineProperty({value: V})
-                                let ok = proxy_define_property_value_only(mc, recv_proxy, &key_clone, &value_clone)?;
+                                let ok = proxy_define_property_value_only(ctx, recv_proxy, &key_clone, &value_clone)?;
                                 Ok(Value::Boolean(ok))
                             } else {
                                 // Step 3.e: CreateDataProperty(Receiver, P, V)
-                                let ok = proxy_define_data_property(mc, recv_proxy, &key_clone, &value_clone)?;
+                                let ok = proxy_define_data_property(ctx, recv_proxy, &key_clone, &value_clone)?;
                                 Ok(Value::Boolean(ok))
                             }
                         } else {
-                            object_set_key_value(mc, recv_obj, &key_clone, &value_clone)?;
+                            object_set_key_value(ctx, recv_obj, &key_clone, &value_clone)?;
                             Ok(Value::Boolean(true))
                         }
                     } else {
-                        let ok = proxy_define_data_property(mc, &proxy_gc, &key_clone, &value_clone)?;
+                        let ok = proxy_define_data_property(ctx, &proxy_gc, &key_clone, &value_clone)?;
                         Ok(Value::Boolean(ok))
                     }
                 }
@@ -2008,7 +2008,7 @@ pub(crate) fn proxy_set_property_with_receiver<'gc>(
 /// Proxy [[DefineOwnProperty]] — forwards a full descriptor object through the proxy chain.
 /// Used when the default behavior needs to forward to a target that may itself be a proxy.
 pub(crate) fn proxy_define_own_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     desc_obj: &crate::core::JSObjectDataPtr<'gc>,
@@ -2018,7 +2018,7 @@ pub(crate) fn proxy_define_own_property<'gc>(
     let key_clone2 = key.clone();
     let desc_obj_copy = *desc_obj;
     let result = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "defineProperty",
         vec![(*proxy.target).clone(), property_key_to_value(key), Value::Object(*desc_obj)],
@@ -2029,13 +2029,13 @@ pub(crate) fn proxy_define_own_property<'gc>(
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
                     return Ok(Value::Boolean(proxy_define_own_property(
-                        mc,
+                        ctx,
                         inner_proxy,
                         &key_clone,
                         &desc_obj_copy,
                     )?));
                 }
-                match crate::js_object::define_property_internal(mc, obj, &key_clone, &desc_obj_copy) {
+                match crate::js_object::define_property_internal(ctx, obj, &key_clone, &desc_obj_copy) {
                     Ok(()) => Ok(Value::Boolean(true)),
                     Err(_) => Ok(Value::Boolean(false)),
                 }
@@ -2060,12 +2060,12 @@ pub(crate) fn proxy_define_own_property<'gc>(
         let target_desc_opt = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            proxy_get_own_property_descriptor(mc, inner_proxy, &key_clone2)?
+            proxy_get_own_property_descriptor(ctx, inner_proxy, &key_clone2)?
         } else if crate::core::get_own_property(target_obj, &key_clone2).is_some() {
             // Build a descriptor object for the target's own property
-            let td = crate::core::build_property_descriptor(mc, target_obj, &key_clone2);
+            let td = crate::core::build_property_descriptor(ctx, target_obj, &key_clone2);
             match td {
-                Some(pd) => Some(pd.to_object(mc)?),
+                Some(pd) => Some(pd.to_object(ctx)?),
                 None => None,
             }
         } else {
@@ -2076,7 +2076,7 @@ pub(crate) fn proxy_define_own_property<'gc>(
         let extensible_target = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            proxy_is_extensible(mc, inner_proxy)?
+            proxy_is_extensible(ctx, inner_proxy)?
         } else {
             target_obj.borrow().is_extensible()
         };
@@ -2088,7 +2088,7 @@ pub(crate) fn proxy_define_own_property<'gc>(
 
         if let Some(ref target_desc) = target_desc_opt {
             // Step 16a: IsCompatiblePropertyDescriptor check
-            if !is_compatible_property_descriptor(mc, extensible_target, desc_obj, target_desc) {
+            if !is_compatible_property_descriptor(ctx, extensible_target, desc_obj, target_desc) {
                 return Err(raise_type_error!("'defineProperty' on proxy: trap returned truish for property descriptor that is incompatible with the existing property in the proxy target").into());
             }
             // Step 16b: If settingConfigFalse and targetDesc.configurable is true, throw
@@ -2132,75 +2132,81 @@ pub(crate) fn proxy_define_own_property<'gc>(
 /// This creates a full data descriptor {value, writable:true, enumerable:true, configurable:true}
 /// and routes through proxy_define_own_property which includes all spec invariant checks.
 pub(crate) fn proxy_define_data_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
-    let desc_obj = new_object_with_proto(mc, proxy);
-    object_set_key_value(mc, &desc_obj, "value", value)?;
-    object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
-    object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(true))?;
-    object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+    let desc_obj = new_object_with_proto(ctx, proxy);
+    object_set_key_value(ctx, &desc_obj, "value", value)?;
+    object_set_key_value(ctx, &desc_obj, "writable", &Value::Boolean(true))?;
+    object_set_key_value(ctx, &desc_obj, "enumerable", &Value::Boolean(true))?;
+    object_set_key_value(ctx, &desc_obj, "configurable", &Value::Boolean(true))?;
 
-    proxy_define_own_property(mc, proxy, key, &desc_obj)
+    proxy_define_own_property(ctx, proxy, key, &desc_obj)
 }
 
 /// Define only the [[Value]] of an existing property on a proxy target
 /// (OrdinarySetWithOwnDescriptor step 2.d.iv: descriptor is {[[Value]]: V} only).
 /// Routes through proxy_define_own_property for proper invariant checks.
 pub(crate) fn proxy_define_property_value_only<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: &Value<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
-    let desc_obj = new_object_with_proto(mc, proxy);
-    object_set_key_value(mc, &desc_obj, "value", value)?;
+    let desc_obj = new_object_with_proto(ctx, proxy);
+    object_set_key_value(ctx, &desc_obj, "value", value)?;
 
-    proxy_define_own_property(mc, proxy, key, &desc_obj)
+    proxy_define_own_property(ctx, proxy, key, &desc_obj)
 }
 
 /// Check if property exists on proxy target, applying has trap if available
 pub(crate) fn proxy_has_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: impl Into<PropertyKey<'gc>>,
 ) -> Result<bool, EvalError<'gc>> {
     let key = key.into();
     let key_clone = key.clone();
-    let result = apply_proxy_trap(mc, proxy, "has", vec![(*proxy.target).clone(), property_key_to_value(&key)], || {
-        // Default behavior: OrdinaryHasProperty — check own, then walk prototype chain
-        match &*proxy.target {
-            Value::Object(obj) => {
-                // If target is itself a proxy, recurse through its [[HasProperty]]
-                if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
-                    && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
-                {
-                    return Ok(Value::Boolean(proxy_has_property(mc, inner_proxy, key)?));
-                }
-                // Check own property
-                if object_get_key_value(obj, &key).is_some() {
-                    return Ok(Value::Boolean(true));
-                }
-                // Walk prototype chain
-                let mut proto = obj.borrow().prototype;
-                while let Some(p) = proto {
-                    if let Some(inner_proxy_cell) = crate::core::slot_get(&p, &InternalSlot::Proxy)
+    let result = apply_proxy_trap(
+        ctx,
+        proxy,
+        "has",
+        vec![(*proxy.target).clone(), property_key_to_value(&key)],
+        || {
+            // Default behavior: OrdinaryHasProperty — check own, then walk prototype chain
+            match &*proxy.target {
+                Value::Object(obj) => {
+                    // If target is itself a proxy, recurse through its [[HasProperty]]
+                    if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                     {
-                        return Ok(Value::Boolean(proxy_has_property(mc, inner_proxy, key)?));
+                        return Ok(Value::Boolean(proxy_has_property(ctx, inner_proxy, key)?));
                     }
-                    if object_get_key_value(&p, &key).is_some() {
+                    // Check own property
+                    if object_get_key_value(obj, &key).is_some() {
                         return Ok(Value::Boolean(true));
                     }
-                    proto = p.borrow().prototype;
+                    // Walk prototype chain
+                    let mut proto = obj.borrow().prototype;
+                    while let Some(p) = proto {
+                        if let Some(inner_proxy_cell) = crate::core::slot_get(&p, &InternalSlot::Proxy)
+                            && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
+                        {
+                            return Ok(Value::Boolean(proxy_has_property(ctx, inner_proxy, key)?));
+                        }
+                        if object_get_key_value(&p, &key).is_some() {
+                            return Ok(Value::Boolean(true));
+                        }
+                        proto = p.borrow().prototype;
+                    }
+                    Ok(Value::Boolean(false))
                 }
-                Ok(Value::Boolean(false))
+                _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
             }
-            _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
-        }
-    })?;
+        },
+    )?;
 
     // Per spec, the trap result is coerced to Boolean via ToBoolean.
     let trap_result = result.to_truthy();
@@ -2235,12 +2241,12 @@ pub(crate) fn proxy_has_property<'gc>(
 
 /// Delete property from proxy target, applying deleteProperty trap if available
 pub(crate) fn proxy_delete_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
     let result = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "deleteProperty",
         vec![(*proxy.target).clone(), property_key_to_value(key)],
@@ -2252,7 +2258,7 @@ pub(crate) fn proxy_delete_property<'gc>(
                     if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                     {
-                        return Ok(Value::Boolean(proxy_delete_property(mc, inner_proxy, key)?));
+                        return Ok(Value::Boolean(proxy_delete_property(ctx, inner_proxy, key)?));
                     }
                     // OrdinaryDelete: if property doesn't exist, return true
                     if !obj.borrow().properties.contains_key(key) {
@@ -2262,7 +2268,7 @@ pub(crate) fn proxy_delete_property<'gc>(
                     if obj.borrow().non_configurable.contains(key) {
                         return Ok(Value::Boolean(false));
                     }
-                    obj.borrow_mut(mc).properties.shift_remove(key);
+                    obj.borrow_mut(ctx).properties.shift_remove(key);
                     Ok(Value::Boolean(true))
                 }
                 _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
@@ -2316,14 +2322,14 @@ pub(crate) fn property_key_to_value_pub<'gc>(key: &PropertyKey<'gc>) -> Value<'g
 }
 
 /// Proxy [[IsExtensible]] internal method (spec §10.5.3)
-pub(crate) fn proxy_is_extensible<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
-    let result = apply_proxy_trap(mc, proxy, "isExtensible", vec![(*proxy.target).clone()], || match &*proxy.target {
+pub(crate) fn proxy_is_extensible<'gc>(ctx: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
+    let result = apply_proxy_trap(ctx, proxy, "isExtensible", vec![(*proxy.target).clone()], || match &*proxy.target {
         Value::Object(obj) => {
             // If target is itself a proxy, recurse
             if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                 && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
             {
-                return Ok(Value::Boolean(proxy_is_extensible(mc, inner_proxy)?));
+                return Ok(Value::Boolean(proxy_is_extensible(ctx, inner_proxy)?));
             }
             Ok(Value::Boolean(obj.borrow().is_extensible()))
         }
@@ -2337,7 +2343,7 @@ pub(crate) fn proxy_is_extensible<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSPr
         let target_result = if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            proxy_is_extensible(mc, inner_proxy)?
+            proxy_is_extensible(ctx, inner_proxy)?
         } else {
             obj.borrow().is_extensible()
         };
@@ -2350,17 +2356,17 @@ pub(crate) fn proxy_is_extensible<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSPr
 }
 
 /// Proxy [[PreventExtensions]] internal method (spec §10.5.4)
-pub(crate) fn proxy_prevent_extensions<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
-    let result = apply_proxy_trap(mc, proxy, "preventExtensions", vec![(*proxy.target).clone()], || {
+pub(crate) fn proxy_prevent_extensions<'gc>(ctx: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<bool, EvalError<'gc>> {
+    let result = apply_proxy_trap(ctx, proxy, "preventExtensions", vec![(*proxy.target).clone()], || {
         match &*proxy.target {
             Value::Object(obj) => {
                 // If target is itself a proxy, recurse
                 if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    return Ok(Value::Boolean(proxy_prevent_extensions(mc, inner_proxy)?));
+                    return Ok(Value::Boolean(proxy_prevent_extensions(ctx, inner_proxy)?));
                 }
-                obj.borrow_mut(mc).prevent_extensions();
+                obj.borrow_mut(ctx).prevent_extensions();
                 Ok(Value::Boolean(true))
             }
             _ => Ok(Value::Boolean(false)),
@@ -2374,7 +2380,7 @@ pub(crate) fn proxy_prevent_extensions<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc,
         let is_ext = if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
             && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
         {
-            proxy_is_extensible(mc, inner_proxy)?
+            proxy_is_extensible(ctx, inner_proxy)?
         } else {
             obj.borrow().is_extensible()
         };
@@ -2387,15 +2393,15 @@ pub(crate) fn proxy_prevent_extensions<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc,
 }
 
 /// Proxy [[GetPrototypeOf]] internal method (spec §10.5.1)
-pub(crate) fn proxy_get_prototype_of<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<Value<'gc>, EvalError<'gc>> {
-    let result = apply_proxy_trap(mc, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
+pub(crate) fn proxy_get_prototype_of<'gc>(ctx: &GcContext<'gc>, proxy: &Gc<'gc, JSProxy<'gc>>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let result = apply_proxy_trap(ctx, proxy, "getPrototypeOf", vec![(*proxy.target).clone()], || {
         match &*proxy.target {
             Value::Object(obj) => {
                 // If target is itself a proxy, recurse
                 if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    return proxy_get_prototype_of(mc, inner_proxy);
+                    return proxy_get_prototype_of(ctx, inner_proxy);
                 }
                 if let Some(proto) = obj.borrow().prototype {
                     Ok(Value::Object(proto))
@@ -2439,14 +2445,14 @@ pub(crate) fn proxy_get_prototype_of<'gc>(mc: &GcContext<'gc>, proxy: &Gc<'gc, J
 
 /// Proxy [[SetPrototypeOf]] internal method (spec §10.5.2)
 pub(crate) fn proxy_set_prototype_of<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     proxy: &Gc<'gc, JSProxy<'gc>>,
     proto: &Value<'gc>,
 ) -> Result<bool, EvalError<'gc>> {
     let proxy_gc = *proxy;
     let proto_clone = proto.clone();
     let result = apply_proxy_trap(
-        mc,
+        ctx,
         proxy,
         "setPrototypeOf",
         vec![(*proxy.target).clone(), proto.clone()],
@@ -2456,7 +2462,7 @@ pub(crate) fn proxy_set_prototype_of<'gc>(
                 if let Some(inner_proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    return Ok(Value::Boolean(proxy_set_prototype_of(mc, inner_proxy, &proto_clone)?));
+                    return Ok(Value::Boolean(proxy_set_prototype_of(ctx, inner_proxy, &proto_clone)?));
                 }
                 // OrdinarySetPrototypeOf(O, V) — spec 10.1.2
                 let current_proto = obj.borrow().prototype;
@@ -2492,7 +2498,7 @@ pub(crate) fn proxy_set_prototype_of<'gc>(
                         }
                     }
                 }
-                obj.borrow_mut(mc).prototype = proto_obj;
+                obj.borrow_mut(ctx).prototype = proto_obj;
                 Ok(Value::Boolean(true))
             }
             _ => Ok(Value::Boolean(false)),
@@ -2508,7 +2514,7 @@ pub(crate) fn proxy_set_prototype_of<'gc>(
             let extensible_target = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                 && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
             {
-                proxy_is_extensible(mc, inner_proxy)?
+                proxy_is_extensible(ctx, inner_proxy)?
             } else {
                 target_obj.borrow().is_extensible()
             };
@@ -2519,7 +2525,7 @@ pub(crate) fn proxy_set_prototype_of<'gc>(
                 let target_proto = if let Some(inner_proxy_cell) = crate::core::slot_get(target_obj, &InternalSlot::Proxy)
                     && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                 {
-                    proxy_get_prototype_of(mc, inner_proxy)?
+                    proxy_get_prototype_of(ctx, inner_proxy)?
                 } else if let Some(p) = target_obj.borrow().prototype {
                     Value::Object(p)
                 } else {
@@ -2545,20 +2551,20 @@ pub(crate) fn proxy_set_prototype_of<'gc>(
 }
 
 /// Initialize Proxy constructor and prototype
-pub fn initialize_proxy<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let proxy_ctor = new_js_object_data(mc);
-    slot_set(mc, &proxy_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &proxy_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Proxy")));
+pub fn initialize_proxy<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let proxy_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &proxy_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &proxy_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Proxy")));
 
     // Per spec: Proxy.length = 2 (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &proxy_ctor, "length", &Value::Number(2.0))?;
-    proxy_ctor.borrow_mut(mc).set_non_writable("length");
-    proxy_ctor.borrow_mut(mc).set_non_enumerable("length");
+    object_set_key_value(ctx, &proxy_ctor, "length", &Value::Number(2.0))?;
+    proxy_ctor.borrow_mut(ctx).set_non_writable("length");
+    proxy_ctor.borrow_mut(ctx).set_non_enumerable("length");
 
     // Per spec: Proxy.name = "Proxy" (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &proxy_ctor, "name", &Value::String(utf8_to_utf16("Proxy")))?;
-    proxy_ctor.borrow_mut(mc).set_non_writable("name");
-    proxy_ctor.borrow_mut(mc).set_non_enumerable("name");
+    object_set_key_value(ctx, &proxy_ctor, "name", &Value::String(utf8_to_utf16("Proxy")))?;
+    proxy_ctor.borrow_mut(ctx).set_non_writable("name");
+    proxy_ctor.borrow_mut(ctx).set_non_enumerable("name");
 
     // Per spec: Proxy.__proto__ = Function.prototype
     let func_proto_opt = if let Some(func_val) = crate::core::env_get(env, "Function")
@@ -2566,33 +2572,33 @@ pub fn initialize_proxy<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
         && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        proxy_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        proxy_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
         Some(*func_proto)
     } else {
         None
     };
 
     // Register revocable static method as proper function object
-    let revocable_obj = new_js_object_data(mc);
-    revocable_obj.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
-        mc,
+    let revocable_obj = new_js_object_data(ctx);
+    revocable_obj.borrow_mut(ctx).set_closure(Some(crate::core::new_gc_cell_ptr(
+        ctx,
         Value::Function("Proxy.revocable".to_string()),
     )));
     // length = 2 (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &revocable_obj, "length", &Value::Number(2.0))?;
-    revocable_obj.borrow_mut(mc).set_non_writable("length");
-    revocable_obj.borrow_mut(mc).set_non_enumerable("length");
+    object_set_key_value(ctx, &revocable_obj, "length", &Value::Number(2.0))?;
+    revocable_obj.borrow_mut(ctx).set_non_writable("length");
+    revocable_obj.borrow_mut(ctx).set_non_enumerable("length");
     // name = "revocable" (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &revocable_obj, "name", &Value::String(utf8_to_utf16("revocable")))?;
-    revocable_obj.borrow_mut(mc).set_non_writable("name");
-    revocable_obj.borrow_mut(mc).set_non_enumerable("name");
+    object_set_key_value(ctx, &revocable_obj, "name", &Value::String(utf8_to_utf16("revocable")))?;
+    revocable_obj.borrow_mut(ctx).set_non_writable("name");
+    revocable_obj.borrow_mut(ctx).set_non_enumerable("name");
     // __proto__ = Function.prototype
     if let Some(fp) = func_proto_opt {
-        revocable_obj.borrow_mut(mc).prototype = Some(fp);
+        revocable_obj.borrow_mut(ctx).prototype = Some(fp);
     }
-    object_set_key_value(mc, &proxy_ctor, "revocable", &Value::Object(revocable_obj))?;
-    proxy_ctor.borrow_mut(mc).set_non_enumerable("revocable");
+    object_set_key_value(ctx, &proxy_ctor, "revocable", &Value::Object(revocable_obj))?;
+    proxy_ctor.borrow_mut(ctx).set_non_enumerable("revocable");
 
-    env_set(mc, env, "Proxy", &Value::Object(proxy_ctor))?;
+    env_set(ctx, env, "Proxy", &Value::Object(proxy_ctor))?;
     Ok(())
 }

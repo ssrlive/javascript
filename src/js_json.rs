@@ -11,25 +11,25 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 // Initialization
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn initialize_json<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let json_obj = new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &json_obj, env, "Object");
+pub fn initialize_json<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let json_obj = new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &json_obj, env, "Object");
 
     // JSON.parse  — function with length = 2
-    object_set_key_value(mc, &json_obj, "parse", &Value::Function("JSON.parse".to_string()))?;
-    json_obj.borrow_mut(mc).set_non_enumerable("parse");
+    object_set_key_value(ctx, &json_obj, "parse", &Value::Function("JSON.parse".to_string()))?;
+    json_obj.borrow_mut(ctx).set_non_enumerable("parse");
 
     // JSON.stringify — function with length = 3
-    object_set_key_value(mc, &json_obj, "stringify", &Value::Function("JSON.stringify".to_string()))?;
-    json_obj.borrow_mut(mc).set_non_enumerable("stringify");
+    object_set_key_value(ctx, &json_obj, "stringify", &Value::Function("JSON.stringify".to_string()))?;
+    json_obj.borrow_mut(ctx).set_non_enumerable("stringify");
 
     // JSON.rawJSON — function with length = 1
-    object_set_key_value(mc, &json_obj, "rawJSON", &Value::Function("JSON.rawJSON".to_string()))?;
-    json_obj.borrow_mut(mc).set_non_enumerable("rawJSON");
+    object_set_key_value(ctx, &json_obj, "rawJSON", &Value::Function("JSON.rawJSON".to_string()))?;
+    json_obj.borrow_mut(ctx).set_non_enumerable("rawJSON");
 
     // JSON.isRawJSON — function with length = 1
-    object_set_key_value(mc, &json_obj, "isRawJSON", &Value::Function("JSON.isRawJSON".to_string()))?;
-    json_obj.borrow_mut(mc).set_non_enumerable("isRawJSON");
+    object_set_key_value(ctx, &json_obj, "isRawJSON", &Value::Function("JSON.isRawJSON".to_string()))?;
+    json_obj.borrow_mut(ctx).set_non_enumerable("isRawJSON");
 
     // Symbol.toStringTag = "JSON" { writable: false, enumerable: false, configurable: true }
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
@@ -38,16 +38,16 @@ pub fn initialize_json<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> 
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
         let tag_desc = crate::core::create_descriptor_object(
-            mc,
+            ctx,
             &Value::String(utf8_to_utf16("JSON")),
             false, // writable
             false, // enumerable
             true,  // configurable
         )?;
-        crate::js_object::define_property_internal(mc, &json_obj, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        crate::js_object::define_property_internal(ctx, &json_obj, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
     }
 
-    env_set(mc, env, "JSON", &Value::Object(json_obj))?;
+    env_set(ctx, env, "JSON", &Value::Object(json_obj))?;
     Ok(())
 }
 
@@ -56,16 +56,16 @@ pub fn initialize_json<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn handle_json_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
-        "parse" => json_parse(mc, args, env),
-        "stringify" => json_stringify(mc, args, env),
-        "rawJSON" => json_raw_json(mc, args, env),
-        "isRawJSON" => json_is_raw_json(mc, args),
+        "parse" => json_parse(ctx, args, env),
+        "stringify" => json_stringify(ctx, args, env),
+        "rawJSON" => json_raw_json(ctx, args, env),
+        "isRawJSON" => json_is_raw_json(ctx, args),
         _ => Err(raise_eval_error!(format!("JSON.{method} is not implemented")).into()),
     }
 }
@@ -74,10 +74,10 @@ pub fn handle_json_method<'gc>(
 // JSON.parse (§24.5.1)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn json_parse<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_parse<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: Let jsonString be ? ToString(text).
     let text = args.first().cloned().unwrap_or(Value::Undefined);
-    let json_str = to_string_for_json(mc, &text, env)?;
+    let json_str = to_string_for_json(ctx, &text, env)?;
 
     // Step 2: Parse jsonString as JSON. Throw SyntaxError on failure.
     let json_value: serde_json::Value = match serde_json::from_str(&json_str) {
@@ -86,7 +86,7 @@ fn json_parse<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataP
     };
 
     // Step 3: Convert JSON AST to JS value.
-    let unfiltered = json_value_to_js(mc, json_value, env)?;
+    let unfiltered = json_value_to_js(ctx, json_value, env)?;
 
     // Step 4: If reviver is a callable function, run InternalizeJSONProperty.
     let reviver = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -95,17 +95,17 @@ fn json_parse<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataP
         let source_tree = extract_json_sources(&json_str);
 
         // Wrap root in {"": unfiltered}
-        let root = new_js_object_data(mc);
-        let _ = crate::core::set_internal_prototype_from_constructor(mc, &root, env, "Object");
-        object_set_key_value(mc, &root, "", &unfiltered)?;
-        internalize_json_property(mc, env, &root, "", &reviver, source_tree.as_ref())
+        let root = new_js_object_data(ctx);
+        let _ = crate::core::set_internal_prototype_from_constructor(ctx, &root, env, "Object");
+        object_set_key_value(ctx, &root, "", &unfiltered)?;
+        internalize_json_property(ctx, env, &root, "", &reviver, source_tree.as_ref())
     } else {
         Ok(unfiltered)
     }
 }
 
 /// ToString coercion for JSON.parse input.
-fn to_string_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
+fn to_string_for_json<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
     match val {
         Value::String(s) => Ok(utf16_to_utf8(s)),
         Value::Number(_) => Ok(crate::core::value_to_string(val)),
@@ -116,8 +116,8 @@ fn to_string_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObject
         Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
         Value::Object(_obj) => {
             // ToPrimitive(input, string) then ToString
-            let prim = crate::core::to_primitive(mc, val, "string", env)?;
-            to_string_for_json(mc, &prim, env)
+            let prim = crate::core::to_primitive(ctx, val, "string", env)?;
+            to_string_for_json(ctx, &prim, env)
         }
         _ => Ok(crate::core::value_to_string(val)),
     }
@@ -126,7 +126,7 @@ fn to_string_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObject
 /// InternalizeJSONProperty (holder, name, reviver) — §24.5.1.1
 /// With json-parse-with-source: passes a context object {source} to reviver.
 fn internalize_json_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     holder: &JSObjectDataPtr<'gc>,
     name: &str,
@@ -134,13 +134,13 @@ fn internalize_json_property<'gc>(
     source_node: Option<&JsonSourceNode>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: Let val be ? Get(holder, name).
-    let val = get_prop(mc, env, holder, name)?;
+    let val = get_prop(ctx, env, holder, name)?;
 
     // Step 2: If val is an Object, then …
     if let Value::Object(obj) = &val {
-        if is_array_for_json_checked(mc, obj)? {
+        if is_array_for_json_checked(ctx, obj)? {
             // Step 2.b: isArray is true
-            let len = to_length_of_array_like(mc, env, obj)?;
+            let len = to_length_of_array_like(ctx, env, obj)?;
             for i in 0..len {
                 let i_str = i.to_string();
                 // Look up child source node
@@ -149,7 +149,7 @@ fn internalize_json_property<'gc>(
                     _ => None,
                 });
                 // Compare current value with original to decide if source is valid
-                let child_val = get_prop(mc, env, obj, &i_str)?;
+                let child_val = get_prop(ctx, env, obj, &i_str)?;
                 let child_source = child_source.and_then(|cs| {
                     if source_node_matches_value(cs, &child_val) {
                         Some(cs)
@@ -157,22 +157,22 @@ fn internalize_json_property<'gc>(
                         None
                     }
                 });
-                let new_element = internalize_json_property(mc, env, obj, &i_str, reviver, child_source)?;
+                let new_element = internalize_json_property(ctx, env, obj, &i_str, reviver, child_source)?;
                 if matches!(new_element, Value::Undefined) {
-                    let _ = json_delete_property(mc, obj, &i_str)?;
+                    let _ = json_delete_property(ctx, obj, &i_str)?;
                 } else {
-                    let _ = json_create_data_property(mc, obj, &i_str, &new_element)?;
+                    let _ = json_create_data_property(ctx, obj, &i_str, &new_element)?;
                 }
             }
         } else {
             // Step 2.c: Else (object)
-            let keys = enumerable_own_property_names(mc, obj)?;
+            let keys = enumerable_own_property_names(ctx, obj)?;
             for key in keys {
                 let child_source = source_node.and_then(|sn| match sn {
                     JsonSourceNode::Object(entries) => entries.iter().find(|(k, _)| k == &key).map(|(_, v)| v),
                     _ => None,
                 });
-                let child_val = get_prop(mc, env, obj, &key)?;
+                let child_val = get_prop(ctx, env, obj, &key)?;
                 let child_source = child_source.and_then(|cs| {
                     if source_node_matches_value(cs, &child_val) {
                         Some(cs)
@@ -180,30 +180,30 @@ fn internalize_json_property<'gc>(
                         None
                     }
                 });
-                let new_element = internalize_json_property(mc, env, obj, &key, reviver, child_source)?;
+                let new_element = internalize_json_property(ctx, env, obj, &key, reviver, child_source)?;
                 if matches!(new_element, Value::Undefined) {
-                    let _ = json_delete_property(mc, obj, &key)?;
+                    let _ = json_delete_property(ctx, obj, &key)?;
                 } else {
-                    let _ = json_create_data_property(mc, obj, key.as_str(), &new_element)?;
+                    let _ = json_create_data_property(ctx, obj, key.as_str(), &new_element)?;
                 }
             }
         }
     }
 
     // Build context object for reviver (json-parse-with-source)
-    let context = new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &context, env, "Object");
+    let context = new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &context, env, "Object");
     if let Some(JsonSourceNode::Primitive(source_text)) = source_node {
         // Only add source if the source node is a primitive and matches the current value
         if primitive_source_matches_value(source_text, &val) {
-            object_set_key_value(mc, &context, "source", &Value::String(utf8_to_utf16(source_text)))?;
+            object_set_key_value(ctx, &context, "source", &Value::String(utf8_to_utf16(source_text)))?;
         }
     }
 
     // Step 3: Return ? Call(reviver, holder, « name, val, context »).
     let name_val = Value::String(utf8_to_utf16(name));
     crate::core::evaluate_call_dispatch(
-        mc,
+        ctx,
         env,
         reviver,
         Some(&Value::Object(*holder)),
@@ -213,14 +213,14 @@ fn internalize_json_property<'gc>(
 
 /// LengthOfArrayLike(obj) — §7.3.2: Get(obj, "length") then ToLength.
 fn to_length_of_array_like<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<usize, EvalError<'gc>> {
-    let len_val = get_prop(mc, env, obj, "length")?;
+    let len_val = get_prop(ctx, env, obj, "length")?;
     // ToLength: ToIntegerOrInfinity(argument), then clamp [0, 2^53 - 1]
     // ToIntegerOrInfinity first calls ToNumber which may call valueOf() and throw.
-    let n = to_number_for_json(mc, &len_val, env)?;
+    let n = to_number_for_json(ctx, &len_val, env)?;
     if n.is_nan() || n <= 0.0 {
         Ok(0)
     } else if n.is_infinite() {
@@ -231,7 +231,7 @@ fn to_length_of_array_like<'gc>(
 }
 
 /// ToNumber for JSON operations — calls ToPrimitive("number") for objects.
-fn to_number_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
+fn to_number_for_json<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
     match val {
         Value::Number(n) => Ok(*n),
         Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
@@ -242,8 +242,8 @@ fn to_number_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObject
             Ok(utf8.trim().parse::<f64>().unwrap_or(f64::NAN))
         }
         Value::Object(_) => {
-            let prim = crate::core::to_primitive(mc, val, "number", env)?;
-            to_number_for_json(mc, &prim, env)
+            let prim = crate::core::to_primitive(ctx, val, "number", env)?;
+            to_number_for_json(ctx, &prim, env)
         }
         _ => Ok(f64::NAN),
     }
@@ -251,20 +251,20 @@ fn to_number_for_json<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObject
 
 /// [[Delete]](P) — respects proxy deleteProperty trap.
 /// Returns false (without throwing) for non-configurable properties per OrdinaryDelete.
-fn json_delete_property<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
+fn json_delete_property<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
     // Check for Proxy
     if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
         let pk: PropertyKey = key.into();
-        return crate::js_proxy::proxy_delete_property(mc, proxy, &pk);
+        return crate::js_proxy::proxy_delete_property(ctx, proxy, &pk);
     }
     // OrdinaryDelete: non-configurable → return false (don't throw).
     let pk: PropertyKey = key.into();
     if obj.borrow().non_configurable.contains(&pk) {
         return Ok(false);
     }
-    let _ = obj.borrow_mut(mc).properties.swap_remove(&pk);
+    let _ = obj.borrow_mut(ctx).properties.swap_remove(&pk);
     Ok(true)
 }
 
@@ -272,7 +272,7 @@ fn json_delete_property<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, ke
 /// Proxies still go through defineProperty trap (which may throw).
 /// For ordinary objects, returns false silently if non-configurable conflicts.
 fn json_create_data_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &str,
     val: &Value<'gc>,
@@ -282,7 +282,7 @@ fn json_create_data_property<'gc>(
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
         let pk: PropertyKey = key.into();
-        return crate::js_proxy::proxy_define_data_property(mc, proxy, &pk, val);
+        return crate::js_proxy::proxy_define_data_property(ctx, proxy, &pk, val);
     }
     // For ordinary objects: check non-configurable — if existing prop is non-configurable
     // and new desc has configurable:true, OrdinaryDefineOwnProperty returns false.
@@ -291,20 +291,20 @@ fn json_create_data_property<'gc>(
         return Ok(false);
     }
     // Set the property normally
-    object_set_key_value(mc, obj, key, val)?;
+    object_set_key_value(ctx, obj, key, val)?;
     Ok(true)
 }
 
 /// EnumerableOwnProperties(O, key) — goes through proxy ownKeys + getOwnPropertyDescriptor traps.
 /// Uses EvalError throughout to preserve the identity of user-thrown errors.
-fn enumerable_own_property_names<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<String>, EvalError<'gc>> {
+fn enumerable_own_property_names<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<String>, EvalError<'gc>> {
     // Get all own keys — for proxies, call proxy_own_keys directly to preserve EvalError::Throw.
     let all_keys: Vec<PropertyKey<'gc>> = if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
-        crate::js_proxy::proxy_own_keys(mc, proxy)?
+        crate::js_proxy::proxy_own_keys(ctx, proxy)?
     } else {
-        crate::core::ordinary_own_property_keys_mc(mc, obj)?
+        crate::core::ordinary_own_property_keys_mc(ctx, obj)?
     };
     let mut result = Vec::new();
     for k in all_keys {
@@ -314,7 +314,7 @@ fn enumerable_own_property_names<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
                 let pk = PropertyKey::String(s.clone());
-                match crate::js_proxy::proxy_get_own_property_is_enumerable(mc, proxy, &pk)? {
+                match crate::js_proxy::proxy_get_own_property_is_enumerable(ctx, proxy, &pk)? {
                     Some(true) => result.push(s), // enumerable
                     Some(false) => {}             // non-enumerable
                     None => {}                    // undefined from trap
@@ -332,12 +332,12 @@ fn enumerable_own_property_names<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr
 
 /// Get a property from an object, going through accessors.
 fn get_prop<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &str,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    crate::core::get_property_with_accessors(mc, env, obj, key)
+    crate::core::get_property_with_accessors(ctx, env, obj, key)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -584,14 +584,14 @@ fn primitive_source_matches_value<'gc>(source: &str, val: &Value<'gc>) -> bool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// JSON.rawJSON(text) — §25.5.2.1
-fn json_raw_json<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_raw_json<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let text = args.first().cloned().unwrap_or(Value::Undefined);
 
     // Step 1: Let jsonString be ? ToString(text).
     let json_string = match &text {
         Value::Symbol(_) => return Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
         Value::BigInt(n) => n.to_string(),
-        _ => to_string_for_json(mc, &text, env)?,
+        _ => to_string_for_json(ctx, &text, env)?,
     };
 
     // Step 2: Throw SyntaxError if jsonString is empty, or if first/last code unit is whitespace.
@@ -614,27 +614,27 @@ fn json_raw_json<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDa
     };
 
     // Step 5: Let obj be OrdinaryObjectCreate(null).
-    let obj = new_js_object_data(mc);
+    let obj = new_js_object_data(ctx);
     // Set prototype to null
-    obj.borrow_mut(mc).prototype = None;
+    obj.borrow_mut(ctx).prototype = None;
 
     // Step 6: CreateDataPropertyOrThrow(obj, "rawJSON", jsonString)
-    object_set_key_value(mc, &obj, "rawJSON", &Value::String(utf8_to_utf16(&json_string)))?;
+    object_set_key_value(ctx, &obj, "rawJSON", &Value::String(utf8_to_utf16(&json_string)))?;
 
     // Mark as raw JSON
-    slot_set(mc, &obj, InternalSlot::IsRawJSON, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::IsRawJSON, &Value::Boolean(true));
 
     // Step 7: SetIntegrityLevel(obj, "frozen")
-    obj.borrow_mut(mc).set_non_writable("rawJSON");
-    obj.borrow_mut(mc).set_non_configurable(PropertyKey::String("rawJSON".to_string()));
+    obj.borrow_mut(ctx).set_non_writable("rawJSON");
+    obj.borrow_mut(ctx).set_non_configurable(PropertyKey::String("rawJSON".to_string()));
     // Prevent extensions
-    slot_set(mc, &obj, InternalSlot::Kind, &Value::String(utf8_to_utf16("frozen")));
+    slot_set(ctx, &obj, InternalSlot::Kind, &Value::String(utf8_to_utf16("frozen")));
 
     Ok(Value::Object(obj))
 }
 
 /// JSON.isRawJSON(O) — §25.5.2.2
-fn json_is_raw_json<'gc>(_mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_is_raw_json<'gc>(_ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = args.first().cloned().unwrap_or(Value::Undefined);
     if let Value::Object(obj) = &val
         && slot_get(obj, &InternalSlot::IsRawJSON).is_some()
@@ -648,7 +648,7 @@ fn json_is_raw_json<'gc>(_mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Va
 // JSON.stringify (§24.5.2)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn json_stringify<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn json_stringify<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let replacer_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
     let space_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -660,12 +660,12 @@ fn json_stringify<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
     if let Value::Object(rep_obj) = &replacer_arg {
         if is_callable(&replacer_arg) {
             replacer_function = Some(replacer_arg.clone());
-        } else if is_array_for_json_checked(mc, rep_obj)? {
+        } else if is_array_for_json_checked(ctx, rep_obj)? {
             // Build PropertyList from array
-            let len = to_length_of_array_like(mc, env, rep_obj)?;
+            let len = to_length_of_array_like(ctx, env, rep_obj)?;
             let mut list: Vec<String> = Vec::new();
             for i in 0..len {
-                let item = get_prop(mc, env, rep_obj, &i.to_string())?;
+                let item = get_prop(ctx, env, rep_obj, &i.to_string())?;
                 let key_str = match &item {
                     Value::String(s) => Some(utf16_to_utf8(s)),
                     Value::Number(_) => Some(crate::core::value_to_string(&item)),
@@ -681,7 +681,7 @@ fn json_stringify<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
                         };
                         if has_wrapper {
                             // ToString(v) on the object — goes through ToPrimitive(v, "string")
-                            Some(to_string_for_json(mc, &item, env)?)
+                            Some(to_string_for_json(ctx, &item, env)?)
                         } else {
                             None
                         }
@@ -699,16 +699,16 @@ fn json_stringify<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
     }
 
     // --- Process space argument ---
-    let gap = process_space_arg(mc, &space_arg, env)?;
+    let gap = process_space_arg(ctx, &space_arg, env)?;
 
     // --- Create wrapper object { "": value } ---
-    let wrapper = new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &wrapper, env, "Object");
-    object_set_key_value(mc, &wrapper, "", &value)?;
+    let wrapper = new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &wrapper, env, "Object");
+    object_set_key_value(ctx, &wrapper, "", &value)?;
 
     // --- SerializeJSONProperty ---
     let mut stack: Vec<usize> = Vec::new();
-    let result = serialize_json_property(mc, env, &wrapper, "", &replacer_function, &property_list, &gap, "", &mut stack)?;
+    let result = serialize_json_property(ctx, env, &wrapper, "", &replacer_function, &property_list, &gap, "", &mut stack)?;
 
     match result {
         Some(s) => Ok(Value::String(utf8_to_utf16(&s))),
@@ -717,9 +717,9 @@ fn json_stringify<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
 }
 
 /// Process the `space` argument (§24.5.2 steps 5-8)
-fn process_space_arg<'gc>(mc: &GcContext<'gc>, space: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
+fn process_space_arg<'gc>(ctx: &GcContext<'gc>, space: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<String, EvalError<'gc>> {
     let space = match space {
-        Value::Object(obj) => unwrap_boxed(mc, obj, env)?,
+        Value::Object(obj) => unwrap_boxed(ctx, obj, env)?,
         other => other.clone(),
     };
 
@@ -739,7 +739,7 @@ fn process_space_arg<'gc>(mc: &GcContext<'gc>, space: &Value<'gc>, env: &JSObjec
 /// SerializeJSONProperty(state, key, holder) — §24.5.2.1
 #[allow(clippy::too_many_arguments)]
 fn serialize_json_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     holder: &JSObjectDataPtr<'gc>,
     key: &str,
@@ -750,15 +750,15 @@ fn serialize_json_property<'gc>(
     stack: &mut Vec<usize>,
 ) -> Result<Option<String>, EvalError<'gc>> {
     // Step 1: Let value be ? Get(holder, key).
-    let mut value = get_prop(mc, env, holder, key)?;
+    let mut value = get_prop(ctx, env, holder, key)?;
 
     // Step 2: If value is an Object or BigInt, check for toJSON.
     if let Value::Object(obj) = &value
-        && let Ok(to_json) = get_prop(mc, env, obj, "toJSON")
+        && let Ok(to_json) = get_prop(ctx, env, obj, "toJSON")
         && is_callable(&to_json)
     {
         let key_arg = Value::String(utf8_to_utf16(key));
-        value = crate::core::evaluate_call_dispatch(mc, env, &to_json, Some(&value), &[key_arg])?;
+        value = crate::core::evaluate_call_dispatch(ctx, env, &to_json, Some(&value), &[key_arg])?;
     }
     if let Value::BigInt(_) = &value {
         // BigInt.prototype may have toJSON — use GetV(value, "toJSON") semantics.
@@ -775,18 +775,18 @@ fn serialize_json_property<'gc>(
                 let to_json = match &raw_val {
                     Value::Getter(..) => {
                         // Invoke getter with receiver = value (the BigInt primitive)
-                        crate::core::evaluate_call_dispatch(mc, env, &raw_val, Some(&value), &[])?
+                        crate::core::evaluate_call_dispatch(ctx, env, &raw_val, Some(&value), &[])?
                     }
                     Value::Property { getter: Some(g), .. } => {
                         // Invoke getter with receiver = value (BigInt primitive)
                         let getter_fn: Value<'gc> = (**g).clone();
-                        crate::core::evaluate_call_dispatch(mc, env, &getter_fn, Some(&value), &[])?
+                        crate::core::evaluate_call_dispatch(ctx, env, &getter_fn, Some(&value), &[])?
                     }
                     other => other.clone(),
                 };
                 if is_callable(&to_json) {
                     let key_arg = Value::String(utf8_to_utf16(key));
-                    value = crate::core::evaluate_call_dispatch(mc, env, &to_json, Some(&value), &[key_arg])?;
+                    value = crate::core::evaluate_call_dispatch(ctx, env, &to_json, Some(&value), &[key_arg])?;
                 }
             }
         }
@@ -795,7 +795,7 @@ fn serialize_json_property<'gc>(
     // Step 3: If ReplacerFunction is defined, call it.
     if let Some(replacer) = replacer_function {
         let key_arg = Value::String(utf8_to_utf16(key));
-        value = crate::core::evaluate_call_dispatch(mc, env, replacer, Some(&Value::Object(*holder)), &[key_arg, value])?;
+        value = crate::core::evaluate_call_dispatch(ctx, env, replacer, Some(&Value::Object(*holder)), &[key_arg, value])?;
     }
 
     // Step 4: If value is an Object, unwrap boxed primitives.
@@ -809,7 +809,7 @@ fn serialize_json_property<'gc>(
                 return Ok(Some(utf16_to_utf8(s)));
             }
         }
-        let unwrapped = unwrap_boxed(mc, obj, env)?;
+        let unwrapped = unwrap_boxed(ctx, obj, env)?;
         if !matches!(unwrapped, Value::Object(_)) {
             value = unwrapped;
         }
@@ -835,7 +835,7 @@ fn serialize_json_property<'gc>(
             }
 
             // IsArray check — throws TypeError for revoked proxies
-            let is_arr = is_array_for_json_checked(mc, obj)?;
+            let is_arr = is_array_for_json_checked(ctx, obj)?;
 
             // Circular check
             let obj_id = gc_ptr_id(obj);
@@ -845,9 +845,9 @@ fn serialize_json_property<'gc>(
             stack.push(obj_id);
 
             let result = if is_arr {
-                serialize_json_array(mc, env, obj, replacer_function, property_list, gap, indent, stack)
+                serialize_json_array(ctx, env, obj, replacer_function, property_list, gap, indent, stack)
             } else {
-                serialize_json_object(mc, env, obj, replacer_function, property_list, gap, indent, stack)
+                serialize_json_object(ctx, env, obj, replacer_function, property_list, gap, indent, stack)
             };
 
             stack.pop();
@@ -861,7 +861,7 @@ fn serialize_json_property<'gc>(
 /// SerializeJSONObject (§24.5.2.2)
 #[allow(clippy::too_many_arguments)]
 fn serialize_json_object<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     replacer_function: &Option<Value<'gc>>,
@@ -876,12 +876,12 @@ fn serialize_json_object<'gc>(
         pl.clone()
     } else {
         // EnumerableOwnPropertyNames(value, "key") — goes through proxy ownKeys + getOwnPropertyDescriptor
-        enumerable_own_property_names(mc, obj)?
+        enumerable_own_property_names(ctx, obj)?
     };
 
     let mut partial: Vec<String> = Vec::new();
     for key in &keys {
-        let str_p = serialize_json_property(mc, env, obj, key, replacer_function, property_list, gap, &new_indent, stack)?;
+        let str_p = serialize_json_property(ctx, env, obj, key, replacer_function, property_list, gap, &new_indent, stack)?;
         if let Some(s) = str_p {
             let member = format!("{}:{}{}", quote_json_string(key), if gap.is_empty() { "" } else { " " }, s);
             partial.push(member);
@@ -901,7 +901,7 @@ fn serialize_json_object<'gc>(
 /// SerializeJSONArray (§24.5.2.3)
 #[allow(clippy::too_many_arguments)]
 fn serialize_json_array<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     replacer_function: &Option<Value<'gc>>,
@@ -912,12 +912,12 @@ fn serialize_json_array<'gc>(
 ) -> Result<Option<String>, EvalError<'gc>> {
     let new_indent = format!("{}{}", indent, gap);
     // ? LengthOfArrayLike(value) — go through proxy get trap for "length", then ToLength
-    let len = to_length_of_array_like(mc, env, obj)?;
+    let len = to_length_of_array_like(ctx, env, obj)?;
 
     let mut partial: Vec<String> = Vec::new();
     for i in 0..len {
         let i_str = i.to_string();
-        let str_p = serialize_json_property(mc, env, obj, &i_str, replacer_function, property_list, gap, &new_indent, stack)?;
+        let str_p = serialize_json_property(ctx, env, obj, &i_str, replacer_function, property_list, gap, &new_indent, stack)?;
         match str_p {
             Some(s) => partial.push(s),
             None => partial.push("null".to_string()),
@@ -939,7 +939,7 @@ fn serialize_json_array<'gc>(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn json_value_to_js<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     json_value: serde_json::Value,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -956,20 +956,20 @@ fn json_value_to_js<'gc>(
         serde_json::Value::String(s) => Ok(Value::String(utf8_to_utf16(&s))),
         serde_json::Value::Array(arr) => {
             let len = arr.len();
-            let obj = create_array(mc, env)?;
+            let obj = create_array(ctx, env)?;
             for (i, item) in arr.into_iter().enumerate() {
-                let js_val = json_value_to_js(mc, item, env)?;
-                object_set_key_value(mc, &obj, i, &js_val)?;
+                let js_val = json_value_to_js(ctx, item, env)?;
+                object_set_key_value(ctx, &obj, i, &js_val)?;
             }
-            set_array_length(mc, &obj, len)?;
+            set_array_length(ctx, &obj, len)?;
             Ok(Value::Object(obj))
         }
         serde_json::Value::Object(map) => {
-            let js_obj = new_js_object_data(mc);
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &js_obj, env, "Object");
+            let js_obj = new_js_object_data(ctx);
+            let _ = crate::core::set_internal_prototype_from_constructor(ctx, &js_obj, env, "Object");
             for (key, value) in map.into_iter() {
-                let js_val = json_value_to_js(mc, value, env)?;
-                object_set_key_value(mc, &js_obj, &key, &js_val)?;
+                let js_val = json_value_to_js(ctx, value, env)?;
+                object_set_key_value(ctx, &js_obj, &key, &js_val)?;
             }
             Ok(Value::Object(js_obj))
         }
@@ -1087,8 +1087,8 @@ fn is_callable<'gc>(val: &Value<'gc>) -> bool {
 
 /// Check if an object is an array (including proxied arrays).
 /// For revoked proxies, throws TypeError per spec IsArray.
-fn is_array_for_json_checked<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
-    if is_array(mc, obj) {
+fn is_array_for_json_checked<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+    if is_array(ctx, obj) {
         return Ok(true);
     }
     if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
@@ -1098,7 +1098,7 @@ fn is_array_for_json_checked<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc
             return Err(raise_type_error!("Cannot perform 'IsArray' on a proxy that has been revoked").into());
         }
         if let Value::Object(target) = &*proxy.target {
-            return is_array_for_json_checked(mc, target);
+            return is_array_for_json_checked(ctx, target);
         }
     }
     Ok(false)
@@ -1106,13 +1106,13 @@ fn is_array_for_json_checked<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc
 
 /// Non-throwing version for contexts where TypeError propagation isn't needed.
 #[allow(dead_code)]
-fn is_array_for_json<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
-    is_array_for_json_checked(mc, obj).unwrap_or(false)
+fn is_array_for_json<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
+    is_array_for_json_checked(ctx, obj).unwrap_or(false)
 }
 
 /// Unwrap a boxed primitive (new String, new Number, new Boolean, Object(bigint)).
 /// Uses ToNumber for Number wrappers and ToString for String wrappers per spec.
-fn unwrap_boxed<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn unwrap_boxed<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Some(pv_rc) = slot_get(obj, &InternalSlot::PrimitiveValue) {
         let pv = pv_rc.borrow().clone();
         match &pv {
@@ -1121,7 +1121,7 @@ fn unwrap_boxed<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, env: &JSOb
             Value::Number(_) => {
                 // Spec says ToNumber(value) — which triggers valueOf()
                 let obj_val = Value::Object(*obj);
-                let prim = crate::core::to_primitive(mc, &obj_val, "number", env)?;
+                let prim = crate::core::to_primitive(ctx, &obj_val, "number", env)?;
                 match &prim {
                     Value::Number(n) => return Ok(Value::Number(*n)),
                     _ => {
@@ -1142,7 +1142,7 @@ fn unwrap_boxed<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, env: &JSOb
             Value::String(_) => {
                 // Spec says ToString(value) — which triggers toString()
                 let obj_val = Value::Object(*obj);
-                let prim = crate::core::to_primitive(mc, &obj_val, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, &obj_val, "string", env)?;
                 let s = crate::core::value_to_string(&prim);
                 return Ok(Value::String(utf8_to_utf16(&s)));
             }

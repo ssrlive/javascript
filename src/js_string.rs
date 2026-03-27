@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 /// Returns `Ok(Some(method))` if the symbol property exists and is callable,
 /// `Ok(None)` if it's undefined/null, or an error if e.g. a getter throws.
 pub fn get_well_known_symbol_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &crate::core::JSObjectDataPtr<'gc>,
     symbol_name: &str,
@@ -31,7 +31,7 @@ pub fn get_well_known_symbol_method<'gc>(
         && let Value::Symbol(sym) = &*sym_val.borrow()
     {
         // Get the property using accessor-aware read (triggers getters)
-        let method = crate::core::get_property_with_accessors(mc, env, obj, PropertyKey::Symbol(*sym))?;
+        let method = crate::core::get_property_with_accessors(ctx, env, obj, PropertyKey::Symbol(*sym))?;
         match method {
             Value::Undefined | Value::Null => Ok(None),
             _ => Ok(Some(method)),
@@ -44,7 +44,7 @@ pub fn get_well_known_symbol_method<'gc>(
 /// IsRegExp abstract operation (ES 2024 §7.2.8)
 /// Returns true if the argument is an object with a truthy @@match property,
 /// or is a RegExp instance.
-fn is_regexp_like<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
+fn is_regexp_like<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = val {
         // First check @@match property
         if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
@@ -52,7 +52,7 @@ fn is_regexp_like<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Va
             && let Some(sym_val) = object_get_key_value(sym_ctor, "match")
             && let Value::Symbol(sym) = &*sym_val.borrow()
         {
-            let matcher = crate::core::get_property_with_accessors(mc, env, obj, PropertyKey::Symbol(*sym))?;
+            let matcher = crate::core::get_property_with_accessors(ctx, env, obj, PropertyKey::Symbol(*sym))?;
             if !matches!(matcher, Value::Undefined) {
                 // Coerce to boolean — any truthy value means it's regexp-like
                 let is_truthy = match &matcher {
@@ -73,8 +73,8 @@ fn is_regexp_like<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Va
 }
 
 /// Spec ToIntegerOrZero: ToNumber, then truncate. NaN/±0→0, ±∞→±∞, else trunc
-fn spec_to_integer_or_zero<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
-    let n = to_number_with_env(mc, env, val)?;
+fn spec_to_integer_or_zero<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
+    let n = to_number_with_env(ctx, env, val)?;
     if n.is_nan() || n == 0.0 {
         Ok(0.0)
     } else if !n.is_finite() {
@@ -126,22 +126,22 @@ fn es_trim_end(s: &[u16]) -> Vec<u16> {
     s[..end].to_vec()
 }
 
-pub fn initialize_string<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let string_ctor = new_js_object_data(mc);
-    slot_set(mc, &string_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    object_set_key_value(mc, &string_ctor, "name", &Value::String(utf8_to_utf16("String")))?;
+pub fn initialize_string<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let string_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &string_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    object_set_key_value(ctx, &string_ctor, "name", &Value::String(utf8_to_utf16("String")))?;
 
     // Mark as native constructor so it can be called as a function (String(...))
-    slot_set(mc, &string_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("String")));
+    slot_set(ctx, &string_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("String")));
     // Hide internal flags/prototype from enumeration
-    string_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    string_ctor.borrow_mut(mc).set_non_writable("prototype");
-    string_ctor.borrow_mut(mc).set_non_configurable("prototype");
+    string_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    string_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    string_ctor.borrow_mut(ctx).set_non_configurable("prototype");
 
     // String.length = 1 (non-writable, non-enumerable, non-configurable)
-    object_set_key_value(mc, &string_ctor, "length", &Value::Number(1.0))?;
-    string_ctor.borrow_mut(mc).set_non_enumerable("length");
-    string_ctor.borrow_mut(mc).set_non_writable("length");
+    object_set_key_value(ctx, &string_ctor, "length", &Value::Number(1.0))?;
+    string_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    string_ctor.borrow_mut(ctx).set_non_writable("length");
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -154,13 +154,13 @@ pub fn initialize_string<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
         None
     };
 
-    let string_proto = new_js_object_data(mc);
+    let string_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        string_proto.borrow_mut(mc).prototype = Some(proto);
+        string_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &string_ctor, "prototype", &Value::Object(string_proto))?;
-    object_set_key_value(mc, &string_proto, "constructor", &Value::Object(string_ctor))?;
+    object_set_key_value(ctx, &string_ctor, "prototype", &Value::Object(string_proto))?;
+    object_set_key_value(ctx, &string_proto, "constructor", &Value::Object(string_ctor))?;
 
     // Register Symbol.iterator
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
@@ -170,8 +170,8 @@ pub fn initialize_string<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
             && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
         {
             let val = Value::Function("String.prototype.[Symbol.iterator]".to_string());
-            object_set_key_value(mc, &string_proto, iter_sym, &val)?;
-            string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
+            object_set_key_value(ctx, &string_proto, iter_sym, &val)?;
+            string_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
         }
 
         // Symbol.toStringTag default for String.prototype
@@ -179,27 +179,27 @@ pub fn initialize_string<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
             let val = Value::String(utf8_to_utf16("String"));
-            object_set_key_value(mc, &string_proto, tag_sym, &val)?;
-            string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+            object_set_key_value(ctx, &string_proto, tag_sym, &val)?;
+            string_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
         }
     }
 
     object_set_key_value(
-        mc,
+        ctx,
         &string_ctor,
         "fromCharCode",
         &Value::Function("String.fromCharCode".to_string()),
     )?;
-    string_ctor.borrow_mut(mc).set_non_enumerable("fromCharCode");
+    string_ctor.borrow_mut(ctx).set_non_enumerable("fromCharCode");
     object_set_key_value(
-        mc,
+        ctx,
         &string_ctor,
         "fromCodePoint",
         &Value::Function("String.fromCodePoint".to_string()),
     )?;
-    string_ctor.borrow_mut(mc).set_non_enumerable("fromCodePoint");
-    object_set_key_value(mc, &string_ctor, "raw", &Value::Function("String.raw".to_string()))?;
-    string_ctor.borrow_mut(mc).set_non_enumerable("raw");
+    string_ctor.borrow_mut(ctx).set_non_enumerable("fromCodePoint");
+    object_set_key_value(ctx, &string_ctor, "raw", &Value::Function("String.raw".to_string()))?;
+    string_ctor.borrow_mut(ctx).set_non_enumerable("raw");
 
     // Register instance methods with correct .length
     let methods_len1 = vec![
@@ -239,99 +239,99 @@ pub fn initialize_string<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
     // toString and valueOf must be wrapped in Object with OriginGlobal so that
     // cross-realm identity and realm-specific TypeError throwing work correctly.
     for method in &["toString", "valueOf"] {
-        let fn_obj = new_js_object_data(mc);
+        let fn_obj = new_js_object_data(ctx);
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(format!("String.prototype.{method}")))));
-        slot_set(mc, &fn_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function(format!("String.prototype.{method}")))));
+        slot_set(ctx, &fn_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
         // Set Function.prototype as the internal prototype so the object is callable
         if let Some(func_val_rc) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_val_rc.borrow()
             && let Some(func_proto_rc) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*func_proto_rc.borrow()
         {
-            fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            fn_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_desc)?;
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_desc)?;
-        object_set_key_value(mc, &string_proto, *method, &Value::Object(fn_obj))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(*method);
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(method)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &name_desc)?;
+        object_set_key_value(ctx, &string_proto, *method, &Value::Object(fn_obj))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(*method);
     }
     for method in &methods_len0 {
-        object_set_key_value(mc, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(*method);
+        object_set_key_value(ctx, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(*method);
     }
     for method in &methods_len1 {
-        object_set_key_value(mc, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(*method);
+        object_set_key_value(ctx, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(*method);
     }
     for method in &methods_len2 {
-        object_set_key_value(mc, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(*method);
+        object_set_key_value(ctx, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(*method);
     }
     for method in &methods_normalize {
-        object_set_key_value(mc, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(*method);
+        object_set_key_value(ctx, &string_proto, *method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(*method);
     }
 
     // AnnexB: trimLeft === trimStart, trimRight === trimEnd (reference identity)
     if let Some(trim_start_val) = object_get_key_value(&string_proto, "trimStart") {
         let v = trim_start_val.borrow().clone();
-        object_set_key_value(mc, &string_proto, "trimLeft", &v)?;
-        string_proto.borrow_mut(mc).set_non_enumerable("trimLeft");
+        object_set_key_value(ctx, &string_proto, "trimLeft", &v)?;
+        string_proto.borrow_mut(ctx).set_non_enumerable("trimLeft");
     }
     if let Some(trim_end_val) = object_get_key_value(&string_proto, "trimEnd") {
         let v = trim_end_val.borrow().clone();
-        object_set_key_value(mc, &string_proto, "trimRight", &v)?;
-        string_proto.borrow_mut(mc).set_non_enumerable("trimRight");
+        object_set_key_value(ctx, &string_proto, "trimRight", &v)?;
+        string_proto.borrow_mut(ctx).set_non_enumerable("trimRight");
     }
 
     // AnnexB HTML string wrapper methods (B.2.3.2 – B.2.3.14)
     // Simple wrappers (length 0)
     for method in ["big", "blink", "bold", "fixed", "italics", "small", "strike", "sub", "sup"] {
-        object_set_key_value(mc, &string_proto, method, &Value::Function(format!("String.prototype.{method}")))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &string_proto, method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
     // Attribute wrappers (length 1)
     for method in ["anchor", "fontcolor", "fontsize", "link"] {
-        object_set_key_value(mc, &string_proto, method, &Value::Function(format!("String.prototype.{method}")))?;
-        string_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &string_proto, method, &Value::Function(format!("String.prototype.{method}")))?;
+        string_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
 
     // Make constructor non-enumerable on the prototype
-    string_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    string_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // String.prototype is a String exotic object with [[StringData]] = ""
-    slot_set(mc, &string_proto, InternalSlot::PrimitiveValue, &Value::String(Vec::new()));
+    slot_set(ctx, &string_proto, InternalSlot::PrimitiveValue, &Value::String(Vec::new()));
 
     // Ensure String.prototype.length exists and is a number (0)
-    let proto_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, false)?;
-    crate::js_object::define_property_internal(mc, &string_proto, "length", &proto_len_desc)?;
+    let proto_len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, false)?;
+    crate::js_object::define_property_internal(ctx, &string_proto, "length", &proto_len_desc)?;
 
-    env_set(mc, env, "String", &Value::Object(string_ctor))?;
+    env_set(ctx, env, "String", &Value::Object(string_ctor))?;
 
     Ok(())
 }
 
 /// Create %StringIteratorPrototype%. Must be called AFTER %IteratorPrototype% is available.
-pub fn initialize_string_iterator_prototype<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let str_iter_proto = new_js_object_data(mc);
+pub fn initialize_string_iterator_prototype<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let str_iter_proto = new_js_object_data(ctx);
     if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
         && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
     {
-        str_iter_proto.borrow_mut(mc).prototype = Some(*iter_proto);
+        str_iter_proto.borrow_mut(ctx).prototype = Some(*iter_proto);
     }
 
     // next method (non-enumerable)
     object_set_key_value(
-        mc,
+        ctx,
         &str_iter_proto,
         "next",
         &Value::Function("StringIterator.prototype.next".to_string()),
     )?;
-    str_iter_proto.borrow_mut(mc).set_non_enumerable("next");
+    str_iter_proto.borrow_mut(ctx).set_non_enumerable("next");
 
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
@@ -340,18 +340,19 @@ pub fn initialize_string_iterator_prototype<'gc>(mc: &GcContext<'gc>, env: &JSOb
         if let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
-            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("String Iterator")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &str_iter_proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+            let tag_desc =
+                crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("String Iterator")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &str_iter_proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
         }
     }
 
-    slot_set(mc, env, InternalSlot::StringIteratorPrototype, &Value::Object(str_iter_proto));
+    slot_set(ctx, env, InternalSlot::StringIteratorPrototype, &Value::Object(str_iter_proto));
 
     Ok(())
 }
 
 pub(crate) fn string_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -368,9 +369,9 @@ pub(crate) fn string_constructor<'gc>(
         Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
         Value::Object(_) => {
             // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-            let prim = to_primitive(mc, arg_val, "string", env)?;
+            let prim = to_primitive(ctx, arg_val, "string", env)?;
             // Convert the resulting primitive to a string
-            Ok(Value::String(spec_to_string(mc, &prim, env)?))
+            Ok(Value::String(spec_to_string(ctx, &prim, env)?))
         }
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
         Value::Closure(_) => Ok(Value::String(utf8_to_utf16("[Function]"))),
@@ -422,69 +423,69 @@ pub(crate) fn string_constructor<'gc>(
 }
 
 pub fn handle_string_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
-        "[Symbol.iterator]" => create_string_iterator(mc, s, env),
+        "[Symbol.iterator]" => create_string_iterator(ctx, s, env),
         "toString" | "valueOf" => Ok(Value::String(s.to_vec())),
-        "substring" => string_substring_method(mc, s, args, env),
-        "substr" => string_substr_method(mc, s, args, env),
-        "slice" => string_slice_method(mc, s, args, env),
+        "substring" => string_substring_method(ctx, s, args, env),
+        "substr" => string_substr_method(ctx, s, args, env),
+        "slice" => string_slice_method(ctx, s, args, env),
         "toUpperCase" | "toLocaleUpperCase" => Ok(Value::String(utf16_to_uppercase(s))),
         "toLowerCase" | "toLocaleLowerCase" => Ok(Value::String(utf16_to_lowercase(s))),
-        "indexOf" => string_indexof_method(mc, s, args, env),
-        "lastIndexOf" => string_lastindexof_method(mc, s, args, env),
-        "replace" => string_replace_method(mc, s, args, env),
-        "split" => string_split_method(mc, s, args, env),
-        "match" => string_match_method(mc, s, args, env),
-        "charAt" => string_charat_method(mc, s, args, env),
-        "charCodeAt" => string_char_code_at_method(mc, s, args, env),
+        "indexOf" => string_indexof_method(ctx, s, args, env),
+        "lastIndexOf" => string_lastindexof_method(ctx, s, args, env),
+        "replace" => string_replace_method(ctx, s, args, env),
+        "split" => string_split_method(ctx, s, args, env),
+        "match" => string_match_method(ctx, s, args, env),
+        "charAt" => string_charat_method(ctx, s, args, env),
+        "charCodeAt" => string_char_code_at_method(ctx, s, args, env),
         "trim" => Ok(Value::String(es_trim(s))),
         "trimEnd" => Ok(Value::String(es_trim_end(s))),
         "trimStart" => Ok(Value::String(es_trim_start(s))),
-        "startsWith" => string_starts_with_method(mc, s, args, env),
-        "endsWith" => string_ends_with_method(mc, s, args, env),
-        "includes" => string_includes_method(mc, s, args, env),
-        "repeat" => string_repeat_method(mc, s, args, env),
-        "concat" => string_concat_method(mc, s, args, env),
-        "padStart" => string_pad_start_method(mc, s, args, env),
-        "padEnd" => string_pad_end_method(mc, s, args, env),
-        "at" => string_at_method(mc, s, args, env),
-        "codePointAt" => string_code_point_at_method(mc, s, args, env),
-        "search" => string_search_method(mc, s, args, env),
-        "matchAll" => string_match_all_method(mc, s, args, env),
-        "normalize" => string_normalize_method(mc, s, args, env),
-        "toWellFormed" => string_to_well_formed_method(mc, s, args, env),
-        "isWellFormed" => string_is_well_formed_method(mc, s, args, env),
-        "replaceAll" => string_replace_all_method(mc, s, args, env),
-        "localeCompare" => string_locale_compare_method(mc, s, args, env),
+        "startsWith" => string_starts_with_method(ctx, s, args, env),
+        "endsWith" => string_ends_with_method(ctx, s, args, env),
+        "includes" => string_includes_method(ctx, s, args, env),
+        "repeat" => string_repeat_method(ctx, s, args, env),
+        "concat" => string_concat_method(ctx, s, args, env),
+        "padStart" => string_pad_start_method(ctx, s, args, env),
+        "padEnd" => string_pad_end_method(ctx, s, args, env),
+        "at" => string_at_method(ctx, s, args, env),
+        "codePointAt" => string_code_point_at_method(ctx, s, args, env),
+        "search" => string_search_method(ctx, s, args, env),
+        "matchAll" => string_match_all_method(ctx, s, args, env),
+        "normalize" => string_normalize_method(ctx, s, args, env),
+        "toWellFormed" => string_to_well_formed_method(ctx, s, args, env),
+        "isWellFormed" => string_is_well_formed_method(ctx, s, args, env),
+        "replaceAll" => string_replace_all_method(ctx, s, args, env),
+        "localeCompare" => string_locale_compare_method(ctx, s, args, env),
         // AnnexB aliases
         "trimLeft" => Ok(Value::String(es_trim_start(s))),
         "trimRight" => Ok(Value::String(es_trim_end(s))),
         // AnnexB HTML wrapper methods
-        "anchor" => string_html_wrapper(mc, s, "a", Some(("name", args)), env),
-        "big" => string_html_wrapper(mc, s, "big", None, env),
-        "blink" => string_html_wrapper(mc, s, "blink", None, env),
-        "bold" => string_html_wrapper(mc, s, "b", None, env),
-        "fixed" => string_html_wrapper(mc, s, "tt", None, env),
-        "fontcolor" => string_html_wrapper(mc, s, "font", Some(("color", args)), env),
-        "fontsize" => string_html_wrapper(mc, s, "font", Some(("size", args)), env),
-        "italics" => string_html_wrapper(mc, s, "i", None, env),
-        "link" => string_html_wrapper(mc, s, "a", Some(("href", args)), env),
-        "small" => string_html_wrapper(mc, s, "small", None, env),
-        "strike" => string_html_wrapper(mc, s, "strike", None, env),
-        "sub" => string_html_wrapper(mc, s, "sub", None, env),
-        "sup" => string_html_wrapper(mc, s, "sup", None, env),
+        "anchor" => string_html_wrapper(ctx, s, "a", Some(("name", args)), env),
+        "big" => string_html_wrapper(ctx, s, "big", None, env),
+        "blink" => string_html_wrapper(ctx, s, "blink", None, env),
+        "bold" => string_html_wrapper(ctx, s, "b", None, env),
+        "fixed" => string_html_wrapper(ctx, s, "tt", None, env),
+        "fontcolor" => string_html_wrapper(ctx, s, "font", Some(("color", args)), env),
+        "fontsize" => string_html_wrapper(ctx, s, "font", Some(("size", args)), env),
+        "italics" => string_html_wrapper(ctx, s, "i", None, env),
+        "link" => string_html_wrapper(ctx, s, "a", Some(("href", args)), env),
+        "small" => string_html_wrapper(ctx, s, "small", None, env),
+        "strike" => string_html_wrapper(ctx, s, "strike", None, env),
+        "sub" => string_html_wrapper(ctx, s, "sub", None, env),
+        "sup" => string_html_wrapper(ctx, s, "sup", None, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}")).into()),
     }
 }
 
 fn string_substring_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -493,12 +494,12 @@ fn string_substring_method<'gc>(
     let int_start = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     let int_end = if args.len() < 2 || matches!(args[1], Value::Undefined) {
         len
     } else {
-        spec_to_integer_or_zero(mc, &args[1], env)?
+        spec_to_integer_or_zero(ctx, &args[1], env)?
     };
     let final_start = int_start.max(0.0).min(len);
     let final_end = int_end.max(0.0).min(len);
@@ -511,7 +512,7 @@ fn string_substring_method<'gc>(
 }
 
 fn string_substr_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -520,7 +521,7 @@ fn string_substr_method<'gc>(
     let int_start = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     // Step 5: If intStart is -∞ or +∞, clamp accordingly
     let int_start = if int_start < 0.0 {
@@ -531,7 +532,7 @@ fn string_substr_method<'gc>(
     let length = if args.len() < 2 || matches!(args[1], Value::Undefined) {
         size - int_start
     } else {
-        let n = spec_to_integer_or_zero(mc, &args[1], env)?;
+        let n = spec_to_integer_or_zero(ctx, &args[1], env)?;
         n.max(0.0).min(size - int_start)
     };
     if length <= 0.0 {
@@ -543,7 +544,7 @@ fn string_substr_method<'gc>(
 }
 
 fn string_slice_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -552,12 +553,12 @@ fn string_slice_method<'gc>(
     let int_start = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     let int_end = if args.len() < 2 || matches!(args[1], Value::Undefined) {
         len
     } else {
-        spec_to_integer_or_zero(mc, &args[1], env)?
+        spec_to_integer_or_zero(ctx, &args[1], env)?
     };
     let from = if int_start < 0.0 {
         (len + int_start).max(0.0)
@@ -577,7 +578,7 @@ fn string_slice_method<'gc>(
 }
 
 fn string_indexof_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -585,10 +586,10 @@ fn string_indexof_method<'gc>(
     let search = if args.is_empty() {
         utf8_to_utf16("undefined")
     } else {
-        spec_to_string(mc, &args[0], env)?
+        spec_to_string(ctx, &args[0], env)?
     };
     let from_index = if args.len() >= 2 {
-        let n = spec_to_integer_or_zero(mc, &args[1], env)?;
+        let n = spec_to_integer_or_zero(ctx, &args[1], env)?;
         n.max(0.0) as usize
     } else {
         0
@@ -608,7 +609,7 @@ fn string_indexof_method<'gc>(
 }
 
 fn string_lastindexof_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -616,11 +617,11 @@ fn string_lastindexof_method<'gc>(
     let search = if args.is_empty() {
         utf8_to_utf16("undefined")
     } else {
-        spec_to_string(mc, &args[0], env)?
+        spec_to_string(ctx, &args[0], env)?
     };
     let len = utf16_len(s);
     let pos = if args.len() >= 2 {
-        let n = to_number_with_env(mc, env, &args[1])?;
+        let n = to_number_with_env(ctx, env, &args[1])?;
         if n.is_nan() {
             len // NaN → search from end
         } else {
@@ -758,7 +759,7 @@ fn expand_replacement_tokens(
 }
 
 fn string_replace_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -769,9 +770,9 @@ fn string_replace_method<'gc>(
     // Step 1-2: If searchValue is not undefined/null, let replacer = GetMethod(searchValue, @@replace)
     if !matches!(search_val, Value::Undefined | Value::Null)
         && let Value::Object(obj) = &search_val
-        && let Some(replacer) = get_well_known_symbol_method(mc, env, obj, "replace")?
+        && let Some(replacer) = get_well_known_symbol_method(ctx, env, obj, "replace")?
     {
-        return evaluate_call_dispatch(mc, env, &replacer, Some(&search_val), &[Value::String(s.to_vec()), replace_val]);
+        return evaluate_call_dispatch(ctx, env, &replacer, Some(&search_val), &[Value::String(s.to_vec()), replace_val]);
     }
 
     // Legacy path: searchValue has no @@replace
@@ -802,11 +803,11 @@ fn string_replace_method<'gc>(
             // For global regex, we always use the manual matching loop below,
             // so the expensive get_property_with_accessors call is wasted.
             if !global {
-                let exec_prop = crate::core::get_property_with_accessors(mc, env, obj, "exec")?;
+                let exec_prop = crate::core::get_property_with_accessors(ctx, env, obj, "exec")?;
                 let has_custom_exec = !matches!(&exec_prop, Value::Function(name) if name == "RegExp.prototype.exec");
 
                 if has_custom_exec {
-                    let exec_res = evaluate_call_dispatch(mc, env, &exec_prop, Some(&Value::Object(*obj)), &[Value::String(s.to_vec())])?;
+                    let exec_res = evaluate_call_dispatch(ctx, env, &exec_prop, Some(&Value::Object(*obj)), &[Value::String(s.to_vec())])?;
 
                     match exec_res {
                         Value::Null => return Ok(Value::String(s.to_vec())),
@@ -1012,18 +1013,18 @@ fn string_replace_method<'gc>(
                 }
 
                 if !named_captures.is_empty() {
-                    let groups_obj = new_js_object_data(mc);
+                    let groups_obj = new_js_object_data(ctx);
                     for (name, val_opt) in named_captures {
                         if let Some(v) = val_opt {
-                            object_set_key_value(mc, &groups_obj, name.as_str(), &Value::String(v))?;
+                            object_set_key_value(ctx, &groups_obj, name.as_str(), &Value::String(v))?;
                         } else {
-                            object_set_key_value(mc, &groups_obj, name.as_str(), &Value::Undefined)?;
+                            object_set_key_value(ctx, &groups_obj, name.as_str(), &Value::Undefined)?;
                         }
                     }
                     call_args.push(Value::Object(groups_obj));
                 }
 
-                let repl_val = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &call_args)?;
+                let repl_val = evaluate_call_dispatch(ctx, env, &replace_val, Some(&Value::Undefined), &call_args)?;
                 let repl_u16 = utf8_to_utf16(&value_to_string(&repl_val));
 
                 out.extend_from_slice(&s[last_pos..start]);
@@ -1048,7 +1049,7 @@ fn string_replace_method<'gc>(
             return Ok(Value::String(out));
         } else {
             // Non-callable replaceValue (undefined, null, objects, etc.) → coerce to string
-            let repl_u16 = spec_to_string(mc, &replace_val, env)?;
+            let repl_u16 = spec_to_string(ctx, &replace_val, env)?;
             let repl = utf16_to_utf8(&repl_u16);
             let mut out: Vec<u16> = Vec::new();
             let mut last_pos = 0usize;
@@ -1108,7 +1109,7 @@ fn string_replace_method<'gc>(
     } // end Value::Object
 
     // String replacement path (for non-regex search values)
-    let search = spec_to_string(mc, &search_val, env)?;
+    let search = spec_to_string(ctx, &search_val, env)?;
     let is_callable = matches!(
         &replace_val,
         Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
@@ -1118,7 +1119,7 @@ fn string_replace_method<'gc>(
             let matched = Value::String(Vec::new());
             let position = Value::Number(0.0);
             let input = Value::String(s.to_vec());
-            let repl = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &[matched, position, input])?;
+            let repl = evaluate_call_dispatch(ctx, env, &replace_val, Some(&Value::Undefined), &[matched, position, input])?;
             let repl_s = value_to_string(&repl);
             let mut out = utf8_to_utf16(&repl_s);
             out.extend_from_slice(s);
@@ -1131,7 +1132,7 @@ fn string_replace_method<'gc>(
             let matched = Value::String(search.clone());
             let position = Value::Number(pos as f64);
             let input = Value::String(s.to_vec());
-            let repl = evaluate_call_dispatch(mc, env, &replace_val, Some(&Value::Undefined), &[matched, position, input])?;
+            let repl = evaluate_call_dispatch(ctx, env, &replace_val, Some(&Value::Undefined), &[matched, position, input])?;
             let repl_s = value_to_string(&repl);
 
             let mut out = before.to_vec();
@@ -1143,13 +1144,13 @@ fn string_replace_method<'gc>(
         }
     } else {
         // Coerce replacement to string
-        let replace = spec_to_string(mc, &replace_val, env)?;
+        let replace = spec_to_string(ctx, &replace_val, env)?;
         Ok(Value::String(utf16_replace(s, &search, &replace)))
     }
 }
 
 fn string_split_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1160,15 +1161,15 @@ fn string_split_method<'gc>(
     // Step 2: If separator is not undefined/null, let splitter = GetMethod(separator, @@split)
     if !matches!(sep_val, Value::Undefined | Value::Null)
         && let Value::Object(obj) = &sep_val
-        && let Some(splitter) = get_well_known_symbol_method(mc, env, obj, "split")?
+        && let Some(splitter) = get_well_known_symbol_method(ctx, env, obj, "split")?
     {
-        return evaluate_call_dispatch(mc, env, &splitter, Some(&sep_val), &[Value::String(s.to_vec()), limit_val.clone()]);
+        return evaluate_call_dispatch(ctx, env, &splitter, Some(&sep_val), &[Value::String(s.to_vec()), limit_val.clone()]);
     }
 
     let limit = if matches!(limit_val, Value::Undefined) {
         0xFFFFFFFF_usize // 2^32 - 1
     } else {
-        crate::core::to_uint32_value_with_env(mc, env, &limit_val)? as usize
+        crate::core::to_uint32_value_with_env(ctx, env, &limit_val)? as usize
     };
 
     // If separator is a RegExp object, use regex split
@@ -1176,8 +1177,8 @@ fn string_split_method<'gc>(
         && is_regex_object(object)
     {
         if limit == 0 {
-            let arr = create_array(mc, env)?;
-            set_array_length(mc, &arr, 0)?;
+            let arr = create_array(ctx, env)?;
+            set_array_length(ctx, &arr, 0)?;
             return Ok(Value::Object(arr));
         }
         let pattern_u16 = internal_get_regex_pattern(object)?;
@@ -1254,32 +1255,32 @@ fn string_split_method<'gc>(
             parts.push(Value::String(s[start..].to_vec()));
         }
 
-        let arr = create_array(mc, env)?;
+        let arr = create_array(ctx, env)?;
         for (i, part) in parts.iter().enumerate() {
-            object_set_key_value(mc, &arr, i, &part.clone())?;
+            object_set_key_value(ctx, &arr, i, &part.clone())?;
         }
-        set_array_length(mc, &arr, parts.len())?;
+        set_array_length(ctx, &arr, parts.len())?;
         return Ok(Value::Object(arr));
     } // end Value::Object
 
     // String split path (for non-regex separators)
     if matches!(sep_val, Value::Undefined) {
         if limit == 0 {
-            let arr = create_array(mc, env)?;
-            set_array_length(mc, &arr, 0)?;
+            let arr = create_array(ctx, env)?;
+            set_array_length(ctx, &arr, 0)?;
             return Ok(Value::Object(arr));
         }
-        let arr = create_array(mc, env)?;
-        object_set_key_value(mc, &arr, 0, &Value::String(s.to_vec()))?;
-        set_array_length(mc, &arr, 1)?;
+        let arr = create_array(ctx, env)?;
+        object_set_key_value(ctx, &arr, 0, &Value::String(s.to_vec()))?;
+        set_array_length(ctx, &arr, 1)?;
         return Ok(Value::Object(arr));
     }
     // Step 7: ToString(separator) — may throw
-    let sep = spec_to_string(mc, &sep_val, env)?;
+    let sep = spec_to_string(ctx, &sep_val, env)?;
     // Step 8: if limit == 0, return empty array
     if limit == 0 {
-        let arr = create_array(mc, env)?;
-        set_array_length(mc, &arr, 0)?;
+        let arr = create_array(ctx, env)?;
+        set_array_length(ctx, &arr, 0)?;
         return Ok(Value::Object(arr));
     }
     let mut parts: Vec<Vec<u16>> = Vec::new();
@@ -1302,16 +1303,16 @@ fn string_split_method<'gc>(
             }
         }
     }
-    let arr = create_array(mc, env)?;
+    let arr = create_array(ctx, env)?;
     for (i, part) in parts.iter().enumerate() {
-        object_set_key_value(mc, &arr, i, &Value::String(part.clone()))?;
+        object_set_key_value(ctx, &arr, i, &Value::String(part.clone()))?;
     }
-    set_array_length(mc, &arr, parts.len())?;
+    set_array_length(ctx, &arr, parts.len())?;
     Ok(Value::Object(arr))
 }
 
 fn string_match_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1322,30 +1323,30 @@ fn string_match_method<'gc>(
     // Step 2: If regexp is not undefined/null, let matcher = GetMethod(regexp, @@match)
     if !matches!(search_val, Value::Undefined | Value::Null)
         && let Value::Object(obj) = &search_val
-        && let Some(matcher) = get_well_known_symbol_method(mc, env, obj, "match")?
+        && let Some(matcher) = get_well_known_symbol_method(ctx, env, obj, "match")?
     {
         // Call matcher with regexp as this, passing the string
-        return evaluate_call_dispatch(mc, env, &matcher, Some(&search_val), &[Value::String(s.to_vec())]);
+        return evaluate_call_dispatch(ctx, env, &matcher, Some(&search_val), &[Value::String(s.to_vec())]);
     }
 
     // Step 6: Let rx = RegExpCreate(regexp, undefined)
     // Step 8: Return Invoke(rx, @@match, «S»)
     let regexp_obj = if matches!(search_val, Value::Undefined) {
-        match handle_regexp_constructor_with_env(mc, Some(env), &[])? {
+        match handle_regexp_constructor_with_env(ctx, Some(env), &[])? {
             Value::Object(o) => o,
             _ => return Err(raise_eval_error!("failed to construct default RegExp").into()),
         }
     } else {
-        let pattern = spec_to_string(mc, &search_val, env)?;
-        match handle_regexp_constructor_with_env(mc, Some(env), &[Value::String(pattern)])? {
+        let pattern = spec_to_string(ctx, &search_val, env)?;
+        match handle_regexp_constructor_with_env(ctx, Some(env), &[Value::String(pattern)])? {
             Value::Object(o) => o,
             _ => return Err(raise_eval_error!("failed to construct RegExp from arg").into()),
         }
     };
 
     // Look up @@match on the newly created RegExp and invoke it
-    if let Some(matcher) = get_well_known_symbol_method(mc, env, &regexp_obj, "match")? {
-        return evaluate_call_dispatch(mc, env, &matcher, Some(&Value::Object(regexp_obj)), &[Value::String(s.to_vec())]);
+    if let Some(matcher) = get_well_known_symbol_method(ctx, env, &regexp_obj, "match")? {
+        return evaluate_call_dispatch(ctx, env, &matcher, Some(&Value::Object(regexp_obj)), &[Value::String(s.to_vec())]);
     }
 
     // Fallback: manual match (should not normally reach here)
@@ -1363,11 +1364,11 @@ fn string_match_method<'gc>(
 
     if global {
         let prev_last_index = get_own_property(&regexp_obj, "lastIndex");
-        object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
+        object_set_key_value(ctx, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
 
         let mut matches: Vec<String> = Vec::new();
         loop {
-            match handle_regexp_method(mc, &regexp_obj, "exec", &exec_args, env)? {
+            match handle_regexp_method(ctx, &regexp_obj, "exec", &exec_args, env)? {
                 Value::Object(arr) => {
                     if let Some(val_rc) = object_get_key_value(&arr, "0") {
                         match &*val_rc.borrow() {
@@ -1384,29 +1385,29 @@ fn string_match_method<'gc>(
         }
 
         if let Some(val) = prev_last_index {
-            object_set_key_value(mc, &regexp_obj, "lastIndex", &val.borrow().clone())?;
+            object_set_key_value(ctx, &regexp_obj, "lastIndex", &val.borrow().clone())?;
         } else {
-            object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
+            object_set_key_value(ctx, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
         }
 
         if matches.is_empty() {
             return Ok(Value::Null);
         }
 
-        let arr = create_array(mc, env)?;
+        let arr = create_array(ctx, env)?;
         for (i, m) in matches.iter().enumerate() {
-            object_set_key_value(mc, &arr, i, &Value::String(utf8_to_utf16(m)))?;
+            object_set_key_value(ctx, &arr, i, &Value::String(utf8_to_utf16(m)))?;
         }
-        set_array_length(mc, &arr, matches.len())?;
+        set_array_length(ctx, &arr, matches.len())?;
         Ok(Value::Object(arr))
     } else {
-        let res = handle_regexp_method(mc, &regexp_obj, "exec", &exec_args, env)?;
+        let res = handle_regexp_method(ctx, &regexp_obj, "exec", &exec_args, env)?;
         Ok(res)
     }
 }
 
 fn string_charat_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1414,7 +1415,7 @@ fn string_charat_method<'gc>(
     let pos = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     if pos < 0.0 || pos >= utf16_len(s) as f64 {
         Ok(Value::String(Vec::new()))
@@ -1426,7 +1427,7 @@ fn string_charat_method<'gc>(
 }
 
 fn string_char_code_at_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1434,7 +1435,7 @@ fn string_char_code_at_method<'gc>(
     let pos = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     if pos < 0.0 || pos >= s.len() as f64 {
         Ok(Value::Number(f64::NAN))
@@ -1444,25 +1445,25 @@ fn string_char_code_at_method<'gc>(
 }
 
 fn string_starts_with_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 4: If IsRegExp(searchString) is true, throw TypeError
     if let Some(arg) = args.first()
-        && is_regexp_like(mc, env, arg)?
+        && is_regexp_like(ctx, env, arg)?
     {
         return Err(crate::raise_type_error!("First argument to String.prototype.startsWith must not be a regular expression").into());
     }
     let search = if args.is_empty() {
         utf8_to_utf16("undefined")
     } else {
-        spec_to_string(mc, &args[0], env)?
+        spec_to_string(ctx, &args[0], env)?
     };
     let len = utf16_len(s);
     let pos = if args.len() >= 2 && !matches!(args[1], Value::Undefined) {
-        let p = spec_to_integer_or_zero(mc, &args[1], env)?;
+        let p = spec_to_integer_or_zero(ctx, &args[1], env)?;
         p.max(0.0).min(len as f64) as usize
     } else {
         0
@@ -1476,25 +1477,25 @@ fn string_starts_with_method<'gc>(
 }
 
 fn string_ends_with_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 4: If IsRegExp(searchString) is true, throw TypeError
     if let Some(arg) = args.first()
-        && is_regexp_like(mc, env, arg)?
+        && is_regexp_like(ctx, env, arg)?
     {
         return Err(crate::raise_type_error!("First argument to String.prototype.endsWith must not be a regular expression").into());
     }
     let search = if args.is_empty() {
         utf8_to_utf16("undefined")
     } else {
-        spec_to_string(mc, &args[0], env)?
+        spec_to_string(ctx, &args[0], env)?
     };
     let len = utf16_len(s);
     let end_pos = if args.len() >= 2 && !matches!(args[1], Value::Undefined) {
-        let p = spec_to_integer_or_zero(mc, &args[1], env)?;
+        let p = spec_to_integer_or_zero(ctx, &args[1], env)?;
         p.max(0.0).min(len as f64) as usize
     } else {
         len
@@ -1509,24 +1510,24 @@ fn string_ends_with_method<'gc>(
 }
 
 fn string_includes_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 4: If IsRegExp(searchString) is true, throw TypeError
     if let Some(arg) = args.first()
-        && is_regexp_like(mc, env, arg)?
+        && is_regexp_like(ctx, env, arg)?
     {
         return Err(crate::raise_type_error!("First argument to String.prototype.includes must not be a regular expression").into());
     }
     let search = if args.is_empty() {
         utf8_to_utf16("undefined")
     } else {
-        spec_to_string(mc, &args[0], env)?
+        spec_to_string(ctx, &args[0], env)?
     };
     let position = if args.len() >= 2 {
-        let p = spec_to_integer_or_zero(mc, &args[1], env)?;
+        let p = spec_to_integer_or_zero(ctx, &args[1], env)?;
         p.max(0.0) as usize
     } else {
         0
@@ -1539,7 +1540,7 @@ fn string_includes_method<'gc>(
 }
 
 fn string_repeat_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1547,7 +1548,7 @@ fn string_repeat_method<'gc>(
     let n = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     if n < 0.0 || n == f64::INFINITY {
         return Err(crate::raise_range_error!("Invalid count value").into());
@@ -1564,14 +1565,14 @@ fn string_repeat_method<'gc>(
 }
 
 fn string_concat_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut result = s.to_vec();
     for arg in args {
-        let str_val = spec_to_string(mc, arg, env)?;
+        let str_val = spec_to_string(ctx, arg, env)?;
         result.extend(str_val);
     }
     Ok(Value::String(result))
@@ -1579,7 +1580,7 @@ fn string_concat_method<'gc>(
 
 /// Spec-compliant ToString: for objects, calls ToPrimitive(hint: "string") first,
 /// then converts the resulting primitive to a string.
-pub(crate) fn spec_to_string<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
+pub(crate) fn spec_to_string<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
     match val {
         Value::String(s) => Ok(s.clone()),
         Value::Number(_n) => Ok(utf8_to_utf16(&value_to_string(val))),
@@ -1589,15 +1590,15 @@ pub(crate) fn spec_to_string<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &J
         Value::Null => Ok(utf8_to_utf16("null")),
         Value::Symbol(_) => Err(crate::raise_type_error!("Cannot convert a Symbol value to a string").into()),
         Value::Object(_) => {
-            let prim = to_primitive(mc, val, "string", env)?;
-            spec_to_string(mc, &prim, env)
+            let prim = to_primitive(ctx, val, "string", env)?;
+            spec_to_string(ctx, &prim, env)
         }
         _ => Ok(utf8_to_utf16(&value_to_string(val))),
     }
 }
 
 fn string_pad_start_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1605,14 +1606,14 @@ fn string_pad_start_method<'gc>(
     let max_length = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     let string_length = utf16_len(s);
     if max_length as usize <= string_length {
         return Ok(Value::String(s.to_vec()));
     }
     let fill_string = if args.len() >= 2 && !matches!(args[1], Value::Undefined) {
-        spec_to_string(mc, &args[1], env)?
+        spec_to_string(ctx, &args[1], env)?
     } else {
         vec![0x0020] // space
     };
@@ -1630,7 +1631,7 @@ fn string_pad_start_method<'gc>(
 }
 
 fn string_pad_end_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1638,14 +1639,14 @@ fn string_pad_end_method<'gc>(
     let max_length = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     let string_length = utf16_len(s);
     if max_length as usize <= string_length {
         return Ok(Value::String(s.to_vec()));
     }
     let fill_string = if args.len() >= 2 && !matches!(args[1], Value::Undefined) {
-        spec_to_string(mc, &args[1], env)?
+        spec_to_string(ctx, &args[1], env)?
     } else {
         vec![0x0020] // space
     };
@@ -1664,7 +1665,7 @@ fn string_pad_end_method<'gc>(
 }
 
 fn string_at_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1672,7 +1673,7 @@ fn string_at_method<'gc>(
     let n = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     let len = s.len() as i64;
     let k = if n >= 0.0 { n as i64 } else { len + n as i64 };
@@ -1684,7 +1685,7 @@ fn string_at_method<'gc>(
 }
 
 fn string_code_point_at_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1692,7 +1693,7 @@ fn string_code_point_at_method<'gc>(
     let pos = if args.is_empty() {
         0.0
     } else {
-        spec_to_integer_or_zero(mc, &args[0], env)?
+        spec_to_integer_or_zero(ctx, &args[0], env)?
     };
     if pos < 0.0 || pos >= s.len() as f64 {
         return Ok(Value::Undefined);
@@ -1710,7 +1711,7 @@ fn string_code_point_at_method<'gc>(
 }
 
 fn string_search_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1720,35 +1721,35 @@ fn string_search_method<'gc>(
     // Step 2: If regexp is not undefined/null, let searcher = GetMethod(regexp, @@search)
     if !matches!(search_val, Value::Undefined | Value::Null)
         && let Value::Object(obj) = &search_val
-        && let Some(searcher) = get_well_known_symbol_method(mc, env, obj, "search")?
+        && let Some(searcher) = get_well_known_symbol_method(ctx, env, obj, "search")?
     {
-        return evaluate_call_dispatch(mc, env, &searcher, Some(&search_val), &[Value::String(s.to_vec())]);
+        return evaluate_call_dispatch(ctx, env, &searcher, Some(&search_val), &[Value::String(s.to_vec())]);
     }
 
     // Step 6: Let rx = RegExpCreate(regexp, undefined)
     // Step 8: Return Invoke(rx, @@search, «S»)
     let regexp_obj = if matches!(search_val, Value::Undefined) {
-        match handle_regexp_constructor_with_env(mc, Some(env), &[Value::String(Vec::new())])? {
+        match handle_regexp_constructor_with_env(ctx, Some(env), &[Value::String(Vec::new())])? {
             Value::Object(o) => o,
             _ => return Err(raise_eval_error!("Failed to create RegExp").into()),
         }
     } else {
-        let p = spec_to_string(mc, &search_val, env)?;
-        match handle_regexp_constructor_with_env(mc, Some(env), &[Value::String(p)])? {
+        let p = spec_to_string(ctx, &search_val, env)?;
+        match handle_regexp_constructor_with_env(ctx, Some(env), &[Value::String(p)])? {
             Value::Object(o) => o,
             _ => return Err(raise_eval_error!("Failed to create RegExp").into()),
         }
     };
 
     // Look up @@search on the newly created RegExp and invoke it
-    if let Some(searcher) = get_well_known_symbol_method(mc, env, &regexp_obj, "search")? {
-        return evaluate_call_dispatch(mc, env, &searcher, Some(&Value::Object(regexp_obj)), &[Value::String(s.to_vec())]);
+    if let Some(searcher) = get_well_known_symbol_method(ctx, env, &regexp_obj, "search")? {
+        return evaluate_call_dispatch(ctx, env, &searcher, Some(&Value::Object(regexp_obj)), &[Value::String(s.to_vec())]);
     }
 
     // Fallback: manual search
-    object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
+    object_set_key_value(ctx, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
     let exec_args = vec![Value::String(s.to_vec())];
-    let res = handle_regexp_method(mc, &regexp_obj, "exec", &exec_args, env)?;
+    let res = handle_regexp_method(ctx, &regexp_obj, "exec", &exec_args, env)?;
 
     match res {
         Value::Object(match_obj) => {
@@ -1763,7 +1764,7 @@ fn string_search_method<'gc>(
 }
 
 fn string_match_all_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1774,16 +1775,16 @@ fn string_match_all_method<'gc>(
     // Step 2: If regexp is neither undefined nor null
     if !matches!(regexp_val, Value::Undefined | Value::Null) {
         // Step 2.a: Let isRegExp = ? IsRegExp(regexp)
-        if is_regexp_like(mc, env, &regexp_val)? {
+        if is_regexp_like(ctx, env, &regexp_val)? {
             // Step 2.b: If isRegExp is true, then
             // Let flags = ? Get(regexp, "flags")
             if let Value::Object(obj) = &regexp_val {
-                let flags_val = crate::core::get_property_with_accessors(mc, env, obj, "flags")?;
+                let flags_val = crate::core::get_property_with_accessors(ctx, env, obj, "flags")?;
                 // RequireObjectCoercible(flags) — if flags is undefined/null, throw TypeError
                 if matches!(flags_val, Value::Undefined | Value::Null) {
                     return Err(raise_type_error!("String.prototype.matchAll called with a non-global RegExp argument").into());
                 }
-                let flags_str = utf16_to_utf8(&spec_to_string(mc, &flags_val, env)?);
+                let flags_str = utf16_to_utf8(&spec_to_string(ctx, &flags_val, env)?);
                 if !flags_str.contains('g') {
                     return Err(raise_type_error!("String.prototype.matchAll called with a non-global RegExp argument").into());
                 }
@@ -1793,9 +1794,9 @@ fn string_match_all_method<'gc>(
         // Step 2.c: Let matcher = ? GetMethod(regexp, @@matchAll)
         // Step 2.d: If matcher is not undefined, return ? Call(matcher, regexp, « O »)
         if let Value::Object(obj) = &regexp_val
-            && let Some(matcher) = get_well_known_symbol_method(mc, env, obj, "matchAll")?
+            && let Some(matcher) = get_well_known_symbol_method(ctx, env, obj, "matchAll")?
         {
-            return evaluate_call_dispatch(mc, env, &matcher, Some(&regexp_val), &[Value::String(s.to_vec())]);
+            return evaluate_call_dispatch(ctx, env, &matcher, Some(&regexp_val), &[Value::String(s.to_vec())]);
         }
     }
 
@@ -1804,11 +1805,11 @@ fn string_match_all_method<'gc>(
     // Pass the original value directly so RegExp constructor handles undefined → empty pattern
     let pattern_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
     let re_args = vec![pattern_val, Value::String(utf8_to_utf16("g"))];
-    let val = handle_regexp_constructor_with_env(mc, Some(env), &re_args)?;
+    let val = handle_regexp_constructor_with_env(ctx, Some(env), &re_args)?;
     if let Value::Object(obj) = val {
         // Step 5: Return ? Invoke(rx, @@matchAll, « S »)
-        if let Some(matcher) = get_well_known_symbol_method(mc, env, &obj, "matchAll")? {
-            return evaluate_call_dispatch(mc, env, &matcher, Some(&Value::Object(obj)), &[Value::String(s.to_vec())]);
+        if let Some(matcher) = get_well_known_symbol_method(ctx, env, &obj, "matchAll")? {
+            return evaluate_call_dispatch(ctx, env, &matcher, Some(&Value::Object(obj)), &[Value::String(s.to_vec())]);
         }
         // If @@matchAll is not found (e.g., deleted from RegExp.prototype), Invoke throws TypeError
         Err(raise_type_error!("[Symbol.matchAll] is not a function").into())
@@ -1818,7 +1819,7 @@ fn string_match_all_method<'gc>(
 }
 
 fn string_locale_compare_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1826,7 +1827,7 @@ fn string_locale_compare_method<'gc>(
     let that = if args.is_empty() {
         utf8_to_utf16("undefined")
     } else {
-        spec_to_string(mc, &args[0], env)?
+        spec_to_string(ctx, &args[0], env)?
     };
     // NFC-normalize both operands so that canonically equivalent sequences
     // (e.g. U+006F U+0308 vs U+00F6) compare as equal, as required by the
@@ -1843,7 +1844,7 @@ fn string_locale_compare_method<'gc>(
 }
 
 fn string_normalize_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1851,7 +1852,7 @@ fn string_normalize_method<'gc>(
     let form = if args.is_empty() || matches!(args[0], Value::Undefined) {
         "NFC".to_string()
     } else {
-        let f = spec_to_string(mc, &args[0], env)?;
+        let f = spec_to_string(ctx, &args[0], env)?;
         utf16_to_utf8(&f)
     };
     match form.as_str() {
@@ -1878,7 +1879,7 @@ fn string_normalize_method<'gc>(
 /// §22.1.3.8 String.prototype.isWellFormed()
 /// Returns true if the string contains no lone surrogates.
 fn string_is_well_formed_method<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     s: &[u16],
     _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -1903,7 +1904,7 @@ fn string_is_well_formed_method<'gc>(
 }
 
 fn string_to_well_formed_method<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     s: &[u16],
     _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -1937,16 +1938,16 @@ fn string_to_well_formed_method<'gc>(
 
 #[allow(dead_code)]
 fn make_array_from_values<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     values: Vec<Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let len = values.len();
-    let arr = create_array(mc, env)?;
+    let arr = create_array(ctx, env)?;
     for (i, v) in values.into_iter().enumerate() {
-        object_set_key_value(mc, &arr, i, &v)?;
+        object_set_key_value(ctx, &arr, i, &v)?;
     }
-    set_array_length(mc, &arr, len)?;
+    set_array_length(ctx, &arr, len)?;
     Ok(Value::Object(arr))
 }
 
@@ -1954,7 +1955,7 @@ fn make_array_from_values<'gc>(
 /// This ensures the correct spec ordering: steps 2a-2d (IsRegExp, flags check, @@replace)
 /// happen BEFORE ToString(this) (step 3).
 pub fn string_replace_all_raw<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: Value<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1968,18 +1969,18 @@ pub fn string_replace_all_raw<'gc>(
         && let Value::Object(obj) = &search_val
     {
         // Step 2a: Let isRegExp be ? IsRegExp(searchValue)
-        let is_regexp = is_regexp_like(mc, env, &search_val)?;
+        let is_regexp = is_regexp_like(ctx, env, &search_val)?;
 
         // Step 2b: If isRegExp is true
         if is_regexp {
             // i. Let flags be ? Get(searchValue, "flags")
-            let flags_val = crate::core::get_property_with_accessors(mc, env, obj, "flags")?;
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, obj, "flags")?;
             // ii. Perform ? RequireObjectCoercible(flags)
             if matches!(flags_val, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
             }
             // iii. If ? ToString(flags) does not contain "g", throw a TypeError
-            let flags_str = utf16_to_utf8(&spec_to_string(mc, &flags_val, env)?);
+            let flags_str = utf16_to_utf8(&spec_to_string(ctx, &flags_val, env)?);
             if !flags_str.contains('g') {
                 return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
             }
@@ -1987,20 +1988,20 @@ pub fn string_replace_all_raw<'gc>(
 
         // Step 2c: Let replacer be ? GetMethod(searchValue, @@replace)
         // Step 2d: If replacer is not undefined, return ? Call(replacer, searchValue, « O, replaceValue »)
-        if let Some(replacer) = get_well_known_symbol_method(mc, env, obj, "replace")? {
-            return evaluate_call_dispatch(mc, env, &replacer, Some(&search_val), &[this_val, replace_val]);
+        if let Some(replacer) = get_well_known_symbol_method(ctx, env, obj, "replace")? {
+            return evaluate_call_dispatch(ctx, env, &replacer, Some(&search_val), &[this_val, replace_val]);
         }
     }
 
     // Step 3: Let string be ? ToString(O)
-    let s = spec_to_string(mc, &this_val, env)?;
+    let s = spec_to_string(ctx, &this_val, env)?;
 
     // Delegate to string path
-    string_replace_all_string_path(mc, &s, &search_val, &replace_val, env)
+    string_replace_all_string_path(ctx, &s, &search_val, &replace_val, env)
 }
 
 fn string_replace_all_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2014,18 +2015,18 @@ fn string_replace_all_method<'gc>(
         && let Value::Object(obj) = &search_val
     {
         // Step 2a: Let isRegExp be ? IsRegExp(searchValue)
-        let is_regexp = is_regexp_like(mc, env, &search_val)?;
+        let is_regexp = is_regexp_like(ctx, env, &search_val)?;
 
         // Step 2b: If isRegExp is true
         if is_regexp {
             // i. Let flags be ? Get(searchValue, "flags")
-            let flags_val = crate::core::get_property_with_accessors(mc, env, obj, "flags")?;
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, obj, "flags")?;
             // ii. Perform ? RequireObjectCoercible(flags)
             if matches!(flags_val, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
             }
             // iii. If ? ToString(flags) does not contain "g", throw a TypeError
-            let flags_str = utf16_to_utf8(&spec_to_string(mc, &flags_val, env)?);
+            let flags_str = utf16_to_utf8(&spec_to_string(ctx, &flags_val, env)?);
             if !flags_str.contains('g') {
                 return Err(raise_type_error!("String.prototype.replaceAll called with a non-global RegExp argument").into());
             }
@@ -2033,26 +2034,26 @@ fn string_replace_all_method<'gc>(
 
         // Step 2c: Let replacer be ? GetMethod(searchValue, @@replace)
         // Step 2d: If replacer is not undefined, return ? Call(replacer, searchValue, « O, replaceValue »)
-        if let Some(replacer) = get_well_known_symbol_method(mc, env, obj, "replace")? {
-            return evaluate_call_dispatch(mc, env, &replacer, Some(&search_val), &[Value::String(s.to_vec()), replace_val]);
+        if let Some(replacer) = get_well_known_symbol_method(ctx, env, obj, "replace")? {
+            return evaluate_call_dispatch(ctx, env, &replacer, Some(&search_val), &[Value::String(s.to_vec()), replace_val]);
         }
     }
 
     // Step 3: Let string be ? ToString(O) — already done (s parameter)
     // Delegate to string path
-    string_replace_all_string_path(mc, s, &search_val, &replace_val, env)
+    string_replace_all_string_path(ctx, s, &search_val, &replace_val, env)
 }
 
 /// Steps 4-16 of §22.1.3.19: the string-based replacement path.
 fn string_replace_all_string_path<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     search_val: &Value<'gc>,
     replace_val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 4: Let searchString be ? ToString(searchValue)
-    let search = spec_to_string(mc, search_val, env)?;
+    let search = spec_to_string(ctx, search_val, env)?;
 
     // Step 5: Let functionalReplace be IsCallable(replaceValue)
     let functional_replace = matches!(
@@ -2065,7 +2066,7 @@ fn string_replace_all_string_path<'gc>(
 
     // Step 6: If functionalReplace is false, let replaceValue be ? ToString(replaceValue)
     let replace_str = if !functional_replace {
-        Some(spec_to_string(mc, replace_val, env)?)
+        Some(spec_to_string(ctx, replace_val, env)?)
     } else {
         None
     };
@@ -2101,8 +2102,8 @@ fn string_replace_all_string_path<'gc>(
             // Step 14a: functionalReplace is true
             // i. Let replacement be ? ToString(? Call(replaceValue, undefined, « searchString, 𝔽(position), string »))
             let call_args = vec![Value::String(search.clone()), Value::Number(pos as f64), Value::String(s.to_vec())];
-            let repl_val = evaluate_call_dispatch(mc, env, replace_val, Some(&Value::Undefined), &call_args)?;
-            let repl_u16 = spec_to_string(mc, &repl_val, env)?;
+            let repl_val = evaluate_call_dispatch(ctx, env, replace_val, Some(&Value::Undefined), &call_args)?;
+            let repl_u16 = spec_to_string(ctx, &repl_val, env)?;
             result.extend_from_slice(&repl_u16);
         } else {
             // Step 14b: functionalReplace is false
@@ -2160,13 +2161,13 @@ fn string_index_of_u16(s: &[u16], search: &[u16], from_index: usize, s_len: usiz
 }
 
 pub fn string_from_char_code<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut chars = Vec::new();
     for arg in args {
-        let num = crate::core::to_number_with_env(mc, env, arg)?;
+        let num = crate::core::to_number_with_env(ctx, env, arg)?;
         // ToUint16
         let u = if num.is_nan() || num == 0.0 || num.is_infinite() {
             0u16
@@ -2182,13 +2183,13 @@ pub fn string_from_char_code<'gc>(
 }
 
 pub fn string_from_code_point<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut chars = Vec::new();
     for arg in args {
-        let num = crate::core::to_number_with_env(mc, env, arg)?;
+        let num = crate::core::to_number_with_env(ctx, env, arg)?;
         // Step 3c: If nextCP is not an integer, throw a RangeError.
         if num.is_nan() || num.is_infinite() || num.fract() != 0.0 {
             return Err(raise_range_error!("Invalid code point").into());
@@ -2212,7 +2213,7 @@ pub fn string_from_code_point<'gc>(
     Ok(Value::String(chars))
 }
 
-pub fn string_raw<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn string_raw<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // §22.1.2.4 String.raw(template, ...substitutions)
     if args.is_empty() {
         return Err(crate::raise_type_error!("Cannot convert undefined or null to object").into());
@@ -2230,7 +2231,7 @@ pub fn string_raw<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
     };
     // Step 3: Let literals = ToObject(Get(cooked, "raw"))
     // Use get_property_with_accessors to trigger getters
-    let raw_val = crate::core::get_property_with_accessors(mc, env, &cooked_obj, "raw")?;
+    let raw_val = crate::core::get_property_with_accessors(ctx, env, &cooked_obj, "raw")?;
     let literals_obj = match raw_val {
         Value::Object(obj) => obj,
         Value::Undefined | Value::Null => {
@@ -2242,8 +2243,8 @@ pub fn string_raw<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
     };
     // Step 4: Let literalCount = ToLength(Get(raw, "length"))
     // Use get_property_with_accessors to trigger getters on length
-    let len_val = crate::core::get_property_with_accessors(mc, env, &literals_obj, "length")?;
-    let n = to_number_with_env(mc, env, &len_val)?;
+    let len_val = crate::core::get_property_with_accessors(ctx, env, &literals_obj, "length")?;
+    let n = to_number_with_env(ctx, env, &len_val)?;
     let literal_count = if n.is_nan() || n <= 0.0 {
         0usize
     } else {
@@ -2256,15 +2257,15 @@ pub fn string_raw<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
     let mut result: Vec<u16> = Vec::new();
     for next_index in 0..literal_count {
         // Get the next literal segment — use get_property_with_accessors to trigger getters
-        let next_seg_val = crate::core::get_property_with_accessors(mc, env, &literals_obj, next_index)?;
-        let next_seg = spec_to_string(mc, &next_seg_val, env)?;
+        let next_seg_val = crate::core::get_property_with_accessors(ctx, env, &literals_obj, next_index)?;
+        let next_seg = spec_to_string(ctx, &next_seg_val, env)?;
         result.extend_from_slice(&next_seg);
         if next_index + 1 == literal_count {
             break;
         }
         // Get substitution if available
         if next_index < substitutions.len() {
-            let next_sub_str = spec_to_string(mc, &substitutions[next_index], env)?;
+            let next_sub_str = spec_to_string(ctx, &substitutions[next_index], env)?;
             result.extend_from_slice(&next_sub_str);
         }
     }
@@ -2273,27 +2274,30 @@ pub fn string_raw<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectD
 
 /// Create a new String Iterator
 pub(crate) fn create_string_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let iterator = new_js_object_data(mc);
+    let iterator = new_js_object_data(ctx);
 
     // Set [[Prototype]] to %StringIteratorPrototype%
     if let Some(proto_val) = slot_get_chained(env, &InternalSlot::StringIteratorPrototype)
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        iterator.borrow_mut(mc).prototype = Some(*proto);
+        iterator.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     // Store string data
-    slot_set(mc, &iterator, InternalSlot::IteratorString, &Value::String(s.to_vec()));
-    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
+    slot_set(ctx, &iterator, InternalSlot::IteratorString, &Value::String(s.to_vec()));
+    slot_set(ctx, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
 
     Ok(Value::Object(iterator))
 }
 
-pub(crate) fn handle_string_iterator_next<'gc>(mc: &GcContext<'gc>, iterator: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn handle_string_iterator_next<'gc>(
+    ctx: &GcContext<'gc>,
+    iterator: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Spec §22.1.5.2.1: If O does not have all of the internal slots of a
     // String Iterator Instance, throw a TypeError.  Use `slot_get` (own-only)
     // so that `Object.create(realIterator)` does NOT inherit these slots.
@@ -2322,9 +2326,9 @@ pub(crate) fn handle_string_iterator_next<'gc>(mc: &GcContext<'gc>, iterator: &J
 
     let len = s.len();
     if index >= len {
-        let result_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
-        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        let result_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -2342,17 +2346,17 @@ pub(crate) fn handle_string_iterator_next<'gc>(mc: &GcContext<'gc>, iterator: &J
     }
 
     index += code_unit_count;
-    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
+    slot_set(ctx, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
-    let result_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &result_obj, "value", &Value::String(ch_vec))?;
-    object_set_key_value(mc, &result_obj, "done", &Value::Boolean(false))?;
+    let result_obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &result_obj, "value", &Value::String(ch_vec))?;
+    object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(false))?;
     Ok(Value::Object(result_obj))
 }
 
 /// AnnexB CreateHTML(string, tag, attribute, value) — B.2.3.2–B.2.3.14
 fn string_html_wrapper<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     s: &[u16],
     tag: &str,
     attr: Option<(&str, &[Value<'gc>])>,
@@ -2363,7 +2367,7 @@ fn string_html_wrapper<'gc>(
         let attr_val = if args.is_empty() {
             "undefined".to_string()
         } else {
-            let v = spec_to_string(mc, &args[0], env)?;
+            let v = spec_to_string(ctx, &args[0], env)?;
             utf16_to_utf8(&v)
         };
         // Escape '"' as '&quot;' in attribute value

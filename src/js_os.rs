@@ -58,7 +58,7 @@ fn get_parent_pid_windows() -> u32 {
 
 /// Handle OS module method calls
 pub(crate) fn handle_os_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -264,24 +264,24 @@ pub(crate) fn handle_os_method<'gc>(
                     };
                     match std::fs::read_dir(&dirname) {
                         Ok(entries) => {
-                            let obj = crate::js_array::create_array(mc, env)?;
+                            let obj = crate::js_array::create_array(ctx, env)?;
                             let mut i = 0;
                             for entry in entries.flatten() {
                                 if let Some(name) = entry.file_name().to_str() {
-                                    object_set_key_value(mc, &obj, i, &Value::String(utf8_to_utf16(name)))?;
+                                    object_set_key_value(ctx, &obj, i, &Value::String(utf8_to_utf16(name)))?;
                                     i += 1;
                                 }
                             }
-                            set_array_length(mc, &obj, i)?;
+                            set_array_length(ctx, &obj, i)?;
                             return Ok(Value::Object(obj));
                         }
                         Err(_) => {
-                            let obj = crate::js_array::create_array(mc, env)?;
+                            let obj = crate::js_array::create_array(ctx, env)?;
                             return Ok(Value::Object(obj));
                         }
                     }
                 }
-                let obj = crate::js_array::create_array(mc, env)?;
+                let obj = crate::js_array::create_array(ctx, env)?;
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {
@@ -424,66 +424,66 @@ pub(crate) fn handle_os_method<'gc>(
     Err(raise_eval_error!(format!("OS method {method} not implemented")))
 }
 
-pub fn initialize_os_module<'gc>(mc: &GcContext<'gc>, global_obj: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let os_obj = make_os_object(mc)?;
-    object_set_key_value(mc, global_obj, "os", &Value::Object(os_obj))?;
+pub fn initialize_os_module<'gc>(ctx: &GcContext<'gc>, global_obj: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let os_obj = make_os_object(ctx)?;
+    object_set_key_value(ctx, global_obj, "os", &Value::Object(os_obj))?;
     Ok(())
 }
 
 /// Create the OS object with all OS-related functions and constants
-pub fn make_os_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "remove", &Value::Function("os.remove".to_string()))?;
-    object_set_key_value(mc, &obj, "mkdir", &Value::Function("os.mkdir".to_string()))?;
-    object_set_key_value(mc, &obj, "open", &Value::Function("os.open".to_string()))?;
-    object_set_key_value(mc, &obj, "write", &Value::Function("os.write".to_string()))?;
-    object_set_key_value(mc, &obj, "read", &Value::Function("os.read".to_string()))?;
-    object_set_key_value(mc, &obj, "seek", &Value::Function("os.seek".to_string()))?;
-    object_set_key_value(mc, &obj, "close", &Value::Function("os.close".to_string()))?;
-    object_set_key_value(mc, &obj, "readdir", &Value::Function("os.readdir".to_string()))?;
-    object_set_key_value(mc, &obj, "utimes", &Value::Function("os.utimes".to_string()))?;
-    object_set_key_value(mc, &obj, "stat", &Value::Function("os.stat".to_string()))?;
-    object_set_key_value(mc, &obj, "lstat", &Value::Function("os.lstat".to_string()))?;
-    object_set_key_value(mc, &obj, "symlink", &Value::Function("os.symlink".to_string()))?;
-    object_set_key_value(mc, &obj, "readlink", &Value::Function("os.readlink".to_string()))?;
-    object_set_key_value(mc, &obj, "getcwd", &Value::Function("os.getcwd".to_string()))?;
-    object_set_key_value(mc, &obj, "realpath", &Value::Function("os.realpath".to_string()))?;
-    object_set_key_value(mc, &obj, "exec", &Value::Function("os.exec".to_string()))?;
-    object_set_key_value(mc, &obj, "pipe", &Value::Function("os.pipe".to_string()))?;
-    object_set_key_value(mc, &obj, "waitpid", &Value::Function("os.waitpid".to_string()))?;
-    object_set_key_value(mc, &obj, "kill", &Value::Function("os.kill".to_string()))?;
-    object_set_key_value(mc, &obj, "isatty", &Value::Function("os.isatty".to_string()))?;
-    object_set_key_value(mc, &obj, "getpid", &Value::Function("os.getpid".to_string()))?;
-    object_set_key_value(mc, &obj, "getppid", &Value::Function("os.getppid".to_string()))?;
-    object_set_key_value(mc, &obj, "O_RDWR", &Value::Number(2.0))?;
-    object_set_key_value(mc, &obj, "O_CREAT", &Value::Number(64.0))?;
-    object_set_key_value(mc, &obj, "O_TRUNC", &Value::Number(512.0))?;
-    object_set_key_value(mc, &obj, "O_RDONLY", &Value::Number(0.0))?;
-    object_set_key_value(mc, &obj, "S_IFMT", &Value::Number(0o170000 as f64))?;
-    object_set_key_value(mc, &obj, "S_IFREG", &Value::Number(0o100000 as f64))?;
-    object_set_key_value(mc, &obj, "S_IFLNK", &Value::Number(0o120000 as f64))?;
-    object_set_key_value(mc, &obj, "SIGTERM", &Value::Number(15.0))?;
+pub fn make_os_object<'gc>(ctx: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &obj, "remove", &Value::Function("os.remove".to_string()))?;
+    object_set_key_value(ctx, &obj, "mkdir", &Value::Function("os.mkdir".to_string()))?;
+    object_set_key_value(ctx, &obj, "open", &Value::Function("os.open".to_string()))?;
+    object_set_key_value(ctx, &obj, "write", &Value::Function("os.write".to_string()))?;
+    object_set_key_value(ctx, &obj, "read", &Value::Function("os.read".to_string()))?;
+    object_set_key_value(ctx, &obj, "seek", &Value::Function("os.seek".to_string()))?;
+    object_set_key_value(ctx, &obj, "close", &Value::Function("os.close".to_string()))?;
+    object_set_key_value(ctx, &obj, "readdir", &Value::Function("os.readdir".to_string()))?;
+    object_set_key_value(ctx, &obj, "utimes", &Value::Function("os.utimes".to_string()))?;
+    object_set_key_value(ctx, &obj, "stat", &Value::Function("os.stat".to_string()))?;
+    object_set_key_value(ctx, &obj, "lstat", &Value::Function("os.lstat".to_string()))?;
+    object_set_key_value(ctx, &obj, "symlink", &Value::Function("os.symlink".to_string()))?;
+    object_set_key_value(ctx, &obj, "readlink", &Value::Function("os.readlink".to_string()))?;
+    object_set_key_value(ctx, &obj, "getcwd", &Value::Function("os.getcwd".to_string()))?;
+    object_set_key_value(ctx, &obj, "realpath", &Value::Function("os.realpath".to_string()))?;
+    object_set_key_value(ctx, &obj, "exec", &Value::Function("os.exec".to_string()))?;
+    object_set_key_value(ctx, &obj, "pipe", &Value::Function("os.pipe".to_string()))?;
+    object_set_key_value(ctx, &obj, "waitpid", &Value::Function("os.waitpid".to_string()))?;
+    object_set_key_value(ctx, &obj, "kill", &Value::Function("os.kill".to_string()))?;
+    object_set_key_value(ctx, &obj, "isatty", &Value::Function("os.isatty".to_string()))?;
+    object_set_key_value(ctx, &obj, "getpid", &Value::Function("os.getpid".to_string()))?;
+    object_set_key_value(ctx, &obj, "getppid", &Value::Function("os.getppid".to_string()))?;
+    object_set_key_value(ctx, &obj, "O_RDWR", &Value::Number(2.0))?;
+    object_set_key_value(ctx, &obj, "O_CREAT", &Value::Number(64.0))?;
+    object_set_key_value(ctx, &obj, "O_TRUNC", &Value::Number(512.0))?;
+    object_set_key_value(ctx, &obj, "O_RDONLY", &Value::Number(0.0))?;
+    object_set_key_value(ctx, &obj, "S_IFMT", &Value::Number(0o170000 as f64))?;
+    object_set_key_value(ctx, &obj, "S_IFREG", &Value::Number(0o100000 as f64))?;
+    object_set_key_value(ctx, &obj, "S_IFLNK", &Value::Number(0o120000 as f64))?;
+    object_set_key_value(ctx, &obj, "SIGTERM", &Value::Number(15.0))?;
 
     // Add path submodule
-    let path_obj = make_path_object(mc)?;
-    object_set_key_value(mc, &obj, "path", &Value::Object(path_obj))?;
+    let path_obj = make_path_object(ctx)?;
+    object_set_key_value(ctx, &obj, "path", &Value::Object(path_obj))?;
     Ok(obj)
 }
 
 /// Create the OS path object with path-related functions
-pub fn make_path_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "join", &Value::Function("os.path.join".to_string()))?;
-    object_set_key_value(mc, &obj, "dirname", &Value::Function("os.path.dirname".to_string()))?;
-    object_set_key_value(mc, &obj, "basename", &Value::Function("os.path.basename".to_string()))?;
-    object_set_key_value(mc, &obj, "extname", &Value::Function("os.path.extname".to_string()))?;
-    object_set_key_value(mc, &obj, "resolve", &Value::Function("os.path.resolve".to_string()))?;
-    object_set_key_value(mc, &obj, "normalize", &Value::Function("os.path.normalize".to_string()))?;
-    object_set_key_value(mc, &obj, "relative", &Value::Function("os.path.relative".to_string()))?;
-    object_set_key_value(mc, &obj, "isAbsolute", &Value::Function("os.path.isAbsolute".to_string()))?;
+pub fn make_path_object<'gc>(ctx: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &obj, "join", &Value::Function("os.path.join".to_string()))?;
+    object_set_key_value(ctx, &obj, "dirname", &Value::Function("os.path.dirname".to_string()))?;
+    object_set_key_value(ctx, &obj, "basename", &Value::Function("os.path.basename".to_string()))?;
+    object_set_key_value(ctx, &obj, "extname", &Value::Function("os.path.extname".to_string()))?;
+    object_set_key_value(ctx, &obj, "resolve", &Value::Function("os.path.resolve".to_string()))?;
+    object_set_key_value(ctx, &obj, "normalize", &Value::Function("os.path.normalize".to_string()))?;
+    object_set_key_value(ctx, &obj, "relative", &Value::Function("os.path.relative".to_string()))?;
+    object_set_key_value(ctx, &obj, "isAbsolute", &Value::Function("os.path.isAbsolute".to_string()))?;
 
     // Platform-specific path separator
     let val = Value::String(std::path::MAIN_SEPARATOR_STR.encode_utf16().collect());
-    object_set_key_value(mc, &obj, "sep", &val)?;
+    object_set_key_value(ctx, &obj, "sep", &val)?;
     Ok(obj)
 }

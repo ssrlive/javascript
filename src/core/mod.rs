@@ -27,8 +27,8 @@ pub(crate) type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 use std::collections::HashMap;
 
 #[inline]
-pub fn new_gc_cell_ptr<'gc, T: 'gc + Collect<'gc>>(mc: &GcContext<'gc>, value: T) -> GcPtr<'gc, T> {
-    Gc::new(mc, GcCell::new(value))
+pub fn new_gc_cell_ptr<'gc, T: 'gc + Collect<'gc>>(ctx: &GcContext<'gc>, value: T) -> GcPtr<'gc, T> {
+    Gc::new(ctx, GcCell::new(value))
 }
 
 mod gc;
@@ -80,16 +80,16 @@ pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;
 
 pub type JsArenaVm = gc_arena::Arena<gc_arena::Rootable!['gc => VM<'gc>]>;
 
-pub fn initialize_global_constructors<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    initialize_global_constructors_with_parent(mc, env, None)
+pub fn initialize_global_constructors<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    initialize_global_constructors_with_parent(ctx, env, None)
 }
 
 pub fn initialize_global_constructors_with_parent<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     parent_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<(), JSError> {
-    crate::js_object::initialize_object_module(mc, env)?;
+    crate::js_object::initialize_object_module(ctx, env)?;
 
     // Set the global object's [[Prototype]] to Object.prototype per spec.
     // This ensures `Object.getPrototypeOf(globalThis)` returns Object.prototype.
@@ -109,29 +109,29 @@ pub fn initialize_global_constructors_with_parent<'gc>(
             _ => None,
         };
         if let Some(proto) = proto_obj {
-            env.borrow_mut(mc).prototype = Some(proto);
+            env.borrow_mut(ctx).prototype = Some(proto);
         }
     }
 
-    initialize_error_constructor(mc, env)?;
+    initialize_error_constructor(ctx, env)?;
 
-    let console_obj = initialize_console_object(mc)?;
-    env_set(mc, env, "console", &Value::Object(console_obj))?;
+    let console_obj = initialize_console_object(ctx)?;
+    env_set(ctx, env, "console", &Value::Object(console_obj))?;
 
-    initialize_number_module(mc, env)?;
+    initialize_number_module(ctx, env)?;
 
-    initialize_symbol(mc, env, parent_env)?;
+    initialize_symbol(ctx, env, parent_env)?;
 
     // Initialize Reflect object with full (implemented) methods
     // (must be after initialize_symbol so Symbol.toStringTag is available)
-    crate::js_reflect::initialize_reflect(mc, env)?;
+    crate::js_reflect::initialize_reflect(ctx, env)?;
 
-    initialize_math(mc, env)?;
-    initialize_string(mc, env)?;
-    initialize_array(mc, env)?;
+    initialize_math(ctx, env)?;
+    initialize_string(ctx, env)?;
+    initialize_array(ctx, env)?;
     // Create %StringIteratorPrototype% now that %IteratorPrototype% is available
-    crate::js_string::initialize_string_iterator_prototype(mc, env)?;
-    crate::js_function::initialize_function(mc, env)?;
+    crate::js_string::initialize_string_iterator_prototype(ctx, env)?;
+    crate::js_function::initialize_function(ctx, env)?;
 
     // Fix up [[Prototype]] of builtins created before Function was initialized.
     if let Some(func_val) = env_get(env, "Function")
@@ -143,7 +143,7 @@ pub fn initialize_global_constructors_with_parent<'gc>(
         if let Some(sym_val) = env_get(env, "Symbol")
             && let Value::Object(sym_ctor) = &*sym_val.borrow()
         {
-            sym_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+            sym_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
         }
         // Array static methods (isArray, from, of, fromAsync)
         if let Some(arr_val) = env_get(env, "Array")
@@ -154,49 +154,49 @@ pub fn initialize_global_constructors_with_parent<'gc>(
                     && let Value::Object(method_obj) = &*method_val.borrow()
                     && method_obj.borrow().prototype.is_none()
                 {
-                    method_obj.borrow_mut(mc).prototype = Some(*func_proto);
+                    method_obj.borrow_mut(ctx).prototype = Some(*func_proto);
                 }
             }
         }
     }
 
-    initialize_regexp(mc, env)?;
+    initialize_regexp(ctx, env)?;
     // Create %RegExpStringIteratorPrototype% now that %IteratorPrototype% is available
-    crate::js_regexp::initialize_regexp_string_iterator_prototype(mc, env)?;
+    crate::js_regexp::initialize_regexp_string_iterator_prototype(ctx, env)?;
     // Initialize Date constructor and prototype
-    initialize_date(mc, env)?;
-    crate::js_typedarray::initialize_typedarray(mc, env)?;
-    initialize_boolean(mc, env)?;
-    initialize_bigint(mc, env)?;
-    initialize_json(mc, env)?;
-    initialize_map(mc, env)?;
-    crate::js_proxy::initialize_proxy(mc, env)?;
-    initialize_weakmap(mc, env)?;
-    initialize_weakref(mc, env)?;
-    initialize_weakset(mc, env)?;
-    initialize_finalization_registry(mc, env)?;
-    initialize_set(mc, env)?;
-    crate::js_promise::initialize_promise(mc, env)?;
-    crate::js_disposable::initialize_disposable_stack(mc, env)?;
-    crate::js_disposable::initialize_async_disposable_stack(mc, env)?;
-    crate::js_abstract_module_source::initialize_abstract_module_source(mc, env)?;
+    initialize_date(ctx, env)?;
+    crate::js_typedarray::initialize_typedarray(ctx, env)?;
+    initialize_boolean(ctx, env)?;
+    initialize_bigint(ctx, env)?;
+    initialize_json(ctx, env)?;
+    initialize_map(ctx, env)?;
+    crate::js_proxy::initialize_proxy(ctx, env)?;
+    initialize_weakmap(ctx, env)?;
+    initialize_weakref(ctx, env)?;
+    initialize_weakset(ctx, env)?;
+    initialize_finalization_registry(ctx, env)?;
+    initialize_set(ctx, env)?;
+    crate::js_promise::initialize_promise(ctx, env)?;
+    crate::js_disposable::initialize_disposable_stack(ctx, env)?;
+    crate::js_disposable::initialize_async_disposable_stack(ctx, env)?;
+    crate::js_abstract_module_source::initialize_abstract_module_source(ctx, env)?;
 
     // Initialize generator prototype/constructor
-    crate::js_generator::initialize_generator(mc, env)?;
+    crate::js_generator::initialize_generator(ctx, env)?;
     // Initialize async generator prototype/constructor
-    crate::js_async_generator::initialize_async_generator(mc, env)?;
+    crate::js_async_generator::initialize_async_generator(ctx, env)?;
 
     // Initialize Iterator helpers (Iterator constructor, prototype methods, etc.)
-    crate::js_iterator_helpers::initialize_iterator_helpers(mc, env)?;
+    crate::js_iterator_helpers::initialize_iterator_helpers(ctx, env)?;
 
     // Initialize ShadowRealm constructor
-    crate::js_shadow_realm::initialize_shadow_realm(mc, env)?;
+    crate::js_shadow_realm::initialize_shadow_realm(ctx, env)?;
 
     // Create AsyncFunction constructor/prototype so async function objects
     // inherit @@toStringTag = "AsyncFunction" from a distinct prototype.
     {
-        let async_func_ctor = new_js_object_data(mc);
-        let async_func_proto = new_js_object_data(mc);
+        let async_func_ctor = new_js_object_data(ctx);
+        let async_func_proto = new_js_object_data(ctx);
 
         // AsyncFunction.prototype inherits from Function.prototype
         // AsyncFunction itself inherits from Function (the constructor)
@@ -204,12 +204,12 @@ pub fn initialize_global_constructors_with_parent<'gc>(
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         {
             // [[Prototype]] of AsyncFunction is Function
-            async_func_ctor.borrow_mut(mc).prototype = Some(*func_ctor);
+            async_func_ctor.borrow_mut(ctx).prototype = Some(*func_ctor);
             // AsyncFunction.prototype.[[Prototype]] is Function.prototype
             if let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(func_proto) = &*proto_val.borrow()
             {
-                async_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
+                async_func_proto.borrow_mut(ctx).prototype = Some(*func_proto);
             }
         }
 
@@ -219,74 +219,74 @@ pub fn initialize_global_constructors_with_parent<'gc>(
             && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
-            let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("AsyncFunction"), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &async_func_proto, *tag_sym, &desc_tag)?;
+            let desc_tag = crate::core::create_descriptor_object(ctx, &Value::from("AsyncFunction"), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &async_func_proto, *tag_sym, &desc_tag)?;
         }
 
         // Make AsyncFunction callable via __native_ctor so AsyncFunction("...") works
-        slot_set(mc, &async_func_ctor, InternalSlot::NativeCtor, &Value::from("AsyncFunction"));
+        slot_set(ctx, &async_func_ctor, InternalSlot::NativeCtor, &Value::from("AsyncFunction"));
         // Mark as constructor so typeof returns "function" and isConstructor is true
-        slot_set(mc, &async_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+        slot_set(ctx, &async_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
 
         // AsyncFunction.length = 1 (non-writable, non-enumerable, configurable)
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_func_ctor, "length", &desc_len)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_func_ctor, "length", &desc_len)?;
 
         // AsyncFunction.name = "AsyncFunction" (non-writable, non-enumerable, configurable)
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::from("AsyncFunction"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_func_ctor, "name", &desc_name)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::from("AsyncFunction"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_func_ctor, "name", &desc_name)?;
 
         // Link constructor ↔ prototype
         // AsyncFunction.prototype: non-writable, non-enumerable, non-configurable
-        object_set_key_value(mc, &async_func_ctor, "prototype", &Value::Object(async_func_proto))?;
-        async_func_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-        async_func_ctor.borrow_mut(mc).set_non_writable("prototype");
-        async_func_ctor.borrow_mut(mc).set_non_configurable("prototype");
-        object_set_key_value(mc, &async_func_proto, "constructor", &Value::Object(async_func_ctor))?;
-        async_func_proto.borrow_mut(mc).set_non_enumerable("constructor");
+        object_set_key_value(ctx, &async_func_ctor, "prototype", &Value::Object(async_func_proto))?;
+        async_func_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+        async_func_ctor.borrow_mut(ctx).set_non_writable("prototype");
+        async_func_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+        object_set_key_value(ctx, &async_func_proto, "constructor", &Value::Object(async_func_ctor))?;
+        async_func_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
         // Store as hidden intrinsic (NOT a global) via internal slot
-        slot_set(mc, env, InternalSlot::AsyncFunctionCtor, &Value::Object(async_func_ctor));
+        slot_set(ctx, env, InternalSlot::AsyncFunctionCtor, &Value::Object(async_func_ctor));
         // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
-        slot_set(mc, &async_func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
+        slot_set(ctx, &async_func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
     }
 
-    env_set(mc, env, "undefined", &Value::Undefined)?;
+    env_set(ctx, env, "undefined", &Value::Undefined)?;
     // Make global 'undefined', 'NaN', and 'Infinity' non-writable and non-configurable per ECMAScript
-    env.borrow_mut(mc).set_non_configurable("undefined");
-    env.borrow_mut(mc).set_non_writable("undefined");
+    env.borrow_mut(ctx).set_non_configurable("undefined");
+    env.borrow_mut(ctx).set_non_writable("undefined");
 
-    env_set(mc, env, "NaN", &Value::Number(f64::NAN))?;
-    env.borrow_mut(mc).set_non_configurable("NaN");
-    env.borrow_mut(mc).set_non_writable("NaN");
+    env_set(ctx, env, "NaN", &Value::Number(f64::NAN))?;
+    env.borrow_mut(ctx).set_non_configurable("NaN");
+    env.borrow_mut(ctx).set_non_writable("NaN");
 
-    env_set(mc, env, "Infinity", &Value::Number(f64::INFINITY))?;
-    env.borrow_mut(mc).set_non_configurable("Infinity");
-    env.borrow_mut(mc).set_non_writable("Infinity");
+    env_set(ctx, env, "Infinity", &Value::Number(f64::INFINITY))?;
+    env.borrow_mut(ctx).set_non_configurable("Infinity");
+    env.borrow_mut(ctx).set_non_writable("Infinity");
 
     // Wrap eval in an Object so it carries OriginGlobal for cross-realm indirect eval.
     // Without this, `var otherEval = otherRealm.eval; otherEval('var x = 1')` would
     // execute in the caller's realm instead of the eval function's realm.
     {
-        let eval_obj = new_js_object_data(mc);
+        let eval_obj = new_js_object_data(ctx);
         eval_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("eval".to_string()))));
-        slot_set(mc, &eval_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function("eval".to_string()))));
+        slot_set(ctx, &eval_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
         // [[Prototype]] = Function.prototype so `eval instanceof Function` works
         if let Some(func_ctor_val) = env_get(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            eval_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            eval_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
         // eval.name = "eval", eval.length = 1
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("eval")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &eval_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &eval_obj, "length", &desc_len)?;
-        env_set(mc, env, "eval", &Value::Object(eval_obj))?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("eval")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &eval_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &eval_obj, "length", &desc_len)?;
+        env_set(ctx, env, "eval", &Value::Object(eval_obj))?;
     }
 
     // The global environment runs in sloppy (non-strict) mode by default.
@@ -294,92 +294,92 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     // ES module semantics.  Keeping the global sloppy ensures correct
     // ECMAScript behaviours: this-boxing of primitives in sloppy calls,
     // silent delete of non-configurable properties, arguments.callee access, etc.
-    env_set_strictness(mc, env, false)?;
+    env_set_strictness(ctx, env, false)?;
 
     let val = Value::Function("__internal_async_step_resolve".to_string());
-    env_set(mc, env, "__internal_async_step_resolve", &val)?;
+    env_set(ctx, env, "__internal_async_step_resolve", &val)?;
 
     let val = Value::Function("__internal_async_step_reject".to_string());
-    env_set(mc, env, "__internal_async_step_reject", &val)?;
+    env_set(ctx, env, "__internal_async_step_reject", &val)?;
 
     // Internal helpers used by Promise implementation (e.g. finally chaining)
     let val = Value::Function("__internal_resolve_promise".to_string());
-    env_set(mc, env, "__internal_resolve_promise", &val)?;
+    env_set(ctx, env, "__internal_resolve_promise", &val)?;
 
     let val = Value::Function("__internal_reject_promise".to_string());
-    env_set(mc, env, "__internal_reject_promise", &val)?;
+    env_set(ctx, env, "__internal_reject_promise", &val)?;
 
     let val = Value::Function("__internal_allsettled_state_record_fulfilled_env".to_string());
-    env_set(mc, env, "__internal_allsettled_state_record_fulfilled_env", &val)?;
+    env_set(ctx, env, "__internal_allsettled_state_record_fulfilled_env", &val)?;
 
     let val = Value::Function("__internal_allsettled_state_record_rejected_env".to_string());
-    env_set(mc, env, "__internal_allsettled_state_record_rejected_env", &val)?;
+    env_set(ctx, env, "__internal_allsettled_state_record_rejected_env", &val)?;
 
     let val = Value::Function("__detachArrayBuffer__".to_string());
     // Use object_set_key_value (not env_set) so it stays as a String property
     // visible to JS via `globalThis.__detachArrayBuffer__`.  env_set would route
     // through str_to_internal_slot, hiding it from property access.
-    object_set_key_value(mc, env, "__detachArrayBuffer__", &val)?;
+    object_set_key_value(ctx, env, "__detachArrayBuffer__", &val)?;
 
     // AnnexB: Create [[IsHTMLDDA]] object for $262.IsHTMLDDA test262 harness.
     // This is a callable object that returns null when called.
     {
-        let htmldda = new_js_object_data(mc);
+        let htmldda = new_js_object_data(ctx);
         // Mark with [[IsHTMLDDA]] internal slot
-        slot_set(mc, &htmldda, InternalSlot::IsHTMLDDA, &Value::Boolean(true));
+        slot_set(ctx, &htmldda, InternalSlot::IsHTMLDDA, &Value::Boolean(true));
         // Make it callable: attach a closure that returns null
         let closure_fn = Value::Function("__isHTMLDDA__".to_string());
-        htmldda.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_fn)));
-        object_set_key_value(mc, env, "__isHTMLDDA__", &Value::Object(htmldda))?;
+        htmldda.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, closure_fn)));
+        object_set_key_value(ctx, env, "__isHTMLDDA__", &Value::Object(htmldda))?;
     }
 
     // Expose common global functions as callables
-    env_set(mc, env, "parseInt", &Value::Function("parseInt".to_string()))?;
-    env_set(mc, env, "parseFloat", &Value::Function("parseFloat".to_string()))?;
-    env_set(mc, env, "isNaN", &Value::Function("isNaN".to_string()))?;
-    env_set(mc, env, "isFinite", &Value::Function("isFinite".to_string()))?;
-    env_set(mc, env, "encodeURI", &Value::Function("encodeURI".to_string()))?;
-    env_set(mc, env, "decodeURI", &Value::Function("decodeURI".to_string()))?;
-    env_set(mc, env, "encodeURIComponent", &Value::Function("encodeURIComponent".to_string()))?;
-    env_set(mc, env, "decodeURIComponent", &Value::Function("decodeURIComponent".to_string()))?;
+    env_set(ctx, env, "parseInt", &Value::Function("parseInt".to_string()))?;
+    env_set(ctx, env, "parseFloat", &Value::Function("parseFloat".to_string()))?;
+    env_set(ctx, env, "isNaN", &Value::Function("isNaN".to_string()))?;
+    env_set(ctx, env, "isFinite", &Value::Function("isFinite".to_string()))?;
+    env_set(ctx, env, "encodeURI", &Value::Function("encodeURI".to_string()))?;
+    env_set(ctx, env, "decodeURI", &Value::Function("decodeURI".to_string()))?;
+    env_set(ctx, env, "encodeURIComponent", &Value::Function("encodeURIComponent".to_string()))?;
+    env_set(ctx, env, "decodeURIComponent", &Value::Function("decodeURIComponent".to_string()))?;
     // AnnexB global functions
-    env_set(mc, env, "escape", &Value::Function("escape".to_string()))?;
-    env_set(mc, env, "unescape", &Value::Function("unescape".to_string()))?;
+    env_set(ctx, env, "escape", &Value::Function("escape".to_string()))?;
+    env_set(ctx, env, "unescape", &Value::Function("unescape".to_string()))?;
 
     // Timer functions
-    env_set(mc, env, "setTimeout", &Value::Function("setTimeout".to_string()))?;
-    env_set(mc, env, "clearTimeout", &Value::Function("clearTimeout".to_string()))?;
-    env_set(mc, env, "setInterval", &Value::Function("setInterval".to_string()))?;
-    env_set(mc, env, "clearInterval", &Value::Function("clearInterval".to_string()))?;
+    env_set(ctx, env, "setTimeout", &Value::Function("setTimeout".to_string()))?;
+    env_set(ctx, env, "clearTimeout", &Value::Function("clearTimeout".to_string()))?;
+    env_set(ctx, env, "setInterval", &Value::Function("setInterval".to_string()))?;
+    env_set(ctx, env, "clearInterval", &Value::Function("clearInterval".to_string()))?;
 
     // Expose __createRealm__ as a native callable for cross-realm tests.
-    env_set(mc, env, "__createRealm__", &Value::Function("__createRealm__".to_string()))?;
+    env_set(ctx, env, "__createRealm__", &Value::Function("__createRealm__".to_string()))?;
 
     // $262.agent native hooks for test262 multi-agent tests
-    object_set_key_value(mc, env, "__agent_start", &Value::Function("__agent_start".to_string()))?;
-    object_set_key_value(mc, env, "__agent_broadcast", &Value::Function("__agent_broadcast".to_string()))?;
-    object_set_key_value(mc, env, "__agent_getReport", &Value::Function("__agent_getReport".to_string()))?;
-    object_set_key_value(mc, env, "__agent_sleep", &Value::Function("__agent_sleep".to_string()))?;
+    object_set_key_value(ctx, env, "__agent_start", &Value::Function("__agent_start".to_string()))?;
+    object_set_key_value(ctx, env, "__agent_broadcast", &Value::Function("__agent_broadcast".to_string()))?;
+    object_set_key_value(ctx, env, "__agent_getReport", &Value::Function("__agent_getReport".to_string()))?;
+    object_set_key_value(ctx, env, "__agent_sleep", &Value::Function("__agent_sleep".to_string()))?;
     object_set_key_value(
-        mc,
+        ctx,
         env,
         "__agent_monotonicNow",
         &Value::Function("__agent_monotonicNow".to_string()),
     )?;
     object_set_key_value(
-        mc,
+        ctx,
         env,
         "__agent_receiveBroadcast",
         &Value::Function("__agent_receiveBroadcast".to_string()),
     )?;
-    object_set_key_value(mc, env, "__agent_report", &Value::Function("__agent_report".to_string()))?;
-    object_set_key_value(mc, env, "__agent_leaving", &Value::Function("__agent_leaving".to_string()))?;
+    object_set_key_value(ctx, env, "__agent_report", &Value::Function("__agent_report".to_string()))?;
+    object_set_key_value(ctx, env, "__agent_leaving", &Value::Function("__agent_leaving".to_string()))?;
 
     #[cfg(feature = "os")]
-    crate::js_os::initialize_os_module(mc, env)?;
+    crate::js_os::initialize_os_module(ctx, env)?;
 
     #[cfg(feature = "std")]
-    crate::js_std::initialize_std_module(mc, env)?;
+    crate::js_std::initialize_std_module(ctx, env)?;
 
     // Per the ECMAScript specification, the global object's built-in properties
     // (constructors, global functions, etc.) should have attributes:
@@ -389,7 +389,7 @@ pub fn initialize_global_constructors_with_parent<'gc>(
     {
         let keys: Vec<PropertyKey> = env.borrow().properties.keys().cloned().collect();
         for key in keys {
-            env.borrow_mut(mc).non_enumerable.insert(key);
+            env.borrow_mut(ctx).non_enumerable.insert(key);
         }
     }
 
@@ -399,19 +399,19 @@ pub fn initialize_global_constructors_with_parent<'gc>(
 /// Create a new Realm: a fresh global environment with its own set of built-in
 /// intrinsics.  Returns the new global-env object (the "global" property
 /// expected by the `$262.createRealm()` harness).
-pub fn create_new_realm<'gc>(mc: &GcContext<'gc>, _parent_env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let new_env = new_js_object_data(mc);
-    new_env.borrow_mut(mc).is_function_scope = true;
+pub fn create_new_realm<'gc>(ctx: &GcContext<'gc>, _parent_env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let new_env = new_js_object_data(ctx);
+    new_env.borrow_mut(ctx).is_function_scope = true;
 
-    initialize_global_constructors_with_parent(mc, &new_env, Some(_parent_env))?;
+    initialize_global_constructors_with_parent(ctx, &new_env, Some(_parent_env))?;
 
-    env_set(mc, &new_env, "globalThis", &Value::Object(new_env))?;
-    new_env.borrow_mut(mc).set_non_enumerable("globalThis");
-    object_set_key_value(mc, &new_env, "this", &Value::Object(new_env))?;
+    env_set(ctx, &new_env, "globalThis", &Value::Object(new_env))?;
+    new_env.borrow_mut(ctx).set_non_enumerable("globalThis");
+    object_set_key_value(ctx, &new_env, "this", &Value::Object(new_env))?;
 
     // Copy `print` from the parent realm so test harnesses have access.
     if let Some(print_val) = env_get(_parent_env, "print") {
-        env_set(mc, &new_env, "print", &print_val.borrow())?;
+        env_set(ctx, &new_env, "print", &print_val.borrow())?;
     }
 
     Ok(new_env)
@@ -499,35 +499,35 @@ where
     // DEBUG: show parsed statements for troubleshooting
     log::trace!("DEBUG: PARSED STATEMENTS: {:#?}", statements);
 
-    let arena = JsArena::new(|mc| {
-        let global_env = new_js_object_data(mc);
-        global_env.borrow_mut(mc).is_function_scope = true;
+    let arena = JsArena::new(|ctx| {
+        let global_env = new_js_object_data(ctx);
+        global_env.borrow_mut(ctx).is_function_scope = true;
 
         JsRoot {
             global_env,
-            well_known_symbols: new_gc_cell_ptr(mc, HashMap::new()),
+            well_known_symbols: new_gc_cell_ptr(ctx, HashMap::new()),
         }
     });
 
-    arena.mutate(|mc, root| {
-        initialize_global_constructors(mc, &root.global_env)?;
+    arena.mutate(|ctx, root| {
+        initialize_global_constructors(ctx, &root.global_env)?;
 
         // Reset agent state for test isolation (only on main thread, not agent threads)
         if !crate::js_agent::is_agent_thread() {
             crate::js_agent::reset_agent_state();
         }
 
-        env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
-        root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
-        object_set_key_value(mc, &root.global_env, "this", &Value::Object(root.global_env))?;
+        env_set(ctx, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
+        root.global_env.borrow_mut(ctx).set_non_enumerable("globalThis");
+        object_set_key_value(ctx, &root.global_env, "this", &Value::Object(root.global_env))?;
 
         let mut entry_module_exports: Option<JSObjectDataPtr<'_>> = None;
         if kind == ProgramKind::Module {
-            let module_exports = new_js_object_data(mc);
-            object_set_key_value(mc, &root.global_env, "exports", &Value::Object(module_exports))?;
-            let module_obj = new_js_object_data(mc);
-            object_set_key_value(mc, &module_obj, "exports", &Value::Object(module_exports))?;
-            object_set_key_value(mc, &root.global_env, "module", &Value::Object(module_obj))?;
+            let module_exports = new_js_object_data(ctx);
+            object_set_key_value(ctx, &root.global_env, "exports", &Value::Object(module_exports))?;
+            let module_obj = new_js_object_data(ctx);
+            object_set_key_value(ctx, &module_obj, "exports", &Value::Object(module_exports))?;
+            object_set_key_value(ctx, &root.global_env, "module", &Value::Object(module_obj))?;
             entry_module_exports = Some(module_exports);
         }
 
@@ -543,12 +543,12 @@ where
                 p_str = injected_path;
             }
             // Store __filepath
-            slot_set(mc, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
+            slot_set(ctx, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
         }
 
         if kind == ProgramKind::Script {
             slot_set(
-                mc,
+                ctx,
                 &root.global_env,
                 InternalSlot::SuppressDynamicImportResult,
                 &Value::Boolean(true),
@@ -566,17 +566,17 @@ where
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or(logical_module_path);
 
-            let cache = crate::js_module::get_or_create_module_cache(mc, &root.global_env)?;
-            object_set_key_value(mc, &cache, module_path.as_str(), &Value::Object(exports_obj))?;
-            object_set_key_value(mc, &cache, script_fs_path_str.as_str(), &Value::Object(exports_obj))?;
-            let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
-            object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(true))?;
-            object_set_key_value(mc, &loading, script_fs_path_str.as_str(), &Value::Boolean(true))?;
+            let cache = crate::js_module::get_or_create_module_cache(ctx, &root.global_env)?;
+            object_set_key_value(ctx, &cache, module_path.as_str(), &Value::Object(exports_obj))?;
+            object_set_key_value(ctx, &cache, script_fs_path_str.as_str(), &Value::Object(exports_obj))?;
+            let loading = crate::js_module::get_or_create_module_loading(ctx, &root.global_env)?;
+            object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(true))?;
+            object_set_key_value(ctx, &loading, script_fs_path_str.as_str(), &Value::Boolean(true))?;
 
             // Create import.meta for the entry module so `import.meta` is defined in module scripts
-            let import_meta = new_js_object_data(mc);
-            object_set_key_value(mc, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path)))?;
-            slot_set(mc, &root.global_env, InternalSlot::ImportMeta, &Value::Object(import_meta));
+            let import_meta = new_js_object_data(ctx);
+            object_set_key_value(ctx, &import_meta, "url", &Value::String(utf8_to_utf16(&module_path)))?;
+            slot_set(ctx, &root.global_env, InternalSlot::ImportMeta, &Value::Object(import_meta));
         }
 
         // Pre-scan the script source for the test262 global-code-mode marker.
@@ -586,23 +586,23 @@ where
         // apply the proper GlobalDeclarationInstantiation semantics (separate
         // lexical environment for let/const/class).
         if script.contains("__test262_global_code_mode") {
-            slot_set(mc, &root.global_env, InternalSlot::Test262GlobalCodeMode, &Value::Boolean(true));
+            slot_set(ctx, &root.global_env, InternalSlot::Test262GlobalCodeMode, &Value::Boolean(true));
         }
 
         let exec_env = if kind == ProgramKind::Module {
-            let module_env = new_js_object_data(mc);
-            module_env.borrow_mut(mc).is_function_scope = true;
-            module_env.borrow_mut(mc).prototype = Some(root.global_env);
+            let module_env = new_js_object_data(ctx);
+            module_env.borrow_mut(ctx).is_function_scope = true;
+            module_env.borrow_mut(ctx).prototype = Some(root.global_env);
             // ES modules are always strict (§10.2.1)
-            env_set_strictness(mc, &module_env, true)?;
-            object_set_key_value(mc, &module_env, "this", &Value::Undefined)?;
-            object_set_key_value(mc, &module_env, "globalThis", &Value::Object(root.global_env))?;
+            env_set_strictness(ctx, &module_env, true)?;
+            object_set_key_value(ctx, &module_env, "this", &Value::Undefined)?;
+            object_set_key_value(ctx, &module_env, "globalThis", &Value::Object(root.global_env))?;
 
             if let Some(exports_obj) = entry_module_exports {
-                object_set_key_value(mc, &module_env, "exports", &Value::Object(exports_obj))?;
-                let module_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &module_obj, "exports", &Value::Object(exports_obj))?;
-                object_set_key_value(mc, &module_env, "module", &Value::Object(module_obj))?;
+                object_set_key_value(ctx, &module_env, "exports", &Value::Object(exports_obj))?;
+                let module_obj = new_js_object_data(ctx);
+                object_set_key_value(ctx, &module_obj, "exports", &Value::Object(exports_obj))?;
+                object_set_key_value(ctx, &module_env, "module", &Value::Object(module_obj))?;
             }
 
             module_env
@@ -625,7 +625,7 @@ where
             if let Some(idx) = split_idx {
                 let prefix = &statements[..=idx];
                 if !prefix.is_empty() {
-                    evaluate_statements(mc, &exec_env, prefix)?;
+                    evaluate_statements(ctx, &exec_env, prefix)?;
                 }
                 &statements[(idx + 1)..]
             } else {
@@ -635,7 +635,7 @@ where
             &statements
         };
 
-        match evaluate_statements(mc, &exec_env, eval_statements_slice) {
+        match evaluate_statements(ctx, &exec_env, eval_statements_slice) {
             Ok(mut result) => {
                 if kind == ProgramKind::Module
                     && let (Some(_exports_obj), Some(p)) = (entry_module_exports, script_path.as_ref())
@@ -647,13 +647,13 @@ where
                         .ok()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or(logical_module_path);
-                    let loading = crate::js_module::get_or_create_module_loading(mc, &root.global_env)?;
-                    object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
-                    object_set_key_value(mc, &loading, script_fs_path_str.as_str(), &Value::Boolean(false))?;
+                    let loading = crate::js_module::get_or_create_module_loading(ctx, &root.global_env)?;
+                    object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(false))?;
+                    object_set_key_value(ctx, &loading, script_fs_path_str.as_str(), &Value::Boolean(false))?;
                 }
                 let mut count = 0;
                 loop {
-                    match crate::js_promise::run_event_loop(mc)? {
+                    match crate::js_promise::run_event_loop(ctx)? {
                         crate::js_promise::PollResult::Executed => {
                             count += 1;
                             log::trace!("DEBUG: event loop iteration {count}");
@@ -690,7 +690,7 @@ where
                         crate::js_promise::PollResult::Empty => {
                             // Before exiting, attempt to process any runtime-pending unhandled checks
                             // (they may have matured and should be re-queued as UnhandledCheck tasks).
-                            if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env, false)? {
+                            if crate::js_promise::process_runtime_pending_unhandled(ctx, &root.global_env, false)? {
                                 count += 1;
                                 continue;
                             }
@@ -721,7 +721,7 @@ where
                             }
 
                             // About to exit. Force flush any pending unhandled rejections as if the grace period expired.
-                            if crate::js_promise::process_runtime_pending_unhandled(mc, &root.global_env, true)? {
+                            if crate::js_promise::process_runtime_pending_unhandled(ctx, &root.global_env, true)? {
                                 count += 1;
                                 continue;
                             }
@@ -742,7 +742,7 @@ where
                             match expr {
                                 // e.g. final expression is a variable reference: `result`
                                 crate::core::Expr::Var(_name, ..) => {
-                                    if let Ok(new_val) = evaluate_expr(mc, &exec_env, expr) {
+                                    if let Ok(new_val) = evaluate_expr(ctx, &exec_env, expr) {
                                         result = new_val;
                                     }
                                 }
@@ -769,7 +769,7 @@ where
                                         && let crate::core::Expr::Var(var_name, ..) = &**boxed_prop
                                         && var_name == "JSON"
                                         && prop_name == "stringify"
-                                        && let Ok(new_val) = evaluate_expr(mc, &root.global_env, expr)
+                                        && let Ok(new_val) = evaluate_expr(ctx, &root.global_env, expr)
                                     {
                                         result = new_val;
                                     }
@@ -777,7 +777,7 @@ where
                                 // Re-evaluate top-level Array expressions to pick up microtask-side-effects
                                 // e.g. `[resolveResult, rejectResult]` should reflect values set in `.then`/`.catch` callbacks
                                 crate::core::Expr::Array(_elems) => {
-                                    if let Ok(new_val) = evaluate_expr(mc, &root.global_env, expr) {
+                                    if let Ok(new_val) = evaluate_expr(ctx, &root.global_env, expr) {
                                         result = new_val;
                                     }
                                 }
@@ -792,7 +792,7 @@ where
                             match expr {
                                 // e.g. `return result` -> re-evaluate to pick up microtask-side-effects
                                 crate::core::Expr::Var(_name, ..) => {
-                                    if let Ok(new_val) = evaluate_expr(mc, &root.global_env, expr) {
+                                    if let Ok(new_val) = evaluate_expr(ctx, &root.global_env, expr) {
                                         result = new_val;
                                     }
                                 }
@@ -812,14 +812,14 @@ where
                                         && let crate::core::Expr::Var(var_name, ..) = &**boxed_prop
                                         && var_name == "JSON"
                                         && prop_name == "stringify"
-                                        && let Ok(new_val) = evaluate_expr(mc, &root.global_env, expr)
+                                        && let Ok(new_val) = evaluate_expr(ctx, &root.global_env, expr)
                                     {
                                         result = new_val;
                                     }
                                 }
                                 // e.g. `return [a, b]` -> re-evaluate array expressions
                                 crate::core::Expr::Array(_elems) => {
-                                    if let Ok(new_val) = evaluate_expr(mc, &root.global_env, expr) {
+                                    if let Ok(new_val) = evaluate_expr(ctx, &root.global_env, expr) {
                                         result = new_val;
                                     }
                                 }
@@ -900,7 +900,7 @@ where
                 if report_unhandled {
                     // Prefer to consume any runtime `__unhandled_rejection` string which is set
                     // only after the UnhandledCheck grace window has elapsed.
-                    if let Some(val) = crate::js_promise::take_unhandled_rejection(mc, &root.global_env)
+                    if let Some(val) = crate::js_promise::take_unhandled_rejection(ctx, &root.global_env)
                         && let crate::core::Value::String(s) = val
                     {
                         let msg = crate::unicode::utf16_to_utf8(&s);
@@ -909,7 +909,7 @@ where
                     }
 
                     // Fallback: peek pending unhandled checks whose grace window has elapsed and report them
-                    if let Some((msg, loc_opt)) = crate::js_promise::peek_pending_unhandled_info(mc, &root.global_env) {
+                    if let Some((msg, loc_opt)) = crate::js_promise::peek_pending_unhandled_info(ctx, &root.global_env) {
                         let mut err = crate::make_js_error!(crate::JSErrorKind::Throw(msg));
                         if let Some((line, col)) = loc_opt {
                             err.set_js_location(line, col);
@@ -928,13 +928,13 @@ where
                     }
                     Value::Object(obj) => {
                         // WeakMap/WeakSet special-case to display as [object WeakMap] / [object WeakSet]
-                        if crate::js_weakmap::is_weakmap_object(mc, obj) {
+                        if crate::js_weakmap::is_weakmap_object(ctx, obj) {
                             "[object WeakMap]".to_string()
-                        } else if crate::js_weakset::is_weakset_object(mc, obj) {
+                        } else if crate::js_weakset::is_weakset_object(ctx, obj) {
                             "[object WeakSet]".to_string()
                         // If it's an Array, delegate to array helper for consistent formatting
-                        } else if crate::js_array::is_array(mc, obj) {
-                            crate::js_array::serialize_array_for_eval(mc, obj)?
+                        } else if crate::js_array::is_array(ctx, obj) {
+                            crate::js_array::serialize_array_for_eval(ctx, obj)?
                         } else if crate::js_regexp::is_regex_object(obj) {
                             // For top-level RegExp object display as [object RegExp]
                             "[object RegExp]".to_string()
@@ -973,8 +973,8 @@ where
                                             Value::Null => "null".to_string(),
                                             Value::Object(o) => {
                                                 // For nested arrays, serialize them properly, otherwise use default object string
-                                                if crate::js_array::is_array(mc, &o) {
-                                                    crate::js_array::serialize_array_for_eval(mc, &o)?
+                                                if crate::js_array::is_array(ctx, &o) {
+                                                    crate::js_array::serialize_array_for_eval(ctx, &o)?
                                                 } else {
                                                     value_to_string(&val)
                                                 }
@@ -1043,7 +1043,7 @@ where
 
 // Helper to resolve a constructor's prototype object if present in `env`.
 pub fn get_constructor_prototype<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &str,
 ) -> Result<Option<JSObjectDataPtr<'gc>>, JSError> {
@@ -1057,7 +1057,7 @@ pub fn get_constructor_prototype<'gc>(
     }
 
     // If not found, attempt to evaluate the variable to force lazy creation
-    match evaluate_expr(mc, env, &Expr::Var(name.to_string(), None, None)) {
+    match evaluate_expr(ctx, env, &Expr::Var(name.to_string(), None, None)) {
         Ok(Value::Object(ctor_obj)) => {
             if let Some(proto_val_rc) = object_get_key_value(&ctor_obj, "prototype")
                 && let Value::Object(proto_obj) = &*proto_val_rc.borrow()
@@ -1071,19 +1071,19 @@ pub fn get_constructor_prototype<'gc>(
 }
 
 // Helper to set an object's internal prototype from a constructor name.
-// If the constructor.prototype is available, sets `obj.borrow_mut(mc).prototype`
+// If the constructor.prototype is available, sets `obj.borrow_mut(ctx).prototype`
 // to that object. This consolidates the common pattern used when boxing
 // primitives and creating instances.
 pub fn set_internal_prototype_from_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor_name: &str,
 ) -> Result<(), JSError> {
-    if let Some(proto_obj) = get_constructor_prototype(mc, env, ctor_name)? {
+    if let Some(proto_obj) = get_constructor_prototype(ctx, env, ctor_name)? {
         // set internal prototype pointer (store Weak to avoid cycles)
         log::trace!("setting prototype for ctor='{}' proto_obj={:p}", ctor_name, Gc::as_ptr(proto_obj));
-        obj.borrow_mut(mc).prototype = Some(proto_obj);
+        obj.borrow_mut(ctx).prototype = Some(proto_obj);
         // Do not create an own `__proto__` property for this helper; only set the internal prototype pointer.
         log::trace!("set_internal_prototype_from_constructor: set internal prototype pointer");
     }
@@ -1142,26 +1142,26 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     let statements = parse_program_statements(script_str, kind)?;
     let script_path_buf = script_path.as_ref().map(|p| p.as_ref().to_path_buf());
 
-    let arena = JsArena::new(|mc| {
-        let global_env = new_js_object_data(mc);
-        global_env.borrow_mut(mc).is_function_scope = true;
+    let arena = JsArena::new(|ctx| {
+        let global_env = new_js_object_data(ctx);
+        global_env.borrow_mut(ctx).is_function_scope = true;
 
         JsRoot {
             global_env,
-            well_known_symbols: new_gc_cell_ptr(mc, HashMap::new()),
+            well_known_symbols: new_gc_cell_ptr(ctx, HashMap::new()),
         }
     });
 
-    arena.mutate(|mc, root| {
-        initialize_global_constructors(mc, &root.global_env)?;
+    arena.mutate(|ctx, root| {
+        initialize_global_constructors(ctx, &root.global_env)?;
 
         if !crate::js_agent::is_agent_thread() {
             crate::js_agent::reset_agent_state();
         }
 
-        env_set(mc, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
-        root.global_env.borrow_mut(mc).set_non_enumerable("globalThis");
-        object_set_key_value(mc, &root.global_env, "this", &Value::Object(root.global_env))?;
+        env_set(ctx, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
+        root.global_env.borrow_mut(ctx).set_non_enumerable("globalThis");
+        object_set_key_value(ctx, &root.global_env, "this", &Value::Object(root.global_env))?;
 
         crate::js_promise::reset_global_state();
 
@@ -1172,12 +1172,12 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             {
                 p_str = injected_path;
             }
-            slot_set(mc, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
+            slot_set(ctx, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
         }
 
         if kind == ProgramKind::Script {
             slot_set(
-                mc,
+                ctx,
                 &root.global_env,
                 InternalSlot::SuppressDynamicImportResult,
                 &Value::Boolean(true),
@@ -1187,9 +1187,9 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         let compiler = Compiler::new();
         let chunk = compiler.compile(&statements)?;
 
-        let mut vm = VM::new(chunk, mc);
+        let mut vm = VM::new(chunk, ctx);
         vm.set_source_context(script_str, script_path_buf.as_deref());
-        let mut v = vm.run(mc)?;
+        let mut v = vm.run(ctx)?;
 
         // VM helper behavior: if top-level result is a settled Promise, expose its
         // resolved/rejected payload so tests can assert final values directly.
@@ -1221,7 +1221,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
                     let tn = crate::unicode::utf16_to_utf8(t);
                     if tn == "Error" || tn.ends_with("Error") {
                         drop(b);
-                        return Err(vm.vm_error_to_js_error(mc, &next));
+                        return Err(vm.vm_error_to_js_error(ctx, &next));
                     }
                 }
             }

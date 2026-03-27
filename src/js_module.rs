@@ -11,13 +11,13 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 
 pub fn load_module<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create a new object for the module
-    let module_exports = new_js_object_data(mc);
+    let module_exports = new_js_object_data(ctx);
 
     // For demonstration, create a simple module with some exports
     if module_name == "math" {
@@ -25,12 +25,12 @@ pub fn load_module<'gc>(
         let pi = Value::Number(std::f64::consts::PI);
         let e = Value::Number(std::f64::consts::E);
 
-        object_set_key_value(mc, &module_exports, "PI", &pi)?;
-        object_set_key_value(mc, &module_exports, "E", &e)?;
+        object_set_key_value(ctx, &module_exports, "PI", &pi)?;
+        object_set_key_value(ctx, &module_exports, "E", &e)?;
 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(Gc::new(
-            mc,
+            ctx,
             ClosureData::new(
                 &[DestructuringElement::Variable("x".to_string(), None)],
                 &[Statement {
@@ -42,17 +42,17 @@ pub fn load_module<'gc>(
                 None,
             ),
         ));
-        object_set_key_value(mc, &module_exports, "identity", &identity_func.clone())?;
-        object_set_key_value(mc, &module_exports, "default", &identity_func)?;
+        object_set_key_value(ctx, &module_exports, "identity", &identity_func.clone())?;
+        object_set_key_value(ctx, &module_exports, "default", &identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function
         // Create a function that directly handles console.log calls
         let log_func = Value::Function("console.log".to_string());
-        object_set_key_value(mc, &module_exports, "log", &log_func)?;
+        object_set_key_value(ctx, &module_exports, "log", &log_func)?;
     } else if module_name == "std" {
         #[cfg(feature = "std")]
         {
-            let std_obj = crate::js_std::make_std_object(mc)?;
+            let std_obj = crate::js_std::make_std_object(ctx)?;
             return Ok(Value::Object(std_obj));
         }
         #[cfg(not(feature = "std"))]
@@ -60,21 +60,21 @@ pub fn load_module<'gc>(
     } else if module_name == "os" {
         #[cfg(feature = "os")]
         {
-            let os_obj = crate::js_os::make_os_object(mc)?;
+            let os_obj = crate::js_os::make_os_object(ctx)?;
             return Ok(Value::Object(os_obj));
         }
         #[cfg(not(feature = "os"))]
         return Err(crate::raise_eval_error!("Module 'os' is not built-in. Please provide it via host environment.").into());
     } else {
         // Try to load as a file
-        return load_module_from_file(mc, module_name, base_path, caller_env);
+        return load_module_from_file(ctx, module_name, base_path, caller_env);
     }
 
     Ok(Value::Object(module_exports))
 }
 
 pub fn load_module_for_dynamic_import<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: &JSObjectDataPtr<'gc>,
@@ -89,7 +89,7 @@ pub fn load_module_for_dynamic_import<'gc>(
         *caller_env
     };
 
-    let loading = get_or_create_module_loading(mc, &cache_env).map_err(EvalError::from)?;
+    let loading = get_or_create_module_loading(ctx, &cache_env).map_err(EvalError::from)?;
 
     loop {
         let is_loading = if let Some(flag_rc) = object_get_key_value(&loading, module_path.as_str()) {
@@ -102,14 +102,14 @@ pub fn load_module_for_dynamic_import<'gc>(
             break;
         }
 
-        match crate::js_promise::run_event_loop(mc).map_err(EvalError::from)? {
+        match crate::js_promise::run_event_loop(ctx).map_err(EvalError::from)? {
             crate::js_promise::PollResult::Executed => continue,
             crate::js_promise::PollResult::Wait(d) => {
                 std::thread::sleep(d);
                 continue;
             }
             crate::js_promise::PollResult::Empty => {
-                if crate::js_promise::process_runtime_pending_unhandled(mc, &cache_env, false).map_err(EvalError::from)? {
+                if crate::js_promise::process_runtime_pending_unhandled(ctx, &cache_env, false).map_err(EvalError::from)? {
                     continue;
                 }
                 std::thread::yield_now();
@@ -117,7 +117,7 @@ pub fn load_module_for_dynamic_import<'gc>(
         }
     }
 
-    preload_async_transitive_module(mc, module_name, base_path, Some(*caller_env))
+    preload_async_transitive_module(ctx, module_name, base_path, Some(*caller_env))
 }
 
 fn expr_contains_top_level_await(expr: &Expr) -> bool {
@@ -552,16 +552,16 @@ pub(crate) fn deferred_preload_ready_now<'gc>(module_path: &str, env: &JSObjectD
 }
 
 fn load_module_from_file<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    load_module_from_file_with_mode(mc, module_name, base_path, caller_env, false)
+    load_module_from_file_with_mode(ctx, module_name, base_path, caller_env, false)
 }
 
 fn load_module_from_file_with_mode<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -573,9 +573,9 @@ fn load_module_from_file_with_mode<'gc>(
 
     let cache_env = resolve_cache_env(caller_env);
     if let Some(cache_env) = cache_env {
-        let cache = get_or_create_module_cache(mc, &cache_env)?;
-        let eval_errors = get_or_create_module_eval_errors(mc, &cache_env)?;
-        let async_pending = get_or_create_module_async_pending(mc, &cache_env)?;
+        let cache = get_or_create_module_cache(ctx, &cache_env)?;
+        let eval_errors = get_or_create_module_eval_errors(ctx, &cache_env)?;
+        let async_pending = get_or_create_module_async_pending(ctx, &cache_env)?;
 
         if let Some(err_rc) = object_get_key_value(&eval_errors, module_path.as_str()) {
             return Err(EvalError::Throw(err_rc.borrow().clone(), None, None));
@@ -585,20 +585,20 @@ fn load_module_from_file_with_mode<'gc>(
             return Ok(val_rc.borrow().clone());
         }
 
-        let loading = get_or_create_module_loading(mc, &cache_env)?;
+        let loading = get_or_create_module_loading(ctx, &cache_env)?;
         if let Some(flag_rc) = object_get_key_value(&loading, module_path.as_str())
             && matches!(*flag_rc.borrow(), Value::Boolean(true))
         {
             return Err(crate::raise_syntax_error!("Circular module import").into());
         }
 
-        object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(true))?;
+        object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(true))?;
         if mark_async_pending {
-            object_set_key_value(mc, &async_pending, module_path.as_str(), &Value::Boolean(true))?;
+            object_set_key_value(ctx, &async_pending, module_path.as_str(), &Value::Boolean(true))?;
         }
 
-        let module_exports = new_js_object_data(mc);
-        object_set_key_value(mc, &cache, module_path.as_str(), &Value::Object(module_exports))?;
+        let module_exports = new_js_object_data(ctx);
+        object_set_key_value(ctx, &cache, module_path.as_str(), &Value::Object(module_exports))?;
 
         // Read the file
         let content = crate::core::read_script_file(&module_path).map_err(EvalError::from)?;
@@ -606,34 +606,34 @@ fn load_module_from_file_with_mode<'gc>(
         if module_path.ends_with(".json") {
             let json_val: JsonValue =
                 serde_json::from_str(&content).map_err(|e| EvalError::from(raise_syntax_error!(format!("Invalid JSON module: {e}"))))?;
-            let js_default = json_to_js_value(mc, &json_val, caller_env.as_ref())?;
-            object_set_key_value(mc, &module_exports, "default", &js_default)?;
+            let js_default = json_to_js_value(ctx, &json_val, caller_env.as_ref())?;
+            object_set_key_value(ctx, &module_exports, "default", &js_default)?;
 
             let value = Value::Object(module_exports);
-            object_set_key_value(mc, &cache, module_path.as_str(), &value.clone())?;
-            object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
-            object_set_key_value(mc, &async_pending, module_path.as_str(), &Value::Boolean(false))?;
+            object_set_key_value(ctx, &cache, module_path.as_str(), &value.clone())?;
+            object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(false))?;
+            object_set_key_value(ctx, &async_pending, module_path.as_str(), &Value::Boolean(false))?;
             return Ok(value);
         }
 
         // Execute the module and get the final module value
-        let value = match execute_module(mc, &content, &module_path, caller_env, Some(module_exports), preload_tla_async) {
+        let value = match execute_module(ctx, &content, &module_path, caller_env, Some(module_exports), preload_tla_async) {
             Ok(v) => v,
             Err(EvalError::Throw(throw_val, line, column)) => {
-                object_set_key_value(mc, &eval_errors, module_path.as_str(), &throw_val)?;
-                object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
-                object_set_key_value(mc, &async_pending, module_path.as_str(), &Value::Boolean(false))?;
+                object_set_key_value(ctx, &eval_errors, module_path.as_str(), &throw_val)?;
+                object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(false))?;
+                object_set_key_value(ctx, &async_pending, module_path.as_str(), &Value::Boolean(false))?;
                 return Err(EvalError::Throw(throw_val, line, column));
             }
             Err(e) => {
-                object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
-                object_set_key_value(mc, &async_pending, module_path.as_str(), &Value::Boolean(false))?;
+                object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(false))?;
+                object_set_key_value(ctx, &async_pending, module_path.as_str(), &Value::Boolean(false))?;
                 return Err(e);
             }
         };
 
-        object_set_key_value(mc, &cache, module_path.as_str(), &value)?;
-        object_set_key_value(mc, &loading, module_path.as_str(), &Value::Boolean(false))?;
+        object_set_key_value(ctx, &cache, module_path.as_str(), &value)?;
+        object_set_key_value(ctx, &loading, module_path.as_str(), &Value::Boolean(false))?;
         return Ok(value);
     }
 
@@ -643,28 +643,28 @@ fn load_module_from_file_with_mode<'gc>(
     if module_path.ends_with(".json") {
         let json_val: JsonValue =
             serde_json::from_str(&content).map_err(|e| EvalError::from(raise_syntax_error!(format!("Invalid JSON module: {e}"))))?;
-        let module_exports = new_js_object_data(mc);
-        let js_default = json_to_js_value(mc, &json_val, caller_env.as_ref())?;
-        object_set_key_value(mc, &module_exports, "default", &js_default)?;
+        let module_exports = new_js_object_data(ctx);
+        let js_default = json_to_js_value(ctx, &json_val, caller_env.as_ref())?;
+        object_set_key_value(ctx, &module_exports, "default", &js_default)?;
         return Ok(Value::Object(module_exports));
     }
 
     // Execute the module and get the final module value
-    execute_module(mc, &content, &module_path, caller_env, None, preload_tla_async)
+    execute_module(ctx, &content, &module_path, caller_env, None, preload_tla_async)
 }
 
 #[allow(dead_code)]
 pub fn preload_async_transitive_module<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    load_module_from_file_with_mode(mc, module_name, base_path, caller_env, true)
+    load_module_from_file_with_mode(ctx, module_name, base_path, caller_env, true)
 }
 
 fn json_to_js_value<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     json: &JsonValue,
     caller_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -675,25 +675,25 @@ fn json_to_js_value<'gc>(
         JsonValue::String(s) => Value::from(s),
         JsonValue::Array(items) => {
             let arr_obj = if let Some(env) = caller_env {
-                crate::js_array::create_array(mc, env).map_err(EvalError::from)?
+                crate::js_array::create_array(ctx, env).map_err(EvalError::from)?
             } else {
-                new_js_object_data(mc)
+                new_js_object_data(ctx)
             };
             for (idx, item) in items.iter().enumerate() {
-                let v = json_to_js_value(mc, item, caller_env)?;
-                object_set_key_value(mc, &arr_obj, idx, &v).map_err(EvalError::from)?;
+                let v = json_to_js_value(ctx, item, caller_env)?;
+                object_set_key_value(ctx, &arr_obj, idx, &v).map_err(EvalError::from)?;
             }
-            object_set_key_value(mc, &arr_obj, "length", &Value::Number(items.len() as f64)).map_err(EvalError::from)?;
+            object_set_key_value(ctx, &arr_obj, "length", &Value::Number(items.len() as f64)).map_err(EvalError::from)?;
             Value::Object(arr_obj)
         }
         JsonValue::Object(map) => {
-            let obj = new_js_object_data(mc);
+            let obj = new_js_object_data(ctx);
             if let Some(env) = caller_env {
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object");
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &obj, env, "Object");
             }
             for (k, v) in map.iter() {
-                let vv = json_to_js_value(mc, v, caller_env)?;
-                object_set_key_value(mc, &obj, k.as_str(), &vv).map_err(EvalError::from)?;
+                let vv = json_to_js_value(ctx, v, caller_env)?;
+                object_set_key_value(ctx, &obj, k.as_str(), &vv).map_err(EvalError::from)?;
             }
             Value::Object(obj)
         }
@@ -1087,7 +1087,7 @@ fn validate_module_declarations(statements: &[Statement]) -> Result<(), JSError>
 }
 
 fn execute_module<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     content: &str,
     module_path: &str,
     caller_env: Option<JSObjectDataPtr<'gc>>,
@@ -1095,51 +1095,51 @@ fn execute_module<'gc>(
     preload_tla_async: bool,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create module exports object
-    let module_exports = module_exports_override.unwrap_or_else(|| new_js_object_data(mc));
+    let module_exports = module_exports_override.unwrap_or_else(|| new_js_object_data(ctx));
 
     // Create a module environment
-    let env = new_js_object_data(mc);
-    env.borrow_mut(mc).is_function_scope = true;
+    let env = new_js_object_data(ctx);
+    env.borrow_mut(ctx).is_function_scope = true;
 
     // Module code is always strict per ECMAScript spec §16.2.1.11
-    crate::core::env_set_strictness(mc, &env, true)?;
+    crate::core::env_set_strictness(ctx, &env, true)?;
 
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
     let val = Value::from(module_path);
-    slot_set(mc, &env, InternalSlot::Filepath, &val);
+    slot_set(ctx, &env, InternalSlot::Filepath, &val);
 
     // Add exports object to the environment
-    env.borrow_mut(mc).insert(
+    env.borrow_mut(ctx).insert(
         crate::core::PropertyKey::String("exports".to_string()),
-        new_gc_cell_ptr(mc, Value::Object(module_exports)),
+        new_gc_cell_ptr(ctx, Value::Object(module_exports)),
     );
 
     // Add module object with exports
-    let module_obj = new_js_object_data(mc);
-    module_obj.borrow_mut(mc).insert(
+    let module_obj = new_js_object_data(ctx);
+    module_obj.borrow_mut(ctx).insert(
         crate::core::PropertyKey::String("exports".to_string()),
-        new_gc_cell_ptr(mc, Value::Object(module_exports)),
+        new_gc_cell_ptr(ctx, Value::Object(module_exports)),
     );
-    env.borrow_mut(mc).insert(
+    env.borrow_mut(ctx).insert(
         crate::core::PropertyKey::String("module".to_string()),
-        new_gc_cell_ptr(mc, Value::Object(module_obj)),
+        new_gc_cell_ptr(ctx, Value::Object(module_obj)),
     );
 
     // In ECMAScript modules, top-level `this` is `undefined`.
-    object_set_key_value(mc, &env, "this", &Value::Undefined)?;
+    object_set_key_value(ctx, &env, "this", &Value::Undefined)?;
 
     // Create and store import.meta object for this module
-    let import_meta = new_js_object_data(mc);
+    let import_meta = new_js_object_data(ctx);
     // Provide a 'url' property referencing the module path; leave as raw path string
-    object_set_key_value(mc, &import_meta, "url", &Value::from(module_path))?;
+    object_set_key_value(ctx, &import_meta, "url", &Value::from(module_path))?;
     // Store the import.meta object on the module environment under a hidden key
-    slot_set(mc, &env, InternalSlot::ImportMeta, &Value::Object(import_meta));
+    slot_set(ctx, &env, InternalSlot::ImportMeta, &Value::Object(import_meta));
 
     if caller_env.is_none() {
         // Initialize global constructors for standalone module execution
-        crate::core::initialize_global_constructors(mc, &env)?;
-        object_set_key_value(mc, &env, "globalThis", &crate::core::Value::Object(env))?;
+        crate::core::initialize_global_constructors(ctx, &env)?;
+        object_set_key_value(ctx, &env, "globalThis", &crate::core::Value::Object(env))?;
     } else if let Some(caller) = caller_env {
         let global_obj = if let Some(global_val) = crate::core::env_get(&caller, "globalThis") {
             match global_val.borrow().clone() {
@@ -1151,8 +1151,8 @@ fn execute_module<'gc>(
         };
         // Modules should resolve globals through the realm global object, not
         // through the importing module's lexical environment.
-        env.borrow_mut(mc).prototype = Some(global_obj);
-        object_set_key_value(mc, &env, "globalThis", &crate::core::Value::Object(global_obj))?;
+        env.borrow_mut(ctx).prototype = Some(global_obj);
+        object_set_key_value(ctx, &env, "globalThis", &crate::core::Value::Object(global_obj))?;
     }
 
     // Parse and execute the module content
@@ -1175,22 +1175,22 @@ fn execute_module<'gc>(
 
     if preload_tla_async && let Some(first_tla_idx) = statements.iter().position(stmt_contains_top_level_await) {
         if first_tla_idx > 0 {
-            crate::core::evaluate_statements(mc, &env, &statements[..first_tla_idx])?;
+            crate::core::evaluate_statements(ctx, &env, &statements[..first_tla_idx])?;
         }
 
         if first_tla_idx + 1 < statements.len() {
             let tail_stmts = statements[(first_tla_idx + 1)..].to_vec();
-            let cont = Value::Closure(Gc::new(mc, ClosureData::new(&[], &tail_stmts, Some(env), None)));
-            let (p, resolve, _) = crate::js_promise::create_promise_capability(mc, &env).map_err(EvalError::from)?;
-            crate::js_promise::call_function(mc, &resolve, &[Value::Undefined], &env)?;
-            crate::js_promise::perform_promise_then(mc, p, Some(cont), None, None, &env).map_err(EvalError::from)?;
+            let cont = Value::Closure(Gc::new(ctx, ClosureData::new(&[], &tail_stmts, Some(env), None)));
+            let (p, resolve, _) = crate::js_promise::create_promise_capability(ctx, &env).map_err(EvalError::from)?;
+            crate::js_promise::call_function(ctx, &resolve, &[Value::Undefined], &env)?;
+            crate::js_promise::perform_promise_then(ctx, p, Some(cont), None, None, &env).map_err(EvalError::from)?;
         }
 
         return Ok(Value::Object(module_exports));
     }
 
     // Execute statements in module environment
-    crate::core::evaluate_statements(mc, &env, &statements)?;
+    crate::core::evaluate_statements(ctx, &env, &statements)?;
 
     // Log the exports stored in the provided `module_exports` object at trace level
     log::trace!("Module executed, exports keys:");
@@ -1226,56 +1226,56 @@ pub fn import_from_module<'gc>(module_value: &Value<'gc>, specifier: &str) -> Re
     }
 }
 
-pub(crate) fn get_or_create_module_cache<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub(crate) fn get_or_create_module_cache<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
-    let cache = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::ModuleCache, &Value::Object(cache));
+    let cache = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::ModuleCache, &Value::Object(cache));
     Ok(cache)
 }
 
-pub(crate) fn get_or_create_module_loading<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub(crate) fn get_or_create_module_loading<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleLoading)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
-    let loading = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::ModuleLoading, &Value::Object(loading));
+    let loading = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::ModuleLoading, &Value::Object(loading));
     Ok(loading)
 }
 
-fn get_or_create_module_eval_errors<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_or_create_module_eval_errors<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleEvalErrors)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
-    let errors = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::ModuleEvalErrors, &Value::Object(errors));
+    let errors = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::ModuleEvalErrors, &Value::Object(errors));
     Ok(errors)
 }
 
-fn get_or_create_module_async_pending<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_or_create_module_async_pending<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleAsyncPending)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
 
-    let pending = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::ModuleAsyncPending, &Value::Object(pending));
+    let pending = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::ModuleAsyncPending, &Value::Object(pending));
     Ok(pending)
 }
 
 fn get_or_create_module_deferred_namespace_cache<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleDeferredNsCache)
@@ -1284,25 +1284,25 @@ fn get_or_create_module_deferred_namespace_cache<'gc>(
         return Ok(*obj);
     }
 
-    let cache = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::ModuleDeferredNsCache, &Value::Object(cache));
+    let cache = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::ModuleDeferredNsCache, &Value::Object(cache));
     Ok(cache)
 }
 
-fn get_or_create_module_namespace_cache<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn get_or_create_module_namespace_cache<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleNamespaceCache)
         && let Value::Object(obj) = &*val_rc.borrow()
     {
         return Ok(*obj);
     }
-    let cache = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::ModuleNamespaceCache, &Value::Object(cache));
+    let cache = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::ModuleNamespaceCache, &Value::Object(cache));
     Ok(cache)
 }
 
 #[allow(dead_code)]
 fn get_or_create_module_defer_pending_preloads<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     if let Some(val_rc) = slot_get_chained(env, &InternalSlot::ModuleDeferPendingPreloads)
@@ -1311,19 +1311,19 @@ fn get_or_create_module_defer_pending_preloads<'gc>(
         return Ok(*obj);
     }
 
-    let arr = crate::js_array::create_array(mc, env)?;
-    slot_set(mc, env, InternalSlot::ModuleDeferPendingPreloads, &Value::Object(arr));
+    let arr = crate::js_array::create_array(ctx, env)?;
+    slot_set(ctx, env, InternalSlot::ModuleDeferPendingPreloads, &Value::Object(arr));
     Ok(arr)
 }
 
 #[allow(dead_code)]
 pub fn queue_deferred_async_preload_module<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     module_path: &str,
 ) -> Result<(), EvalError<'gc>> {
     let cache_env = resolve_cache_env(Some(*env)).unwrap_or(*env);
-    let pending = get_or_create_module_defer_pending_preloads(mc, &cache_env).map_err(EvalError::from)?;
+    let pending = get_or_create_module_defer_pending_preloads(ctx, &cache_env).map_err(EvalError::from)?;
 
     let length = object_get_key_value(&pending, "length")
         .and_then(|v| match &*v.borrow() {
@@ -1341,15 +1341,15 @@ pub fn queue_deferred_async_preload_module<'gc>(
         }
     }
 
-    object_set_key_value(mc, &pending, length, &Value::from(module_path)).map_err(EvalError::from)?;
-    object_set_key_value(mc, &pending, "length", &Value::Number((length + 1) as f64)).map_err(EvalError::from)?;
+    object_set_key_value(ctx, &pending, length, &Value::from(module_path)).map_err(EvalError::from)?;
+    object_set_key_value(ctx, &pending, "length", &Value::Number((length + 1) as f64)).map_err(EvalError::from)?;
     Ok(())
 }
 
 #[allow(dead_code)]
-fn drain_microtasks<'gc>(mc: &GcContext<'gc>) {
+fn drain_microtasks<'gc>(ctx: &GcContext<'gc>) {
     for _ in 0..1024 {
-        match crate::js_promise::run_event_loop(mc) {
+        match crate::js_promise::run_event_loop(ctx) {
             Ok(crate::js_promise::PollResult::Executed) => continue,
             Ok(crate::js_promise::PollResult::Wait(d)) => {
                 std::thread::sleep(d);
@@ -1362,10 +1362,10 @@ fn drain_microtasks<'gc>(mc: &GcContext<'gc>) {
 }
 
 #[allow(dead_code)]
-pub fn flush_deferred_async_preload_modules<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
+pub fn flush_deferred_async_preload_modules<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), EvalError<'gc>> {
     let cache_env = resolve_cache_env(Some(*env)).unwrap_or(*env);
-    let pending = get_or_create_module_defer_pending_preloads(mc, &cache_env).map_err(EvalError::from)?;
-    let async_pending = get_or_create_module_async_pending(mc, &cache_env).map_err(EvalError::from)?;
+    let pending = get_or_create_module_defer_pending_preloads(ctx, &cache_env).map_err(EvalError::from)?;
+    let async_pending = get_or_create_module_async_pending(ctx, &cache_env).map_err(EvalError::from)?;
 
     let length = object_get_key_value(&pending, "length")
         .and_then(|v| match &*v.borrow() {
@@ -1382,7 +1382,7 @@ pub fn flush_deferred_async_preload_modules<'gc>(mc: &GcContext<'gc>, env: &JSOb
             .any(|(_, v)| matches!(*v.borrow(), Value::Boolean(true)));
         if has_async_pending {
             for _ in 0..8 {
-                drain_microtasks(mc);
+                drain_microtasks(ctx);
             }
         }
         return Ok(());
@@ -1396,9 +1396,9 @@ pub fn flush_deferred_async_preload_modules<'gc>(mc: &GcContext<'gc>, env: &JSOb
             modules.push(crate::unicode::utf16_to_utf8(&s));
         }
     }
-    object_set_key_value(mc, &pending, "length", &Value::Number(0.0)).map_err(EvalError::from)?;
+    object_set_key_value(ctx, &pending, "length", &Value::Number(0.0)).map_err(EvalError::from)?;
 
-    drain_microtasks(mc);
+    drain_microtasks(ctx);
     let mut deferred_retry: Vec<String> = Vec::new();
     for module_path in &modules {
         let is_loading = is_module_loading_in_env_chain(&cache_env, module_path.as_str());
@@ -1411,14 +1411,14 @@ pub fn flush_deferred_async_preload_modules<'gc>(mc: &GcContext<'gc>, env: &JSOb
             deferred_retry.push(module_path.clone());
             continue;
         }
-        preload_async_transitive_module(mc, module_path.as_str(), None, Some(cache_env))?;
+        preload_async_transitive_module(ctx, module_path.as_str(), None, Some(cache_env))?;
     }
     for (idx, module_path) in deferred_retry.iter().enumerate() {
-        object_set_key_value(mc, &pending, idx, &Value::from(module_path)).map_err(EvalError::from)?;
+        object_set_key_value(ctx, &pending, idx, &Value::from(module_path)).map_err(EvalError::from)?;
     }
-    object_set_key_value(mc, &pending, "length", &Value::Number(deferred_retry.len() as f64)).map_err(EvalError::from)?;
+    object_set_key_value(ctx, &pending, "length", &Value::Number(deferred_retry.len() as f64)).map_err(EvalError::from)?;
     for _ in 0..8 {
-        drain_microtasks(mc);
+        drain_microtasks(ctx);
     }
 
     if !deferred_retry.is_empty() {
@@ -1431,13 +1431,13 @@ pub fn flush_deferred_async_preload_modules<'gc>(mc: &GcContext<'gc>, env: &JSOb
                 still_retry.push(module_path);
                 continue;
             }
-            preload_async_transitive_module(mc, module_path.as_str(), None, Some(cache_env))?;
+            preload_async_transitive_module(ctx, module_path.as_str(), None, Some(cache_env))?;
         }
 
         for (idx, module_path) in still_retry.iter().enumerate() {
-            object_set_key_value(mc, &pending, idx, &Value::from(module_path)).map_err(EvalError::from)?;
+            object_set_key_value(ctx, &pending, idx, &Value::from(module_path)).map_err(EvalError::from)?;
         }
-        object_set_key_value(mc, &pending, "length", &Value::Number(still_retry.len() as f64)).map_err(EvalError::from)?;
+        object_set_key_value(ctx, &pending, "length", &Value::Number(still_retry.len() as f64)).map_err(EvalError::from)?;
     }
 
     Ok(())
@@ -1454,19 +1454,19 @@ fn get_symbol_to_string_tag<'gc>(env: &JSObjectDataPtr<'gc>) -> Option<Value<'gc
 }
 
 pub fn make_module_namespace_object<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     exports_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let cache_env = resolve_cache_env(Some(*env)).unwrap_or(*env);
-    let ns_cache = get_or_create_module_namespace_cache(mc, &cache_env).map_err(EvalError::from)?;
+    let ns_cache = get_or_create_module_namespace_cache(ctx, &cache_env).map_err(EvalError::from)?;
     let cache_key = format!("ptr:{:p}", exports_obj.as_ptr());
     if let Some(cached_ns) = object_get_key_value(&ns_cache, cache_key.as_str()) {
         return Ok(cached_ns.borrow().clone());
     }
 
-    let namespace_obj = new_js_object_data(mc);
-    namespace_obj.borrow_mut(mc).prototype = None;
+    let namespace_obj = new_js_object_data(ctx);
+    namespace_obj.borrow_mut(ctx).prototype = None;
 
     let mut export_names: Vec<String> = exports_obj
         .borrow()
@@ -1520,12 +1520,12 @@ pub fn make_module_namespace_object<'gc>(
     export_names.sort();
     export_names.dedup();
 
-    let export_names_meta = new_js_object_data(mc);
+    let export_names_meta = new_js_object_data(ctx);
     for name in &export_names {
-        object_set_key_value(mc, &export_names_meta, name.as_str(), &Value::Boolean(true)).map_err(EvalError::from)?;
+        object_set_key_value(ctx, &export_names_meta, name.as_str(), &Value::Boolean(true)).map_err(EvalError::from)?;
     }
     object_set_key_value(
-        mc,
+        ctx,
         &namespace_obj,
         crate::core::PropertyKey::Private("__ns_export_names".to_string(), 1),
         &Value::Object(export_names_meta),
@@ -1534,17 +1534,17 @@ pub fn make_module_namespace_object<'gc>(
 
     for name in export_names {
         let key = crate::core::PropertyKey::String(name.clone());
-        if let Some(mut pd) = crate::core::build_property_descriptor(mc, exports_obj, &key) {
+        if let Some(mut pd) = crate::core::build_property_descriptor(ctx, exports_obj, &key) {
             pd.enumerable = Some(true);
             pd.configurable = Some(false);
             if pd.value.is_some() && pd.writable.is_none() {
                 pd.writable = Some(true);
             }
-            let desc = pd.to_object(mc).map_err(EvalError::from)?;
-            crate::js_object::define_property_internal(mc, &namespace_obj, key, &desc).map_err(EvalError::from)?;
+            let desc = pd.to_object(ctx).map_err(EvalError::from)?;
+            crate::js_object::define_property_internal(ctx, &namespace_obj, key, &desc).map_err(EvalError::from)?;
         } else {
             let hidden = format!("__ns_src_{}_{}", cache_key.replace(':', "_"), name);
-            crate::core::env_set(mc, &cache_env, hidden.as_str(), &Value::Object(*exports_obj)).map_err(EvalError::from)?;
+            crate::core::env_set(ctx, &cache_env, hidden.as_str(), &Value::Object(*exports_obj)).map_err(EvalError::from)?;
 
             let getter_body = vec![Statement {
                 kind: Box::new(StatementKind::Return(Some(Expr::Property(
@@ -1562,9 +1562,9 @@ pub fn make_module_namespace_object<'gc>(
                 setter: None,
             };
 
-            object_set_key_value(mc, &namespace_obj, name.as_str(), &prop).map_err(EvalError::from)?;
+            object_set_key_value(ctx, &namespace_obj, name.as_str(), &prop).map_err(EvalError::from)?;
             namespace_obj
-                .borrow_mut(mc)
+                .borrow_mut(ctx)
                 .set_non_configurable(crate::core::PropertyKey::String(name));
         }
     }
@@ -1572,14 +1572,14 @@ pub fn make_module_namespace_object<'gc>(
     if let Some(sym_tst_val) = get_symbol_to_string_tag(env)
         && let Value::Symbol(sym_tst) = sym_tst_val
     {
-        let desc = create_descriptor_object(mc, &Value::from("Module"), false, false, false).map_err(EvalError::from)?;
-        crate::js_object::define_property_internal(mc, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
+        let desc = create_descriptor_object(ctx, &Value::from("Module"), false, false, false).map_err(EvalError::from)?;
+        crate::js_object::define_property_internal(ctx, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
             .map_err(EvalError::from)?;
     }
 
-    namespace_obj.borrow_mut(mc).prevent_extensions();
+    namespace_obj.borrow_mut(ctx).prevent_extensions();
     let namespace_val = Value::Object(namespace_obj);
-    object_set_key_value(mc, &ns_cache, cache_key.as_str(), &namespace_val).map_err(EvalError::from)?;
+    object_set_key_value(ctx, &ns_cache, cache_key.as_str(), &namespace_val).map_err(EvalError::from)?;
     Ok(namespace_val)
 }
 
@@ -1764,33 +1764,33 @@ fn module_has_local_export_name(module_path: &str, export_name: &str) -> Result<
 }
 
 pub fn load_module_deferred_namespace<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     module_name: &str,
     base_path: Option<&str>,
     caller_env: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if matches!(module_name, "math" | "console" | "std" | "os") {
-        return load_module(mc, module_name, base_path, caller_env);
+        return load_module(ctx, module_name, base_path, caller_env);
     }
 
     let module_path = resolve_module_path(module_name, base_path).map_err(EvalError::from)?;
 
-    let cache_env = resolve_cache_env(caller_env).unwrap_or_else(|| new_js_object_data(mc));
-    let deferred_cache = get_or_create_module_deferred_namespace_cache(mc, &cache_env).map_err(EvalError::from)?;
+    let cache_env = resolve_cache_env(caller_env).unwrap_or_else(|| new_js_object_data(ctx));
+    let deferred_cache = get_or_create_module_deferred_namespace_cache(ctx, &cache_env).map_err(EvalError::from)?;
 
     if let Some(ns_val_rc) = object_get_key_value(&deferred_cache, module_path.as_str()) {
         return Ok(ns_val_rc.borrow().clone());
     }
 
-    let namespace_obj = new_js_object_data(mc);
-    namespace_obj.borrow_mut(mc).prototype = None;
-    namespace_obj.borrow_mut(mc).deferred_module_path = Some(module_path.clone());
-    namespace_obj.borrow_mut(mc).deferred_cache_env = Some(cache_env);
+    let namespace_obj = new_js_object_data(ctx);
+    namespace_obj.borrow_mut(ctx).prototype = None;
+    namespace_obj.borrow_mut(ctx).deferred_module_path = Some(module_path.clone());
+    namespace_obj.borrow_mut(ctx).deferred_cache_env = Some(cache_env);
 
     let ns_value = Value::Object(namespace_obj);
-    object_set_key_value(mc, &deferred_cache, module_path.as_str(), &ns_value).map_err(EvalError::from)?;
+    object_set_key_value(ctx, &deferred_cache, module_path.as_str(), &ns_value).map_err(EvalError::from)?;
 
-    let module_cache = get_or_create_module_cache(mc, &cache_env).map_err(EvalError::from)?;
+    let module_cache = get_or_create_module_cache(ctx, &cache_env).map_err(EvalError::from)?;
     let mut export_names: Vec<String> = Vec::new();
     let mut export_values: std::collections::HashMap<String, Value<'gc>> = std::collections::HashMap::new();
 
@@ -1821,25 +1821,25 @@ pub fn load_module_deferred_namespace<'gc>(
 
     for name in export_names {
         let value = export_values.remove(&name).unwrap_or(Value::Undefined);
-        object_set_key_value(mc, &namespace_obj, name.as_str(), &value).map_err(EvalError::from)?;
-        namespace_obj.borrow_mut(mc).set_non_configurable(name.clone());
+        object_set_key_value(ctx, &namespace_obj, name.as_str(), &value).map_err(EvalError::from)?;
+        namespace_obj.borrow_mut(ctx).set_non_configurable(name.clone());
     }
 
     if let Some(sym_tst_val) = get_symbol_to_string_tag(&cache_env)
         && let Value::Symbol(sym_tst) = sym_tst_val
     {
-        let desc = create_descriptor_object(mc, &Value::from("Deferred Module"), false, false, false).map_err(EvalError::from)?;
-        crate::js_object::define_property_internal(mc, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
+        let desc = create_descriptor_object(ctx, &Value::from("Deferred Module"), false, false, false).map_err(EvalError::from)?;
+        crate::js_object::define_property_internal(ctx, &namespace_obj, crate::core::PropertyKey::Symbol(sym_tst), &desc)
             .map_err(EvalError::from)?;
     }
 
-    namespace_obj.borrow_mut(mc).prevent_extensions();
+    namespace_obj.borrow_mut(ctx).prevent_extensions();
 
     Ok(Value::Object(namespace_obj))
 }
 
 pub fn ensure_deferred_namespace_evaluated<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key_hint: Option<&str>,
@@ -1921,7 +1921,7 @@ pub fn ensure_deferred_namespace_evaluated<'gc>(
     // accessing namespace exports should throw TypeError rather than attempting
     // a recursive sync load/eval.
     let module_is_loading = is_module_loading_in_env_chain(&cache_env, module_path.as_str());
-    let module_is_async_pending = get_or_create_module_async_pending(mc, &cache_env)
+    let module_is_async_pending = get_or_create_module_async_pending(ctx, &cache_env)
         .ok()
         .and_then(|pending| object_get_key_value(&pending, module_path.as_str()))
         .map(|v| matches!(*v.borrow(), Value::Boolean(true)))
@@ -1943,8 +1943,8 @@ pub fn ensure_deferred_namespace_evaluated<'gc>(
     }
 
     if module_is_async_pending && same_module_context {
-        if let Ok(async_pending) = get_or_create_module_async_pending(mc, &cache_env) {
-            let _ = object_set_key_value(mc, &async_pending, module_path.as_str(), &Value::Boolean(false));
+        if let Ok(async_pending) = get_or_create_module_async_pending(ctx, &cache_env) {
+            let _ = object_set_key_value(ctx, &async_pending, module_path.as_str(), &Value::Boolean(false));
         }
         return Err(crate::raise_type_error!("Module is currently evaluating").into());
     }
@@ -1955,7 +1955,7 @@ pub fn ensure_deferred_namespace_evaluated<'gc>(
 
     let _ = module_requested_modules(module_path.as_str());
 
-    let _ = load_module(mc, module_path.as_str(), None, Some(cache_env))?;
+    let _ = load_module(ctx, module_path.as_str(), None, Some(cache_env))?;
 
     Ok(true)
 }

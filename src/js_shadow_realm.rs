@@ -12,12 +12,12 @@ pub(crate) const SHADOW_REALM_SLOT: InternalSlot = InternalSlot::ShadowRealm;
 
 /// Throw a TypeError from a specific realm (so `instanceof TypeError` in the
 /// caller realm holds true, even when the error originates from another realm).
-fn throw_caller_realm_type_error<'gc>(mc: &GcContext<'gc>, caller_env: &JSObjectDataPtr<'gc>, msg: &str) -> crate::core::EvalError<'gc> {
+fn throw_caller_realm_type_error<'gc>(ctx: &GcContext<'gc>, caller_env: &JSObjectDataPtr<'gc>, msg: &str) -> crate::core::EvalError<'gc> {
     use crate::unicode::utf8_to_utf16;
     let msg_val = Value::String(utf8_to_utf16(msg));
     if let Some(te_val) = object_get_key_value(caller_env, "TypeError")
         && let Value::Object(te_ctor) = &*te_val.borrow()
-        && let Ok(err) = crate::js_class::evaluate_new(mc, caller_env, &Value::Object(*te_ctor), &[msg_val], None)
+        && let Ok(err) = crate::js_class::evaluate_new(ctx, caller_env, &Value::Object(*te_ctor), &[msg_val], None)
     {
         return crate::core::EvalError::Throw(err, None, None);
     }
@@ -26,12 +26,12 @@ fn throw_caller_realm_type_error<'gc>(mc: &GcContext<'gc>, caller_env: &JSObject
 }
 
 /// Throw a SyntaxError from a specific realm (for parsing failures in evaluate).
-fn throw_caller_realm_syntax_error<'gc>(mc: &GcContext<'gc>, caller_env: &JSObjectDataPtr<'gc>, msg: &str) -> crate::core::EvalError<'gc> {
+fn throw_caller_realm_syntax_error<'gc>(ctx: &GcContext<'gc>, caller_env: &JSObjectDataPtr<'gc>, msg: &str) -> crate::core::EvalError<'gc> {
     use crate::unicode::utf8_to_utf16;
     let msg_val = Value::String(utf8_to_utf16(msg));
     if let Some(se_val) = object_get_key_value(caller_env, "SyntaxError")
         && let Value::Object(se_ctor) = &*se_val.borrow()
-        && let Ok(err) = crate::js_class::evaluate_new(mc, caller_env, &Value::Object(*se_ctor), &[msg_val], None)
+        && let Ok(err) = crate::js_class::evaluate_new(ctx, caller_env, &Value::Object(*se_ctor), &[msg_val], None)
     {
         return crate::core::EvalError::Throw(err, None, None);
     }
@@ -43,69 +43,69 @@ fn throw_caller_realm_syntax_error<'gc>(mc: &GcContext<'gc>, caller_env: &JSObje
 //  Initialization: register global `ShadowRealm` constructor
 // ---------------------------------------------------------------------------
 
-pub fn initialize_shadow_realm<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let ctor = new_js_object_data(mc);
-    slot_set(mc, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ShadowRealm")));
+pub fn initialize_shadow_realm<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let ctor = new_js_object_data(ctx);
+    slot_set(ctx, &ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ShadowRealm")));
 
     // ShadowRealm.prototype
-    let proto = new_js_object_data(mc);
+    let proto = new_js_object_data(ctx);
 
     // Link constructor ↔ prototype
-    object_set_key_value(mc, &ctor, "prototype", &Value::Object(proto))?;
-    object_set_key_value(mc, &proto, "constructor", &Value::Object(ctor))?;
+    object_set_key_value(ctx, &ctor, "prototype", &Value::Object(proto))?;
+    object_set_key_value(ctx, &proto, "constructor", &Value::Object(ctor))?;
 
     // ShadowRealm.prototype.evaluate — proper function object
     {
-        let eval_obj = new_js_object_data(mc);
-        eval_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        let eval_obj = new_js_object_data(ctx);
+        eval_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("ShadowRealm.prototype.evaluate".to_string()),
         )));
         // Store the creating realm so get_function_realm returns the correct
         // realm for cross-realm scenarios (tests 2-4).
-        slot_set(mc, &eval_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        slot_set(ctx, &eval_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
         // [[Prototype]] = Function.prototype
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            eval_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            eval_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("evaluate")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &eval_obj, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &eval_obj, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("evaluate")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &eval_obj, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &eval_obj, "length", &len_desc)?;
         // writable, not enumerable, configurable
-        let prop_desc = crate::core::create_descriptor_object(mc, &Value::Object(eval_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, "evaluate", &prop_desc)?;
+        let prop_desc = crate::core::create_descriptor_object(ctx, &Value::Object(eval_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, "evaluate", &prop_desc)?;
     }
 
     // ShadowRealm.prototype.importValue — proper function object
     {
-        let import_obj = new_js_object_data(mc);
-        import_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        let import_obj = new_js_object_data(ctx);
+        import_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("ShadowRealm.prototype.importValue".to_string()),
         )));
         // Store the creating realm for cross-realm dispatch.
-        slot_set(mc, &import_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        slot_set(ctx, &import_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
         // [[Prototype]] = Function.prototype
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            import_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            import_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("importValue")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &import_obj, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &import_obj, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("importValue")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &import_obj, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(2.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &import_obj, "length", &len_desc)?;
         // writable, not enumerable, configurable
-        let prop_desc = crate::core::create_descriptor_object(mc, &Value::Object(import_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, "importValue", &prop_desc)?;
+        let prop_desc = crate::core::create_descriptor_object(ctx, &Value::Object(import_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, "importValue", &prop_desc)?;
     }
 
     // ShadowRealm.prototype[@@toStringTag] = "ShadowRealm"
@@ -114,20 +114,20 @@ pub fn initialize_shadow_realm<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("ShadowRealm")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, *tag_sym, &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("ShadowRealm")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, *tag_sym, &desc)?;
     }
 
     // Mark prototype non-enumerable on constructor
-    ctor.borrow_mut(mc).set_non_enumerable("prototype");
+    ctor.borrow_mut(ctx).set_non_enumerable("prototype");
 
     // ShadowRealm.length = 0
-    let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &ctor, "length", &len_desc)?;
+    let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &ctor, "length", &len_desc)?;
 
     // ShadowRealm.name = "ShadowRealm"
-    let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("ShadowRealm")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &ctor, "name", &name_desc)?;
+    let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("ShadowRealm")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &ctor, "name", &name_desc)?;
 
     // Set ShadowRealm.__proto__ = Function.prototype
     if let Some(func_ctor_val) = object_get_key_value(env, "Function")
@@ -135,25 +135,25 @@ pub fn initialize_shadow_realm<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        ctor.borrow_mut(ctx).prototype = Some(*func_proto);
         // Also set the ShadowRealm.prototype's [[Prototype]] to Object.prototype
         if let Some(obj_ctor_val) = object_get_key_value(env, "Object")
             && let Value::Object(obj_ctor) = &*obj_ctor_val.borrow()
             && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
             && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
         {
-            proto.borrow_mut(mc).prototype = Some(*obj_proto);
+            proto.borrow_mut(ctx).prototype = Some(*obj_proto);
         }
     }
 
     // Store the creating realm on the constructor so get_function_realm
     // returns the correct realm for Reflect.construct(OtherShadowRealm, []).
-    slot_set(mc, &ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
+    slot_set(ctx, &ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
 
     // Register on global
-    object_set_key_value(mc, env, "ShadowRealm", &Value::Object(ctor))?;
+    object_set_key_value(ctx, env, "ShadowRealm", &Value::Object(ctor))?;
     // Make non-enumerable
-    env.borrow_mut(mc).set_non_enumerable("ShadowRealm");
+    env.borrow_mut(ctx).set_non_enumerable("ShadowRealm");
 
     Ok(())
 }
@@ -163,26 +163,26 @@ pub fn initialize_shadow_realm<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'
 // ---------------------------------------------------------------------------
 
 pub fn handle_shadow_realm_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     caller_env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, crate::core::EvalError<'gc>> {
     // Create a fresh global environment with all built-ins
-    let realm_env = new_js_object_data(mc);
+    let realm_env = new_js_object_data(ctx);
 
     // Initialize all global constructors in the new realm, sharing well-known
     // symbols from the caller's realm per §6.1.5.1.
-    initialize_global_constructors_with_parent(mc, &realm_env, Some(caller_env))?;
+    initialize_global_constructors_with_parent(ctx, &realm_env, Some(caller_env))?;
 
     // Per spec: ShadowRealm evaluates in non-strict mode by default.
     // initialize_global_constructors sets strict mode, so we reset it.
-    env_set_strictness(mc, &realm_env, false)?;
+    env_set_strictness(ctx, &realm_env, false)?;
 
     // Per spec: the GlobalSymbolRegistry is shared across all realms (per-agent).
     // Copy the caller's symbol registry into the shadow realm so `Symbol.for`
     // returns the same symbols.
     if let Some(registry_cell) = slot_get(caller_env, &InternalSlot::SymbolRegistry) {
-        slot_set(mc, &realm_env, InternalSlot::SymbolRegistry, &registry_cell.borrow());
+        slot_set(ctx, &realm_env, InternalSlot::SymbolRegistry, &registry_cell.borrow());
     }
 
     // Per spec: globalThis is an ordinary object whose [[Prototype]] is Object.prototype.
@@ -191,43 +191,43 @@ pub fn handle_shadow_realm_constructor<'gc>(
         && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
     {
-        realm_env.borrow_mut(mc).prototype = Some(*obj_proto);
+        realm_env.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
     // Set globalThis to point to the realm environment itself
-    object_set_key_value(mc, &realm_env, "globalThis", &Value::Object(realm_env))?;
+    object_set_key_value(ctx, &realm_env, "globalThis", &Value::Object(realm_env))?;
 
     // Set up global constants
-    object_set_key_value(mc, &realm_env, "undefined", &Value::Undefined)?;
-    object_set_key_value(mc, &realm_env, "NaN", &Value::Number(f64::NAN))?;
-    object_set_key_value(mc, &realm_env, "Infinity", &Value::Number(f64::INFINITY))?;
+    object_set_key_value(ctx, &realm_env, "undefined", &Value::Undefined)?;
+    object_set_key_value(ctx, &realm_env, "NaN", &Value::Number(f64::NAN))?;
+    object_set_key_value(ctx, &realm_env, "Infinity", &Value::Number(f64::INFINITY))?;
 
     // Set up global functions
-    object_set_key_value(mc, &realm_env, "eval", &Value::Function("eval".to_string()))?;
-    object_set_key_value(mc, &realm_env, "isFinite", &Value::Function("isFinite".to_string()))?;
-    object_set_key_value(mc, &realm_env, "isNaN", &Value::Function("isNaN".to_string()))?;
-    object_set_key_value(mc, &realm_env, "parseFloat", &Value::Function("parseFloat".to_string()))?;
-    object_set_key_value(mc, &realm_env, "parseInt", &Value::Function("parseInt".to_string()))?;
-    object_set_key_value(mc, &realm_env, "decodeURI", &Value::Function("decodeURI".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "eval", &Value::Function("eval".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "isFinite", &Value::Function("isFinite".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "isNaN", &Value::Function("isNaN".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "parseFloat", &Value::Function("parseFloat".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "parseInt", &Value::Function("parseInt".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "decodeURI", &Value::Function("decodeURI".to_string()))?;
     object_set_key_value(
-        mc,
+        ctx,
         &realm_env,
         "decodeURIComponent",
         &Value::Function("decodeURIComponent".to_string()),
     )?;
-    object_set_key_value(mc, &realm_env, "encodeURI", &Value::Function("encodeURI".to_string()))?;
+    object_set_key_value(ctx, &realm_env, "encodeURI", &Value::Function("encodeURI".to_string()))?;
     object_set_key_value(
-        mc,
+        ctx,
         &realm_env,
         "encodeURIComponent",
         &Value::Function("encodeURIComponent".to_string()),
     )?;
 
     // Create the ShadowRealm instance object
-    let instance = new_js_object_data(mc);
+    let instance = new_js_object_data(ctx);
 
     // Store realm env as internal slot
-    slot_set(mc, &instance, SHADOW_REALM_SLOT, &Value::Object(realm_env));
+    slot_set(ctx, &instance, SHADOW_REALM_SLOT, &Value::Object(realm_env));
 
     // Set the prototype from the caller's ShadowRealm.prototype
     if let Some(sr_ctor_val) = object_get_key_value(caller_env, "ShadowRealm")
@@ -235,7 +235,7 @@ pub fn handle_shadow_realm_constructor<'gc>(
         && let Some(sr_proto_val) = object_get_key_value(sr_ctor, "prototype")
         && let Value::Object(sr_proto) = &*sr_proto_val.borrow()
     {
-        instance.borrow_mut(mc).prototype = Some(*sr_proto);
+        instance.borrow_mut(ctx).prototype = Some(*sr_proto);
     }
 
     Ok(Value::Object(instance))
@@ -246,7 +246,7 @@ pub fn handle_shadow_realm_constructor<'gc>(
 // ---------------------------------------------------------------------------
 
 pub fn handle_shadow_realm_evaluate<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: &Value<'gc>,
     args: &[Value<'gc>],
     caller_env: &JSObjectDataPtr<'gc>,
@@ -257,7 +257,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
         Value::Object(obj) => *obj,
         _ => {
             return Err(throw_caller_realm_type_error(
-                mc,
+                ctx,
                 caller_env,
                 "ShadowRealm.prototype.evaluate called on non-object",
             ));
@@ -270,7 +270,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
             Value::Object(o) => *o,
             _ => {
                 return Err(throw_caller_realm_type_error(
-                    mc,
+                    ctx,
                     caller_env,
                     "ShadowRealm.prototype.evaluate: invalid realm",
                 ));
@@ -278,7 +278,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
         },
         None => {
             return Err(throw_caller_realm_type_error(
-                mc,
+                ctx,
                 caller_env,
                 "ShadowRealm.prototype.evaluate requires a ShadowRealm object",
             ));
@@ -290,14 +290,14 @@ pub fn handle_shadow_realm_evaluate<'gc>(
         Some(Value::String(s)) => utf16_to_utf8(s),
         Some(_) => {
             return Err(throw_caller_realm_type_error(
-                mc,
+                ctx,
                 caller_env,
                 "ShadowRealm.prototype.evaluate requires a string argument",
             ));
         }
         None => {
             return Err(throw_caller_realm_type_error(
-                mc,
+                ctx,
                 caller_env,
                 "ShadowRealm.prototype.evaluate requires a string argument",
             ));
@@ -316,7 +316,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
             Ok(t) => t,
             Err(_e) => {
                 return Err(throw_caller_realm_syntax_error(
-                    mc,
+                    ctx,
                     caller_env,
                     "Invalid syntax in ShadowRealm evaluate",
                 ));
@@ -330,7 +330,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
             Ok(s) => s,
             Err(_e) => {
                 return Err(throw_caller_realm_syntax_error(
-                    mc,
+                    ctx,
                     caller_env,
                     "Invalid syntax in ShadowRealm evaluate",
                 ));
@@ -345,7 +345,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
         .unwrap_or(false);
     if is_strict && let Err(_e) = check_strict_mode_violations(&statements) {
         return Err(throw_caller_realm_syntax_error(
-            mc,
+            ctx,
             caller_env,
             "Strict mode only SyntaxError in ShadowRealm evaluate",
         ));
@@ -359,13 +359,13 @@ pub fn handle_shadow_realm_evaluate<'gc>(
     // declarations go to the global env. We reuse the IsIndirectEval machinery
     // in evaluate_statements which already handles this distinction.
     let eval_result: Result<Value<'gc>, crate::core::EvalError<'gc>> = (|| {
-        slot_set(mc, &realm_env, InternalSlot::IsIndirectEval, &Value::Boolean(true));
-        let result = evaluate_statements(mc, &realm_env, &statements);
+        slot_set(ctx, &realm_env, InternalSlot::IsIndirectEval, &Value::Boolean(true));
+        let result = evaluate_statements(ctx, &realm_env, &statements);
         // Clean up marker in case evaluate_statements didn't remove it (e.g. error path)
-        let _ = slot_remove(mc, &realm_env, &InternalSlot::IsIndirectEval);
+        let _ = slot_remove(ctx, &realm_env, &InternalSlot::IsIndirectEval);
         let result = result?;
         // GetWrappedValue(callerRealm, result)
-        get_wrapped_value(mc, caller_env, &realm_env, &result)
+        get_wrapped_value(ctx, caller_env, &realm_env, &result)
     })();
 
     match eval_result {
@@ -374,7 +374,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
             // Per spec: any runtime exception originating from the other realm is
             // wrapped into a TypeError thrown from the caller realm.
             Err(throw_caller_realm_type_error(
-                mc,
+                ctx,
                 caller_env,
                 "ShadowRealm evaluate threw an exception",
             ))
@@ -387,7 +387,7 @@ pub fn handle_shadow_realm_evaluate<'gc>(
 // ---------------------------------------------------------------------------
 
 pub fn handle_shadow_realm_import_value<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: &Value<'gc>,
     args: &[Value<'gc>],
     caller_env: &JSObjectDataPtr<'gc>,
@@ -409,7 +409,7 @@ pub fn handle_shadow_realm_import_value<'gc>(
 
     // Step 3: specifier = ToString(specifier)
     let specifier = match args.first() {
-        Some(v) => crate::js_string::spec_to_string(mc, v, caller_env)?,
+        Some(v) => crate::js_string::spec_to_string(ctx, v, caller_env)?,
         None => return Err(raise_type_error!("importValue requires a specifier").into()),
     };
     let specifier_str = utf16_to_utf8(&specifier);
@@ -425,10 +425,10 @@ pub fn handle_shadow_realm_import_value<'gc>(
     // Per spec, module-related errors should result in a rejected promise
     // with a TypeError (from the caller realm), NOT a synchronous throw.
     let import_result: Result<Value<'gc>, crate::core::EvalError<'gc>> = (|| {
-        let module_val = crate::js_module::load_module(mc, &specifier_str, None, Some(realm_env))?;
+        let module_val = crate::js_module::load_module(ctx, &specifier_str, None, Some(realm_env))?;
 
         let export_val = match module_val {
-            Value::Object(exports_obj) => get_property_with_accessors(mc, &realm_env, &exports_obj, export_name_str.as_str())?,
+            Value::Object(exports_obj) => get_property_with_accessors(ctx, &realm_env, &exports_obj, export_name_str.as_str())?,
             _ => Value::Undefined,
         };
 
@@ -437,25 +437,25 @@ pub fn handle_shadow_realm_import_value<'gc>(
         }
 
         // Wrap the exported value
-        get_wrapped_value(mc, caller_env, &realm_env, &export_val)
+        get_wrapped_value(ctx, caller_env, &realm_env, &export_val)
     })();
 
     match import_result {
         Ok(wrapped) => {
             // Return a resolved promise
-            crate::js_promise::handle_promise_static_method_val(mc, "resolve", &[wrapped], None, caller_env)
+            crate::js_promise::handle_promise_static_method_val(ctx, "resolve", &[wrapped], None, caller_env)
         }
         Err(_e) => {
             // Per spec: any exception from module loading/evaluation is wrapped
             // into a TypeError and returned as a rejected promise.
-            let type_err = throw_caller_realm_type_error(mc, caller_env, "importValue failed");
+            let type_err = throw_caller_realm_type_error(ctx, caller_env, "importValue failed");
             match type_err {
                 crate::core::EvalError::Throw(err_val, _, _) => {
-                    crate::js_promise::handle_promise_static_method_val(mc, "reject", &[err_val], None, caller_env)
+                    crate::js_promise::handle_promise_static_method_val(ctx, "reject", &[err_val], None, caller_env)
                 }
                 crate::core::EvalError::Js(js_err) => {
                     let msg = Value::String(utf8_to_utf16(&format!("{}", js_err)));
-                    crate::js_promise::handle_promise_static_method_val(mc, "reject", &[msg], None, caller_env)
+                    crate::js_promise::handle_promise_static_method_val(ctx, "reject", &[msg], None, caller_env)
                 }
             }
         }
@@ -467,7 +467,7 @@ pub fn handle_shadow_realm_import_value<'gc>(
 // ---------------------------------------------------------------------------
 
 fn get_wrapped_value<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     caller_env: &JSObjectDataPtr<'gc>,
     realm_env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
@@ -483,7 +483,7 @@ fn get_wrapped_value<'gc>(
         | Value::AsyncClosure(_)
         | Value::Function(_)
         | Value::GeneratorFunction(..)
-        | Value::AsyncGeneratorFunction(..) => create_wrapped_function(mc, caller_env, realm_env, value),
+        | Value::AsyncGeneratorFunction(..) => create_wrapped_function(ctx, caller_env, realm_env, value),
 
         Value::Object(obj) => {
             // Check if the object is callable (has a closure or is a function-object)
@@ -501,7 +501,7 @@ fn get_wrapped_value<'gc>(
             };
 
             if is_callable || is_callable_proxy {
-                create_wrapped_function(mc, caller_env, realm_env, value)
+                create_wrapped_function(ctx, caller_env, realm_env, value)
             } else {
                 // Non-callable objects throw TypeError
                 Err(raise_type_error!("ShadowRealm evaluate: non-callable object cannot cross realm boundary").into())
@@ -510,7 +510,7 @@ fn get_wrapped_value<'gc>(
 
         Value::Proxy(proxy) => {
             if crate::js_proxy::is_callable_proxy(proxy) {
-                create_wrapped_function(mc, caller_env, realm_env, value)
+                create_wrapped_function(ctx, caller_env, realm_env, value)
             } else {
                 Err(raise_type_error!("ShadowRealm evaluate: non-callable object cannot cross realm boundary").into())
             }
@@ -526,7 +526,7 @@ fn get_wrapped_value<'gc>(
 // ---------------------------------------------------------------------------
 
 fn create_wrapped_function<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     caller_env: &JSObjectDataPtr<'gc>,
     realm_env: &JSObjectDataPtr<'gc>,
     target: &Value<'gc>,
@@ -545,12 +545,12 @@ fn create_wrapped_function<'gc>(
         return Err(raise_type_error!("Cannot wrap a revoked proxy").into());
     }
 
-    let wrapped = new_js_object_data(mc);
+    let wrapped = new_js_object_data(ctx);
 
     // Store the target function and realm references
-    slot_set(mc, &wrapped, InternalSlot::WrappedTarget, target);
-    slot_set(mc, &wrapped, InternalSlot::WrappedCallerRealm, &Value::Object(*caller_env));
-    slot_set(mc, &wrapped, InternalSlot::WrappedTargetRealm, &Value::Object(*realm_env));
+    slot_set(ctx, &wrapped, InternalSlot::WrappedTarget, target);
+    slot_set(ctx, &wrapped, InternalSlot::WrappedCallerRealm, &Value::Object(*caller_env));
+    slot_set(ctx, &wrapped, InternalSlot::WrappedTargetRealm, &Value::Object(*realm_env));
 
     // Set [[Prototype]] to callerRealm's Function.prototype
     if let Some(func_ctor_val) = object_get_key_value(caller_env, "Function")
@@ -558,15 +558,15 @@ fn create_wrapped_function<'gc>(
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        wrapped.borrow_mut(mc).prototype = Some(*func_proto);
+        wrapped.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     // CopyNameAndLength: copy "name" and "length" from target
-    copy_name_and_length(mc, &wrapped, target, caller_env, realm_env)?;
+    copy_name_and_length(ctx, &wrapped, target, caller_env, realm_env)?;
 
     // Store the wrapped function as a closure that dispatches to the target
     let trampoline = Value::Function("__shadow_realm_wrapped_fn__".to_string());
-    wrapped.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, trampoline)));
+    wrapped.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, trampoline)));
 
     Ok(Value::Object(wrapped))
 }
@@ -578,7 +578,7 @@ fn create_wrapped_function<'gc>(
 /// `crate::js_object::has_own_property_with_proxy` for the has-check
 /// (which honours the getOwnPropertyDescriptor proxy trap).
 fn copy_name_and_length<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     wrapped: &JSObjectDataPtr<'gc>,
     target: &Value<'gc>,
     _caller_env: &JSObjectDataPtr<'gc>,
@@ -593,13 +593,13 @@ fn copy_name_and_length<'gc>(
             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
         {
             // For proxy: call getOwnPropertyDescriptor trap
-            crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &crate::core::PropertyKey::String("length".to_string()))?
+            crate::js_proxy::proxy_get_own_property_descriptor(ctx, proxy, &crate::core::PropertyKey::String("length".to_string()))?
                 .is_some()
         } else {
             object_get_key_value(target_obj, "length").is_some()
         };
         if has_length {
-            let target_len_val = get_property_with_accessors(mc, realm_env, target_obj, "length")?;
+            let target_len_val = get_property_with_accessors(ctx, realm_env, target_obj, "length")?;
             if let Value::Number(n) = target_len_val {
                 if n.is_infinite() && n.is_sign_positive() {
                     length = f64::INFINITY;
@@ -618,8 +618,8 @@ fn copy_name_and_length<'gc>(
     }
 
     // Set length as non-writable, non-enumerable, configurable
-    let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(length), false, false, true)?;
-    crate::js_object::define_property_internal(mc, wrapped, "length", &len_desc)?;
+    let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(length), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, wrapped, "length", &len_desc)?;
 
     // Get target's name — per spec step 6: Let targetName be ? Get(Target, "name").
     // "name" does NOT have a HasOwnProperty check in the spec, but Get goes through proxy get trap.
@@ -627,7 +627,7 @@ fn copy_name_and_length<'gc>(
     if let Value::Object(target_obj) = target {
         // For proxy targets, getOwnPropertyDescriptor may also fire for "name" access.
         // But per spec, CopyNameAndLength step 6 is just ? Get(Target, "name"), no HasOwnProperty.
-        let target_name_val = get_property_with_accessors(mc, realm_env, target_obj, "name")?;
+        let target_name_val = get_property_with_accessors(ctx, realm_env, target_obj, "name")?;
         if let Value::String(s) = target_name_val {
             name = utf16_to_utf8(&s);
         }
@@ -638,8 +638,8 @@ fn copy_name_and_length<'gc>(
     }
 
     // Set name as non-writable, non-enumerable, configurable
-    let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(&name)), false, false, true)?;
-    crate::js_object::define_property_internal(mc, wrapped, "name", &name_desc)?;
+    let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(&name)), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, wrapped, "name", &name_desc)?;
 
     Ok(())
 }
@@ -649,7 +649,7 @@ fn copy_name_and_length<'gc>(
 // ---------------------------------------------------------------------------
 
 pub fn handle_wrapped_function_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     wrapped_obj: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
@@ -694,15 +694,15 @@ pub fn handle_wrapped_function_call<'gc>(
     let call_result: Result<Value<'gc>, crate::core::EvalError<'gc>> = (|| {
         let mut wrapped_args = Vec::with_capacity(args.len());
         for arg in args {
-            let wrapped_arg = wrap_argument_into_realm(mc, &target_realm, &caller_env, arg)?;
+            let wrapped_arg = wrap_argument_into_realm(ctx, &target_realm, &caller_env, arg)?;
             wrapped_args.push(wrapped_arg);
         }
 
         // Call the target function in the target realm
-        let result = evaluate_call_dispatch(mc, &target_realm, &target, None, &wrapped_args)?;
+        let result = evaluate_call_dispatch(ctx, &target_realm, &target, None, &wrapped_args)?;
 
         // Wrap the result back to the caller realm
-        get_wrapped_value(mc, &caller_env, &target_realm, &result)
+        get_wrapped_value(ctx, &caller_env, &target_realm, &result)
     })();
 
     match call_result {
@@ -711,7 +711,7 @@ pub fn handle_wrapped_function_call<'gc>(
             // Per spec: any exception from a wrapped function call is converted
             // to a TypeError from the caller realm.
             Err(throw_caller_realm_type_error(
-                mc,
+                ctx,
                 &caller_env,
                 "WrappedFunction call threw an exception",
             ))
@@ -722,7 +722,7 @@ pub fn handle_wrapped_function_call<'gc>(
 /// Wrap an argument value when crossing from caller realm to target realm.
 /// Primitives pass through. Callable objects get wrapped. Non-callable objects throw TypeError.
 fn wrap_argument_into_realm<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     target_realm: &JSObjectDataPtr<'gc>,
     caller_realm: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
@@ -738,7 +738,7 @@ fn wrap_argument_into_realm<'gc>(
         | Value::GeneratorFunction(..)
         | Value::AsyncGeneratorFunction(..) => {
             // Wrap callable into the target realm (reverse direction)
-            create_wrapped_function(mc, target_realm, caller_realm, value)
+            create_wrapped_function(ctx, target_realm, caller_realm, value)
         }
 
         Value::Object(obj) => {
@@ -758,7 +758,7 @@ fn wrap_argument_into_realm<'gc>(
             let is_wrapped = slot_get(obj, &InternalSlot::WrappedTarget).is_some();
 
             if is_callable || is_callable_proxy || is_wrapped {
-                create_wrapped_function(mc, target_realm, caller_realm, value)
+                create_wrapped_function(ctx, target_realm, caller_realm, value)
             } else {
                 Err(raise_type_error!("Wrapped function arguments must be primitive or callable").into())
             }
@@ -766,7 +766,7 @@ fn wrap_argument_into_realm<'gc>(
 
         Value::Proxy(proxy) => {
             if crate::js_proxy::is_callable_proxy(proxy) {
-                create_wrapped_function(mc, target_realm, caller_realm, value)
+                create_wrapped_function(ctx, target_realm, caller_realm, value)
             } else {
                 Err(raise_type_error!("Wrapped function arguments must be primitive or callable").into())
             }

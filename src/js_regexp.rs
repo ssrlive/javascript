@@ -137,18 +137,18 @@ pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex
     })
 }
 
-pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let regexp_ctor = new_js_object_data(mc);
-    slot_set(mc, &regexp_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &regexp_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("RegExp")));
+pub fn initialize_regexp<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let regexp_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &regexp_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &regexp_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("RegExp")));
 
     // RegExp.length = 2 (per spec §22.2.4: writable:false, enumerable:false, configurable:true)
-    object_set_key_value(mc, &regexp_ctor, "length", &Value::Number(2.0))?;
-    regexp_ctor.borrow_mut(mc).set_non_enumerable("length");
-    regexp_ctor.borrow_mut(mc).set_non_writable("length");
+    object_set_key_value(ctx, &regexp_ctor, "length", &Value::Number(2.0))?;
+    regexp_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    regexp_ctor.borrow_mut(ctx).set_non_writable("length");
 
     // Stamp with OriginGlobal so cross-realm new Ctor() picks up the correct realm
-    slot_set(mc, &regexp_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
+    slot_set(ctx, &regexp_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -161,23 +161,23 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
         None
     };
 
-    let regexp_proto = new_js_object_data(mc);
+    let regexp_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        regexp_proto.borrow_mut(mc).prototype = Some(proto);
+        regexp_proto.borrow_mut(ctx).prototype = Some(proto);
     }
     // Mark as RegExp.prototype for getter spec checks
-    slot_set(mc, &regexp_proto, InternalSlot::IsRegExpPrototype, &Value::Boolean(true));
+    slot_set(ctx, &regexp_proto, InternalSlot::IsRegExpPrototype, &Value::Boolean(true));
 
-    object_set_key_value(mc, &regexp_ctor, "prototype", &Value::Object(regexp_proto))?;
-    regexp_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    regexp_ctor.borrow_mut(mc).set_non_writable("prototype");
-    regexp_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &regexp_proto, "constructor", &Value::Object(regexp_ctor))?;
+    object_set_key_value(ctx, &regexp_ctor, "prototype", &Value::Object(regexp_proto))?;
+    regexp_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    regexp_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    regexp_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &regexp_proto, "constructor", &Value::Object(regexp_ctor))?;
 
     // Register RegExp.escape static method (§22.2.4.3)
     let escape_fn = Value::Function("RegExp.escape".to_string());
-    object_set_key_value(mc, &regexp_ctor, "escape", &escape_fn)?;
-    regexp_ctor.borrow_mut(mc).set_non_enumerable("escape");
+    object_set_key_value(ctx, &regexp_ctor, "escape", &escape_fn)?;
+    regexp_ctor.borrow_mut(ctx).set_non_enumerable("escape");
     // RegExp.escape.length = 1, .name = "escape"
     // (handled by native function dispatch)
 
@@ -186,27 +186,29 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
 
     for method in methods {
         let val = Value::Function(format!("RegExp.prototype.{method}"));
-        object_set_key_value(mc, &regexp_proto, method, &val)?;
-        regexp_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &regexp_proto, method, &val)?;
+        regexp_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
 
     // `compile` needs to track its realm's RegExp constructor for cross-realm
     // checks, so wrap it in an Object with OriginGlobal pointing to the realm.
     {
-        let compile_fn_obj = new_js_object_data(mc);
+        let compile_fn_obj = new_js_object_data(ctx);
         let compile_fn_val = Value::Function("RegExp.prototype.compile".to_string());
-        compile_fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, compile_fn_val)));
-        slot_set(mc, &compile_fn_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        compile_fn_obj
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, compile_fn_val)));
+        slot_set(ctx, &compile_fn_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
         // Set length = 2 and name = "compile" so property descriptor tests pass
         // Per spec: { writable: false, enumerable: false, configurable: true }
-        object_set_key_value(mc, &compile_fn_obj, "length", &Value::Number(2.0))?;
-        compile_fn_obj.borrow_mut(mc).set_non_enumerable("length");
-        compile_fn_obj.borrow_mut(mc).set_non_writable("length");
-        object_set_key_value(mc, &compile_fn_obj, "name", &Value::String(utf8_to_utf16("compile")))?;
-        compile_fn_obj.borrow_mut(mc).set_non_enumerable("name");
-        compile_fn_obj.borrow_mut(mc).set_non_writable("name");
-        object_set_key_value(mc, &regexp_proto, "compile", &Value::Object(compile_fn_obj))?;
-        regexp_proto.borrow_mut(mc).set_non_enumerable("compile");
+        object_set_key_value(ctx, &compile_fn_obj, "length", &Value::Number(2.0))?;
+        compile_fn_obj.borrow_mut(ctx).set_non_enumerable("length");
+        compile_fn_obj.borrow_mut(ctx).set_non_writable("length");
+        object_set_key_value(ctx, &compile_fn_obj, "name", &Value::String(utf8_to_utf16("compile")))?;
+        compile_fn_obj.borrow_mut(ctx).set_non_enumerable("name");
+        compile_fn_obj.borrow_mut(ctx).set_non_writable("name");
+        object_set_key_value(ctx, &regexp_proto, "compile", &Value::Object(compile_fn_obj))?;
+        regexp_proto.borrow_mut(ctx).set_non_enumerable("compile");
     }
 
     if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
@@ -216,8 +218,8 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
             && let Value::Symbol(match_sym) = &*match_sym_val.borrow()
         {
             let match_fn = Value::Function("RegExp.prototype.match".to_string());
-            object_set_key_value(mc, &regexp_proto, *match_sym, &match_fn)?;
-            regexp_proto.borrow_mut(mc).set_non_enumerable(*match_sym);
+            object_set_key_value(ctx, &regexp_proto, *match_sym, &match_fn)?;
+            regexp_proto.borrow_mut(ctx).set_non_enumerable(*match_sym);
         }
 
         // Register Symbol.replace, Symbol.search, Symbol.split, Symbol.matchAll on RegExp.prototype
@@ -226,8 +228,8 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
                 && let Value::Symbol(sym) = &*sym_val.borrow()
             {
                 let fn_val = Value::Function(format!("RegExp.prototype.{sym_name}"));
-                object_set_key_value(mc, &regexp_proto, *sym, &fn_val)?;
-                regexp_proto.borrow_mut(mc).set_non_enumerable(*sym);
+                object_set_key_value(ctx, &regexp_proto, *sym, &fn_val)?;
+                regexp_proto.borrow_mut(ctx).set_non_enumerable(*sym);
             }
         }
 
@@ -240,8 +242,8 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
                 getter: Some(Box::new(species_getter)),
                 setter: None,
             };
-            object_set_key_value(mc, &regexp_ctor, *species_sym, &species_accessor)?;
-            regexp_ctor.borrow_mut(mc).set_non_enumerable(*species_sym);
+            object_set_key_value(ctx, &regexp_ctor, *species_sym, &species_accessor)?;
+            regexp_ctor.borrow_mut(ctx).set_non_enumerable(*species_sym);
         }
     }
 
@@ -263,23 +265,23 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
         // Wrap getter in an Object with OriginGlobal so cross-realm .call() uses the
         // getter's defining realm (not the caller's realm) for the %RegExp.prototype%
         // identity check per spec §22.2.5 step 3a.
-        let getter_obj = new_js_object_data(mc);
-        getter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, getter_fn)));
-        slot_set(mc, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        let getter_obj = new_js_object_data(ctx);
+        getter_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, getter_fn)));
+        slot_set(ctx, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
         // Spec-required function properties: length = 0, name = "get <prop>"
-        object_set_key_value(mc, &getter_obj, "length", &Value::Number(0.0))?;
-        getter_obj.borrow_mut(mc).set_non_enumerable("length");
-        getter_obj.borrow_mut(mc).set_non_writable("length");
-        object_set_key_value(mc, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop_name}"))))?;
-        getter_obj.borrow_mut(mc).set_non_enumerable("name");
-        getter_obj.borrow_mut(mc).set_non_writable("name");
+        object_set_key_value(ctx, &getter_obj, "length", &Value::Number(0.0))?;
+        getter_obj.borrow_mut(ctx).set_non_enumerable("length");
+        getter_obj.borrow_mut(ctx).set_non_writable("length");
+        object_set_key_value(ctx, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop_name}"))))?;
+        getter_obj.borrow_mut(ctx).set_non_enumerable("name");
+        getter_obj.borrow_mut(ctx).set_non_writable("name");
         // Set prototype to Function.prototype
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*func_proto_val.borrow()
         {
-            getter_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            getter_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
         let getter = Value::Object(getter_obj);
         let accessor = Value::Property {
@@ -287,16 +289,16 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
             getter: Some(Box::new(getter)),
             setter: None,
         };
-        object_set_key_value(mc, &regexp_proto, prop_name, &accessor)?;
-        regexp_proto.borrow_mut(mc).set_non_enumerable(prop_name);
+        object_set_key_value(ctx, &regexp_proto, prop_name, &accessor)?;
+        regexp_proto.borrow_mut(ctx).set_non_enumerable(prop_name);
     }
 
-    regexp_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    regexp_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
-    env_set(mc, env, "RegExp", &Value::Object(regexp_ctor))?;
+    env_set(ctx, env, "RegExp", &Value::Object(regexp_ctor))?;
 
     // Ensure RegExp constructor [[Prototype]] = Function.prototype
-    if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &regexp_ctor, env, "Function") {
+    if let Err(e) = crate::core::set_internal_prototype_from_constructor(ctx, &regexp_ctor, env, "Function") {
         log::warn!("Failed to set RegExp constructor's internal prototype from Function: {e:?}");
     }
 
@@ -339,54 +341,54 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
 
         for prop in getter_only_props {
             let getter_fn = Value::Function(format!("RegExp.legacy.get {prop}"));
-            let getter_obj = new_js_object_data(mc);
-            getter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, getter_fn)));
-            slot_set(mc, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
-            object_set_key_value(mc, &getter_obj, "length", &Value::Number(0.0))?;
-            getter_obj.borrow_mut(mc).set_non_enumerable("length");
-            getter_obj.borrow_mut(mc).set_non_writable("length");
-            object_set_key_value(mc, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop}"))))?;
-            getter_obj.borrow_mut(mc).set_non_enumerable("name");
-            getter_obj.borrow_mut(mc).set_non_writable("name");
+            let getter_obj = new_js_object_data(ctx);
+            getter_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, getter_fn)));
+            slot_set(ctx, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            object_set_key_value(ctx, &getter_obj, "length", &Value::Number(0.0))?;
+            getter_obj.borrow_mut(ctx).set_non_enumerable("length");
+            getter_obj.borrow_mut(ctx).set_non_writable("length");
+            object_set_key_value(ctx, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop}"))))?;
+            getter_obj.borrow_mut(ctx).set_non_enumerable("name");
+            getter_obj.borrow_mut(ctx).set_non_writable("name");
             if let Some(fp) = func_proto {
-                getter_obj.borrow_mut(mc).prototype = Some(fp);
+                getter_obj.borrow_mut(ctx).prototype = Some(fp);
             }
             let accessor = Value::Property {
                 value: None,
                 getter: Some(Box::new(Value::Object(getter_obj))),
                 setter: None, // spec says [[Set]]: undefined for read-only legacy props
             };
-            object_set_key_value(mc, &regexp_ctor, prop, &accessor)?;
-            regexp_ctor.borrow_mut(mc).set_non_enumerable(prop);
+            object_set_key_value(ctx, &regexp_ctor, prop, &accessor)?;
+            regexp_ctor.borrow_mut(ctx).set_non_enumerable(prop);
         }
 
         for prop in getter_setter_props {
             let getter_fn = Value::Function(format!("RegExp.legacy.get {prop}"));
-            let getter_obj = new_js_object_data(mc);
-            getter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, getter_fn)));
-            slot_set(mc, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
-            object_set_key_value(mc, &getter_obj, "length", &Value::Number(0.0))?;
-            getter_obj.borrow_mut(mc).set_non_enumerable("length");
-            getter_obj.borrow_mut(mc).set_non_writable("length");
-            object_set_key_value(mc, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop}"))))?;
-            getter_obj.borrow_mut(mc).set_non_enumerable("name");
-            getter_obj.borrow_mut(mc).set_non_writable("name");
+            let getter_obj = new_js_object_data(ctx);
+            getter_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, getter_fn)));
+            slot_set(ctx, &getter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            object_set_key_value(ctx, &getter_obj, "length", &Value::Number(0.0))?;
+            getter_obj.borrow_mut(ctx).set_non_enumerable("length");
+            getter_obj.borrow_mut(ctx).set_non_writable("length");
+            object_set_key_value(ctx, &getter_obj, "name", &Value::String(utf8_to_utf16(&format!("get {prop}"))))?;
+            getter_obj.borrow_mut(ctx).set_non_enumerable("name");
+            getter_obj.borrow_mut(ctx).set_non_writable("name");
             if let Some(fp) = func_proto {
-                getter_obj.borrow_mut(mc).prototype = Some(fp);
+                getter_obj.borrow_mut(ctx).prototype = Some(fp);
             }
 
             let setter_fn = Value::Function(format!("RegExp.legacy.set {prop}"));
-            let setter_obj = new_js_object_data(mc);
-            setter_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, setter_fn)));
-            slot_set(mc, &setter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
-            object_set_key_value(mc, &setter_obj, "length", &Value::Number(1.0))?;
-            setter_obj.borrow_mut(mc).set_non_enumerable("length");
-            setter_obj.borrow_mut(mc).set_non_writable("length");
-            object_set_key_value(mc, &setter_obj, "name", &Value::String(utf8_to_utf16(&format!("set {prop}"))))?;
-            setter_obj.borrow_mut(mc).set_non_enumerable("name");
-            setter_obj.borrow_mut(mc).set_non_writable("name");
+            let setter_obj = new_js_object_data(ctx);
+            setter_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, setter_fn)));
+            slot_set(ctx, &setter_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+            object_set_key_value(ctx, &setter_obj, "length", &Value::Number(1.0))?;
+            setter_obj.borrow_mut(ctx).set_non_enumerable("length");
+            setter_obj.borrow_mut(ctx).set_non_writable("length");
+            object_set_key_value(ctx, &setter_obj, "name", &Value::String(utf8_to_utf16(&format!("set {prop}"))))?;
+            setter_obj.borrow_mut(ctx).set_non_enumerable("name");
+            setter_obj.borrow_mut(ctx).set_non_writable("name");
             if let Some(fp) = func_proto {
-                setter_obj.borrow_mut(mc).prototype = Some(fp);
+                setter_obj.borrow_mut(ctx).prototype = Some(fp);
             }
 
             let accessor = Value::Property {
@@ -394,8 +396,8 @@ pub fn initialize_regexp<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
                 getter: Some(Box::new(Value::Object(getter_obj))),
                 setter: Some(Box::new(Value::Object(setter_obj))),
             };
-            object_set_key_value(mc, &regexp_ctor, prop, &accessor)?;
-            regexp_ctor.borrow_mut(mc).set_non_enumerable(prop);
+            object_set_key_value(ctx, &regexp_ctor, prop, &accessor)?;
+            regexp_ctor.borrow_mut(ctx).set_non_enumerable(prop);
         }
     }
 
@@ -415,9 +417,9 @@ pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSE
 /// Handle RegExp.prototype getter accessors (source, global, ignoreCase, etc.)
 /// These read internal slots from the RegExp instance (`this`).
 /// For `flags`, the spec requires reading observable properties from any object.
-/// `mc` and `env` are needed for `flags` getter to invoke accessors.
+/// `ctx` and `env` are needed for `flags` getter to invoke accessors.
 pub(crate) fn handle_regexp_getter_with_this<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     this_val: &Value<'gc>,
     prop: &str,
@@ -426,7 +428,7 @@ pub(crate) fn handle_regexp_getter_with_this<'gc>(
     // so cross-realm getters produce errors from their own realm.
     let throw_realm_type_error = |msg: String| -> EvalError<'gc> {
         let js_err = raise_type_error!(msg);
-        let val = crate::core::js_error_to_value(mc, env, &js_err);
+        let val = crate::core::js_error_to_value(ctx, env, &js_err);
         EvalError::Throw(val, None, None)
     };
 
@@ -471,7 +473,7 @@ pub(crate) fn handle_regexp_getter_with_this<'gc>(
             ("sticky", 'y'),
         ];
         for (prop_name, flag_char) in flag_props {
-            let val = crate::core::get_property_with_accessors(mc, env, obj, *prop_name)?;
+            let val = crate::core::get_property_with_accessors(ctx, env, obj, *prop_name)?;
             if val.to_truthy() {
                 result.push(*flag_char);
             }
@@ -762,7 +764,7 @@ pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSErro
 }
 
 fn create_regexp_object_from_parts<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: Option<&JSObjectDataPtr<'gc>>,
     pattern_u16: Vec<u16>,
     flags: String,
@@ -824,31 +826,31 @@ fn create_regexp_object_from_parts<'gc>(
         return Err(raise_syntax_error!(format!("Invalid RegExp: {}", e)).into());
     }
 
-    let regexp_obj = new_js_object_data(mc);
+    let regexp_obj = new_js_object_data(ctx);
     if let Some(env) = env
         && let Some(regexp_ctor_val) = object_get_key_value(env, "RegExp")
         && let Value::Object(regexp_ctor_obj) = &*regexp_ctor_val.borrow()
         && let Some(regexp_proto_val) = object_get_key_value(regexp_ctor_obj, "prototype")
         && let Value::Object(regexp_proto_obj) = &*regexp_proto_val.borrow()
     {
-        regexp_obj.borrow_mut(mc).prototype = Some(*regexp_proto_obj);
+        regexp_obj.borrow_mut(ctx).prototype = Some(*regexp_proto_obj);
     }
-    slot_set(mc, &regexp_obj, InternalSlot::Regex, &Value::String(pattern_u16.clone()));
-    slot_set(mc, &regexp_obj, InternalSlot::Flags, &Value::String(utf8_to_utf16(&flags)));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexGlobal, &Value::Boolean(global));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexIgnoreCase, &Value::Boolean(ignore_case));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexMultiline, &Value::Boolean(multiline));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexDotAll, &Value::Boolean(dot_matches_new_line));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexUnicode, &Value::Boolean(unicode));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexSticky, &Value::Boolean(sticky));
-    slot_set(mc, &regexp_obj, InternalSlot::SwapGreed, &Value::Boolean(swap_greed));
-    slot_set(mc, &regexp_obj, InternalSlot::Crlf, &Value::Boolean(crlf));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexHasIndices, &Value::Boolean(has_indices));
-    slot_set(mc, &regexp_obj, InternalSlot::RegexUnicodeSets, &Value::Boolean(unicode_sets));
+    slot_set(ctx, &regexp_obj, InternalSlot::Regex, &Value::String(pattern_u16.clone()));
+    slot_set(ctx, &regexp_obj, InternalSlot::Flags, &Value::String(utf8_to_utf16(&flags)));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexGlobal, &Value::Boolean(global));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexIgnoreCase, &Value::Boolean(ignore_case));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexMultiline, &Value::Boolean(multiline));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexDotAll, &Value::Boolean(dot_matches_new_line));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexUnicode, &Value::Boolean(unicode));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexSticky, &Value::Boolean(sticky));
+    slot_set(ctx, &regexp_obj, InternalSlot::SwapGreed, &Value::Boolean(swap_greed));
+    slot_set(ctx, &regexp_obj, InternalSlot::Crlf, &Value::Boolean(crlf));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexHasIndices, &Value::Boolean(has_indices));
+    slot_set(ctx, &regexp_obj, InternalSlot::RegexUnicodeSets, &Value::Boolean(unicode_sets));
 
-    object_set_key_value(mc, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
-    regexp_obj.borrow_mut(mc).set_non_enumerable("lastIndex");
-    regexp_obj.borrow_mut(mc).set_non_configurable("lastIndex");
+    object_set_key_value(ctx, &regexp_obj, "lastIndex", &Value::Number(0.0))?;
+    regexp_obj.borrow_mut(ctx).set_non_enumerable("lastIndex");
+    regexp_obj.borrow_mut(ctx).set_non_configurable("lastIndex");
 
     // Per spec, source/global/flags/etc. are accessor properties on RegExp.prototype,
     // not own data properties on instances. The prototype getters read internal slots
@@ -859,23 +861,23 @@ fn create_regexp_object_from_parts<'gc>(
 }
 
 pub(crate) fn create_regexp_object_fast_for_eval<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     pattern_u16: Vec<u16>,
     flags: String,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    create_regexp_object_from_parts(mc, Some(env), pattern_u16, flags, false)
+    create_regexp_object_from_parts(ctx, Some(env), pattern_u16, flags, false)
 }
 
 /// Handle RegExp constructor calls
-pub(crate) fn handle_regexp_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
-    handle_regexp_constructor_with_env(mc, None, args)
+pub(crate) fn handle_regexp_constructor<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    handle_regexp_constructor_with_env(ctx, None, args)
 }
 
 /// §7.2.8 IsRegExp(argument)
 /// Returns true if the argument has a truthy @@match property, or has [[RegExpMatcher]] internal slot.
 /// Uses proper Get (invokes getters) for @@match check per spec.
-fn is_regexp_with_env<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: Option<&JSObjectDataPtr<'gc>>) -> Result<bool, EvalError<'gc>> {
+fn is_regexp_with_env<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: Option<&JSObjectDataPtr<'gc>>) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = val {
         // Step 1-2: Check @@match property via proper Get
         if let Some(env) = env
@@ -884,7 +886,7 @@ fn is_regexp_with_env<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: Option<&J
             && let Some(match_sym_val) = object_get_key_value(sym_ctor, "match")
             && let Value::Symbol(match_sym) = &*match_sym_val.borrow()
         {
-            let matcher = crate::core::get_property_with_accessors(mc, env, obj, crate::core::PropertyKey::Symbol(*match_sym))?;
+            let matcher = crate::core::get_property_with_accessors(ctx, env, obj, crate::core::PropertyKey::Symbol(*match_sym))?;
             if !matches!(matcher, Value::Undefined) {
                 return Ok(matcher.to_truthy());
             }
@@ -930,7 +932,7 @@ fn value_to_pattern_u16<'gc>(val: &Value<'gc>) -> Vec<u16> {
 }
 
 pub(crate) fn handle_regexp_constructor_with_env<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: Option<&JSObjectDataPtr<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -940,7 +942,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
     // Per spec 22.2.3.1 step 2: always call IsRegExp first so side effects
     // on Symbol.match (e.g. recompiling via .compile()) are observable
     // before we read internal slots in steps 4-5.
-    let pattern_is_regexp = is_regexp_with_env(mc, &arg0, env)?;
+    let pattern_is_regexp = is_regexp_with_env(ctx, &arg0, env)?;
 
     // Step 4: If pattern has [[RegExpMatcher]] internal slot, use internal source/flags
     if let Some((re_pattern, re_flags)) = extract_regexp_parts(&arg0) {
@@ -950,7 +952,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
                 Value::String(s) => utf16_to_utf8(s),
                 Value::Object(_) => {
                     if let Some(env) = env {
-                        let prim = crate::core::to_primitive(mc, f, "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, f, "string", env)?;
                         crate::core::value_to_string(&prim)
                     } else {
                         crate::core::value_to_string(f)
@@ -961,14 +963,14 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
         } else {
             re_flags
         };
-        return create_regexp_object_from_parts(mc, env, re_pattern, flags, true);
+        return create_regexp_object_from_parts(ctx, env, re_pattern, flags, true);
     }
 
     // Step 5: Else if patternIsRegExp, read source/flags from regexp-like object
     if pattern_is_regexp && let Value::Object(obj) = &arg0 {
         // Step 5a: P = ? Get(pattern, "source")
         let source_val = if let Some(env) = env {
-            crate::core::get_property_with_accessors(mc, env, obj, "source")?
+            crate::core::get_property_with_accessors(ctx, env, obj, "source")?
         } else if let Some(v) = object_get_key_value(obj, "source") {
             v.borrow().clone()
         } else {
@@ -986,7 +988,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
                 Value::Undefined => {
                     // Read flags from object
                     let flags_val = if let Some(env) = env {
-                        crate::core::get_property_with_accessors(mc, env, obj, "flags")?
+                        crate::core::get_property_with_accessors(ctx, env, obj, "flags")?
                     } else if let Some(v) = object_get_key_value(obj, "flags") {
                         v.borrow().clone()
                     } else {
@@ -1001,7 +1003,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
                 Value::String(s) => utf16_to_utf8(s),
                 Value::Object(_) => {
                     if let Some(env) = env {
-                        let prim = crate::core::to_primitive(mc, f, "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, f, "string", env)?;
                         crate::core::value_to_string(&prim)
                     } else {
                         crate::core::value_to_string(f)
@@ -1012,7 +1014,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
         } else {
             // flags argument absent → read from object
             let flags_val = if let Some(env) = env {
-                crate::core::get_property_with_accessors(mc, env, obj, "flags")?
+                crate::core::get_property_with_accessors(ctx, env, obj, "flags")?
             } else if let Some(v) = object_get_key_value(obj, "flags") {
                 v.borrow().clone()
             } else {
@@ -1025,7 +1027,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
             }
         };
 
-        return create_regexp_object_from_parts(mc, env, pattern_u16, flags, true);
+        return create_regexp_object_from_parts(ctx, env, pattern_u16, flags, true);
     }
 
     // ToString coercion on pattern (undefined → empty)
@@ -1034,7 +1036,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
         Value::String(s) => s.clone(),
         Value::Object(_) => {
             if let Some(env) = env {
-                let prim = crate::core::to_primitive(mc, &arg0, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, &arg0, "string", env)?;
                 match prim {
                     Value::String(s) => s,
                     other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1052,7 +1054,7 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
         Some(Value::Undefined) | None => String::new(),
         Some(Value::Object(_)) => {
             if let Some(env) = env {
-                let prim = crate::core::to_primitive(mc, arg1.as_ref().unwrap(), "string", env)?;
+                let prim = crate::core::to_primitive(ctx, arg1.as_ref().unwrap(), "string", env)?;
                 crate::core::value_to_string(&prim)
             } else {
                 crate::core::value_to_string(arg1.as_ref().unwrap())
@@ -1061,14 +1063,14 @@ pub(crate) fn handle_regexp_constructor_with_env<'gc>(
         Some(f) => crate::core::value_to_string(f),
     };
 
-    create_regexp_object_from_parts(mc, env, pattern_u16, flags, true)
+    create_regexp_object_from_parts(ctx, env, pattern_u16, flags, true)
 }
 
 /// Handle RegExp() called as a function (without new).
 /// Per spec §21.2.3.1: if pattern is RegExp, flags is undefined, and
 /// pattern.constructor === RegExp, return the same object.
 pub(crate) fn handle_regexp_call_with_env<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: Option<&JSObjectDataPtr<'gc>>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1076,7 +1078,7 @@ pub(crate) fn handle_regexp_call_with_env<'gc>(
     let arg1 = args.get(1).cloned();
 
     // Step 1: Let patternIsRegExp = IsRegExp(pattern)
-    let pattern_is_regexp = is_regexp_with_env(mc, &arg0, env)?;
+    let pattern_is_regexp = is_regexp_with_env(ctx, &arg0, env)?;
 
     // Step 4b: If patternIsRegExp is true and flags is undefined
     if pattern_is_regexp {
@@ -1084,7 +1086,7 @@ pub(crate) fn handle_regexp_call_with_env<'gc>(
         if flags_undefined && let Value::Object(obj) = &arg0 {
             // Step 4b.i: Let patternConstructor = ? Get(pattern, "constructor")
             let ctor_val = if let Some(env) = env {
-                crate::core::get_property_with_accessors(mc, env, obj, "constructor")?
+                crate::core::get_property_with_accessors(ctx, env, obj, "constructor")?
             } else if let Some(v) = object_get_key_value(obj, "constructor") {
                 v.borrow().clone()
             } else {
@@ -1111,7 +1113,7 @@ pub(crate) fn handle_regexp_call_with_env<'gc>(
     }
 
     // Otherwise, construct a new RegExp
-    handle_regexp_constructor_with_env(mc, env, args)
+    handle_regexp_constructor_with_env(ctx, env, args)
 }
 
 /// Read the flags string from a RegExp object's internal Flags slot.
@@ -1150,10 +1152,10 @@ fn to_length_primitive(val: &Value) -> usize {
 
 /// ToLength with ToPrimitive for objects: calls valueOf/toString on objects.
 /// Throws TypeError for Symbol values (per ToNumber spec).
-fn to_length_with_coercion<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_length_with_coercion<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
     // Use to_number_with_env which properly handles ToPrimitive for objects
     // and throws TypeError for Symbols
-    let n = crate::core::to_number_with_env(mc, env, val)?;
+    let n = crate::core::to_number_with_env(ctx, env, val)?;
     if n.is_nan() || n <= 0.0 {
         return Ok(0);
     }
@@ -1164,7 +1166,7 @@ fn to_length_with_coercion<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSO
 }
 
 /// Try to set lastIndex; throw TypeError if non-writable (strict mode)
-fn set_last_index_checked<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>, value: f64) -> Result<(), EvalError<'gc>> {
+fn set_last_index_checked<'gc>(ctx: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>, value: f64) -> Result<(), EvalError<'gc>> {
     // Check if lastIndex is non-writable
     if object
         .borrow()
@@ -1173,19 +1175,19 @@ fn set_last_index_checked<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc
     {
         return Err(raise_type_error!("Cannot set property lastIndex of [object Object] which has only a getter").into());
     }
-    object_set_key_value(mc, object, "lastIndex", &Value::Number(value))?;
+    object_set_key_value(ctx, object, "lastIndex", &Value::Number(value))?;
     Ok(())
 }
 
 /// §22.2.4.2 SpeciesConstructor(O, defaultConstructor)
 /// Returns the species constructor for a RegExp-like object.
 fn species_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
     // Step 1: Let C = ? Get(O, "constructor")
-    let ctor = crate::core::get_property_with_accessors(mc, env, obj, "constructor")?;
+    let ctor = crate::core::get_property_with_accessors(ctx, env, obj, "constructor")?;
 
     // Step 2: If C is undefined, return defaultConstructor
     if matches!(ctor, Value::Undefined) {
@@ -1205,7 +1207,7 @@ fn species_constructor<'gc>(
         && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
         && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
     {
-        let species = crate::core::get_property_with_accessors(mc, env, &ctor_obj, crate::core::PropertyKey::Symbol(*species_sym))?;
+        let species = crate::core::get_property_with_accessors(ctx, env, &ctor_obj, crate::core::PropertyKey::Symbol(*species_sym))?;
 
         // Step 5: If S is undefined or null, return defaultConstructor
         if matches!(species, Value::Undefined | Value::Null) {
@@ -1251,13 +1253,13 @@ fn internal_get_flags_string(object: &JSObjectDataPtr) -> String {
 /// Checks for a user-defined `exec` property on the regexp object;
 /// if callable, delegates to it. Otherwise falls back to built-in exec.
 fn regexp_exec_abstract<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     rx: &JSObjectDataPtr<'gc>,
     string: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: Let exec be ? Get(R, "exec")
-    let exec_val = crate::core::get_property_with_accessors(mc, env, rx, "exec")?;
+    let exec_val = crate::core::get_property_with_accessors(ctx, env, rx, "exec")?;
     // Step 2: If IsCallable(exec), then
     let is_callable = match &exec_val {
         Value::Function(_) | Value::Closure(_) => true,
@@ -1267,7 +1269,7 @@ fn regexp_exec_abstract<'gc>(
     if is_callable {
         // Call exec with rx as this, [string] as args
         let result =
-            crate::js_promise::call_function_with_this(mc, &exec_val, Some(&Value::Object(*rx)), std::slice::from_ref(string), env)?;
+            crate::js_promise::call_function_with_this(ctx, &exec_val, Some(&Value::Object(*rx)), std::slice::from_ref(string), env)?;
         // Step 2.a: Result must be null or object
         match &result {
             Value::Null | Value::Object(_) => return Ok(result),
@@ -1275,12 +1277,12 @@ fn regexp_exec_abstract<'gc>(
         }
     }
     // Step 3: Fall back to built-in exec
-    handle_regexp_method(mc, rx, "exec", std::slice::from_ref(string), env)
+    handle_regexp_method(ctx, rx, "exec", std::slice::from_ref(string), env)
 }
 
 /// Handle RegExp instance method calls
 pub(crate) fn handle_regexp_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -1306,7 +1308,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 Value::Undefined => utf8_to_utf16("undefined"),
                 Value::Null => utf8_to_utf16("null"),
                 Value::Object(_) => {
-                    let prim = crate::core::to_primitive(mc, &input_val, "string", env)?;
+                    let prim = crate::core::to_primitive(ctx, &input_val, "string", env)?;
                     match prim {
                         Value::String(s) => s,
                         other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1361,9 +1363,9 @@ pub(crate) fn handle_regexp_method<'gc>(
             let full_unicode = flags.contains('u') || flags.contains('v');
 
             // Per spec (22.2.5.2.2): Always read lastIndex via Get (observable)
-            let last_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
+            let last_index_val = crate::core::get_property_with_accessors(ctx, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
             // ToLength coercion (calls valueOf on objects)
-            let raw_last_index = to_length_with_coercion(mc, &last_index_val, env)?;
+            let raw_last_index = to_length_with_coercion(ctx, &last_index_val, env)?;
 
             let last_index = if use_last {
                 raw_last_index
@@ -1419,21 +1421,21 @@ pub(crate) fn handle_regexp_method<'gc>(
                     }
 
                     // Construct result array
-                    let result_array = create_array(mc, env)?;
+                    let result_array = create_array(ctx, env)?;
 
                     let full_match_u16 = input_u16[orig_start..orig_end].to_vec();
-                    object_set_key_value(mc, &result_array, "0", &Value::String(full_match_u16))?;
+                    object_set_key_value(ctx, &result_array, "0", &Value::String(full_match_u16))?;
 
-                    let indices_array = if has_indices { Some(create_array(mc, env)?) } else { None };
+                    let indices_array = if has_indices { Some(create_array(ctx, env)?) } else { None };
                     let mut groups_obj: Option<JSObjectDataPtr<'gc>> = None;
                     let mut indices_groups_obj: Option<JSObjectDataPtr<'gc>> = None;
 
                     if let Some(indices) = &indices_array {
-                        let match_indices = create_array(mc, env)?;
-                        object_set_key_value(mc, &match_indices, "0", &Value::Number(orig_start as f64))?;
-                        object_set_key_value(mc, &match_indices, "1", &Value::Number(orig_end as f64))?;
-                        set_array_length(mc, &match_indices, 2)?;
-                        object_set_key_value(mc, indices, "0", &Value::Object(match_indices))?;
+                        let match_indices = create_array(ctx, env)?;
+                        object_set_key_value(ctx, &match_indices, "0", &Value::Number(orig_start as f64))?;
+                        object_set_key_value(ctx, &match_indices, "1", &Value::Number(orig_end as f64))?;
+                        set_array_length(ctx, &match_indices, 2)?;
+                        object_set_key_value(ctx, indices, "0", &Value::Object(match_indices))?;
                     }
 
                     let mut group_index = 1;
@@ -1445,26 +1447,26 @@ pub(crate) fn handle_regexp_method<'gc>(
                                 (range.start, range.end)
                             };
                             let cap_str = input_u16[cs..ce].to_vec();
-                            object_set_key_value(mc, &result_array, group_index, &Value::String(cap_str))?;
+                            object_set_key_value(ctx, &result_array, group_index, &Value::String(cap_str))?;
 
                             if let Some(indices) = &indices_array {
-                                let group_indices = create_array(mc, env)?;
-                                object_set_key_value(mc, &group_indices, "0", &Value::Number(cs as f64))?;
-                                object_set_key_value(mc, &group_indices, "1", &Value::Number(ce as f64))?;
-                                set_array_length(mc, &group_indices, 2)?;
-                                object_set_key_value(mc, indices, group_index, &Value::Object(group_indices))?;
+                                let group_indices = create_array(ctx, env)?;
+                                object_set_key_value(ctx, &group_indices, "0", &Value::Number(cs as f64))?;
+                                object_set_key_value(ctx, &group_indices, "1", &Value::Number(ce as f64))?;
+                                set_array_length(ctx, &group_indices, 2)?;
+                                object_set_key_value(ctx, indices, group_index, &Value::Object(group_indices))?;
                             }
                         } else {
-                            object_set_key_value(mc, &result_array, group_index, &Value::Undefined)?;
+                            object_set_key_value(ctx, &result_array, group_index, &Value::Undefined)?;
                             if let Some(indices) = &indices_array {
-                                object_set_key_value(mc, indices, group_index, &Value::Undefined)?;
+                                object_set_key_value(ctx, indices, group_index, &Value::Undefined)?;
                             }
                         }
                         group_index += 1;
                     }
 
                     for (name, range_opt) in m.named_groups() {
-                        let groups = groups_obj.get_or_insert_with(|| new_js_object_data(mc));
+                        let groups = groups_obj.get_or_insert_with(|| new_js_object_data(ctx));
                         match range_opt {
                             Some(range) => {
                                 let (cs, ce) = if mapping {
@@ -1473,56 +1475,56 @@ pub(crate) fn handle_regexp_method<'gc>(
                                     (range.start, range.end)
                                 };
                                 let cap_str = input_u16[cs..ce].to_vec();
-                                object_set_key_value(mc, groups, name, &Value::String(cap_str))?;
+                                object_set_key_value(ctx, groups, name, &Value::String(cap_str))?;
 
                                 if let Some(indices) = &indices_array {
-                                    let indices_groups = indices_groups_obj.get_or_insert_with(|| new_js_object_data(mc));
-                                    let group_indices = create_array(mc, env)?;
-                                    object_set_key_value(mc, &group_indices, "0", &Value::Number(cs as f64))?;
-                                    object_set_key_value(mc, &group_indices, "1", &Value::Number(ce as f64))?;
-                                    set_array_length(mc, &group_indices, 2)?;
-                                    object_set_key_value(mc, indices_groups, name, &Value::Object(group_indices))?;
+                                    let indices_groups = indices_groups_obj.get_or_insert_with(|| new_js_object_data(ctx));
+                                    let group_indices = create_array(ctx, env)?;
+                                    object_set_key_value(ctx, &group_indices, "0", &Value::Number(cs as f64))?;
+                                    object_set_key_value(ctx, &group_indices, "1", &Value::Number(ce as f64))?;
+                                    set_array_length(ctx, &group_indices, 2)?;
+                                    object_set_key_value(ctx, indices_groups, name, &Value::Object(group_indices))?;
                                     let _ = indices;
                                 }
                             }
                             None => {
-                                object_set_key_value(mc, groups, name, &Value::Undefined)?;
+                                object_set_key_value(ctx, groups, name, &Value::Undefined)?;
                                 if let Some(indices) = &indices_array {
-                                    let indices_groups = indices_groups_obj.get_or_insert_with(|| new_js_object_data(mc));
-                                    object_set_key_value(mc, indices_groups, name, &Value::Undefined)?;
+                                    let indices_groups = indices_groups_obj.get_or_insert_with(|| new_js_object_data(ctx));
+                                    object_set_key_value(ctx, indices_groups, name, &Value::Undefined)?;
                                     let _ = indices;
                                 }
                             }
                         }
                     }
-                    set_array_length(mc, &result_array, group_index)?;
+                    set_array_length(ctx, &result_array, group_index)?;
 
-                    object_set_key_value(mc, &result_array, "index", &Value::Number(orig_start as f64))?;
-                    object_set_key_value(mc, &result_array, "input", &Value::String(input_u16.clone()))?;
+                    object_set_key_value(ctx, &result_array, "index", &Value::Number(orig_start as f64))?;
+                    object_set_key_value(ctx, &result_array, "input", &Value::String(input_u16.clone()))?;
                     if let Some(groups) = groups_obj {
-                        object_set_key_value(mc, &result_array, "groups", &Value::Object(groups))?;
+                        object_set_key_value(ctx, &result_array, "groups", &Value::Object(groups))?;
                     } else {
-                        object_set_key_value(mc, &result_array, "groups", &Value::Undefined)?;
+                        object_set_key_value(ctx, &result_array, "groups", &Value::Undefined)?;
                     }
 
                     if let Some(indices) = indices_array {
                         if let Some(indices_groups) = indices_groups_obj {
-                            object_set_key_value(mc, &indices, "groups", &Value::Object(indices_groups))?;
+                            object_set_key_value(ctx, &indices, "groups", &Value::Object(indices_groups))?;
                         } else {
-                            object_set_key_value(mc, &indices, "groups", &Value::Undefined)?;
+                            object_set_key_value(ctx, &indices, "groups", &Value::Undefined)?;
                         }
-                        object_set_key_value(mc, &result_array, "indices", &Value::Object(indices))?;
+                        object_set_key_value(ctx, &result_array, "indices", &Value::Object(indices))?;
                     }
 
                     if use_last {
-                        set_last_index_checked(mc, object, orig_end as f64)?;
+                        set_last_index_checked(ctx, object, orig_end as f64)?;
                     }
 
                     Ok(Value::Object(result_array))
                 }
                 None => {
                     if use_last {
-                        set_last_index_checked(mc, object, 0.0)?;
+                        set_last_index_checked(ctx, object, 0.0)?;
                     }
                     Ok(Value::Null)
                 }
@@ -1547,7 +1549,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 Value::Undefined => utf8_to_utf16("undefined"),
                 Value::Null => utf8_to_utf16("null"),
                 Value::Object(_) => {
-                    let prim = crate::core::to_primitive(mc, &input_val, "string", env)?;
+                    let prim = crate::core::to_primitive(ctx, &input_val, "string", env)?;
                     match prim {
                         Value::String(s) => s,
                         other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1599,8 +1601,8 @@ pub(crate) fn handle_regexp_method<'gc>(
             let full_unicode = flags.contains('u') || flags.contains('v');
 
             // Per spec: Always read lastIndex via Get (observable), then ToLength
-            let last_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
-            let raw_last_index = to_length_with_coercion(mc, &last_index_val, env)?;
+            let last_index_val = crate::core::get_property_with_accessors(ctx, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
+            let raw_last_index = to_length_with_coercion(ctx, &last_index_val, env)?;
             let last_index = if use_last { raw_last_index } else { 0 };
 
             // Per spec: without 'u'/'v' flag, operate on UTF-16 code units (ucs2);
@@ -1649,13 +1651,13 @@ pub(crate) fn handle_regexp_method<'gc>(
                     if use_last {
                         let end = m.range.end;
                         let orig_end = if mapping { map_index_back(&input_u16, end) } else { end };
-                        set_last_index_checked(mc, object, orig_end as f64)?;
+                        set_last_index_checked(ctx, object, orig_end as f64)?;
                     }
                     Ok(Value::Boolean(true))
                 }
                 None => {
                     if use_last {
-                        set_last_index_checked(mc, object, 0.0)?;
+                        set_last_index_checked(ctx, object, 0.0)?;
                     }
                     Ok(Value::Boolean(false))
                 }
@@ -1665,7 +1667,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             // AnnexB B.2.5.1 RegExp.prototype.compile(pattern, flags)
             // Helper: create a TypeError from the current realm's TypeError constructor
             // so that cross-realm instanceof checks work correctly.
-            let realm_type_error = |mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str| -> EvalError<'gc> {
+            let realm_type_error = |ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str| -> EvalError<'gc> {
                 if let Some(tc_val) = crate::core::env_get(env, "TypeError")
                     && let Some(tc_obj) = match &*tc_val.borrow() {
                         Value::Object(tc) => Some(*tc),
@@ -1677,7 +1679,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                     }
                 {
                     let msg_val = Value::String(utf8_to_utf16(message));
-                    if let Ok(err_val) = crate::js_class::evaluate_new(mc, env, &Value::Object(tc_obj), &[msg_val], None)
+                    if let Ok(err_val) = crate::js_class::evaluate_new(ctx, env, &Value::Object(tc_obj), &[msg_val], None)
                         && let Value::Object(err_obj) = err_val
                     {
                         return EvalError::Throw(Value::Object(err_obj), None, None);
@@ -1689,7 +1691,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Step 1: Validate `this` is a RegExp object
             if slot_get(object, &InternalSlot::Regex).is_none() && slot_get(object, &InternalSlot::IsRegExpPrototype).is_none() {
                 return Err(realm_type_error(
-                    mc,
+                    ctx,
                     env,
                     "RegExp.prototype.compile called on incompatible receiver",
                 ));
@@ -1716,7 +1718,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 };
                 if !regexp_proto_match {
                     return Err(realm_type_error(
-                        mc,
+                        ctx,
                         env,
                         "RegExp.prototype.compile called on incompatible receiver",
                     ));
@@ -1747,13 +1749,13 @@ pub(crate) fn handle_regexp_method<'gc>(
                 let p = if matches!(pattern_arg, Value::Undefined) {
                     String::new()
                 } else {
-                    let p_s = crate::js_string::spec_to_string(mc, &pattern_arg, env)?;
+                    let p_s = crate::js_string::spec_to_string(ctx, &pattern_arg, env)?;
                     utf16_to_utf8(&p_s)
                 };
                 let f = if matches!(flags_arg, Value::Undefined) {
                     String::new()
                 } else {
-                    let f_s = crate::js_string::spec_to_string(mc, &flags_arg, env)?;
+                    let f_s = crate::js_string::spec_to_string(ctx, &flags_arg, env)?;
                     utf16_to_utf8(&f_s)
                 };
                 (p, f)
@@ -1781,19 +1783,24 @@ pub(crate) fn handle_regexp_method<'gc>(
             let _ = get_or_compile_regex(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
 
             // Update the RegExp internal slots
-            slot_set(mc, object, InternalSlot::Regex, &Value::String(pattern_u16));
-            slot_set(mc, object, InternalSlot::Flags, &Value::String(utf8_to_utf16(&new_flags)));
+            slot_set(ctx, object, InternalSlot::Regex, &Value::String(pattern_u16));
+            slot_set(ctx, object, InternalSlot::Flags, &Value::String(utf8_to_utf16(&new_flags)));
             // Update individual flag boolean slots
-            slot_set(mc, object, InternalSlot::RegexGlobal, &Value::Boolean(new_flags.contains('g')));
-            slot_set(mc, object, InternalSlot::RegexIgnoreCase, &Value::Boolean(new_flags.contains('i')));
-            slot_set(mc, object, InternalSlot::RegexMultiline, &Value::Boolean(new_flags.contains('m')));
-            slot_set(mc, object, InternalSlot::RegexDotAll, &Value::Boolean(new_flags.contains('s')));
-            slot_set(mc, object, InternalSlot::RegexUnicode, &Value::Boolean(new_flags.contains('u')));
-            slot_set(mc, object, InternalSlot::RegexSticky, &Value::Boolean(new_flags.contains('y')));
-            slot_set(mc, object, InternalSlot::RegexHasIndices, &Value::Boolean(new_flags.contains('d')));
-            slot_set(mc, object, InternalSlot::RegexUnicodeSets, &Value::Boolean(new_flags.contains('v')));
+            slot_set(ctx, object, InternalSlot::RegexGlobal, &Value::Boolean(new_flags.contains('g')));
+            slot_set(ctx, object, InternalSlot::RegexIgnoreCase, &Value::Boolean(new_flags.contains('i')));
+            slot_set(ctx, object, InternalSlot::RegexMultiline, &Value::Boolean(new_flags.contains('m')));
+            slot_set(ctx, object, InternalSlot::RegexDotAll, &Value::Boolean(new_flags.contains('s')));
+            slot_set(ctx, object, InternalSlot::RegexUnicode, &Value::Boolean(new_flags.contains('u')));
+            slot_set(ctx, object, InternalSlot::RegexSticky, &Value::Boolean(new_flags.contains('y')));
+            slot_set(ctx, object, InternalSlot::RegexHasIndices, &Value::Boolean(new_flags.contains('d')));
+            slot_set(
+                ctx,
+                object,
+                InternalSlot::RegexUnicodeSets,
+                &Value::Boolean(new_flags.contains('v')),
+            );
             // Reset lastIndex to 0 (throws TypeError if non-writable per spec §21.2.3.2.2 step 12)
-            set_last_index_checked(mc, object, 0.0)?;
+            set_last_index_checked(ctx, object, 0.0)?;
 
             Ok(Value::Object(*object))
         }
@@ -1801,12 +1808,12 @@ pub(crate) fn handle_regexp_method<'gc>(
             // §22.2.5.14 RegExp.prototype.toString()
             // Step 1: Let R = this value (object).
             // Step 2: Let pattern = ? ToString(? Get(R, "source"))
-            let source_val = crate::core::get_property_with_accessors(mc, env, object, "source")?;
-            let pattern = utf16_to_utf8(&crate::js_string::spec_to_string(mc, &source_val, env)?);
+            let source_val = crate::core::get_property_with_accessors(ctx, env, object, "source")?;
+            let pattern = utf16_to_utf8(&crate::js_string::spec_to_string(ctx, &source_val, env)?);
 
             // Step 3: Let flags = ? ToString(? Get(R, "flags"))
-            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
-            let flags = utf16_to_utf8(&crate::js_string::spec_to_string(mc, &flags_val, env)?);
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, object, "flags")?;
+            let flags = utf16_to_utf8(&crate::js_string::spec_to_string(ctx, &flags_val, env)?);
 
             let result = format!("/{}/{}", pattern, flags);
             Ok(Value::String(utf8_to_utf16(&result)))
@@ -1820,7 +1827,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 match &args[0] {
                     Value::String(s) => s.clone(),
                     Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &args[0], "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, &args[0], "string", env)?;
                         match prim {
                             Value::String(s) => s,
                             other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1831,11 +1838,11 @@ pub(crate) fn handle_regexp_method<'gc>(
             };
 
             // Step 4: Let flags = ? ToString(? Get(rx, "flags"))
-            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, object, "flags")?;
             let flags_str = match &flags_val {
                 Value::String(s) => utf16_to_utf8(s),
                 Value::Object(_) => {
-                    let prim = crate::core::to_primitive(mc, &flags_val, "string", env)?;
+                    let prim = crate::core::to_primitive(ctx, &flags_val, "string", env)?;
                     match prim {
                         Value::String(s) => utf16_to_utf8(&s),
                         other => crate::core::value_to_string(&other),
@@ -1847,39 +1854,39 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             if !global {
                 // Step 5: Non-global: just call exec and return its result
-                return regexp_exec_abstract(mc, object, &Value::String(input_str), env);
+                return regexp_exec_abstract(ctx, object, &Value::String(input_str), env);
             }
 
             // Step 6: Global match
             let full_unicode = flags_str.contains('u') || flags_str.contains('v');
 
             // Step 6b: Set lastIndex = 0
-            set_last_index_checked(mc, object, 0.0)?;
+            set_last_index_checked(ctx, object, 0.0)?;
 
-            let result_array = create_array(mc, env)?;
+            let result_array = create_array(ctx, env)?;
             let mut n = 0usize;
 
             loop {
                 // Step 6e.i: Let result = ? RegExpExec(rx, S)
-                let exec_result = regexp_exec_abstract(mc, object, &Value::String(input_str.clone()), env)?;
+                let exec_result = regexp_exec_abstract(ctx, object, &Value::String(input_str.clone()), env)?;
                 if matches!(exec_result, Value::Null) {
                     if n == 0 {
                         return Ok(Value::Null);
                     }
-                    set_array_length(mc, &result_array, n)?;
+                    set_array_length(ctx, &result_array, n)?;
                     return Ok(Value::Object(result_array));
                 }
 
                 // Step 6e.iii: Let matchStr = ? ToString(? Get(result, "0"))
                 let match_str_val = if let Value::Object(res_obj) = &exec_result {
-                    crate::core::get_property_with_accessors(mc, env, res_obj, "0")?
+                    crate::core::get_property_with_accessors(ctx, env, res_obj, "0")?
                 } else {
                     Value::Undefined
                 };
                 let match_str = match &match_str_val {
                     Value::String(s) => s.clone(),
                     Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &match_str_val, "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, &match_str_val, "string", env)?;
                         match prim {
                             Value::String(s) => s,
                             other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1889,18 +1896,18 @@ pub(crate) fn handle_regexp_method<'gc>(
                 };
 
                 // Step 6e.iv
-                object_set_key_value(mc, &result_array, n, &Value::String(match_str.clone()))?;
+                object_set_key_value(ctx, &result_array, n, &Value::String(match_str.clone()))?;
 
                 // Step 6e.v: If matchStr is empty, advance lastIndex
                 if match_str.is_empty() {
-                    let this_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
-                    let this_index = to_length_with_coercion(mc, &this_index_val, env)?;
+                    let this_index_val = crate::core::get_property_with_accessors(ctx, env, object, "lastIndex")?;
+                    let this_index = to_length_with_coercion(ctx, &this_index_val, env)?;
                     let next_index = if full_unicode {
                         advance_string_index_unicode(&input_str, this_index)
                     } else {
                         this_index + 1
                     };
-                    set_last_index_checked(mc, object, next_index as f64)?;
+                    set_last_index_checked(ctx, object, next_index as f64)?;
                 }
 
                 n += 1;
@@ -1908,7 +1915,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                     break;
                 }
             }
-            set_array_length(mc, &result_array, n)?;
+            set_array_length(ctx, &result_array, n)?;
             Ok(Value::Object(result_array))
         }
         "replace" => {
@@ -1920,7 +1927,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 match &args[0] {
                     Value::String(s) => s.clone(),
                     Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &args[0], "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, &args[0], "string", env)?;
                         match prim {
                             Value::String(s) => s,
                             other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1933,11 +1940,11 @@ pub(crate) fn handle_regexp_method<'gc>(
             let replace_value = args.get(1).cloned().unwrap_or(Value::Undefined);
 
             // Step 5: Let flags = ? ToString(? Get(rx, "flags"))
-            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, object, "flags")?;
             let flags_str = match &flags_val {
                 Value::String(s) => utf16_to_utf8(s),
                 Value::Object(_) => {
-                    let prim = crate::core::to_primitive(mc, &flags_val, "string", env)?;
+                    let prim = crate::core::to_primitive(ctx, &flags_val, "string", env)?;
                     match prim {
                         Value::String(s) => utf16_to_utf8(&s),
                         other => crate::core::value_to_string(&other),
@@ -1949,13 +1956,13 @@ pub(crate) fn handle_regexp_method<'gc>(
             let full_unicode = flags_str.contains('u') || flags_str.contains('v');
 
             if global {
-                set_last_index_checked(mc, object, 0.0)?;
+                set_last_index_checked(ctx, object, 0.0)?;
             }
 
             // Collect all match results
             let mut results: Vec<Value<'gc>> = Vec::new();
             loop {
-                let exec_result = regexp_exec_abstract(mc, object, &Value::String(input_str.clone()), env)?;
+                let exec_result = regexp_exec_abstract(ctx, object, &Value::String(input_str.clone()), env)?;
                 if matches!(exec_result, Value::Null) {
                     break;
                 }
@@ -1967,11 +1974,11 @@ pub(crate) fn handle_regexp_method<'gc>(
 
                 // Advance lastIndex if empty match
                 if let Value::Object(res_obj) = &exec_result {
-                    let match_val = crate::core::get_property_with_accessors(mc, env, res_obj, "0").unwrap_or(Value::Undefined);
+                    let match_val = crate::core::get_property_with_accessors(ctx, env, res_obj, "0").unwrap_or(Value::Undefined);
                     let match_str = match &match_val {
                         Value::String(s) => s.clone(),
                         Value::Object(_) => {
-                            let prim = crate::core::to_primitive(mc, &match_val, "string", env)?;
+                            let prim = crate::core::to_primitive(ctx, &match_val, "string", env)?;
                             match prim {
                                 Value::String(s) => s,
                                 other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -1982,14 +1989,14 @@ pub(crate) fn handle_regexp_method<'gc>(
 
                     if match_str.is_empty() {
                         let this_index_val =
-                            crate::core::get_property_with_accessors(mc, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
-                        let this_index = to_length_with_coercion(mc, &this_index_val, env)?;
+                            crate::core::get_property_with_accessors(ctx, env, object, "lastIndex").unwrap_or(Value::Number(0.0));
+                        let this_index = to_length_with_coercion(ctx, &this_index_val, env)?;
                         let next_index = if full_unicode {
                             advance_string_index_unicode(&input_str, this_index)
                         } else {
                             this_index + 1
                         };
-                        set_last_index_checked(mc, object, next_index as f64)?;
+                        set_last_index_checked(ctx, object, next_index as f64)?;
                     }
                 }
 
@@ -2011,7 +2018,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 match &replace_value {
                     Value::String(s) => s.clone(),
                     Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &replace_value, "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, &replace_value, "string", env)?;
                         match prim {
                             Value::String(s) => s,
                             other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -2034,16 +2041,16 @@ pub(crate) fn handle_regexp_method<'gc>(
                 };
 
                 // Step 14a: Let nCaptures = ? ToLength(? Get(result, "length"))
-                let n_captures_val = crate::core::get_property_with_accessors(mc, env, result_obj, "length")?;
-                let n_captures_raw = to_length_with_coercion(mc, &n_captures_val, env)?;
+                let n_captures_val = crate::core::get_property_with_accessors(ctx, env, result_obj, "length")?;
+                let n_captures_raw = to_length_with_coercion(ctx, &n_captures_val, env)?;
                 let n_captures = if n_captures_raw > 0 { n_captures_raw - 1 } else { 0 };
 
                 // Step 14c: Let matched = ? ToString(? Get(result, "0"))
-                let matched_val = crate::core::get_property_with_accessors(mc, env, result_obj, "0")?;
+                let matched_val = crate::core::get_property_with_accessors(ctx, env, result_obj, "0")?;
                 let matched = match &matched_val {
                     Value::String(s) => s.clone(),
                     Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &matched_val, "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, &matched_val, "string", env)?;
                         match prim {
                             Value::String(s) => s,
                             other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -2053,12 +2060,12 @@ pub(crate) fn handle_regexp_method<'gc>(
                 };
 
                 // Step 14d: Let position = ? ToIntegerOrInfinity(? Get(result, "index"))
-                let position_val = crate::core::get_property_with_accessors(mc, env, result_obj, "index")?;
+                let position_val = crate::core::get_property_with_accessors(ctx, env, result_obj, "index")?;
                 let position = match &position_val {
                     Value::Number(n) => (*n as isize).max(0) as usize,
                     Value::Undefined => 0,
                     Value::Object(_) => {
-                        let prim = crate::core::to_primitive(mc, &position_val, "number", env)?;
+                        let prim = crate::core::to_primitive(ctx, &position_val, "number", env)?;
                         match prim {
                             Value::Number(n) => (n as isize).max(0) as usize,
                             _ => 0,
@@ -2074,14 +2081,14 @@ pub(crate) fn handle_regexp_method<'gc>(
                 // Step 14e-g: Collect captures
                 let mut captures: Vec<Value<'gc>> = Vec::new();
                 for i in 1..=n_captures {
-                    let cap_val = crate::core::get_property_with_accessors(mc, env, result_obj, i)?;
+                    let cap_val = crate::core::get_property_with_accessors(ctx, env, result_obj, i)?;
                     if matches!(cap_val, Value::Undefined) {
                         captures.push(Value::Undefined);
                     } else {
                         let cap_str = match &cap_val {
                             Value::String(s) => Value::String(s.clone()),
                             Value::Object(_) => {
-                                let prim = crate::core::to_primitive(mc, &cap_val, "string", env)?;
+                                let prim = crate::core::to_primitive(ctx, &cap_val, "string", env)?;
                                 match prim {
                                     Value::String(s) => Value::String(s),
                                     other => Value::String(utf8_to_utf16(&crate::core::value_to_string(&other))),
@@ -2094,7 +2101,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                 }
 
                 // Step 14h: Get named captures
-                let named_captures_val = crate::core::get_property_with_accessors(mc, env, result_obj, "groups")?;
+                let named_captures_val = crate::core::get_property_with_accessors(ctx, env, result_obj, "groups")?;
                 let named_captures = if matches!(named_captures_val, Value::Undefined) {
                     None
                 } else {
@@ -2108,17 +2115,17 @@ pub(crate) fn handle_regexp_method<'gc>(
                             Value::Object(_) => Some(named_captures_val),
                             Value::String(s) => {
                                 // ToObject wraps string in a String object
-                                let str_obj = new_js_object_data(mc);
+                                let str_obj = new_js_object_data(ctx);
                                 let s_clone = s.clone();
-                                object_set_key_value(mc, &str_obj, "length", &Value::Number(s_clone.len() as f64))?;
+                                object_set_key_value(ctx, &str_obj, "length", &Value::Number(s_clone.len() as f64))?;
                                 for (idx, &ch) in s_clone.iter().enumerate() {
-                                    object_set_key_value(mc, &str_obj, idx, &Value::String(vec![ch]))?;
+                                    object_set_key_value(ctx, &str_obj, idx, &Value::String(vec![ch]))?;
                                 }
                                 Some(Value::Object(str_obj))
                             }
                             Value::Number(_) | Value::Boolean(_) => {
                                 // ToObject wraps in Number/Boolean object — no useful properties for GetSubstitution
-                                let wrap_obj = new_js_object_data(mc);
+                                let wrap_obj = new_js_object_data(ctx);
                                 Some(Value::Object(wrap_obj))
                             }
                             _ => Some(named_captures_val),
@@ -2139,11 +2146,11 @@ pub(crate) fn handle_regexp_method<'gc>(
                     if let Some(nc) = &named_captures {
                         call_args.push(nc.clone());
                     }
-                    let rep_val = crate::js_promise::call_function(mc, &replace_value, &call_args, env)?;
+                    let rep_val = crate::js_promise::call_function(ctx, &replace_value, &call_args, env)?;
                     match rep_val {
                         Value::String(s) => s,
                         Value::Object(_) => {
-                            let prim = crate::core::to_primitive(mc, &rep_val, "string", env)?;
+                            let prim = crate::core::to_primitive(ctx, &rep_val, "string", env)?;
                             match prim {
                                 Value::String(s) => s,
                                 other => utf8_to_utf16(&crate::core::value_to_string(&other)),
@@ -2160,7 +2167,7 @@ pub(crate) fn handle_regexp_method<'gc>(
                         &captures,
                         &named_captures,
                         &replace_str_val,
-                        mc,
+                        ctx,
                         env,
                     )?
                 };
@@ -2185,33 +2192,33 @@ pub(crate) fn handle_regexp_method<'gc>(
             let input_str = if args.is_empty() {
                 utf8_to_utf16("undefined")
             } else {
-                crate::js_string::spec_to_string(mc, &args[0], env)?
+                crate::js_string::spec_to_string(ctx, &args[0], env)?
             };
 
             // Step 4: let previousLastIndex = ? Get(rx, "lastIndex")
-            let previous_last_index = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
+            let previous_last_index = crate::core::get_property_with_accessors(ctx, env, object, "lastIndex")?;
 
             // Step 5: if SameValue(previousLastIndex, +0) is false, Set(rx, "lastIndex", +0, true)
             if !same_value(&previous_last_index, &Value::Number(0.0)) {
-                crate::core::set_property_with_accessors(mc, env, object, "lastIndex", &Value::Number(0.0), None)?;
+                crate::core::set_property_with_accessors(ctx, env, object, "lastIndex", &Value::Number(0.0), None)?;
             }
 
             // Step 6: let result = ? RegExpExec(rx, S)
-            let exec_result = regexp_exec_abstract(mc, object, &Value::String(input_str), env)?;
+            let exec_result = regexp_exec_abstract(ctx, object, &Value::String(input_str), env)?;
 
             // Step 7: let currentLastIndex = ? Get(rx, "lastIndex")
-            let current_last_index = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
+            let current_last_index = crate::core::get_property_with_accessors(ctx, env, object, "lastIndex")?;
 
             // Step 8: if SameValue(currentLastIndex, previousLastIndex) is false, Set(rx, "lastIndex", previousLastIndex, true)
             if !same_value(&current_last_index, &previous_last_index) {
-                crate::core::set_property_with_accessors(mc, env, object, "lastIndex", &previous_last_index, None)?;
+                crate::core::set_property_with_accessors(ctx, env, object, "lastIndex", &previous_last_index, None)?;
             }
 
             if matches!(exec_result, Value::Null) {
                 Ok(Value::Number(-1.0))
             } else if let Value::Object(res_obj) = &exec_result {
                 // Step 10: Return ? Get(result, "index")
-                Ok(crate::core::get_property_with_accessors(mc, env, res_obj, "index")?)
+                Ok(crate::core::get_property_with_accessors(ctx, env, res_obj, "index")?)
             } else {
                 Ok(Value::Number(-1.0))
             }
@@ -2222,15 +2229,15 @@ pub(crate) fn handle_regexp_method<'gc>(
             let input_str = if args.is_empty() {
                 utf8_to_utf16("undefined")
             } else {
-                crate::js_string::spec_to_string(mc, &args[0], env)?
+                crate::js_string::spec_to_string(ctx, &args[0], env)?
             };
 
             // Step 5: Let C = ? SpeciesConstructor(rx, %RegExp%)
-            let species_ctor = species_constructor(mc, env, object)?;
+            let species_ctor = species_constructor(ctx, env, object)?;
 
             // Step 6: Let flags = ? ToString(? Get(rx, "flags"))
-            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
-            let flags_str = crate::js_string::spec_to_string(mc, &flags_val, env)?;
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, object, "flags")?;
+            let flags_str = crate::js_string::spec_to_string(ctx, &flags_val, env)?;
             let flags_str_utf8 = utf16_to_utf8(&flags_str);
 
             // Step 7: unicodeMatching
@@ -2246,7 +2253,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Step 9: Let splitter = ? Construct(C, [rx, newFlags])
             let splitter = if let Some(ctor) = species_ctor {
                 let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&new_flags))];
-                let v = crate::js_class::evaluate_new(mc, env, &ctor, &ctor_args, None)?;
+                let v = crate::js_class::evaluate_new(ctx, env, &ctor, &ctor_args, None)?;
                 match v {
                     Value::Object(o) => o,
                     _ => return Err(raise_type_error!("[Symbol.split]: species constructor did not return an object").into()),
@@ -2254,7 +2261,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             } else {
                 // Default: construct a new RegExp
                 let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&new_flags))];
-                let v = handle_regexp_constructor_with_env(mc, Some(env), &ctor_args)?;
+                let v = handle_regexp_constructor_with_env(ctx, Some(env), &ctor_args)?;
                 match v {
                     Value::Object(o) => o,
                     _ => return Err(raise_type_error!("[Symbol.split]: failed to construct splitter RegExp").into()),
@@ -2262,7 +2269,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             };
 
             // Step 10: Let A = ! ArrayCreate(0)
-            let result_array = create_array(mc, env)?;
+            let result_array = create_array(ctx, env)?;
 
             // Step 11-12: lengthA = 0
             let mut arr_len = 0usize;
@@ -2271,14 +2278,14 @@ pub(crate) fn handle_regexp_method<'gc>(
             let limit = if let Some(lim) = args.get(1) {
                 match lim {
                     Value::Undefined => u32::MAX,
-                    _ => crate::core::to_uint32_value_with_env(mc, env, lim)?,
+                    _ => crate::core::to_uint32_value_with_env(ctx, env, lim)?,
                 }
             } else {
                 u32::MAX
             };
 
             if limit == 0 {
-                set_array_length(mc, &result_array, 0)?;
+                set_array_length(ctx, &result_array, 0)?;
                 return Ok(Value::Object(result_array));
             }
 
@@ -2286,10 +2293,10 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             // Step 16: If size = 0
             if size == 0 {
-                let z = regexp_exec_abstract(mc, &splitter, &Value::String(input_str.clone()), env)?;
+                let z = regexp_exec_abstract(ctx, &splitter, &Value::String(input_str.clone()), env)?;
                 if matches!(z, Value::Null) {
-                    object_set_key_value(mc, &result_array, 0usize, &Value::String(input_str))?;
-                    set_array_length(mc, &result_array, 1)?;
+                    object_set_key_value(ctx, &result_array, 0usize, &Value::String(input_str))?;
+                    set_array_length(ctx, &result_array, 1)?;
                 }
                 return Ok(Value::Object(result_array));
             }
@@ -2302,10 +2309,10 @@ pub(crate) fn handle_regexp_method<'gc>(
             // Step 19: Repeat, while q < size
             while q < size {
                 // Step 19.a: Perform ? Set(splitter, "lastIndex", q, true)
-                crate::core::set_property_with_accessors(mc, env, &splitter, "lastIndex", &Value::Number(q as f64), None)?;
+                crate::core::set_property_with_accessors(ctx, env, &splitter, "lastIndex", &Value::Number(q as f64), None)?;
 
                 // Step 19.b-c: Let z = ? RegExpExec(splitter, S)
-                let z = regexp_exec_abstract(mc, &splitter, &Value::String(input_str.clone()), env)?;
+                let z = regexp_exec_abstract(ctx, &splitter, &Value::String(input_str.clone()), env)?;
 
                 // Step 19.d: If z is null
                 if matches!(z, Value::Null) {
@@ -2324,8 +2331,8 @@ pub(crate) fn handle_regexp_method<'gc>(
                 };
 
                 // Step 19.e.i: Let e = ? ToLength(? Get(splitter, "lastIndex"))
-                let e_val = crate::core::get_property_with_accessors(mc, env, &splitter, "lastIndex")?;
-                let e_raw = to_length_with_coercion(mc, &e_val, env)?;
+                let e_val = crate::core::get_property_with_accessors(ctx, env, &splitter, "lastIndex")?;
+                let e_raw = to_length_with_coercion(ctx, &e_val, env)?;
                 let e = e_raw.min(size);
 
                 // Step 19.e.ii: If e = p, advance q
@@ -2341,10 +2348,10 @@ pub(crate) fn handle_regexp_method<'gc>(
                 // Step 19.e.iii: e ≠ p
                 // Add T = S[p..q]
                 let sub = input_str[p..q].to_vec();
-                object_set_key_value(mc, &result_array, arr_len, &Value::String(sub))?;
+                object_set_key_value(ctx, &result_array, arr_len, &Value::String(sub))?;
                 arr_len += 1;
                 if arr_len as u32 >= limit {
-                    set_array_length(mc, &result_array, arr_len)?;
+                    set_array_length(ctx, &result_array, arr_len)?;
                     return Ok(Value::Object(result_array));
                 }
 
@@ -2352,17 +2359,17 @@ pub(crate) fn handle_regexp_method<'gc>(
                 p = e;
 
                 // Step 19.e.iii.8: Let numberOfCaptures = ? ToLength(? Get(z, "length"))
-                let n_cap_val = crate::core::get_property_with_accessors(mc, env, &z_obj, "length")?;
-                let number_of_captures = to_length_with_coercion(mc, &n_cap_val, env)?;
+                let n_cap_val = crate::core::get_property_with_accessors(ctx, env, &z_obj, "length")?;
+                let number_of_captures = to_length_with_coercion(ctx, &n_cap_val, env)?;
                 let number_of_captures = if number_of_captures > 0 { number_of_captures - 1 } else { 0 };
 
                 // Step 19.e.iii.9-12: Add captures
                 for i in 1..=number_of_captures {
-                    let cap_val = crate::core::get_property_with_accessors(mc, env, &z_obj, i)?;
-                    object_set_key_value(mc, &result_array, arr_len, &cap_val)?;
+                    let cap_val = crate::core::get_property_with_accessors(ctx, env, &z_obj, i)?;
+                    object_set_key_value(ctx, &result_array, arr_len, &cap_val)?;
                     arr_len += 1;
                     if arr_len as u32 >= limit {
-                        set_array_length(mc, &result_array, arr_len)?;
+                        set_array_length(ctx, &result_array, arr_len)?;
                         return Ok(Value::Object(result_array));
                     }
                 }
@@ -2373,9 +2380,9 @@ pub(crate) fn handle_regexp_method<'gc>(
 
             // Step 20: Add tail T = S[p..size]
             let sub = input_str[p..size].to_vec();
-            object_set_key_value(mc, &result_array, arr_len, &Value::String(sub))?;
+            object_set_key_value(ctx, &result_array, arr_len, &Value::String(sub))?;
             arr_len += 1;
-            set_array_length(mc, &result_array, arr_len)?;
+            set_array_length(ctx, &result_array, arr_len)?;
             Ok(Value::Object(result_array))
         }
         "matchAll" => {
@@ -2385,20 +2392,20 @@ pub(crate) fn handle_regexp_method<'gc>(
             let input_str = if args.is_empty() {
                 utf8_to_utf16("undefined")
             } else {
-                crate::js_string::spec_to_string(mc, &args[0], env)?
+                crate::js_string::spec_to_string(ctx, &args[0], env)?
             };
 
             // Step 4: Let C = ? SpeciesConstructor(R, %RegExp%)
-            let species_ctor = species_constructor(mc, env, object)?;
+            let species_ctor = species_constructor(ctx, env, object)?;
 
             // Step 5: Let flags = ? ToString(? Get(R, "flags"))
-            let flags_val = crate::core::get_property_with_accessors(mc, env, object, "flags")?;
-            let flags_str = utf16_to_utf8(&crate::js_string::spec_to_string(mc, &flags_val, env)?);
+            let flags_val = crate::core::get_property_with_accessors(ctx, env, object, "flags")?;
+            let flags_str = utf16_to_utf8(&crate::js_string::spec_to_string(ctx, &flags_val, env)?);
 
             // Step 6: Let matcher = ? Construct(C, [R, flags])
             let matcher_obj = if let Some(ctor) = species_ctor {
                 let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&flags_str))];
-                let v = crate::js_class::evaluate_new(mc, env, &ctor, &ctor_args, None)?;
+                let v = crate::js_class::evaluate_new(ctx, env, &ctor, &ctor_args, None)?;
                 match v {
                     Value::Object(o) => o,
                     _ => return Err(raise_type_error!("[Symbol.matchAll]: species constructor did not return an object").into()),
@@ -2406,7 +2413,7 @@ pub(crate) fn handle_regexp_method<'gc>(
             } else {
                 // Default: construct a new RegExp
                 let ctor_args = vec![Value::Object(*object), Value::String(utf8_to_utf16(&flags_str))];
-                let v = handle_regexp_constructor_with_env(mc, Some(env), &ctor_args)?;
+                let v = handle_regexp_constructor_with_env(ctx, Some(env), &ctor_args)?;
                 match v {
                     Value::Object(o) => o,
                     _ => return Err(raise_type_error!("[Symbol.matchAll]: failed to construct matcher RegExp").into()),
@@ -2414,16 +2421,16 @@ pub(crate) fn handle_regexp_method<'gc>(
             };
 
             // Step 7-8: Let lastIndex = ? ToLength(? Get(R, "lastIndex"))
-            let last_index_val = crate::core::get_property_with_accessors(mc, env, object, "lastIndex")?;
-            let last_index = to_length_with_coercion(mc, &last_index_val, env)?;
-            set_last_index_checked(mc, &matcher_obj, last_index as f64)?;
+            let last_index_val = crate::core::get_property_with_accessors(ctx, env, object, "lastIndex")?;
+            let last_index = to_length_with_coercion(ctx, &last_index_val, env)?;
+            set_last_index_checked(ctx, &matcher_obj, last_index as f64)?;
 
             // Step 9-10: Determine global and fullUnicode
             let global = flags_str.contains('g');
             let full_unicode = flags_str.contains('u') || flags_str.contains('v');
 
             // Step 11: Return CreateRegExpStringIterator(matcher, S, global, fullUnicode)
-            create_regexp_string_iterator(mc, env, matcher_obj, input_str, global, full_unicode)
+            create_regexp_string_iterator(ctx, env, matcher_obj, input_str, global, full_unicode)
         }
         _ => Err(raise_eval_error!(format!("RegExp.prototype.{method} is not implemented")).into()),
     }
@@ -2450,28 +2457,28 @@ fn advance_string_index_unicode(s: &[u16], index: usize) -> usize {
 
 /// Create %RegExpStringIteratorPrototype%. Must be called after %IteratorPrototype% exists.
 pub fn initialize_regexp_string_iterator_prototype<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), crate::error::JSError> {
     use crate::core::{PropertyKey, slot_get_chained};
 
-    let proto = new_js_object_data(mc);
+    let proto = new_js_object_data(ctx);
 
     // [[Prototype]] = %IteratorPrototype%
     if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
         && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
     {
-        proto.borrow_mut(mc).prototype = Some(*iter_proto);
+        proto.borrow_mut(ctx).prototype = Some(*iter_proto);
     }
 
     // next method – non-enumerable
     object_set_key_value(
-        mc,
+        ctx,
         &proto,
         "next",
         &Value::Function("RegExpStringIterator.prototype.next".to_string()),
     )?;
-    proto.borrow_mut(mc).set_non_enumerable("next");
+    proto.borrow_mut(ctx).set_non_enumerable("next");
 
     // @@toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -2480,18 +2487,18 @@ pub fn initialize_regexp_string_iterator_prototype<'gc>(
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
         let tag_desc =
-            crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("RegExp String Iterator")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+            crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("RegExp String Iterator")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
     }
 
-    slot_set(mc, env, InternalSlot::RegExpStringIteratorPrototype, &Value::Object(proto));
+    slot_set(ctx, env, InternalSlot::RegExpStringIteratorPrototype, &Value::Object(proto));
 
     Ok(())
 }
 
 /// §22.2.7.1 CreateRegExpStringIterator(R, S, global, fullUnicode)
 fn create_regexp_string_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     matcher: JSObjectDataPtr<'gc>,
     string: Vec<u16>,
@@ -2500,28 +2507,28 @@ fn create_regexp_string_iterator<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     use crate::core::slot_get_chained;
 
-    let iterator = new_js_object_data(mc);
+    let iterator = new_js_object_data(ctx);
 
     // [[Prototype]] = %RegExpStringIteratorPrototype%
     if let Some(proto_val) = slot_get_chained(env, &InternalSlot::RegExpStringIteratorPrototype)
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        iterator.borrow_mut(mc).prototype = Some(*proto);
+        iterator.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     // Internal slots
-    slot_set(mc, &iterator, InternalSlot::RegExpIteratorMatcher, &Value::Object(matcher));
-    slot_set(mc, &iterator, InternalSlot::RegExpIteratorString, &Value::String(string));
-    slot_set(mc, &iterator, InternalSlot::RegExpIteratorGlobal, &Value::Boolean(global));
-    slot_set(mc, &iterator, InternalSlot::RegExpIteratorUnicode, &Value::Boolean(full_unicode));
-    slot_set(mc, &iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(false));
+    slot_set(ctx, &iterator, InternalSlot::RegExpIteratorMatcher, &Value::Object(matcher));
+    slot_set(ctx, &iterator, InternalSlot::RegExpIteratorString, &Value::String(string));
+    slot_set(ctx, &iterator, InternalSlot::RegExpIteratorGlobal, &Value::Boolean(global));
+    slot_set(ctx, &iterator, InternalSlot::RegExpIteratorUnicode, &Value::Boolean(full_unicode));
+    slot_set(ctx, &iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(false));
 
     Ok(Value::Object(iterator))
 }
 
 /// §22.2.7.2.1 %RegExpStringIterator%.prototype.next()
 pub(crate) fn handle_regexp_string_iterator_next<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2531,7 +2538,7 @@ pub(crate) fn handle_regexp_string_iterator_next<'gc>(
         None => false,
     };
     if done {
-        return create_iter_result(mc, Value::Undefined, true);
+        return create_iter_result(ctx, Value::Undefined, true);
     }
 
     // 2. Read internal slots
@@ -2562,14 +2569,14 @@ pub(crate) fn handle_regexp_string_iterator_next<'gc>(
     };
 
     // 3. Let match = ? RegExpExec(R, S)
-    let match_result = regexp_exec_abstract(mc, &matcher, &Value::String(s.clone()), env)?;
+    let match_result = regexp_exec_abstract(ctx, &matcher, &Value::String(s.clone()), env)?;
 
     // 4. If match is null:
     if matches!(match_result, Value::Null) {
         // 4.a. Set O.[[Done]] to true
-        slot_set(mc, iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(true));
+        slot_set(ctx, iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(true));
         // 4.b. Return CreateIterResultObject(undefined, true)
-        return create_iter_result(mc, Value::Undefined, true);
+        return create_iter_result(ctx, Value::Undefined, true);
     }
 
     // 5. match is not null
@@ -2577,44 +2584,44 @@ pub(crate) fn handle_regexp_string_iterator_next<'gc>(
         // 5.a. global is true
         // 5.a.i. Let matchStr = ? ToString(? Get(match, "0"))
         let match_val = if let Value::Object(match_obj) = &match_result {
-            crate::core::get_property_with_accessors(mc, env, match_obj, "0")?
+            crate::core::get_property_with_accessors(ctx, env, match_obj, "0")?
         } else {
             Value::Undefined
         };
-        let match_str = crate::js_string::spec_to_string(mc, &match_val, env)?;
+        let match_str = crate::js_string::spec_to_string(ctx, &match_val, env)?;
 
         // 5.a.ii. If matchStr is the empty String, advance lastIndex
         if match_str.is_empty()
             && let Value::Object(match_obj) = &match_result
         {
-            let this_index_val = crate::core::get_property_with_accessors(mc, env, &matcher, "lastIndex")?;
-            let this_index = to_length_with_coercion(mc, &this_index_val, env)?;
+            let this_index_val = crate::core::get_property_with_accessors(ctx, env, &matcher, "lastIndex")?;
+            let this_index = to_length_with_coercion(ctx, &this_index_val, env)?;
             let next_index = if full_unicode {
                 advance_string_index_unicode(&s, this_index)
             } else {
                 this_index + 1
             };
-            set_last_index_checked(mc, &matcher, next_index as f64)?;
+            set_last_index_checked(ctx, &matcher, next_index as f64)?;
             // Still yield this match
             let _ = match_obj; // suppress unused warning
         }
 
         // 5.a.iii. Return CreateIterResultObject(match, false)
-        create_iter_result(mc, match_result, false)
+        create_iter_result(ctx, match_result, false)
     } else {
         // 5.b. global is false
         // 5.b.i. Set O.[[Done]] to true
-        slot_set(mc, iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(true));
+        slot_set(ctx, iterator, InternalSlot::RegExpIteratorDone, &Value::Boolean(true));
         // 5.b.ii. Return CreateIterResultObject(match, false)
-        create_iter_result(mc, match_result, false)
+        create_iter_result(ctx, match_result, false)
     }
 }
 
 /// Create a {value, done} iterator result object.
-fn create_iter_result<'gc>(mc: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Result<Value<'gc>, EvalError<'gc>> {
-    let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "value", &value)?;
-    object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
+fn create_iter_result<'gc>(ctx: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Result<Value<'gc>, EvalError<'gc>> {
+    let obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &obj, "value", &value)?;
+    object_set_key_value(ctx, &obj, "done", &Value::Boolean(done))?;
     Ok(Value::Object(obj))
 }
 
@@ -2627,7 +2634,7 @@ fn get_substitution<'gc>(
     captures: &[Value<'gc>],
     named_captures: &Option<Value<'gc>>,
     replacement: &[u16],
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Vec<u16>, EvalError<'gc>> {
     let mut result = Vec::new();
@@ -2675,12 +2682,12 @@ fn get_substitution<'gc>(
                         let name_u16 = &replacement[i + 2..i + 2 + gt_pos];
                         let name = utf16_to_utf8(name_u16);
                         if let Some(Value::Object(groups)) = named_captures {
-                            let capture_val = crate::core::get_property_with_accessors(mc, env, groups, &*name)?;
+                            let capture_val = crate::core::get_property_with_accessors(ctx, env, groups, &*name)?;
                             match &capture_val {
                                 Value::Undefined => {} // empty replacement
                                 Value::String(s) => result.extend_from_slice(s),
                                 Value::Object(_) => {
-                                    let prim = crate::core::to_primitive(mc, &capture_val, "string", env)?;
+                                    let prim = crate::core::to_primitive(ctx, &capture_val, "string", env)?;
                                     match prim {
                                         Value::String(s) => result.extend_from_slice(&s),
                                         other => {
@@ -2774,7 +2781,7 @@ fn map_index_back(original: &[u16], working_index: usize) -> usize {
 /// RegExp.escape ( string ) — §22.2.4.3
 /// Returns a new string with regex-special characters escaped.
 pub(crate) fn regexp_escape<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {

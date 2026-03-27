@@ -34,7 +34,7 @@ thread_local! {
 /// Check all thread-local pending async waiters. If any have been resolved by
 /// their background notification thread, call the corresponding promise resolve
 /// function and remove them. Returns true if at least one was resolved.
-pub fn check_resolved_async_waiters<'gc>(mc: &GcContext<'gc>) -> Result<bool, EvalError<'gc>> {
+pub fn check_resolved_async_waiters<'gc>(ctx: &GcContext<'gc>) -> Result<bool, EvalError<'gc>> {
     let resolved_items: Vec<(Value<'gc>, JSObjectDataPtr<'gc>, bool)> = PENDING_ASYNC_WAITERS.with(|paw| {
         let mut list = paw.borrow_mut();
         let mut to_resolve = Vec::new();
@@ -59,7 +59,7 @@ pub fn check_resolved_async_waiters<'gc>(mc: &GcContext<'gc>) -> Result<bool, Ev
     for (resolve_fn, env, was_ok) in resolved_items {
         let result_str = if was_ok { "ok" } else { "timed-out" };
         let result_val = Value::String(utf8_to_utf16(result_str));
-        let _ = crate::js_promise::call_function(mc, &resolve_fn, &[result_val], &env);
+        let _ = crate::js_promise::call_function(ctx, &resolve_fn, &[result_val], &env);
     }
 
     Ok(true)
@@ -187,37 +187,37 @@ pub(crate) fn f16_to_f64(bits: u16) -> f64 {
 }
 
 /// Create an ArrayBuffer constructor object
-pub fn make_arraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
+pub fn make_arraybuffer_constructor<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
 
     if let Some(func_ctor_val) = object_get_key_value(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        obj.borrow_mut(mc).prototype = Some(*func_proto);
+        obj.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
-    let proto = make_arraybuffer_prototype(mc, env, &obj)?;
-    object_set_key_value(mc, &obj, "prototype", &Value::Object(proto))?;
-    obj.borrow_mut(mc).set_non_writable("prototype");
-    obj.borrow_mut(mc).set_non_enumerable("prototype");
-    obj.borrow_mut(mc).set_non_configurable("prototype");
+    let proto = make_arraybuffer_prototype(ctx, env, &obj)?;
+    object_set_key_value(ctx, &obj, "prototype", &Value::Object(proto))?;
+    obj.borrow_mut(ctx).set_non_writable("prototype");
+    obj.borrow_mut(ctx).set_non_enumerable("prototype");
+    obj.borrow_mut(ctx).set_non_configurable("prototype");
 
-    object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("ArrayBuffer")))?;
-    obj.borrow_mut(mc).set_non_writable("name");
-    obj.borrow_mut(mc).set_non_enumerable("name");
-    object_set_key_value(mc, &obj, "length", &Value::Number(1.0))?;
-    obj.borrow_mut(mc).set_non_writable("length");
-    obj.borrow_mut(mc).set_non_enumerable("length");
+    object_set_key_value(ctx, &obj, "name", &Value::String(utf8_to_utf16("ArrayBuffer")))?;
+    obj.borrow_mut(ctx).set_non_writable("name");
+    obj.borrow_mut(ctx).set_non_enumerable("name");
+    object_set_key_value(ctx, &obj, "length", &Value::Number(1.0))?;
+    obj.borrow_mut(ctx).set_non_writable("length");
+    obj.borrow_mut(ctx).set_non_enumerable("length");
 
-    let is_view_fn = new_js_object_data(mc);
+    let is_view_fn = new_js_object_data(ctx);
     if let Some(func_ctor_val) = object_get_key_value(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        is_view_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        is_view_fn.borrow_mut(ctx).prototype = Some(*func_proto);
     }
     let closure = ClosureData {
         env: Some(*env),
@@ -226,22 +226,22 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectData
         ..ClosureData::default()
     };
     is_view_fn
-        .borrow_mut(mc)
-        .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, closure)))));
-    object_set_key_value(mc, &is_view_fn, "name", &Value::String(utf8_to_utf16("isView")))?;
-    is_view_fn.borrow_mut(mc).set_non_writable("name");
-    is_view_fn.borrow_mut(mc).set_non_enumerable("name");
-    object_set_key_value(mc, &is_view_fn, "length", &Value::Number(1.0))?;
-    is_view_fn.borrow_mut(mc).set_non_writable("length");
-    is_view_fn.borrow_mut(mc).set_non_enumerable("length");
+        .borrow_mut(ctx)
+        .set_closure(Some(new_gc_cell_ptr(ctx, Value::Closure(Gc::new(ctx, closure)))));
+    object_set_key_value(ctx, &is_view_fn, "name", &Value::String(utf8_to_utf16("isView")))?;
+    is_view_fn.borrow_mut(ctx).set_non_writable("name");
+    is_view_fn.borrow_mut(ctx).set_non_enumerable("name");
+    object_set_key_value(ctx, &is_view_fn, "length", &Value::Number(1.0))?;
+    is_view_fn.borrow_mut(ctx).set_non_writable("length");
+    is_view_fn.borrow_mut(ctx).set_non_enumerable("length");
 
-    object_set_key_value(mc, &obj, "isView", &Value::Object(is_view_fn))?;
-    obj.borrow_mut(mc).set_non_enumerable("isView");
+    object_set_key_value(ctx, &obj, "isView", &Value::Object(is_view_fn))?;
+    obj.borrow_mut(ctx).set_non_enumerable("isView");
 
     // Mark as ArrayBuffer constructor
-    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
-    slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ArrayBuffer")));
+    slot_set(ctx, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("ArrayBuffer")));
 
     // ArrayBuffer[Symbol.species] — accessor getter returning `this`, non-enumerable, configurable
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
@@ -249,13 +249,13 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectData
         && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
         && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
     {
-        let getter_fn = new_js_object_data(mc);
+        let getter_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            getter_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
         let getter_closure = ClosureData {
             env: Some(*env),
@@ -264,30 +264,30 @@ pub fn make_arraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectData
             ..ClosureData::default()
         };
         getter_fn
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, getter_closure)))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Closure(Gc::new(ctx, getter_closure)))));
         let gname_desc =
-            crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "name", &gname_desc)?;
-        let glen_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "length", &glen_desc)?;
+            crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "name", &gname_desc)?;
+        let glen_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "length", &glen_desc)?;
 
-        let species_desc_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &species_desc_obj, "get", &Value::Object(getter_fn))?;
-        object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
-        object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
-        crate::js_object::define_property_internal(mc, &obj, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
+        let species_desc_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &species_desc_obj, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(ctx, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(ctx, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(ctx, &obj, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
     }
 
     Ok(obj)
 }
 
 /// Create the Atomics object with basic atomic methods
-pub fn make_atomics_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
+pub fn make_atomics_object<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
 
     // Set __proto__ to Object.prototype
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object");
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &obj, env, "Object");
 
     // Get Function.prototype for method objects
     let func_proto_opt: Option<JSObjectDataPtr<'gc>> = if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
@@ -319,20 +319,20 @@ pub fn make_atomics_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
     ];
 
     for &(method_name, dispatch_name, length) in methods {
-        let fn_obj = new_js_object_data(mc);
+        let fn_obj = new_js_object_data(ctx);
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function(dispatch_name.to_string()))));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method_name)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(method_name)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(length as f64), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &desc_len)?;
         // writable: true, enumerable: false, configurable: true
-        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &obj, method_name, &desc_method)?;
+        let desc_method = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &obj, method_name, &desc_method)?;
     }
 
     // Set Symbol.toStringTag = "Atomics" { writable: false, enumerable: false, configurable: true }
@@ -341,8 +341,8 @@ pub fn make_atomics_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Atomics")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &obj, *tag_sym, &desc_tag)?;
+        let desc_tag = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Atomics")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &obj, *tag_sym, &desc_tag)?;
     }
 
     Ok(obj)
@@ -353,26 +353,26 @@ pub(crate) fn is_typedarray(obj: &JSObjectDataPtr) -> bool {
 }
 
 pub(crate) fn get_array_like_element<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     arr_obj: &JSObjectDataPtr<'gc>,
     index: usize,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    if is_array(mc, arr_obj) {
+    if is_array(ctx, arr_obj) {
         Ok(if let Some(cell) = object_get_key_value(arr_obj, index) {
             cell.borrow().clone()
         } else {
             Value::Undefined
         })
     } else if is_typedarray(arr_obj) {
-        get_property_with_accessors(mc, env, arr_obj, index)
+        get_property_with_accessors(ctx, env, arr_obj, index)
     } else {
         Ok(Value::Undefined)
     }
 }
 
 pub(crate) fn ensure_typedarray_in_bounds<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     stmt_line: Option<usize>,
     stmt_column: Option<usize>,
@@ -396,7 +396,7 @@ pub(crate) fn ensure_typedarray_in_bounds<'gc>(
             if buf_len < needed {
                 log::trace!("ensure_typedarray_in_bounds: out of bounds detected");
                 let js_err = raise_type_error!("TypedArray is out of bounds");
-                let val = js_error_to_value(mc, env, &js_err);
+                let val = js_error_to_value(ctx, env, &js_err);
                 log::trace!(
                     "ensure_typedarray_in_bounds: throwing TypeError at js_line={:?} js_col={:?}",
                     stmt_line,
@@ -417,7 +417,7 @@ pub(crate) fn ensure_typedarray_in_bounds<'gc>(
             if ta.byte_offset > buf_len {
                 log::trace!("ensure_typedarray_in_bounds: length-tracking view out of bounds detected");
                 let js_err = raise_type_error!("TypedArray is out of bounds");
-                let val = js_error_to_value(mc, env, &js_err);
+                let val = js_error_to_value(ctx, env, &js_err);
                 log::trace!(
                     "ensure_typedarray_in_bounds: throwing TypeError at js_line={:?} js_col={:?}",
                     stmt_line,
@@ -449,9 +449,9 @@ fn bigint_to_i64_modular(b: &num_bigint::BigInt) -> i64 {
 /// ToBigInt coercion: convert a Value to BigInt per spec.
 /// Handles BigInt, Boolean, String, and Object (via ToPrimitive).
 /// Returns the value as i64 using modular arithmetic for BigInt types.
-pub fn to_bigint_i64<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
+pub fn to_bigint_i64<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<i64, EvalError<'gc>> {
     let prim = match val {
-        Value::Object(_) => crate::core::to_primitive(mc, val, "number", env)?,
+        Value::Object(_) => crate::core::to_primitive(ctx, val, "number", env)?,
         other => other.clone(),
     };
     match &prim {
@@ -463,17 +463,17 @@ pub fn to_bigint_i64<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: 
             match crate::js_bigint::parse_bigint_string(&s_str) {
                 Ok(bi) => Ok(bigint_to_i64_modular(&bi)),
                 Err(_) => Err(throw_syntax_error(
-                    mc,
+                    ctx,
                     env,
                     &format!("Cannot convert \"{}\" to a BigInt", s_str.trim()),
                 )),
             }
         }
-        Value::Number(_) => Err(throw_type_error(mc, env, "Cannot convert a Number value to a BigInt")),
-        Value::Symbol(_) => Err(throw_type_error(mc, env, "Cannot convert a Symbol value to a BigInt")),
-        Value::Undefined => Err(throw_type_error(mc, env, "Cannot convert undefined to a BigInt")),
-        Value::Null => Err(throw_type_error(mc, env, "Cannot convert null to a BigInt")),
-        _ => Err(throw_type_error(mc, env, "Cannot convert value to a BigInt")),
+        Value::Number(_) => Err(throw_type_error(ctx, env, "Cannot convert a Number value to a BigInt")),
+        Value::Symbol(_) => Err(throw_type_error(ctx, env, "Cannot convert a Symbol value to a BigInt")),
+        Value::Undefined => Err(throw_type_error(ctx, env, "Cannot convert undefined to a BigInt")),
+        Value::Null => Err(throw_type_error(ctx, env, "Cannot convert null to a BigInt")),
+        _ => Err(throw_type_error(ctx, env, "Cannot convert value to a BigInt")),
     }
 }
 
@@ -499,23 +499,23 @@ pub fn is_bigint_typed_array(kind: &TypedArrayKind) -> bool {
 }
 
 /// Throw a TypeError as EvalError::Throw using env's TypeError constructor.
-fn throw_type_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+fn throw_type_error<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
     let js_err = raise_type_error!(msg);
-    let val = crate::core::js_error_to_value(mc, env, &js_err);
+    let val = crate::core::js_error_to_value(ctx, env, &js_err);
     EvalError::Throw(val, None, None)
 }
 
 /// Throw a RangeError as EvalError::Throw using env's RangeError constructor.
-fn throw_range_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+fn throw_range_error<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
     let js_err = raise_range_error!(msg);
-    let val = crate::core::js_error_to_value(mc, env, &js_err);
+    let val = crate::core::js_error_to_value(ctx, env, &js_err);
     EvalError::Throw(val, None, None)
 }
 
 /// Throw a SyntaxError as EvalError::Throw using env's SyntaxError constructor.
-fn throw_syntax_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
+fn throw_syntax_error<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg: &str) -> EvalError<'gc> {
     let js_err = raise_syntax_error!(msg);
-    let val = crate::core::js_error_to_value(mc, env, &js_err);
+    let val = crate::core::js_error_to_value(ctx, env, &js_err);
     EvalError::Throw(val, None, None)
 }
 
@@ -523,30 +523,30 @@ fn throw_syntax_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, msg:
 /// Extracts the TypedArray, validates it is an integer typed array and not detached.
 /// Returns the JSTypedArray copy.
 fn validate_integer_typed_array<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     arg: &Value<'gc>,
 ) -> Result<(Gc<'gc, JSTypedArray<'gc>>, JSObjectDataPtr<'gc>), EvalError<'gc>> {
     let object = match arg {
         Value::Object(o) => *o,
-        _ => return Err(throw_type_error(mc, env, "Atomics: first argument must be a TypedArray")),
+        _ => return Err(throw_type_error(ctx, env, "Atomics: first argument must be a TypedArray")),
     };
     let ta_obj = if let Some(ta_rc) = slot_get_chained(&object, &InternalSlot::TypedArray)
         && let Value::TypedArray(ta) = &*ta_rc.borrow()
     {
         *ta
     } else {
-        return Err(throw_type_error(mc, env, "Atomics: first argument must be a TypedArray"));
+        return Err(throw_type_error(ctx, env, "Atomics: first argument must be a TypedArray"));
     };
     if !is_valid_atomic_type(&ta_obj.kind) {
         return Err(throw_type_error(
-            mc,
+            ctx,
             env,
             "Atomics: TypedArray must be an integer type (not Float32, Float64, or Uint8Clamped)",
         ));
     }
     if ta_obj.buffer.borrow().detached {
-        return Err(throw_type_error(mc, env, "Atomics: TypedArray buffer is detached"));
+        return Err(throw_type_error(ctx, env, "Atomics: TypedArray buffer is detached"));
     }
     Ok((ta_obj, object))
 }
@@ -554,7 +554,7 @@ fn validate_integer_typed_array<'gc>(
 /// ValidateAtomicAccess (spec 25.4.1.2)
 /// Coerces index arg to integer and validates it is within bounds.
 fn validate_atomic_access<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ta: &JSTypedArray<'gc>,
     index_arg: &Value<'gc>,
@@ -575,8 +575,8 @@ fn validate_atomic_access<'gc>(
     // Step 2: ToIndex(requestIndex)
     let idx = match index_arg {
         Value::Undefined => 0usize,
-        Value::BigInt(_) => return Err(throw_type_error(mc, env, "Cannot convert a BigInt value to a number")),
-        Value::Symbol(_) => return Err(throw_type_error(mc, env, "Cannot convert a Symbol value to a number")),
+        Value::BigInt(_) => return Err(throw_type_error(ctx, env, "Cannot convert a BigInt value to a number")),
+        Value::Symbol(_) => return Err(throw_type_error(ctx, env, "Cannot convert a Symbol value to a number")),
         _ => {
             // ToIntegerOrInfinity: ToNumber first, then NaN/±0 → 0, ±∞ stays, else truncate
             let n = match index_arg {
@@ -588,7 +588,7 @@ fn validate_atomic_access<'gc>(
                         0.0
                     }
                 }
-                _ => crate::core::to_number_with_env(mc, env, index_arg)?,
+                _ => crate::core::to_number_with_env(ctx, env, index_arg)?,
             };
             let integer_index = if n.is_nan() || n == 0.0 {
                 0.0
@@ -599,14 +599,14 @@ fn validate_atomic_access<'gc>(
             };
             // If integerIndex < 0, throw RangeError
             if integer_index < 0.0 {
-                return Err(throw_range_error(mc, env, "Atomics: index out of range"));
+                return Err(throw_range_error(ctx, env, "Atomics: index out of range"));
             }
             // ToLength — clamp to [0, 2^53-1]
             const MAX_SAFE: f64 = 9007199254740991.0; // 2^53-1
             let index = if integer_index > MAX_SAFE { MAX_SAFE } else { integer_index };
             // SameValue(integerIndex, index) - catches +∞ since ToLength caps it
             if integer_index != index {
-                return Err(throw_range_error(mc, env, "Atomics: index out of range"));
+                return Err(throw_range_error(ctx, env, "Atomics: index out of range"));
             }
             index as usize
         }
@@ -614,7 +614,7 @@ fn validate_atomic_access<'gc>(
 
     // Step 3: bounds check against the ORIGINAL length
     if idx >= length {
-        return Err(throw_range_error(mc, env, "Atomics: index out of range"));
+        return Err(throw_range_error(ctx, env, "Atomics: index out of range"));
     }
     Ok(idx)
 }
@@ -634,7 +634,7 @@ fn raw_i64_to_bigint<'gc>(raw: i64, kind: &TypedArrayKind) -> Value<'gc> {
 
 /// Handle Atomics.* calls (minimal mutex-backed implementations)
 pub fn handle_atomics_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -665,7 +665,7 @@ pub fn handle_atomics_method<'gc>(
                 }
             }
             Value::String(_) | Value::Object(_) => {
-                let n = crate::core::to_number_with_env(mc, env, &size_val).unwrap_or(f64::NAN);
+                let n = crate::core::to_number_with_env(ctx, env, &size_val).unwrap_or(f64::NAN);
                 if n.is_nan() || n == 0.0 || n.is_infinite() {
                     0
                 } else {
@@ -709,14 +709,14 @@ pub fn handle_atomics_method<'gc>(
 
     // All remaining methods: validate typed array type FIRST (before index coercion)
     let ta_arg = args.first().cloned().unwrap_or(Value::Undefined);
-    let (ta_obj, _ta_js_obj) = validate_integer_typed_array(mc, env, &ta_arg)?;
+    let (ta_obj, _ta_js_obj) = validate_integer_typed_array(ctx, env, &ta_arg)?;
     let is_bigint = is_bigint_typed_array(&ta_obj.kind);
     let is_shared = ta_obj.buffer.borrow().shared;
 
     match method {
         "load" => {
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
             if is_bigint {
                 let raw = ta_obj.get_bigint_raw(idx)?;
                 Ok(raw_i64_to_bigint(raw, &ta_obj.kind))
@@ -730,17 +730,17 @@ pub fn handle_atomics_method<'gc>(
             let val_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             // Per spec: coerce value BEFORE validating index
             if is_bigint {
-                let v = to_bigint_i64(mc, env, &val_arg)?;
-                let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
-                ta_obj.set_bigint(mc, idx, v)?;
+                let v = to_bigint_i64(ctx, env, &val_arg)?;
+                let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
+                ta_obj.set_bigint(ctx, idx, v)?;
                 // Atomics.store returns the coerced value (ToBigInt result)
                 Ok(Value::BigInt(Box::new(num_bigint::BigInt::from(v))))
             } else {
-                let n = crate::core::to_number_with_env(mc, env, &val_arg)?;
+                let n = crate::core::to_number_with_env(ctx, env, &val_arg)?;
                 let int_n = if n.is_nan() || n == 0.0 { 0.0 } else { n.trunc() };
                 let int_n = if int_n == 0.0 { 0.0 } else { int_n };
-                let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
-                ta_obj.set(mc, idx, n)?;
+                let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
+                ta_obj.set(ctx, idx, n)?;
                 Ok(Value::Number(int_n))
             }
         }
@@ -749,19 +749,19 @@ pub fn handle_atomics_method<'gc>(
             let expected_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             let replacement_arg = args.get(3).cloned().unwrap_or(Value::Undefined);
             // Spec order: ValidateAtomicAccess THEN coerce values
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
             if is_bigint {
-                let expected_i64 = to_bigint_i64(mc, env, &expected_arg)?;
-                let replacement_i64 = to_bigint_i64(mc, env, &replacement_arg)?;
+                let expected_i64 = to_bigint_i64(ctx, env, &expected_arg)?;
+                let replacement_i64 = to_bigint_i64(ctx, env, &replacement_arg)?;
                 let old_raw = ta_obj.get_bigint_raw(idx)?;
                 // Compare raw i64 bits (works for both signed and unsigned)
                 if old_raw == expected_i64 {
-                    ta_obj.set_bigint(mc, idx, replacement_i64)?;
+                    ta_obj.set_bigint(ctx, idx, replacement_i64)?;
                 }
                 Ok(raw_i64_to_bigint(old_raw, &ta_obj.kind))
             } else {
-                let expected_f64 = crate::core::to_number_with_env(mc, env, &expected_arg)?;
-                let replacement_f64 = crate::core::to_number_with_env(mc, env, &replacement_arg)?;
+                let expected_f64 = crate::core::to_number_with_env(ctx, env, &expected_arg)?;
+                let replacement_f64 = crate::core::to_number_with_env(ctx, env, &replacement_arg)?;
                 let old = ta_obj.get(idx)?;
                 let matches = match ta_obj.kind {
                     TypedArrayKind::Int8 => (js_to_int32(old) as i8) == (js_to_int32(expected_f64) as i8),
@@ -773,7 +773,7 @@ pub fn handle_atomics_method<'gc>(
                     _ => old == expected_f64,
                 };
                 if matches {
-                    ta_obj.set(mc, idx, replacement_f64)?;
+                    ta_obj.set(ctx, idx, replacement_f64)?;
                 }
                 Ok(Value::Number(old))
             }
@@ -782,9 +782,9 @@ pub fn handle_atomics_method<'gc>(
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
             let val_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             // Spec order: ValidateAtomicAccess THEN coerce value
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
             if is_bigint {
-                let operand = to_bigint_i64(mc, env, &val_arg)?;
+                let operand = to_bigint_i64(ctx, env, &val_arg)?;
                 let old_raw = ta_obj.get_bigint_raw(idx)?;
                 let new_raw = match method {
                     "add" => old_raw.wrapping_add(operand),
@@ -795,10 +795,10 @@ pub fn handle_atomics_method<'gc>(
                     "exchange" => operand,
                     _ => old_raw,
                 };
-                ta_obj.set_bigint(mc, idx, new_raw)?;
+                ta_obj.set_bigint(ctx, idx, new_raw)?;
                 Ok(raw_i64_to_bigint(old_raw, &ta_obj.kind))
             } else {
-                let operand = crate::core::to_number_with_env(mc, env, &val_arg)? as i64;
+                let operand = crate::core::to_number_with_env(ctx, env, &val_arg)? as i64;
                 let old = ta_obj.get(idx)?;
                 let new_val = match method {
                     "add" => (old as i64).wrapping_add(operand) as f64,
@@ -809,7 +809,7 @@ pub fn handle_atomics_method<'gc>(
                     "exchange" => operand as f64,
                     _ => old,
                 };
-                ta_obj.set(mc, idx, new_val)?;
+                ta_obj.set(ctx, idx, new_val)?;
                 Ok(Value::Number(old))
             }
         }
@@ -818,28 +818,28 @@ pub fn handle_atomics_method<'gc>(
             // Must be Int32Array or BigInt64Array on SharedArrayBuffer
             if !matches!(ta_obj.kind, TypedArrayKind::Int32 | TypedArrayKind::BigInt64) {
                 return Err(throw_type_error(
-                    mc,
+                    ctx,
                     env,
                     "Atomics.wait: TypedArray must be Int32Array or BigInt64Array",
                 ));
             }
             if !is_shared {
                 return Err(throw_type_error(
-                    mc,
+                    ctx,
                     env,
                     "Atomics.wait: TypedArray must be backed by a SharedArrayBuffer",
                 ));
             }
             // Spec order: index → value → timeout → AgentCanSuspend
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
 
             let expected_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             // Coerce expected value
             let expected = if is_bigint {
-                to_bigint_i64(mc, env, &expected_arg)?
+                to_bigint_i64(ctx, env, &expected_arg)?
             } else {
-                crate::core::to_number_with_env(mc, env, &expected_arg)? as i64
+                crate::core::to_number_with_env(ctx, env, &expected_arg)? as i64
             };
 
             // Coerce timeout
@@ -848,7 +848,7 @@ pub fn handle_atomics_method<'gc>(
                 match tval {
                     Value::Undefined => None, // +Infinity
                     _ => {
-                        let n = crate::core::to_number_with_env(mc, env, &tval)?;
+                        let n = crate::core::to_number_with_env(ctx, env, &tval)?;
                         if n.is_nan() { None } else { Some(n) }
                     }
                 }
@@ -935,27 +935,27 @@ pub fn handle_atomics_method<'gc>(
             // Must be Int32Array or BigInt64Array on SharedArrayBuffer
             if !matches!(ta_obj.kind, TypedArrayKind::Int32 | TypedArrayKind::BigInt64) {
                 return Err(throw_type_error(
-                    mc,
+                    ctx,
                     env,
                     "Atomics.waitAsync: TypedArray must be Int32Array or BigInt64Array",
                 ));
             }
             if !is_shared {
                 return Err(throw_type_error(
-                    mc,
+                    ctx,
                     env,
                     "Atomics.waitAsync: TypedArray must be backed by a SharedArrayBuffer",
                 ));
             }
 
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
 
             let expected_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             let expected = if is_bigint {
-                to_bigint_i64(mc, env, &expected_arg)?
+                to_bigint_i64(ctx, env, &expected_arg)?
             } else {
-                crate::core::to_number_with_env(mc, env, &expected_arg)? as i64
+                crate::core::to_number_with_env(ctx, env, &expected_arg)? as i64
             };
 
             let timeout_ms_opt = if args.len() > 3 {
@@ -963,7 +963,7 @@ pub fn handle_atomics_method<'gc>(
                 match tval {
                     Value::Undefined => None,
                     _ => {
-                        let n = crate::core::to_number_with_env(mc, env, &tval)?;
+                        let n = crate::core::to_number_with_env(ctx, env, &tval)?;
                         if n.is_nan() { None } else { Some(n) }
                     }
                 }
@@ -989,9 +989,9 @@ pub fn handle_atomics_method<'gc>(
 
             // If values don't match, return synchronous result
             if current != expected {
-                let result_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &result_obj, "async", &Value::Boolean(false))?;
-                object_set_key_value(mc, &result_obj, "value", &Value::String(utf8_to_utf16("not-equal")))?;
+                let result_obj = new_js_object_data(ctx);
+                object_set_key_value(ctx, &result_obj, "async", &Value::Boolean(false))?;
+                object_set_key_value(ctx, &result_obj, "value", &Value::String(utf8_to_utf16("not-equal")))?;
                 return Ok(Value::Object(result_obj));
             }
 
@@ -999,19 +999,19 @@ pub fn handle_atomics_method<'gc>(
             if let Some(ms) = timeout_ms_opt
                 && ms <= 0.0
             {
-                let result_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &result_obj, "async", &Value::Boolean(false))?;
-                object_set_key_value(mc, &result_obj, "value", &Value::String(utf8_to_utf16("timed-out")))?;
+                let result_obj = new_js_object_data(ctx);
+                object_set_key_value(ctx, &result_obj, "async", &Value::Boolean(false))?;
+                object_set_key_value(ctx, &result_obj, "value", &Value::String(utf8_to_utf16("timed-out")))?;
                 return Ok(Value::Object(result_obj));
             }
 
             // Value matches — create a Promise that resolves when notified or times out.
             // Use the existing promise capability infrastructure.
-            let (promise_gc, resolve_fn, _reject_fn) = crate::js_promise::create_promise_capability(mc, env)?;
+            let (promise_gc, resolve_fn, _reject_fn) = crate::js_promise::create_promise_capability(ctx, env)?;
 
             // Wrap the raw JSPromise into a JS object so it's visible to user code.
             // Pass `env` so make_promise_js_object can look up Promise.prototype from the global environment.
-            let promise_obj = crate::js_promise::make_promise_js_object(mc, promise_gc, Some(*env))?;
+            let promise_obj = crate::js_promise::make_promise_js_object(ctx, promise_gc, Some(*env))?;
             let promise_val = Value::Object(promise_obj);
 
             // Register a waiter
@@ -1097,7 +1097,7 @@ pub fn handle_atomics_method<'gc>(
                     // Resolve the promise synchronously
                     let result_str = if was_ok { "ok" } else { "timed-out" };
                     let result_val = Value::String(utf8_to_utf16(result_str));
-                    let _ = crate::js_promise::call_function(mc, &resolve_fn, &[result_val], env);
+                    let _ = crate::js_promise::call_function(ctx, &resolve_fn, &[result_val], env);
                     // Remove from thread-local since we resolved it here
                     PENDING_ASYNC_WAITERS.with(|paw| {
                         let mut list = paw.borrow_mut();
@@ -1109,9 +1109,9 @@ pub fn handle_atomics_method<'gc>(
             }
 
             // Return { async: true, value: promise }
-            let result_obj = new_js_object_data(mc);
-            object_set_key_value(mc, &result_obj, "async", &Value::Boolean(true))?;
-            object_set_key_value(mc, &result_obj, "value", &promise_val)?;
+            let result_obj = new_js_object_data(ctx);
+            object_set_key_value(ctx, &result_obj, "async", &Value::Boolean(true))?;
+            object_set_key_value(ctx, &result_obj, "value", &promise_val)?;
 
             Ok(Value::Object(result_obj))
         }
@@ -1120,7 +1120,7 @@ pub fn handle_atomics_method<'gc>(
             // Must be Int32Array or BigInt64Array
             if !matches!(ta_obj.kind, TypedArrayKind::Int32 | TypedArrayKind::BigInt64) {
                 return Err(throw_type_error(
-                    mc,
+                    ctx,
                     env,
                     "Atomics.notify: TypedArray must be Int32Array or BigInt64Array",
                 ));
@@ -1128,13 +1128,13 @@ pub fn handle_atomics_method<'gc>(
             let idx_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
             let count_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
             // Spec order: ValidateAtomicAccess THEN coerce count
-            let idx = validate_atomic_access(mc, env, &ta_obj, &idx_arg)?;
+            let idx = validate_atomic_access(ctx, env, &ta_obj, &idx_arg)?;
             // Spec: IntegerOrInfinity(count), then max(intCount, 0)
             // Undefined → +∞ (notify all). Negative → clamp to 0.
             let count = match &count_arg {
                 Value::Undefined => usize::MAX,
                 _ => {
-                    let n = crate::core::to_number_with_env(mc, env, &count_arg)?;
+                    let n = crate::core::to_number_with_env(ctx, env, &count_arg)?;
                     if n.is_nan() || n == 0.0 {
                         0usize
                     } else if n.is_infinite() && n > 0.0 {
@@ -1176,13 +1176,13 @@ pub fn handle_atomics_method<'gc>(
             }
             Ok(Value::Number(awakened as f64))
         }
-        _ => Err(throw_type_error(mc, env, &format!("Atomics.{} is not a function", method))),
+        _ => Err(throw_type_error(ctx, env, &format!("Atomics.{} is not a function", method))),
     }
 }
 
 /// Create a SharedArrayBuffer constructor object
-pub fn make_sharedarraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
+pub fn make_sharedarraybuffer_constructor<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
 
     // Set [[Prototype]] to Function.prototype
     if let Some(func_ctor_val) = object_get_key_value(env, "Function")
@@ -1190,28 +1190,28 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObje
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        obj.borrow_mut(mc).prototype = Some(*func_proto);
+        obj.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
-    let proto = make_sharedarraybuffer_prototype(mc, env, &obj)?;
-    object_set_key_value(mc, &obj, "prototype", &Value::Object(proto))?;
-    obj.borrow_mut(mc).set_non_writable("prototype");
-    obj.borrow_mut(mc).set_non_enumerable("prototype");
-    obj.borrow_mut(mc).set_non_configurable("prototype");
+    let proto = make_sharedarraybuffer_prototype(ctx, env, &obj)?;
+    object_set_key_value(ctx, &obj, "prototype", &Value::Object(proto))?;
+    obj.borrow_mut(ctx).set_non_writable("prototype");
+    obj.borrow_mut(ctx).set_non_enumerable("prototype");
+    obj.borrow_mut(ctx).set_non_configurable("prototype");
 
-    object_set_key_value(mc, &obj, "name", &Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
-    obj.borrow_mut(mc).set_non_writable("name");
-    obj.borrow_mut(mc).set_non_enumerable("name");
-    object_set_key_value(mc, &obj, "length", &Value::Number(1.0))?;
-    obj.borrow_mut(mc).set_non_writable("length");
-    obj.borrow_mut(mc).set_non_enumerable("length");
+    object_set_key_value(ctx, &obj, "name", &Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
+    obj.borrow_mut(ctx).set_non_writable("name");
+    obj.borrow_mut(ctx).set_non_enumerable("name");
+    object_set_key_value(ctx, &obj, "length", &Value::Number(1.0))?;
+    obj.borrow_mut(ctx).set_non_writable("length");
+    obj.borrow_mut(ctx).set_non_enumerable("length");
 
     // Mark as SharedArrayBuffer constructor
-    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
-    slot_set(mc, &obj, InternalSlot::SharedArrayBuffer, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::ArrayBuffer, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::SharedArrayBuffer, &Value::Boolean(true));
     slot_set(
-        mc,
+        ctx,
         &obj,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("SharedArrayBuffer")),
@@ -1223,13 +1223,13 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObje
         && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
         && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
     {
-        let getter_fn = new_js_object_data(mc);
+        let getter_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            getter_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
         let getter_closure = ClosureData {
             env: Some(*env),
@@ -1238,19 +1238,19 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObje
             ..ClosureData::default()
         };
         getter_fn
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, getter_closure)))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Closure(Gc::new(ctx, getter_closure)))));
         let gname_desc =
-            crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "name", &gname_desc)?;
-        let glen_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "length", &glen_desc)?;
+            crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "name", &gname_desc)?;
+        let glen_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "length", &glen_desc)?;
 
-        let species_desc_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &species_desc_obj, "get", &Value::Object(getter_fn))?;
-        object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
-        object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
-        crate::js_object::define_property_internal(mc, &obj, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
+        let species_desc_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &species_desc_obj, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(ctx, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(ctx, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(ctx, &obj, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
     }
 
     Ok(obj)
@@ -1258,14 +1258,14 @@ pub fn make_sharedarraybuffer_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObje
 
 /// Create the ArrayBuffer prototype
 pub fn make_arraybuffer_prototype<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let proto = new_js_object_data(mc);
+    let proto = new_js_object_data(ctx);
 
-    object_set_key_value(mc, &proto, "constructor", &Value::Object(*ctor))?;
-    proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &proto, "constructor", &Value::Object(*ctor))?;
+    proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // byteLength is an accessor property
     let byte_len_getter = Value::Function("get byteLength".to_string());
@@ -1274,43 +1274,43 @@ pub fn make_arraybuffer_prototype<'gc>(
         getter: Some(Box::new(byte_len_getter)),
         setter: None,
     };
-    object_set_key_value(mc, &proto, "byteLength", &byte_len_prop)?;
-    proto.borrow_mut(mc).set_non_enumerable("byteLength");
+    object_set_key_value(ctx, &proto, "byteLength", &byte_len_prop)?;
+    proto.borrow_mut(ctx).set_non_enumerable("byteLength");
 
     let max_byte_len_prop = Value::Property {
         value: None,
         getter: Some(Box::new(Value::Function("get maxByteLength".to_string()))),
         setter: None,
     };
-    object_set_key_value(mc, &proto, "maxByteLength", &max_byte_len_prop)?;
-    proto.borrow_mut(mc).set_non_enumerable("maxByteLength");
+    object_set_key_value(ctx, &proto, "maxByteLength", &max_byte_len_prop)?;
+    proto.borrow_mut(ctx).set_non_enumerable("maxByteLength");
 
     let resizable_prop = Value::Property {
         value: None,
         getter: Some(Box::new(Value::Function("get resizable".to_string()))),
         setter: None,
     };
-    object_set_key_value(mc, &proto, "resizable", &resizable_prop)?;
-    proto.borrow_mut(mc).set_non_enumerable("resizable");
+    object_set_key_value(ctx, &proto, "resizable", &resizable_prop)?;
+    proto.borrow_mut(ctx).set_non_enumerable("resizable");
 
-    object_set_key_value(mc, &proto, "slice", &Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
-    proto.borrow_mut(mc).set_non_enumerable("slice");
-    object_set_key_value(mc, &proto, "resize", &Value::Function("ArrayBuffer.prototype.resize".to_string()))?;
-    proto.borrow_mut(mc).set_non_enumerable("resize");
+    object_set_key_value(ctx, &proto, "slice", &Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
+    proto.borrow_mut(ctx).set_non_enumerable("slice");
+    object_set_key_value(ctx, &proto, "resize", &Value::Function("ArrayBuffer.prototype.resize".to_string()))?;
+    proto.borrow_mut(ctx).set_non_enumerable("resize");
     object_set_key_value(
-        mc,
+        ctx,
         &proto,
         "transfer",
         &Value::Function("ArrayBuffer.prototype.transfer".to_string()),
     )?;
-    proto.borrow_mut(mc).set_non_enumerable("transfer");
+    proto.borrow_mut(ctx).set_non_enumerable("transfer");
     object_set_key_value(
-        mc,
+        ctx,
         &proto,
         "transferToFixedLength",
         &Value::Function("ArrayBuffer.prototype.transferToFixedLength".to_string()),
     )?;
-    proto.borrow_mut(mc).set_non_enumerable("transferToFixedLength");
+    proto.borrow_mut(ctx).set_non_enumerable("transferToFixedLength");
 
     // detached — accessor (getter only)
     let detached_prop = Value::Property {
@@ -1318,8 +1318,8 @@ pub fn make_arraybuffer_prototype<'gc>(
         getter: Some(Box::new(Value::Function("get detached".to_string()))),
         setter: None,
     };
-    object_set_key_value(mc, &proto, "detached", &detached_prop)?;
-    proto.borrow_mut(mc).set_non_enumerable("detached");
+    object_set_key_value(ctx, &proto, "detached", &detached_prop)?;
+    proto.borrow_mut(ctx).set_non_enumerable("detached");
 
     // immutable — accessor (getter only)
     let immutable_prop = Value::Property {
@@ -1327,34 +1327,34 @@ pub fn make_arraybuffer_prototype<'gc>(
         getter: Some(Box::new(Value::Function("get immutable".to_string()))),
         setter: None,
     };
-    object_set_key_value(mc, &proto, "immutable", &immutable_prop)?;
-    proto.borrow_mut(mc).set_non_enumerable("immutable");
+    object_set_key_value(ctx, &proto, "immutable", &immutable_prop)?;
+    proto.borrow_mut(ctx).set_non_enumerable("immutable");
 
     // transferToImmutable
     object_set_key_value(
-        mc,
+        ctx,
         &proto,
         "transferToImmutable",
         &Value::Function("ArrayBuffer.prototype.transferToImmutable".to_string()),
     )?;
-    proto.borrow_mut(mc).set_non_enumerable("transferToImmutable");
+    proto.borrow_mut(ctx).set_non_enumerable("transferToImmutable");
 
     // sliceToImmutable
     object_set_key_value(
-        mc,
+        ctx,
         &proto,
         "sliceToImmutable",
         &Value::Function("ArrayBuffer.prototype.sliceToImmutable".to_string()),
     )?;
-    proto.borrow_mut(mc).set_non_enumerable("sliceToImmutable");
+    proto.borrow_mut(ctx).set_non_enumerable("sliceToImmutable");
 
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
         && let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("ArrayBuffer")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*tag_sym), &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("ArrayBuffer")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, PropertyKey::Symbol(*tag_sym), &desc)?;
     }
 
     Ok(proto)
@@ -1362,11 +1362,11 @@ pub fn make_arraybuffer_prototype<'gc>(
 
 /// Create the SharedArrayBuffer prototype
 pub fn make_sharedarraybuffer_prototype<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let proto = new_js_object_data(mc);
+    let proto = new_js_object_data(ctx);
 
     // Set [[Prototype]] to Object.prototype
     if let Some(obj_ctor_val) = object_get_key_value(env, "Object")
@@ -1374,135 +1374,135 @@ pub fn make_sharedarraybuffer_prototype<'gc>(
         && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
     {
-        proto.borrow_mut(mc).prototype = Some(*obj_proto);
+        proto.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
     // constructor — actual constructor object reference
-    object_set_key_value(mc, &proto, "constructor", &Value::Object(*ctor))?;
-    proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &proto, "constructor", &Value::Object(*ctor))?;
+    proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // byteLength — accessor property with proper function-object getter
     {
-        let getter_fn = new_js_object_data(mc);
+        let getter_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*fp_val.borrow()
         {
-            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            getter_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        getter_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        getter_fn.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("SharedArrayBuffer.prototype.byteLength".to_string()),
         )));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get byteLength")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("get byteLength")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "length", &len_desc)?;
 
-        let bl_desc = new_js_object_data(mc);
-        object_set_key_value(mc, &bl_desc, "get", &Value::Object(getter_fn))?;
-        object_set_key_value(mc, &bl_desc, "enumerable", &Value::Boolean(false))?;
-        object_set_key_value(mc, &bl_desc, "configurable", &Value::Boolean(true))?;
-        crate::js_object::define_property_internal(mc, &proto, "byteLength", &bl_desc)?;
+        let bl_desc = new_js_object_data(ctx);
+        object_set_key_value(ctx, &bl_desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(ctx, &bl_desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(ctx, &bl_desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(ctx, &proto, "byteLength", &bl_desc)?;
     }
 
     // slice — method function object
     {
-        let slice_fn = new_js_object_data(mc);
+        let slice_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*fp_val.borrow()
         {
-            slice_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            slice_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        slice_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        slice_fn.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("SharedArrayBuffer.prototype.slice".to_string()),
         )));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("slice")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &slice_fn, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &slice_fn, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("slice")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &slice_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(2.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &slice_fn, "length", &len_desc)?;
 
-        let sl_desc = crate::core::create_descriptor_object(mc, &Value::Object(slice_fn), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, "slice", &sl_desc)?;
+        let sl_desc = crate::core::create_descriptor_object(ctx, &Value::Object(slice_fn), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, "slice", &sl_desc)?;
     }
 
     // grow — method function object
     {
-        let grow_fn = new_js_object_data(mc);
+        let grow_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*fp_val.borrow()
         {
-            grow_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            grow_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        grow_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        grow_fn.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("SharedArrayBuffer.prototype.grow".to_string()),
         )));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("grow")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &grow_fn, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &grow_fn, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("grow")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &grow_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &grow_fn, "length", &len_desc)?;
 
-        let gr_desc = crate::core::create_descriptor_object(mc, &Value::Object(grow_fn), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, "grow", &gr_desc)?;
+        let gr_desc = crate::core::create_descriptor_object(ctx, &Value::Object(grow_fn), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, "grow", &gr_desc)?;
     }
 
     // maxByteLength — accessor property with getter
     {
-        let getter_fn = new_js_object_data(mc);
+        let getter_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*fp_val.borrow()
         {
-            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            getter_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        getter_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        getter_fn.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("SharedArrayBuffer.prototype.maxByteLength".to_string()),
         )));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get maxByteLength")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("get maxByteLength")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "length", &len_desc)?;
 
-        let mbl_desc = new_js_object_data(mc);
-        object_set_key_value(mc, &mbl_desc, "get", &Value::Object(getter_fn))?;
-        object_set_key_value(mc, &mbl_desc, "enumerable", &Value::Boolean(false))?;
-        object_set_key_value(mc, &mbl_desc, "configurable", &Value::Boolean(true))?;
-        crate::js_object::define_property_internal(mc, &proto, "maxByteLength", &mbl_desc)?;
+        let mbl_desc = new_js_object_data(ctx);
+        object_set_key_value(ctx, &mbl_desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(ctx, &mbl_desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(ctx, &mbl_desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(ctx, &proto, "maxByteLength", &mbl_desc)?;
     }
 
     // growable — accessor property with getter
     {
-        let getter_fn = new_js_object_data(mc);
+        let getter_fn = new_js_object_data(ctx);
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*fp_val.borrow()
         {
-            getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+            getter_fn.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        getter_fn.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        getter_fn.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("SharedArrayBuffer.prototype.growable".to_string()),
         )));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get growable")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &getter_fn, "length", &len_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("get growable")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &getter_fn, "length", &len_desc)?;
 
-        let gr_desc = new_js_object_data(mc);
-        object_set_key_value(mc, &gr_desc, "get", &Value::Object(getter_fn))?;
-        object_set_key_value(mc, &gr_desc, "enumerable", &Value::Boolean(false))?;
-        object_set_key_value(mc, &gr_desc, "configurable", &Value::Boolean(true))?;
-        crate::js_object::define_property_internal(mc, &proto, "growable", &gr_desc)?;
+        let gr_desc = new_js_object_data(ctx);
+        object_set_key_value(ctx, &gr_desc, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(ctx, &gr_desc, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(ctx, &gr_desc, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(ctx, &proto, "growable", &gr_desc)?;
     }
 
     // @@toStringTag = "SharedArrayBuffer"
@@ -1511,16 +1511,16 @@ pub fn make_sharedarraybuffer_prototype<'gc>(
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("SharedArrayBuffer")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, PropertyKey::Symbol(*tag_sym), &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("SharedArrayBuffer")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, PropertyKey::Symbol(*tag_sym), &desc)?;
     }
 
     Ok(proto)
 }
 
 /// Create a DataView constructor object
-pub fn make_dataview_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
+pub fn make_dataview_constructor<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
 
     // Set [[Prototype]] to Function.prototype
     if let Some(func_ctor_val) = object_get_key_value(env, "Function")
@@ -1528,36 +1528,36 @@ pub fn make_dataview_constructor<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*proto_val.borrow()
     {
-        obj.borrow_mut(mc).prototype = Some(*func_proto);
+        obj.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
-    let proto = make_dataview_prototype(mc, env, &obj)?;
-    object_set_key_value(mc, &obj, "prototype", &Value::Object(proto))?;
-    obj.borrow_mut(mc).set_non_writable("prototype");
-    obj.borrow_mut(mc).set_non_enumerable("prototype");
-    obj.borrow_mut(mc).set_non_configurable("prototype");
+    let proto = make_dataview_prototype(ctx, env, &obj)?;
+    object_set_key_value(ctx, &obj, "prototype", &Value::Object(proto))?;
+    obj.borrow_mut(ctx).set_non_writable("prototype");
+    obj.borrow_mut(ctx).set_non_enumerable("prototype");
+    obj.borrow_mut(ctx).set_non_configurable("prototype");
 
-    let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("DataView")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &obj, "name", &name_desc)?;
+    let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("DataView")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &obj, "name", &name_desc)?;
 
-    let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &obj, "length", &len_desc)?;
+    let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &obj, "length", &len_desc)?;
 
     // Mark as DataView constructor
-    slot_set(mc, &obj, InternalSlot::DataView, &Value::Boolean(true));
-    slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("DataView")));
-    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::DataView, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("DataView")));
+    slot_set(ctx, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
 
     Ok(obj)
 }
 
 /// Create the DataView prototype
 pub fn make_dataview_prototype<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let proto = new_js_object_data(mc);
+    let proto = new_js_object_data(ctx);
 
     // Set [[Prototype]] to Object.prototype
     if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -1565,11 +1565,11 @@ pub fn make_dataview_prototype<'gc>(
         && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
     {
-        proto.borrow_mut(mc).prototype = Some(*obj_proto);
+        proto.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
-    object_set_key_value(mc, &proto, "constructor", &Value::Object(*ctor))?;
-    proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &proto, "constructor", &Value::Object(*ctor))?;
+    proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Get Function.prototype for method function objects
     let func_proto_opt: Option<JSObjectDataPtr<'gc>> = if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
@@ -1583,19 +1583,19 @@ pub fn make_dataview_prototype<'gc>(
     };
 
     // Helper: create a getter function object with proper name and length
-    let make_getter = |mc: &GcContext<'gc>, prop_name: &str, dispatch_name: &str| -> Result<JSObjectDataPtr<'gc>, JSError> {
-        let fn_obj = new_js_object_data(mc);
+    let make_getter = |ctx: &GcContext<'gc>, prop_name: &str, dispatch_name: &str| -> Result<JSObjectDataPtr<'gc>, JSError> {
+        let fn_obj = new_js_object_data(ctx);
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function(dispatch_name.to_string()))));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
         let name_str = format!("get {}", prop_name);
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(&name_str)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(&name_str)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &desc_len)?;
         Ok(fn_obj)
     };
 
@@ -1605,9 +1605,9 @@ pub fn make_dataview_prototype<'gc>(
         ("byteLength", "DataView.prototype.byteLength"),
         ("byteOffset", "DataView.prototype.byteOffset"),
     ] {
-        let getter_obj = make_getter(mc, prop_name, dispatch_name)?;
+        let getter_obj = make_getter(ctx, prop_name, dispatch_name)?;
         object_set_key_value(
-            mc,
+            ctx,
             &proto,
             prop_name,
             &Value::Property {
@@ -1616,7 +1616,7 @@ pub fn make_dataview_prototype<'gc>(
                 setter: None,
             },
         )?;
-        proto.borrow_mut(mc).set_non_enumerable(prop_name);
+        proto.borrow_mut(ctx).set_non_enumerable(prop_name);
     }
 
     // DataView getter/setter methods — all non-enumerable per spec
@@ -1647,21 +1647,21 @@ pub fn make_dataview_prototype<'gc>(
     ];
 
     for &(method_name, length) in methods {
-        let fn_obj = new_js_object_data(mc);
+        let fn_obj = new_js_object_data(ctx);
         let dispatch_name = format!("DataView.prototype.{method_name}");
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function(dispatch_name))));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method_name)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(method_name)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(length as f64), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &desc_len)?;
         // writable: true, enumerable: false, configurable: true
-        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, method_name, &desc_method)?;
+        let desc_method = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, method_name, &desc_method)?;
     }
 
     // Symbol.toStringTag = "DataView" (non-writable, non-enumerable, configurable)
@@ -1670,8 +1670,8 @@ pub fn make_dataview_prototype<'gc>(
         && let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("DataView")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &proto, crate::core::PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("DataView")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &proto, crate::core::PropertyKey::Symbol(*tag_sym), &tag_desc)?;
     }
 
     Ok(proto)
@@ -1682,10 +1682,10 @@ pub fn make_dataview_prototype<'gc>(
 /// Per spec, %TypedArray% is not exposed as a global but is the [[Prototype]] of all
 /// concrete TypedArray constructors (Int8Array, Uint8Array, etc).
 pub fn make_typedarray_intrinsic<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, JSObjectDataPtr<'gc>), JSError> {
-    let ta_ctor = new_js_object_data(mc);
+    let ta_ctor = new_js_object_data(ctx);
 
     // Get Function.prototype once for reuse
     let func_proto_opt: Option<JSObjectDataPtr<'gc>> = if let Some(func_ctor_val) = object_get_key_value(env, "Function")
@@ -1700,21 +1700,21 @@ pub fn make_typedarray_intrinsic<'gc>(
 
     // %TypedArray%.[[Prototype]] = Function.prototype
     if let Some(fp) = func_proto_opt {
-        ta_ctor.borrow_mut(mc).prototype = Some(fp);
+        ta_ctor.borrow_mut(ctx).prototype = Some(fp);
     }
 
     // name and length
-    let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("TypedArray")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &ta_ctor, "name", &name_desc)?;
-    let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &ta_ctor, "length", &len_desc)?;
+    let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("TypedArray")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &ta_ctor, "name", &name_desc)?;
+    let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &ta_ctor, "length", &len_desc)?;
 
     // Mark as constructor (abstract — cannot be called directly without new_target)
-    slot_set(mc, &ta_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("TypedArray")));
-    slot_set(mc, &ta_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &ta_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("TypedArray")));
+    slot_set(ctx, &ta_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
 
     // --- %TypedArray%.prototype ---
-    let ta_proto = new_js_object_data(mc);
+    let ta_proto = new_js_object_data(ctx);
 
     // %TypedArray%.prototype.[[Prototype]] = Object.prototype
     if let Some(obj_val) = crate::core::env_get(env, "Object")
@@ -1722,26 +1722,26 @@ pub fn make_typedarray_intrinsic<'gc>(
         && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*proto_val.borrow()
     {
-        ta_proto.borrow_mut(mc).prototype = Some(*obj_proto);
+        ta_proto.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
     // constructor property
-    object_set_key_value(mc, &ta_proto, "constructor", &Value::Object(ta_ctor))?;
-    ta_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &ta_proto, "constructor", &Value::Object(ta_ctor))?;
+    ta_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Helper: create a function object with closure-based dispatch
-    let make_fn = |mc: &GcContext<'gc>, display_name: &str, dispatch_name: &str, arity: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
-        let fn_obj = new_js_object_data(mc);
+    let make_fn = |ctx: &GcContext<'gc>, display_name: &str, dispatch_name: &str, arity: f64| -> Result<JSObjectDataPtr<'gc>, JSError> {
+        let fn_obj = new_js_object_data(ctx);
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function(dispatch_name.to_string()))));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
-        let name_d = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(display_name)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &name_d)?;
-        let len_d = crate::core::create_descriptor_object(mc, &Value::Number(arity), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &len_d)?;
+        let name_d = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(display_name)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &name_d)?;
+        let len_d = crate::core::create_descriptor_object(ctx, &Value::Number(arity), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &len_d)?;
         Ok(fn_obj)
     };
 
@@ -1750,10 +1750,10 @@ pub fn make_typedarray_intrinsic<'gc>(
     for acc_name in &accessor_names {
         let fn_name = format!("get {}", acc_name);
         let dispatch_name = format!("TypedArray.prototype.{}", acc_name);
-        let getter_fn = make_fn(mc, &fn_name, &dispatch_name, 0.0)?;
+        let getter_fn = make_fn(ctx, &fn_name, &dispatch_name, 0.0)?;
 
         object_set_key_value(
-            mc,
+            ctx,
             &ta_proto,
             *acc_name,
             &Value::Property {
@@ -1762,7 +1762,7 @@ pub fn make_typedarray_intrinsic<'gc>(
                 setter: None,
             },
         )?;
-        ta_proto.borrow_mut(mc).set_non_enumerable(*acc_name);
+        ta_proto.borrow_mut(ctx).set_non_enumerable(*acc_name);
     }
 
     // --- Shared methods ---
@@ -1802,9 +1802,9 @@ pub fn make_typedarray_intrinsic<'gc>(
     ];
     for (method_name, arity) in methods {
         let dispatch_name = format!("TypedArray.prototype.{}", method_name);
-        let method_fn = make_fn(mc, method_name, &dispatch_name, *arity as f64)?;
-        let desc = crate::core::create_descriptor_object(mc, &Value::Object(method_fn), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &ta_proto, *method_name, &desc)?;
+        let method_fn = make_fn(ctx, method_name, &dispatch_name, *arity as f64)?;
+        let desc = crate::core::create_descriptor_object(ctx, &Value::Object(method_fn), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &ta_proto, *method_name, &desc)?;
     }
 
     // toString: share the SAME function object as Array.prototype.toString
@@ -1819,8 +1819,8 @@ pub fn make_typedarray_intrinsic<'gc>(
             Value::Property { value: Some(inner), .. } => inner.borrow().clone(),
             other => other.clone(),
         };
-        let desc = crate::core::create_descriptor_object(mc, &ts_fn, true, false, true)?;
-        crate::js_object::define_property_internal(mc, &ta_proto, "toString", &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, &ts_fn, true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &ta_proto, "toString", &desc)?;
     }
 
     // Symbol.iterator = values (same function object, writable, non-enumerable, configurable)
@@ -1835,8 +1835,8 @@ pub fn make_typedarray_intrinsic<'gc>(
                 Value::Property { value: Some(inner), .. } => inner.borrow().clone(),
                 other => other.clone(),
             };
-            let desc = crate::core::create_descriptor_object(mc, &values_fn, true, false, true)?;
-            crate::js_object::define_property_internal(mc, &ta_proto, PropertyKey::Symbol(*iter_sym), &desc)?;
+            let desc = crate::core::create_descriptor_object(ctx, &values_fn, true, false, true)?;
+            crate::js_object::define_property_internal(ctx, &ta_proto, PropertyKey::Symbol(*iter_sym), &desc)?;
         }
     }
 
@@ -1846,30 +1846,30 @@ pub fn make_typedarray_intrinsic<'gc>(
         && let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let getter_fn = make_fn(mc, "get [Symbol.toStringTag]", "TypedArray.prototype.toStringTag", 0.0)?;
+        let getter_fn = make_fn(ctx, "get [Symbol.toStringTag]", "TypedArray.prototype.toStringTag", 0.0)?;
 
         // Create accessor descriptor via define_property_internal
-        let desc_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &desc_obj, "get", &Value::Object(getter_fn))?;
-        object_set_key_value(mc, &desc_obj, "set", &Value::Undefined)?;
-        object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(false))?;
-        object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
-        crate::js_object::define_property_internal(mc, &ta_proto, PropertyKey::Symbol(*tag_sym), &desc_obj)?;
+        let desc_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &desc_obj, "get", &Value::Object(getter_fn))?;
+        object_set_key_value(ctx, &desc_obj, "set", &Value::Undefined)?;
+        object_set_key_value(ctx, &desc_obj, "enumerable", &Value::Boolean(false))?;
+        object_set_key_value(ctx, &desc_obj, "configurable", &Value::Boolean(true))?;
+        crate::js_object::define_property_internal(ctx, &ta_proto, PropertyKey::Symbol(*tag_sym), &desc_obj)?;
     }
 
     // Wire prototype property on constructor
-    object_set_key_value(mc, &ta_ctor, "prototype", &Value::Object(ta_proto))?;
-    ta_ctor.borrow_mut(mc).set_non_writable("prototype");
-    ta_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    ta_ctor.borrow_mut(mc).set_non_configurable("prototype");
+    object_set_key_value(ctx, &ta_ctor, "prototype", &Value::Object(ta_proto))?;
+    ta_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    ta_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    ta_ctor.borrow_mut(ctx).set_non_configurable("prototype");
 
     // --- Static methods on %TypedArray%: from, of ---
     let statics: &[(&str, i32)] = &[("from", 1), ("of", 0)];
     for (sname, arity) in statics {
         let dispatch_name = format!("TypedArray.{}", sname);
-        let sfn = make_fn(mc, sname, &dispatch_name, *arity as f64)?;
-        let desc = crate::core::create_descriptor_object(mc, &Value::Object(sfn), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &ta_ctor, *sname, &desc)?;
+        let sfn = make_fn(ctx, sname, &dispatch_name, *arity as f64)?;
+        let desc = crate::core::create_descriptor_object(ctx, &Value::Object(sfn), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &ta_ctor, *sname, &desc)?;
     }
 
     // Symbol.species accessor — get [Symbol.species]() { return this; }
@@ -1878,10 +1878,10 @@ pub fn make_typedarray_intrinsic<'gc>(
         && let Some(species_sym_val) = object_get_key_value(sym_ctor, "species")
         && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
     {
-        let getter_fn = make_fn(mc, "get [Symbol.species]", "TypedArray.species", 0.0)?;
+        let getter_fn = make_fn(ctx, "get [Symbol.species]", "TypedArray.species", 0.0)?;
 
         object_set_key_value(
-            mc,
+            ctx,
             &ta_ctor,
             PropertyKey::Symbol(*species_sym),
             &Value::Property {
@@ -1896,7 +1896,7 @@ pub fn make_typedarray_intrinsic<'gc>(
 }
 
 pub fn make_typedarray_constructors<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ta_intrinsic: &JSObjectDataPtr<'gc>,
     ta_proto_intrinsic: &JSObjectDataPtr<'gc>,
@@ -1919,7 +1919,7 @@ pub fn make_typedarray_constructors<'gc>(
     let mut constructors = Vec::new();
 
     for (name, kind) in kinds {
-        let constructor = make_typedarray_constructor(mc, env, name, kind, ta_intrinsic, ta_proto_intrinsic)?;
+        let constructor = make_typedarray_constructor(ctx, env, name, kind, ta_intrinsic, ta_proto_intrinsic)?;
         constructors.push((name.to_string(), constructor));
     }
 
@@ -1944,7 +1944,7 @@ fn typedarray_kind_to_number(kind: &TypedArrayKind) -> i32 {
 }
 
 fn make_typedarray_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     name: &str,
     kind: TypedArrayKind,
@@ -1953,25 +1953,25 @@ fn make_typedarray_constructor<'gc>(
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let kind_value = typedarray_kind_to_number(&kind);
 
-    let obj = new_js_object_data(mc);
+    let obj = new_js_object_data(ctx);
 
     // Int8Array.[[Prototype]] = %TypedArray%
-    obj.borrow_mut(mc).prototype = Some(*ta_intrinsic);
+    obj.borrow_mut(ctx).prototype = Some(*ta_intrinsic);
 
-    let proto = make_typedarray_prototype(mc, env, name, kind.clone(), ta_proto_intrinsic)?;
-    object_set_key_value(mc, &obj, "prototype", &Value::Object(proto))?;
-    obj.borrow_mut(mc).set_non_writable("prototype");
-    obj.borrow_mut(mc).set_non_enumerable("prototype");
-    obj.borrow_mut(mc).set_non_configurable("prototype");
+    let proto = make_typedarray_prototype(ctx, env, name, kind.clone(), ta_proto_intrinsic)?;
+    object_set_key_value(ctx, &obj, "prototype", &Value::Object(proto))?;
+    obj.borrow_mut(ctx).set_non_writable("prototype");
+    obj.borrow_mut(ctx).set_non_enumerable("prototype");
+    obj.borrow_mut(ctx).set_non_configurable("prototype");
 
-    let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(name)), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &obj, "name", &name_desc)?;
-    let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(3.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &obj, "length", &len_desc)?;
+    let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(name)), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &obj, "name", &name_desc)?;
+    let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(3.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &obj, "length", &len_desc)?;
 
-    slot_set(mc, &obj, InternalSlot::Kind, &Value::Number(kind_value as f64));
-    slot_set(mc, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("TypedArray")));
-    slot_set(mc, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &obj, InternalSlot::Kind, &Value::Number(kind_value as f64));
+    slot_set(ctx, &obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("TypedArray")));
+    slot_set(ctx, &obj, InternalSlot::IsConstructor, &Value::Boolean(true));
 
     // BYTES_PER_ELEMENT on constructor (non-writable, non-enumerable, non-configurable)
     let bytes_per_element = match kind {
@@ -1981,36 +1981,36 @@ fn make_typedarray_constructor<'gc>(
         TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
     } as f64;
 
-    object_set_key_value(mc, &obj, "BYTES_PER_ELEMENT", &Value::Number(bytes_per_element))?;
-    obj.borrow_mut(mc).set_non_enumerable("BYTES_PER_ELEMENT");
-    obj.borrow_mut(mc).set_non_writable("BYTES_PER_ELEMENT");
-    obj.borrow_mut(mc).set_non_configurable("BYTES_PER_ELEMENT");
+    object_set_key_value(ctx, &obj, "BYTES_PER_ELEMENT", &Value::Number(bytes_per_element))?;
+    obj.borrow_mut(ctx).set_non_enumerable("BYTES_PER_ELEMENT");
+    obj.borrow_mut(ctx).set_non_writable("BYTES_PER_ELEMENT");
+    obj.borrow_mut(ctx).set_non_configurable("BYTES_PER_ELEMENT");
 
     // BYTES_PER_ELEMENT on prototype too
     if let Some(proto_val) = object_get_key_value(&obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        object_set_key_value(mc, proto_obj, "BYTES_PER_ELEMENT", &Value::Number(bytes_per_element))?;
-        proto_obj.borrow_mut(mc).set_non_enumerable("BYTES_PER_ELEMENT");
-        proto_obj.borrow_mut(mc).set_non_writable("BYTES_PER_ELEMENT");
-        proto_obj.borrow_mut(mc).set_non_configurable("BYTES_PER_ELEMENT");
+        object_set_key_value(ctx, proto_obj, "BYTES_PER_ELEMENT", &Value::Number(bytes_per_element))?;
+        proto_obj.borrow_mut(ctx).set_non_enumerable("BYTES_PER_ELEMENT");
+        proto_obj.borrow_mut(ctx).set_non_writable("BYTES_PER_ELEMENT");
+        proto_obj.borrow_mut(ctx).set_non_configurable("BYTES_PER_ELEMENT");
     }
 
     Ok(obj)
 }
 
 fn make_typedarray_prototype<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     _env: &JSObjectDataPtr<'gc>,
     ctor_name: &str,
     kind: TypedArrayKind,
     ta_proto_intrinsic: &JSObjectDataPtr<'gc>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let proto = new_js_object_data(mc);
+    let proto = new_js_object_data(ctx);
 
     // Int8Array.prototype.[[Prototype]] = %TypedArray%.prototype
-    proto.borrow_mut(mc).prototype = Some(*ta_proto_intrinsic);
-    slot_set(mc, &proto, InternalSlot::Proto, &Value::Object(*ta_proto_intrinsic));
+    proto.borrow_mut(ctx).prototype = Some(*ta_proto_intrinsic);
+    slot_set(ctx, &proto, InternalSlot::Proto, &Value::Object(*ta_proto_intrinsic));
 
     // Store the kind for dispatch
     let kind_value = match kind {
@@ -2027,26 +2027,26 @@ fn make_typedarray_prototype<'gc>(
         TypedArrayKind::BigInt64 => 10,
         TypedArrayKind::BigUint64 => 11,
     };
-    slot_set(mc, &proto, InternalSlot::Kind, &Value::Number(kind_value as f64));
+    slot_set(ctx, &proto, InternalSlot::Kind, &Value::Number(kind_value as f64));
 
     // constructor property pointing to the specific TA constructor (set later via caller).
     // Use a placeholder Value::Function that will resolve correctly.
-    object_set_key_value(mc, &proto, "constructor", &Value::Function(ctor_name.to_string()))?;
-    proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &proto, "constructor", &Value::Function(ctor_name.to_string()))?;
+    proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     Ok(proto)
 }
 
 /// Handle ArrayBuffer constructor calls
 pub fn handle_arraybuffer_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let to_index = |v: &Value<'gc>| -> Result<usize, EvalError<'gc>> {
         let prim = if let Value::Object(_) = v {
-            crate::core::to_primitive(mc, v, "number", env)?
+            crate::core::to_primitive(ctx, v, "number", env)?
         } else {
             v.clone()
         };
@@ -2091,7 +2091,7 @@ pub fn handle_arraybuffer_constructor<'gc>(
         let opts = args[1].clone();
         if let Value::Object(obj) = opts {
             // Look for maxByteLength property
-            let max_val = crate::core::get_property_with_accessors(mc, env, &obj, "maxByteLength")?;
+            let max_val = crate::core::get_property_with_accessors(ctx, env, &obj, "maxByteLength")?;
             if !matches!(max_val, Value::Undefined) {
                 let max = to_index(&max_val)?;
                 if max < length {
@@ -2106,11 +2106,11 @@ pub fn handle_arraybuffer_constructor<'gc>(
     }
 
     // Create the ArrayBuffer object first (AllocateArrayBuffer ordering)
-    let obj = new_js_object_data(mc);
+    let obj = new_js_object_data(ctx);
 
     // GetPrototypeFromConstructor for ArrayBuffer
     let proto = if let Some(Value::Object(nt_obj)) = new_target
-        && let Some(p) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "ArrayBuffer")?
+        && let Some(p) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "ArrayBuffer")?
     {
         p
     } else if let Some(ctor_val) = object_get_key_value(env, "ArrayBuffer")
@@ -2120,10 +2120,10 @@ pub fn handle_arraybuffer_constructor<'gc>(
     {
         *p_obj
     } else {
-        let fallback_ctor = new_js_object_data(mc);
-        make_arraybuffer_prototype(mc, env, &fallback_ctor)?
+        let fallback_ctor = new_js_object_data(ctx);
+        make_arraybuffer_prototype(ctx, env, &fallback_ctor)?
     };
-    obj.borrow_mut(mc).prototype = Some(proto);
+    obj.borrow_mut(ctx).prototype = Some(proto);
 
     // Host guard against unsupported large allocation (after object/prototype creation)
     if length > (u32::MAX as usize) {
@@ -2131,14 +2131,14 @@ pub fn handle_arraybuffer_constructor<'gc>(
     }
 
     let buffer = new_gc_cell_ptr(
-        mc,
+        ctx,
         JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
             max_byte_length,
             ..JSArrayBuffer::default()
         },
     );
-    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
+    slot_set(ctx, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
 
     Ok(Value::Object(obj))
 }
@@ -2162,7 +2162,7 @@ pub fn handle_arraybuffer_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
 
 /// Handle SharedArrayBuffer constructor calls (creates a shared buffer)
 pub fn handle_sharedarraybuffer_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -2170,7 +2170,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
     // ToIndex(length) – same logic as ArrayBuffer
     let to_index = |v: &Value<'gc>| -> Result<usize, EvalError<'gc>> {
         let prim = if let Value::Object(_) = v {
-            crate::core::to_primitive(mc, v, "number", env)?
+            crate::core::to_primitive(ctx, v, "number", env)?
         } else {
             v.clone()
         };
@@ -2214,7 +2214,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
     if args.len() > 1 {
         let opts = args[1].clone();
         if let Value::Object(obj) = opts {
-            let max_val = crate::core::get_property_with_accessors(mc, env, &obj, "maxByteLength")?;
+            let max_val = crate::core::get_property_with_accessors(ctx, env, &obj, "maxByteLength")?;
             if !matches!(max_val, Value::Undefined) {
                 let max = to_index(&max_val)?;
                 if max < length {
@@ -2229,13 +2229,13 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
     }
 
     // Create the SharedArrayBuffer object first
-    let obj = new_js_object_data(mc);
+    let obj = new_js_object_data(ctx);
 
     // Set prototype from NewTarget.prototype if present; otherwise fallback to
     // the constructor realm's SharedArrayBuffer.prototype per GetPrototypeFromConstructor.
     let mut proto_from_target: Option<JSObjectDataPtr<'gc>> = None;
     if let Some(Value::Object(nt_obj)) = new_target {
-        let proto_val = crate::core::get_property_with_accessors(mc, env, nt_obj, "prototype")?;
+        let proto_val = crate::core::get_property_with_accessors(ctx, env, nt_obj, "prototype")?;
         if let Value::Object(proto_obj) = proto_val {
             proto_from_target = Some(proto_obj);
         }
@@ -2263,10 +2263,10 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
         {
             *p_obj
         } else {
-            new_js_object_data(mc)
+            new_js_object_data(ctx)
         }
     };
-    obj.borrow_mut(mc).prototype = Some(proto);
+    obj.borrow_mut(ctx).prototype = Some(proto);
 
     // Guard against unsupported large allocation
     if length > (u32::MAX as usize) {
@@ -2275,7 +2275,7 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
     // Create SharedArrayBuffer instance (mark shared: true)
     let buffer = new_gc_cell_ptr(
-        mc,
+        ctx,
         JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
             shared: true,
@@ -2283,14 +2283,14 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
             ..JSArrayBuffer::default()
         },
     );
-    slot_set(mc, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
+    slot_set(ctx, &obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
 
     Ok(Value::Object(obj))
 }
 
 /// Handle DataView constructor calls
 pub fn handle_dataview_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -2306,7 +2306,7 @@ pub fn handle_dataview_constructor<'gc>(
             return Ok(0);
         }
         let prim = if let Value::Object(_) = v {
-            crate::core::to_primitive(mc, v, "number", env)?
+            crate::core::to_primitive(ctx, v, "number", env)?
         } else {
             v.clone()
         };
@@ -2375,11 +2375,11 @@ pub fn handle_dataview_constructor<'gc>(
     };
 
     // Create the DataView object
-    let obj = new_js_object_data(mc);
+    let obj = new_js_object_data(ctx);
 
     // GetPrototypeFromConstructor
     let proto = if let Some(Value::Object(nt_obj)) = new_target
-        && let Some(p) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "DataView")?
+        && let Some(p) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "DataView")?
     {
         p
     } else if let Some(ctor_val) = object_get_key_value(env, "DataView")
@@ -2390,9 +2390,9 @@ pub fn handle_dataview_constructor<'gc>(
         *p_obj
     } else {
         // Fallback: create a fresh prototype (should not normally happen)
-        make_dataview_prototype(mc, env, &new_js_object_data(mc))?
+        make_dataview_prototype(ctx, env, &new_js_object_data(ctx))?
     };
-    obj.borrow_mut(mc).prototype = Some(proto);
+    obj.borrow_mut(ctx).prototype = Some(proto);
 
     // Step 12 (spec): If IsDetachedBuffer(buffer) is true, throw TypeError.
     // The prototype access in GetPrototypeFromConstructor could have detached the buffer.
@@ -2419,7 +2419,7 @@ pub fn handle_dataview_constructor<'gc>(
 
     // Create DataView internal data
     let data_view = Gc::new(
-        mc,
+        ctx,
         JSDataView {
             buffer,
             byte_offset,
@@ -2428,29 +2428,29 @@ pub fn handle_dataview_constructor<'gc>(
         },
     );
 
-    slot_set(mc, &obj, InternalSlot::DataView, &Value::DataView(data_view));
+    slot_set(ctx, &obj, InternalSlot::DataView, &Value::DataView(data_view));
     if let Some(buf_obj) = buffer_obj {
-        slot_set(mc, &obj, InternalSlot::BufferObject, &Value::Object(buf_obj));
+        slot_set(ctx, &obj, InternalSlot::BufferObject, &Value::Object(buf_obj));
     }
 
     Ok(Value::Object(obj))
 }
 
 /// ToIndex per spec (7.1.22): convert to a non-negative integer index or throw RangeError.
-fn to_index<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_index<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
     if matches!(val, Value::Undefined) {
         return Ok(0);
     }
     let prim = if let Value::Object(_) = val {
-        crate::core::to_primitive(mc, val, "number", env)?
+        crate::core::to_primitive(ctx, val, "number", env)?
     } else {
         val.clone()
     };
     if matches!(prim, Value::Symbol(_)) {
-        return Err(throw_type_error(mc, env, "Cannot convert a Symbol value to a number"));
+        return Err(throw_type_error(ctx, env, "Cannot convert a Symbol value to a number"));
     }
     if matches!(prim, Value::BigInt(_)) {
-        return Err(throw_type_error(mc, env, "Cannot convert a BigInt value to a number"));
+        return Err(throw_type_error(ctx, env, "Cannot convert a BigInt value to a number"));
     }
     let n = crate::core::to_number(&prim)?;
     let integer_index = if n.is_nan() || n == 0.0 {
@@ -2461,12 +2461,12 @@ fn to_index<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'g
         n.trunc()
     };
     if integer_index < 0.0 {
-        return Err(throw_range_error(mc, env, "Invalid typed array length"));
+        return Err(throw_range_error(ctx, env, "Invalid typed array length"));
     }
     const MAX_SAFE: f64 = 9007199254740991.0; // 2^53-1
     let index = if integer_index > MAX_SAFE { MAX_SAFE } else { integer_index };
     if integer_index != index {
-        return Err(throw_range_error(mc, env, "Invalid typed array length"));
+        return Err(throw_range_error(ctx, env, "Invalid typed array length"));
     }
     Ok(integer_index as usize)
 }
@@ -2580,25 +2580,25 @@ fn kind_to_constructor_name(kind: &TypedArrayKind) -> &'static str {
 /// `constructor_obj` must carry InternalSlot::Kind (the actual TA constructor).
 /// `new_target` is the NewTarget for GetPrototypeFromConstructor. If None, throws TypeError (called without new).
 pub fn handle_typedarray_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     constructor_obj: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: If NewTarget is undefined, throw a TypeError exception.
-    let new_target = new_target.ok_or_else(|| throw_type_error(mc, env, "Constructor requires 'new'"))?;
+    let new_target = new_target.ok_or_else(|| throw_type_error(ctx, env, "Constructor requires 'new'"))?;
 
     // Get the kind from the constructor (always from constructor_obj, NOT new_target)
     let kind_val = slot_get_chained(constructor_obj, &InternalSlot::Kind);
     let kind = if let Some(kind_val) = kind_val {
         if let Value::Number(kind_num) = *kind_val.borrow() {
-            kind_from_number(kind_num as i32).ok_or_else(|| throw_type_error(mc, env, "Invalid TypedArray kind"))?
+            kind_from_number(kind_num as i32).ok_or_else(|| throw_type_error(ctx, env, "Invalid TypedArray kind"))?
         } else {
-            return Err(throw_type_error(mc, env, "Invalid TypedArray constructor"));
+            return Err(throw_type_error(ctx, env, "Invalid TypedArray constructor"));
         }
     } else {
-        return Err(throw_type_error(mc, env, "Invalid TypedArray constructor"));
+        return Err(throw_type_error(ctx, env, "Invalid TypedArray constructor"));
     };
 
     let element_size = element_size_for_kind(&kind);
@@ -2612,7 +2612,7 @@ pub fn handle_typedarray_constructor<'gc>(
     let (buffer, byte_offset, length) = if args.is_empty() {
         // TypedArray() — no args, create empty
         let buffer = new_gc_cell_ptr(
-            mc,
+            ctx,
             JSArrayBuffer {
                 data: Arc::new(Mutex::new(vec![])),
                 ..JSArrayBuffer::default()
@@ -2632,14 +2632,14 @@ pub fn handle_typedarray_constructor<'gc>(
                     let src_length = if src_ta.length_tracking {
                         // Length-tracking: out-of-bounds when byte_offset > buf_len
                         if src_ta.byte_offset > buf_len {
-                            return Err(throw_type_error(mc, env, "Source TypedArray is out of bounds"));
+                            return Err(throw_type_error(ctx, env, "Source TypedArray is out of bounds"));
                         }
                         (buf_len - src_ta.byte_offset) / src_ta.element_size()
                     } else {
                         // Fixed-length: out-of-bounds when needed bytes exceed buffer
                         let needed = src_ta.byte_offset + src_ta.length * src_ta.element_size();
                         if needed > buf_len {
-                            return Err(throw_type_error(mc, env, "Source TypedArray is out of bounds"));
+                            return Err(throw_type_error(ctx, env, "Source TypedArray is out of bounds"));
                         }
                         src_ta.length
                     };
@@ -2673,7 +2673,7 @@ pub fn handle_typedarray_constructor<'gc>(
                     }
                     init_values = Some(copied);
                     let buffer = new_gc_cell_ptr(
-                        mc,
+                        ctx,
                         JSArrayBuffer {
                             data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
                             ..JSArrayBuffer::default()
@@ -2681,41 +2681,41 @@ pub fn handle_typedarray_constructor<'gc>(
                     );
                     (buffer, 0, src_length)
                 } else {
-                    return Err(throw_type_error(mc, env, "Invalid TypedArray constructor argument"));
+                    return Err(throw_type_error(ctx, env, "Invalid TypedArray constructor argument"));
                 }
             } else if let Some(ab_val) = slot_get_chained(first_obj, &InternalSlot::ArrayBuffer) {
                 // TypedArray(buffer [, byteOffset [, length]])
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     // Step 7: Let offset = ToIndex(byteOffset)
-                    let offset = if args.len() > 1 { to_index(mc, env, &args[1])? } else { 0 };
+                    let offset = if args.len() > 1 { to_index(ctx, env, &args[1])? } else { 0 };
 
                     // Step 8: If offset modulo elementSize ≠ 0, throw RangeError
                     if element_size > 0 && offset % element_size != 0 {
-                        return Err(throw_range_error(mc, env, "Start offset is not a multiple of the element size"));
+                        return Err(throw_range_error(ctx, env, "Start offset is not a multiple of the element size"));
                     }
 
                     // Step 9: If IsDetachedBuffer(buffer), throw TypeError
                     if ab.borrow().detached {
-                        return Err(throw_type_error(mc, env, "Cannot construct TypedArray on a detached ArrayBuffer"));
+                        return Err(throw_type_error(ctx, env, "Cannot construct TypedArray on a detached ArrayBuffer"));
                     }
 
                     let buf_byte_len = ab.borrow().data.lock().unwrap().len();
 
                     // Step 11: If offset > bufferByteLength, throw RangeError
                     if offset > buf_byte_len {
-                        return Err(throw_range_error(mc, env, "Start offset is outside the bounds of the buffer"));
+                        return Err(throw_range_error(ctx, env, "Start offset is outside the bounds of the buffer"));
                     }
 
                     let final_length = if args.len() > 2 && !matches!(args[2], Value::Undefined) {
                         // Explicit length given
-                        let new_length = to_index(mc, env, &args[2])?;
+                        let new_length = to_index(ctx, env, &args[2])?;
                         // Step 12b: If IsDetachedBuffer(buffer) is true, throw a TypeError.
                         // (The length conversion may have detached the buffer via valueOf.)
                         if ab.borrow().detached {
-                            return Err(throw_type_error(mc, env, "Cannot construct TypedArray on a detached ArrayBuffer"));
+                            return Err(throw_type_error(ctx, env, "Cannot construct TypedArray on a detached ArrayBuffer"));
                         }
                         if offset + new_length * element_size > buf_byte_len {
-                            return Err(throw_range_error(mc, env, "Invalid typed array length"));
+                            return Err(throw_range_error(ctx, env, "Invalid typed array length"));
                         }
                         new_length
                     } else {
@@ -2729,7 +2729,7 @@ pub fn handle_typedarray_constructor<'gc>(
                             // Fixed-size buffer: require exact alignment
                             if (buf_byte_len - offset) % element_size != 0 {
                                 return Err(throw_range_error(
-                                    mc,
+                                    ctx,
                                     env,
                                     "Byte length of buffer minus offset is not a multiple of the element size",
                                 ));
@@ -2741,7 +2741,7 @@ pub fn handle_typedarray_constructor<'gc>(
                     buffer_obj_opt = Some(*first_obj);
                     (*ab, offset, final_length)
                 } else {
-                    return Err(throw_type_error(mc, env, "Invalid TypedArray constructor argument"));
+                    return Err(throw_type_error(ctx, env, "Invalid TypedArray constructor argument"));
                 }
             } else {
                 // TypedArray(object) — iterable or array-like
@@ -2753,7 +2753,7 @@ pub fn handle_typedarray_constructor<'gc>(
                         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
                     {
-                        let iter_fn = crate::core::get_property_with_accessors(mc, env, first_obj, *iter_sym)?;
+                        let iter_fn = crate::core::get_property_with_accessors(ctx, env, first_obj, *iter_sym)?;
                         if !matches!(iter_fn, Value::Undefined | Value::Null) {
                             return Ok(Some(iter_fn));
                         }
@@ -2764,18 +2764,18 @@ pub fn handle_typedarray_constructor<'gc>(
 
                 if let Some(iter_fn) = iter_fn {
                     // Use iterator protocol
-                    let iterator = crate::core::evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(*first_obj)), &[])?;
+                    let iterator = crate::core::evaluate_call_dispatch(ctx, env, &iter_fn, Some(&Value::Object(*first_obj)), &[])?;
                     if let Value::Object(iter_obj) = iterator {
                         let mut values = Vec::new();
                         loop {
-                            let next_fn = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
-                            let next_res = crate::core::evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
+                            let next_fn = crate::core::get_property_with_accessors(ctx, env, &iter_obj, "next")?;
+                            let next_res = crate::core::evaluate_call_dispatch(ctx, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
                             if let Value::Object(next_obj) = next_res {
-                                let done_val = crate::core::get_property_with_accessors(mc, env, &next_obj, "done")?;
+                                let done_val = crate::core::get_property_with_accessors(ctx, env, &next_obj, "done")?;
                                 if done_val.to_truthy() {
                                     break;
                                 }
-                                let value = crate::core::get_property_with_accessors(mc, env, &next_obj, "value")?;
+                                let value = crate::core::get_property_with_accessors(ctx, env, &next_obj, "value")?;
                                 values.push(value);
                             } else {
                                 break;
@@ -2789,7 +2789,7 @@ pub fn handle_typedarray_constructor<'gc>(
                     let src_length = values.len();
                     init_values = Some(values);
                     let buffer = new_gc_cell_ptr(
-                        mc,
+                        ctx,
                         JSArrayBuffer {
                             data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
                             ..JSArrayBuffer::default()
@@ -2798,18 +2798,18 @@ pub fn handle_typedarray_constructor<'gc>(
                     (buffer, 0, src_length)
                 } else {
                     // Array-like source (no iterator)
-                    let len_val = crate::core::get_property_with_accessors(mc, env, first_obj, "length")?;
-                    let src_length = to_index(mc, env, &len_val)?;
+                    let len_val = crate::core::get_property_with_accessors(ctx, env, first_obj, "length")?;
+                    let src_length = to_index(ctx, env, &len_val)?;
 
                     let mut copied = Vec::with_capacity(src_length);
                     for idx in 0..src_length {
-                        let raw = crate::core::get_property_with_accessors(mc, env, first_obj, idx)?;
+                        let raw = crate::core::get_property_with_accessors(ctx, env, first_obj, idx)?;
                         copied.push(raw);
                     }
                     init_values = Some(copied);
 
                     let buffer = new_gc_cell_ptr(
-                        mc,
+                        ctx,
                         JSArrayBuffer {
                             data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
                             ..JSArrayBuffer::default()
@@ -2820,9 +2820,9 @@ pub fn handle_typedarray_constructor<'gc>(
             }
         } else {
             // First arg is NOT an Object → TypedArray(length)
-            let element_length = to_index(mc, env, first)?;
+            let element_length = to_index(ctx, env, first)?;
             let buffer = new_gc_cell_ptr(
-                mc,
+                ctx,
                 JSArrayBuffer {
                     data: Arc::new(Mutex::new(vec![0; element_length * element_size])),
                     ..JSArrayBuffer::default()
@@ -2833,17 +2833,17 @@ pub fn handle_typedarray_constructor<'gc>(
     };
 
     // Create the TypedArray object
-    let obj = new_js_object_data(mc);
+    let obj = new_js_object_data(ctx);
 
     // GetPrototypeFromConstructor(newTarget, defaultProto) - use new_target for proto
-    if let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, new_target, env, ctor_name)? {
-        obj.borrow_mut(mc).prototype = Some(proto);
+    if let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, new_target, env, ctor_name)? {
+        obj.borrow_mut(ctx).prototype = Some(proto);
     } else {
         // Fallback: use the constructor's own prototype
         if let Some(proto_val) = object_get_key_value(constructor_obj, "prototype")
             && let Value::Object(proto_obj) = &*proto_val.borrow()
         {
-            obj.borrow_mut(mc).prototype = Some(*proto_obj);
+            obj.borrow_mut(ctx).prototype = Some(*proto_obj);
         }
     }
 
@@ -2868,7 +2868,7 @@ pub fn handle_typedarray_constructor<'gc>(
 
     // Create TypedArray instance
     let typed_array = Gc::new(
-        mc,
+        ctx,
         JSTypedArray {
             kind: kind.clone(),
             buffer,
@@ -2877,24 +2877,24 @@ pub fn handle_typedarray_constructor<'gc>(
             length_tracking,
         },
     );
-    slot_set(mc, &obj, InternalSlot::TypedArray, &Value::TypedArray(typed_array));
+    slot_set(ctx, &obj, InternalSlot::TypedArray, &Value::TypedArray(typed_array));
 
     // Store buffer wrapper object
     let buf_wrapper = if let Some(existing) = buffer_obj_opt {
         existing
     } else {
-        let buf_obj = new_js_object_data(mc);
+        let buf_obj = new_js_object_data(ctx);
         if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
             && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
-            buf_obj.borrow_mut(mc).prototype = Some(*proto);
+            buf_obj.borrow_mut(ctx).prototype = Some(*proto);
         }
-        slot_set(mc, &buf_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
+        slot_set(ctx, &buf_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
         buf_obj
     };
-    slot_set(mc, &obj, InternalSlot::BufferObject, &Value::Object(buf_wrapper));
+    slot_set(ctx, &obj, InternalSlot::BufferObject, &Value::Object(buf_wrapper));
 
     // Initialize elements from init_values
     if let Some(values) = init_values {
@@ -2904,15 +2904,15 @@ pub fn handle_typedarray_constructor<'gc>(
             }
             if is_bigint_ta {
                 // Use ToBigInt which properly throws for invalid types
-                let n = to_bigint_i64(mc, env, v)?;
-                typed_array.set_bigint(mc, idx, n).map_err(|e| {
-                    let v = crate::core::js_error_to_value(mc, env, &e);
+                let n = to_bigint_i64(ctx, env, v)?;
+                typed_array.set_bigint(ctx, idx, n).map_err(|e| {
+                    let v = crate::core::js_error_to_value(ctx, env, &e);
                     EvalError::Throw(v, None, None)
                 })?;
             } else {
-                let num = crate::core::to_number_with_env(mc, env, v)?;
-                typed_array.set(mc, idx, num).map_err(|e| {
-                    let v2 = crate::core::js_error_to_value(mc, env, &e);
+                let num = crate::core::to_number_with_env(ctx, env, v)?;
+                typed_array.set(ctx, idx, num).map_err(|e| {
+                    let v2 = crate::core::js_error_to_value(ctx, env, &e);
                     EvalError::Throw(v2, None, None)
                 })?;
             }
@@ -2924,7 +2924,7 @@ pub fn handle_typedarray_constructor<'gc>(
 
 /// Handle DataView instance method calls
 pub fn handle_dataview_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -2973,7 +2973,7 @@ pub fn handle_dataview_method<'gc>(
         if matches!(v, Value::Undefined) {
             return Ok(0);
         }
-        let n = crate::core::to_number_with_env(mc, env, v)?;
+        let n = crate::core::to_number_with_env(ctx, env, v)?;
         let integer = if n.is_nan() || n == 0.0 { 0.0 } else { n.trunc() };
         const MAX_SAFE_PLUS_ONE: f64 = 9007199254740992.0;
         if !(0.0..MAX_SAFE_PLUS_ONE).contains(&integer) {
@@ -3142,7 +3142,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             check_detached()?;
             data_view_rc.set_int8(offset, f64_to_int8(val)).map_err(bounds_err)?;
             Ok(Value::Undefined)
@@ -3152,7 +3152,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             check_detached()?;
             data_view_rc.set_uint8(offset, f64_to_uint8(val)).map_err(bounds_err)?;
             Ok(Value::Undefined)
@@ -3162,7 +3162,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_int16(offset, f64_to_int16(val), le).map_err(bounds_err)?;
@@ -3173,7 +3173,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_uint16(offset, f64_to_uint16(val), le).map_err(bounds_err)?;
@@ -3184,7 +3184,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_int32(offset, f64_to_int32(val), le).map_err(bounds_err)?;
@@ -3195,7 +3195,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_uint32(offset, f64_to_uint32(val), le).map_err(bounds_err)?;
@@ -3206,7 +3206,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_float32(offset, val as f32, le).map_err(bounds_err)?;
@@ -3217,7 +3217,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_float64(offset, val, le).map_err(bounds_err)?;
@@ -3228,7 +3228,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let val = crate::core::to_number_with_env(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let val = crate::core::to_number_with_env(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_float16(offset, f64_to_f16(val), le).map_err(bounds_err)?;
@@ -3239,7 +3239,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let i = to_bigint_i64(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let i = to_bigint_i64(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             data_view_rc.set_bigint64(offset, i, le).map_err(bounds_err)?;
@@ -3250,7 +3250,7 @@ pub fn handle_dataview_method<'gc>(
                 return Err(raise_type_error!("Cannot modify an immutable ArrayBuffer").into());
             }
             let offset = to_index_val(args.first().unwrap_or(&Value::Undefined))?;
-            let i = to_bigint_i64(mc, env, args.get(1).unwrap_or(&Value::Undefined))?;
+            let i = to_bigint_i64(ctx, env, args.get(1).unwrap_or(&Value::Undefined))?;
             let le = to_bool(args.get(2).unwrap_or(&Value::Undefined));
             check_detached()?;
             let u = i as u64;
@@ -3670,14 +3670,14 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         }
     }
 
-    pub fn set(&self, mc: &crate::core::GcContext<'gc>, idx: usize, val: f64) -> Result<(), crate::error::JSError> {
+    pub fn set(&self, ctx: &crate::core::GcContext<'gc>, idx: usize, val: f64) -> Result<(), crate::error::JSError> {
         // Per spec IntegerIndexedElementSet: if not IsValidIntegerIndex, silently return.
         if !self.is_valid_integer_index(idx) {
             return Ok(());
         }
         let size = self.element_size();
         let byte_offset = self.byte_offset + idx * size;
-        let buffer = self.buffer.borrow_mut(mc);
+        let buffer = self.buffer.borrow_mut(ctx);
         let mut data = buffer.data.lock().unwrap();
 
         if byte_offset + size > data.len() {
@@ -3763,14 +3763,14 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
 
     /// Set a BigInt value directly using i64 (no f64 intermediary).
     /// This avoids precision loss for large BigInt values.
-    pub fn set_bigint(&self, mc: &crate::core::GcContext<'gc>, idx: usize, val: i64) -> Result<(), crate::error::JSError> {
+    pub fn set_bigint(&self, ctx: &crate::core::GcContext<'gc>, idx: usize, val: i64) -> Result<(), crate::error::JSError> {
         // Per spec IntegerIndexedElementSet: if not IsValidIntegerIndex, silently return.
         if !self.is_valid_integer_index(idx) {
             return Ok(());
         }
         let size = self.element_size();
         let byte_offset = self.byte_offset + idx * size;
-        let buffer = self.buffer.borrow_mut(mc);
+        let buffer = self.buffer.borrow_mut(ctx);
         let mut data = buffer.data.lock().unwrap();
 
         if byte_offset + size > data.len() {
@@ -3788,7 +3788,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
             }
             _ => {
                 // Fallback: convert to f64 for non-BigInt types
-                self.set(mc, idx, val as f64)?;
+                self.set(ctx, idx, val as f64)?;
             }
         }
         Ok(())
@@ -3814,7 +3814,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
 }
 
 pub fn handle_arraybuffer_accessor<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     property: &str,
 ) -> Result<Value<'gc>, JSError> {
@@ -3930,7 +3930,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
 }
 
 /// SharedArrayBuffer.prototype.byteLength getter — must be called on a SAB, not a regular AB.
-pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_sharedarraybuffer_bytelength<'gc>(_ctx: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
         && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
     {
@@ -3950,7 +3950,7 @@ pub fn handle_sharedarraybuffer_bytelength<'gc>(_mc: &GcContext<'gc>, object: &J
 }
 
 /// SharedArrayBuffer.prototype.maxByteLength getter
-pub fn handle_sharedarraybuffer_maxbytelength<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_sharedarraybuffer_maxbytelength<'gc>(_ctx: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
         && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
     {
@@ -3970,7 +3970,7 @@ pub fn handle_sharedarraybuffer_maxbytelength<'gc>(_mc: &GcContext<'gc>, object:
 }
 
 /// SharedArrayBuffer.prototype.growable getter
-pub fn handle_sharedarraybuffer_growable<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_sharedarraybuffer_growable<'gc>(_ctx: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(ab_val) = slot_get_chained(object, &InternalSlot::ArrayBuffer)
         && let Value::ArrayBuffer(ab) = &*ab_val.borrow()
     {
@@ -3989,7 +3989,7 @@ pub fn handle_sharedarraybuffer_growable<'gc>(_mc: &GcContext<'gc>, object: &JSO
 
 /// SharedArrayBuffer.prototype.grow(newLength)
 pub fn handle_sharedarraybuffer_grow<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
@@ -4023,7 +4023,7 @@ pub fn handle_sharedarraybuffer_grow<'gc>(
     // Step 4: Let newByteLength be ? ToIntegerOrInfinity(newLength)
     let new_len_val = args.first().cloned().unwrap_or(Value::Undefined);
     let prim = if let Value::Object(_) = &new_len_val {
-        crate::core::to_primitive(mc, &new_len_val, "number", env).map_err(JSError::from)?
+        crate::core::to_primitive(ctx, &new_len_val, "number", env).map_err(JSError::from)?
     } else {
         new_len_val
     };
@@ -4064,7 +4064,7 @@ pub fn handle_sharedarraybuffer_grow<'gc>(
 
 /// SharedArrayBuffer.prototype.slice(start, end)
 pub fn handle_sharedarraybuffer_slice<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     args: &[Value<'gc>],
@@ -4094,7 +4094,7 @@ pub fn handle_sharedarraybuffer_slice<'gc>(
         let raw = match v {
             None | Some(Value::Undefined) => default as f64,
             Some(Value::Object(_)) => {
-                let prim = crate::core::to_primitive(mc, v.unwrap(), "number", env).map_err(JSError::from)?;
+                let prim = crate::core::to_primitive(ctx, v.unwrap(), "number", env).map_err(JSError::from)?;
                 crate::core::to_number(&prim).map_err(JSError::from)?
             }
             Some(other) => crate::core::to_number(other).map_err(JSError::from)?,
@@ -4122,10 +4122,10 @@ pub fn handle_sharedarraybuffer_slice<'gc>(
     let new_len = (end - start).max(0) as usize;
 
     // SpeciesConstructor(O, %SharedArrayBuffer%)
-    let species_ctor = get_species_constructor(mc, env, object).map_err(JSError::from)?;
+    let species_ctor = get_species_constructor(ctx, env, object).map_err(JSError::from)?;
 
     let new_obj = if let Some(ctor) = species_ctor {
-        let new_val = crate::js_class::evaluate_new(mc, env, &ctor, &[Value::Number(new_len as f64)], None)?;
+        let new_val = crate::js_class::evaluate_new(ctx, env, &ctor, &[Value::Number(new_len as f64)], None)?;
         let new_obj = match new_val {
             Value::Object(o) => o,
             _ => return Err(raise_type_error!("Species constructor must return an object")),
@@ -4159,24 +4159,24 @@ pub fn handle_sharedarraybuffer_slice<'gc>(
     } else {
         // Default: create a new SharedArrayBuffer
         let new_ab = new_gc_cell_ptr(
-            mc,
+            ctx,
             JSArrayBuffer {
                 data: Arc::new(Mutex::new(vec![0u8; new_len])),
                 shared: true,
                 ..JSArrayBuffer::default()
             },
         );
-        let new_obj = new_js_object_data(mc);
-        slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+        let new_obj = new_js_object_data(ctx);
+        slot_set(ctx, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
         // Set prototype from SharedArrayBuffer.prototype
         if let Some(sab_ctor_val) = crate::core::env_get(env, "SharedArrayBuffer")
             && let Value::Object(sab_ctor) = &*sab_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(sab_ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
-            new_obj.borrow_mut(mc).prototype = Some(*proto);
+            new_obj.borrow_mut(ctx).prototype = Some(*proto);
         } else {
-            new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+            new_obj.borrow_mut(ctx).prototype = object.borrow().prototype;
         }
         new_obj
     };
@@ -4199,7 +4199,7 @@ pub fn handle_sharedarraybuffer_slice<'gc>(
 }
 
 pub fn handle_arraybuffer_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
@@ -4225,7 +4225,7 @@ pub fn handle_arraybuffer_method<'gc>(
                     let raw = match v {
                         None | Some(Value::Undefined) => default as f64,
                         Some(Value::Object(_)) => {
-                            let prim = crate::core::to_primitive(mc, v.unwrap(), "number", env).map_err(JSError::from)?;
+                            let prim = crate::core::to_primitive(ctx, v.unwrap(), "number", env).map_err(JSError::from)?;
                             crate::core::to_number(&prim).map_err(JSError::from)?
                         }
                         Some(other) => crate::core::to_number(other).map_err(JSError::from)?,
@@ -4254,12 +4254,12 @@ pub fn handle_arraybuffer_method<'gc>(
                 let new_len = (final_end - start) as usize;
 
                 // Step 13: Let ctor be ? SpeciesConstructor(O, %ArrayBuffer%).
-                let species_ctor = get_species_constructor(mc, env, object).map_err(JSError::from)?;
+                let species_ctor = get_species_constructor(ctx, env, object).map_err(JSError::from)?;
 
                 let new_obj = if let Some(ctor) = species_ctor {
                     // Step 15: Let new be ? Construct(ctor, «newLen»).
                     let new_val =
-                        crate::js_class::evaluate_new(mc, env, &ctor, &[Value::Number(new_len as f64)], None).map_err(JSError::from)?;
+                        crate::js_class::evaluate_new(ctx, env, &ctor, &[Value::Number(new_len as f64)], None).map_err(JSError::from)?;
                     let new_obj = match new_val {
                         Value::Object(o) => o,
                         _ => return Err(raise_type_error!("Species constructor must return an object")),
@@ -4301,23 +4301,23 @@ pub fn handle_arraybuffer_method<'gc>(
                 } else {
                     // Default: create a new ArrayBuffer with newLen bytes
                     let new_ab = new_gc_cell_ptr(
-                        mc,
+                        ctx,
                         JSArrayBuffer {
                             data: Arc::new(Mutex::new(vec![0u8; new_len])),
                             ..JSArrayBuffer::default()
                         },
                     );
-                    let new_obj = new_js_object_data(mc);
-                    slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                    let new_obj = new_js_object_data(ctx);
+                    slot_set(ctx, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
                     // Set prototype from ArrayBuffer.prototype
                     if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
                         && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
                         && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
                         && let Value::Object(proto) = &*proto_val.borrow()
                     {
-                        new_obj.borrow_mut(mc).prototype = Some(*proto);
+                        new_obj.borrow_mut(ctx).prototype = Some(*proto);
                     } else {
-                        new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                        new_obj.borrow_mut(ctx).prototype = object.borrow().prototype;
                     }
                     new_obj
                 };
@@ -4361,7 +4361,7 @@ pub fn handle_arraybuffer_method<'gc>(
                     }
                     let new_len_val = args[0].clone();
                     let prim = if let Value::Object(_) = &new_len_val {
-                        crate::core::to_primitive(mc, &new_len_val, "number", env).map_err(JSError::from)?
+                        crate::core::to_primitive(ctx, &new_len_val, "number", env).map_err(JSError::from)?
                     } else {
                         new_len_val
                     };
@@ -4436,7 +4436,7 @@ pub fn handle_arraybuffer_method<'gc>(
                     && !matches!(arg, Value::Undefined)
                 {
                     let prim = if let Value::Object(_) = arg {
-                        crate::core::to_primitive(mc, arg, "number", env).map_err(JSError::from)?
+                        crate::core::to_primitive(ctx, arg, "number", env).map_err(JSError::from)?
                     } else {
                         arg.clone()
                     };
@@ -4471,7 +4471,7 @@ pub fn handle_arraybuffer_method<'gc>(
                 };
 
                 let new_ab = new_gc_cell_ptr(
-                    mc,
+                    ctx,
                     JSArrayBuffer {
                         data: Arc::new(Mutex::new(new_data)),
                         max_byte_length,
@@ -4481,21 +4481,21 @@ pub fn handle_arraybuffer_method<'gc>(
                     },
                 );
 
-                let new_obj = new_js_object_data(mc);
-                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                let new_obj = new_js_object_data(ctx);
+                slot_set(ctx, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
                 if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
                     && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
                     && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
                 {
-                    new_obj.borrow_mut(mc).prototype = Some(*proto);
+                    new_obj.borrow_mut(ctx).prototype = Some(*proto);
                 } else {
-                    new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                    new_obj.borrow_mut(ctx).prototype = object.borrow().prototype;
                 }
 
                 // Detach the original buffer
                 {
-                    let mut orig = ab.borrow_mut(mc);
+                    let mut orig = ab.borrow_mut(ctx);
                     orig.detached = true;
                     orig.data = Arc::new(Mutex::new(Vec::new()));
                 }
@@ -4534,7 +4534,7 @@ pub fn handle_arraybuffer_method<'gc>(
 
                 // Create an immutable ArrayBuffer with the same data
                 let new_ab = new_gc_cell_ptr(
-                    mc,
+                    ctx,
                     JSArrayBuffer {
                         data: Arc::new(Mutex::new(old_data)),
                         max_byte_length: None,
@@ -4544,21 +4544,21 @@ pub fn handle_arraybuffer_method<'gc>(
                     },
                 );
 
-                let new_obj = new_js_object_data(mc);
-                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                let new_obj = new_js_object_data(ctx);
+                slot_set(ctx, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
                 if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
                     && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
                     && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
                 {
-                    new_obj.borrow_mut(mc).prototype = Some(*proto);
+                    new_obj.borrow_mut(ctx).prototype = Some(*proto);
                 } else {
-                    new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                    new_obj.borrow_mut(ctx).prototype = object.borrow().prototype;
                 }
 
                 // Detach the original buffer
                 {
-                    let mut orig = ab.borrow_mut(mc);
+                    let mut orig = ab.borrow_mut(ctx);
                     orig.detached = true;
                     orig.data = Arc::new(Mutex::new(Vec::new()));
                 }
@@ -4590,7 +4590,7 @@ pub fn handle_arraybuffer_method<'gc>(
                     let raw = match v {
                         None | Some(Value::Undefined) => default as f64,
                         Some(Value::Object(_)) => {
-                            let prim = crate::core::to_primitive(mc, v.unwrap(), "number", env).map_err(JSError::from)?;
+                            let prim = crate::core::to_primitive(ctx, v.unwrap(), "number", env).map_err(JSError::from)?;
                             crate::core::to_number(&prim).map_err(JSError::from)?
                         }
                         Some(other) => crate::core::to_number(other).map_err(JSError::from)?,
@@ -4627,7 +4627,7 @@ pub fn handle_arraybuffer_method<'gc>(
                 new_data[..slice_bytes.len()].copy_from_slice(slice_bytes);
 
                 let new_ab = new_gc_cell_ptr(
-                    mc,
+                    ctx,
                     JSArrayBuffer {
                         data: Arc::new(Mutex::new(new_data)),
                         max_byte_length: None,
@@ -4637,16 +4637,16 @@ pub fn handle_arraybuffer_method<'gc>(
                     },
                 );
 
-                let new_obj = new_js_object_data(mc);
-                slot_set(mc, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
+                let new_obj = new_js_object_data(ctx);
+                slot_set(ctx, &new_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(new_ab));
                 if let Some(ab_ctor_val) = crate::core::env_get(env, "ArrayBuffer")
                     && let Value::Object(ab_ctor) = &*ab_ctor_val.borrow()
                     && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
                 {
-                    new_obj.borrow_mut(mc).prototype = Some(*proto);
+                    new_obj.borrow_mut(ctx).prototype = Some(*proto);
                 } else {
-                    new_obj.borrow_mut(mc).prototype = object.borrow().prototype;
+                    new_obj.borrow_mut(ctx).prototype = object.borrow().prototype;
                 }
 
                 Ok(Value::Object(new_obj))
@@ -4663,11 +4663,11 @@ pub fn handle_arraybuffer_method<'gc>(
 /// SpeciesConstructor(O, defaultConstructor) — returns Some(species) or None (use default).
 /// Reads O.constructor, checks type, then checks Symbol.species.
 fn get_species_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
-    let ctor = get_property_with_accessors(mc, env, obj, "constructor")?;
+    let ctor = get_property_with_accessors(ctx, env, obj, "constructor")?;
 
     if matches!(ctor, Value::Undefined) {
         return Ok(None); // use default constructor
@@ -4684,7 +4684,7 @@ fn get_species_constructor<'gc>(
         && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
         && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
     {
-        let species = get_property_with_accessors(mc, env, &ctor_obj, *species_sym)?;
+        let species = get_property_with_accessors(ctx, env, &ctor_obj, *species_sym)?;
         if matches!(species, Value::Undefined | Value::Null) {
             return Ok(None); // use default constructor
         }
@@ -4713,16 +4713,16 @@ fn get_species_constructor<'gc>(
 
 /// TypedArraySpeciesCreate: create a result TypedArray using SpeciesConstructor.
 fn typed_array_species_create<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     exemplar: &JSObjectDataPtr<'gc>,
     length: usize,
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
-    let species = get_species_constructor(mc, env, exemplar)?;
+    let species = get_species_constructor(ctx, env, exemplar)?;
     if let Some(ctor) = species {
         // TypedArrayCreate(constructor, « length »)
         // Step 1: Let newTypedArray be ? Construct(constructor, argumentList).
-        let new_val = crate::js_class::evaluate_new(mc, env, &ctor, &[Value::Number(length as f64)], None)?;
+        let new_val = crate::js_class::evaluate_new(ctx, env, &ctor, &[Value::Number(length as f64)], None)?;
         let new_obj = match new_val {
             Value::Object(o) => o,
             _ => return Err(raise_type_error!("Species constructor did not return an object").into()),
@@ -4762,13 +4762,13 @@ fn typed_array_species_create<'gc>(
         }
         Ok(new_obj)
     } else {
-        create_same_type_typedarray(mc, env, exemplar, length).map_err(|e| e.into())
+        create_same_type_typedarray(ctx, env, exemplar, length).map_err(|e| e.into())
     }
 }
 
 /// Create a new TypedArray of the same kind as the source, with the given length
 fn create_same_type_typedarray<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     source_obj: &JSObjectDataPtr<'gc>,
     length: usize,
@@ -4782,7 +4782,7 @@ fn create_same_type_typedarray<'gc>(
 
         // Create a new ArrayBuffer
         let buffer = new_gc_cell_ptr(
-            mc,
+            ctx,
             JSArrayBuffer {
                 data: Arc::new(Mutex::new(vec![0; byte_len])),
                 ..JSArrayBuffer::default()
@@ -4790,15 +4790,15 @@ fn create_same_type_typedarray<'gc>(
         );
 
         // Wrap buffer in a JS object
-        let buf_obj = new_js_object_data(mc);
+        let buf_obj = new_js_object_data(ctx);
         if let Some(ab_val) = crate::core::env_get(env, "ArrayBuffer")
             && let Value::Object(ab_ctor) = &*ab_val.borrow()
             && let Some(proto_val) = object_get_key_value(ab_ctor, "prototype")
             && let Value::Object(ab_proto) = &*proto_val.borrow()
         {
-            buf_obj.borrow_mut(mc).prototype = Some(*ab_proto);
+            buf_obj.borrow_mut(ctx).prototype = Some(*ab_proto);
         }
-        slot_set(mc, &buf_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
+        slot_set(ctx, &buf_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(buffer));
 
         let new_ta = JSTypedArray {
             buffer,
@@ -4808,20 +4808,24 @@ fn create_same_type_typedarray<'gc>(
             length_tracking: false,
         };
 
-        let result_obj = new_js_object_data(mc);
+        let result_obj = new_js_object_data(ctx);
         // Copy prototype from source
         if let Some(proto) = source_obj.borrow().prototype {
-            result_obj.borrow_mut(mc).prototype = Some(proto);
+            result_obj.borrow_mut(ctx).prototype = Some(proto);
         }
-        slot_set(mc, &result_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(mc, new_ta)));
-        slot_set(mc, &result_obj, InternalSlot::BufferObject, &Value::Object(buf_obj));
+        slot_set(ctx, &result_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(ctx, new_ta)));
+        slot_set(ctx, &result_obj, InternalSlot::BufferObject, &Value::Object(buf_obj));
         Ok(result_obj)
     } else {
         Err(raise_type_error!("Source is not a TypedArray"))
     }
 }
 
-pub fn handle_typedarray_accessor<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>, property: &str) -> Result<Value<'gc>, JSError> {
+pub fn handle_typedarray_accessor<'gc>(
+    _ctx: &GcContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    property: &str,
+) -> Result<Value<'gc>, JSError> {
     // Per spec, TypedArray prototype accessors check the receiver's OWN
     // [[TypedArrayName]] internal slot — they must NOT walk the prototype chain.
     if let Some(ta_val) = slot_get(object, &InternalSlot::TypedArray) {
@@ -4932,7 +4936,7 @@ pub fn handle_typedarray_accessor<'gc>(_mc: &GcContext<'gc>, object: &JSObjectDa
     }
 }
 
-pub fn handle_typedarray_iterator_next<'gc>(mc: &GcContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn handle_typedarray_iterator_next<'gc>(ctx: &GcContext<'gc>, this_val: &Value<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Value::Object(obj) = this_val {
         if let Some(ta_cell) = slot_get_chained(obj, &InternalSlot::TypedArrayIterator)
             && let Value::TypedArray(ta) = &*ta_cell.borrow()
@@ -5007,18 +5011,18 @@ pub fn handle_typedarray_iterator_next<'gc>(mc: &GcContext<'gc>, this_val: &Valu
                 };
 
                 // Update index
-                slot_set(mc, obj, InternalSlot::Index, &Value::Number((idx + 1) as f64));
+                slot_set(ctx, obj, InternalSlot::Index, &Value::Number((idx + 1) as f64));
 
                 // Return { value, done: false }
-                let result_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &result_obj, "value", &value)?;
-                object_set_key_value(mc, &result_obj, "done", &Value::Boolean(false))?;
+                let result_obj = new_js_object_data(ctx);
+                object_set_key_value(ctx, &result_obj, "value", &value)?;
+                object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(false))?;
                 Ok(Value::Object(result_obj))
             } else {
                 // Done
-                let result_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
-                object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+                let result_obj = new_js_object_data(ctx);
+                object_set_key_value(ctx, &result_obj, "value", &Value::Undefined)?;
+                object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(true))?;
                 Ok(Value::Object(result_obj))
             }
         } else {
@@ -5034,22 +5038,22 @@ pub fn handle_typedarray_iterator_next<'gc>(mc: &GcContext<'gc>, this_val: &Valu
 /// 2. Perform ? ValidateTypedArray(newTypedArray).
 /// 3. If argumentList is a List of a single Number, check newTypedArray.length >= argumentList[0].
 fn typedarray_create<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     constructor: &Value<'gc>,
     args: &[Value<'gc>],
     expected_len: Option<usize>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Step 1: Construct(constructor, argumentList)
-    let new_ta = crate::js_class::evaluate_new(mc, env, constructor, args, Some(constructor))?;
+    let new_ta = crate::js_class::evaluate_new(ctx, env, constructor, args, Some(constructor))?;
 
     // Step 2: ValidateTypedArray(newTypedArray)
     let ta_obj = match &new_ta {
         Value::Object(o) => o,
-        _ => return Err(throw_type_error(mc, env, "TypedArray expected")),
+        _ => return Err(throw_type_error(ctx, env, "TypedArray expected")),
     };
     if slot_get(ta_obj, &InternalSlot::TypedArray).is_none() {
-        return Err(throw_type_error(mc, env, "result is not a TypedArray"));
+        return Err(throw_type_error(ctx, env, "result is not a TypedArray"));
     }
 
     // Step 3: If argumentList has one Number, check length >= that number
@@ -5058,7 +5062,7 @@ fn typedarray_create<'gc>(
         && let Value::TypedArray(ta) = &*ta_cell.borrow()
         && ta.length < expected
     {
-        return Err(throw_type_error(mc, env, "TypedArray is too small"));
+        return Err(throw_type_error(ctx, env, "TypedArray is too small"));
     }
 
     Ok(new_ta)
@@ -5066,7 +5070,7 @@ fn typedarray_create<'gc>(
 
 /// Handle %TypedArray%.from() and %TypedArray%.of() static methods
 pub fn handle_typedarray_static_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -5133,26 +5137,26 @@ pub fn handle_typedarray_static_method<'gc>(
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
                     {
                         // Propagate errors from accessing @@iterator (e.g., getter that throws)
-                        let iter_fn = get_property_with_accessors(mc, env, src_obj, *iter_sym)?;
+                        let iter_fn = get_property_with_accessors(ctx, env, src_obj, *iter_sym)?;
                         if !matches!(iter_fn, Value::Undefined | Value::Null) {
                             used_iterator = true;
                             // ES2024 §23.2.2.1 step 5a: IteratorToList — collect ALL values first
-                            let iterator = crate::core::evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(*src_obj)), &[])?;
+                            let iterator = crate::core::evaluate_call_dispatch(ctx, env, &iter_fn, Some(&Value::Object(*src_obj)), &[])?;
                             // GetIterator step 5: If Type(iterator) is not Object, throw a TypeError.
                             if !matches!(iterator, Value::Object(_)) {
                                 return Err(raise_type_error!("Result of the Symbol.iterator method is not an object").into());
                             }
                             if let Value::Object(iter_obj) = iterator {
                                 loop {
-                                    let next_fn = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+                                    let next_fn = get_property_with_accessors(ctx, env, &iter_obj, "next")?;
                                     let next_res =
-                                        crate::core::evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
+                                        crate::core::evaluate_call_dispatch(ctx, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
                                     if let Value::Object(next_obj) = next_res {
-                                        let done_val = get_property_with_accessors(mc, env, &next_obj, "done")?;
+                                        let done_val = get_property_with_accessors(ctx, env, &next_obj, "done")?;
                                         if done_val.to_truthy() {
                                             break;
                                         }
-                                        let value = get_property_with_accessors(mc, env, &next_obj, "value")?;
+                                        let value = get_property_with_accessors(ctx, env, &next_obj, "value")?;
                                         values.push(value);
                                     } else {
                                         break;
@@ -5167,7 +5171,7 @@ pub fn handle_typedarray_static_method<'gc>(
                     if used_iterator {
                         let expected_len = values.len();
                         let len_val = Value::Number(expected_len as f64);
-                        let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(expected_len))?;
+                        let new_ta = typedarray_create(ctx, env, this_val, &[len_val], Some(expected_len))?;
 
                         // Step 6e: loop — map + set interleaved
                         if let Value::Object(ta_obj) = &new_ta
@@ -5178,7 +5182,7 @@ pub fn handle_typedarray_static_method<'gc>(
                             for (i, val) in values.iter().enumerate() {
                                 let mapped = if let Some(mfn) = &mapper {
                                     crate::js_promise::call_function_with_this(
-                                        mc,
+                                        ctx,
                                         mfn,
                                         Some(&this_arg),
                                         &[val.clone(), Value::Number(i as f64)],
@@ -5190,12 +5194,12 @@ pub fn handle_typedarray_static_method<'gc>(
                                 if is_bigint_ta {
                                     let n = match &mapped {
                                         Value::BigInt(b) => bigint_to_i64_modular(b),
-                                        _ => to_bigint_i64(mc, env, &mapped)?,
+                                        _ => to_bigint_i64(ctx, env, &mapped)?,
                                     };
-                                    ta.set_bigint(mc, i, n)?;
+                                    ta.set_bigint(ctx, i, n)?;
                                 } else {
-                                    let n = crate::core::to_number_with_env(mc, env, &mapped)?;
-                                    ta.set(mc, i, n)?;
+                                    let n = crate::core::to_number_with_env(ctx, env, &mapped)?;
+                                    ta.set(ctx, i, n)?;
                                 }
                             }
                         }
@@ -5204,12 +5208,12 @@ pub fn handle_typedarray_static_method<'gc>(
 
                     if !used_iterator {
                         // Array-like source — spec step 10-12: create TA first, then iterate and set
-                        let len_val_raw = get_property_with_accessors(mc, env, src_obj, "length")?;
-                        let len = crate::core::to_number_with_env(mc, env, &len_val_raw)?.max(0.0) as usize;
+                        let len_val_raw = get_property_with_accessors(ctx, env, src_obj, "length")?;
+                        let len = crate::core::to_number_with_env(ctx, env, &len_val_raw)?.max(0.0) as usize;
 
                         // Step 10: TypedArrayCreate(C, «len»)
                         let len_val = Value::Number(len as f64);
-                        let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(len))?;
+                        let new_ta = typedarray_create(ctx, env, this_val, &[len_val], Some(len))?;
 
                         // Step 12: iterate and set each element
                         if let Value::Object(ta_obj) = &new_ta
@@ -5218,10 +5222,10 @@ pub fn handle_typedarray_static_method<'gc>(
                         {
                             let is_bigint_ta = is_bigint_typed_array(&ta.kind);
                             for i in 0..len {
-                                let val = get_property_with_accessors(mc, env, src_obj, i)?;
+                                let val = get_property_with_accessors(ctx, env, src_obj, i)?;
                                 let mapped = if let Some(ref mfn) = mapper {
                                     crate::js_promise::call_function_with_this(
-                                        mc,
+                                        ctx,
                                         mfn,
                                         Some(&this_arg),
                                         &[val, Value::Number(i as f64)],
@@ -5233,12 +5237,12 @@ pub fn handle_typedarray_static_method<'gc>(
                                 if is_bigint_ta {
                                     let n = match &mapped {
                                         Value::BigInt(b) => bigint_to_i64_modular(b),
-                                        _ => to_bigint_i64(mc, env, &mapped)?,
+                                        _ => to_bigint_i64(ctx, env, &mapped)?,
                                     };
-                                    ta.set_bigint(mc, i, n)?;
+                                    ta.set_bigint(ctx, i, n)?;
                                 } else {
-                                    let n = crate::core::to_number_with_env(mc, env, &mapped)?;
-                                    ta.set(mc, i, n)?;
+                                    let n = crate::core::to_number_with_env(ctx, env, &mapped)?;
+                                    ta.set(ctx, i, n)?;
                                 }
                             }
                         }
@@ -5250,7 +5254,7 @@ pub fn handle_typedarray_static_method<'gc>(
                     for (i, ch) in s.iter().enumerate() {
                         let ch_val = Value::String(vec![*ch]);
                         let mapped = if let Some(ref mfn) = mapper {
-                            crate::js_promise::call_function_with_this(mc, mfn, Some(&this_arg), &[ch_val, Value::Number(i as f64)], env)?
+                            crate::js_promise::call_function_with_this(ctx, mfn, Some(&this_arg), &[ch_val, Value::Number(i as f64)], env)?
                         } else {
                             ch_val
                         };
@@ -5265,7 +5269,7 @@ pub fn handle_typedarray_static_method<'gc>(
             // TypedArrayCreate(C, «len»): Construct(C, [len]) then ValidateTypedArray
             let expected_len = values.len();
             let len_val = Value::Number(expected_len as f64);
-            let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(expected_len))?;
+            let new_ta = typedarray_create(ctx, env, this_val, &[len_val], Some(expected_len))?;
 
             // Set elements via ToNumber/ToBigInt (per spec, Set(newObj, Pk, kValue, true))
             if let Value::Object(ta_obj) = &new_ta
@@ -5277,12 +5281,12 @@ pub fn handle_typedarray_static_method<'gc>(
                     if is_bigint_ta {
                         let n = match val {
                             Value::BigInt(b) => bigint_to_i64_modular(b),
-                            _ => to_bigint_i64(mc, env, val)?,
+                            _ => to_bigint_i64(ctx, env, val)?,
                         };
-                        ta.set_bigint(mc, i, n)?;
+                        ta.set_bigint(ctx, i, n)?;
                     } else {
-                        let n = crate::core::to_number_with_env(mc, env, val)?;
-                        ta.set(mc, i, n)?;
+                        let n = crate::core::to_number_with_env(ctx, env, val)?;
+                        ta.set(ctx, i, n)?;
                     };
                 }
             }
@@ -5293,7 +5297,7 @@ pub fn handle_typedarray_static_method<'gc>(
             // TypedArrayCreate(C, «len»): Construct(C, [len]) then ValidateTypedArray
             let expected_len = args.len();
             let len_val = Value::Number(expected_len as f64);
-            let new_ta = typedarray_create(mc, env, this_val, &[len_val], Some(expected_len))?;
+            let new_ta = typedarray_create(ctx, env, this_val, &[len_val], Some(expected_len))?;
 
             if let Value::Object(ta_obj) = &new_ta
                 && let Some(ta_cell) = slot_get(ta_obj, &InternalSlot::TypedArray)
@@ -5304,12 +5308,12 @@ pub fn handle_typedarray_static_method<'gc>(
                     if is_bigint_ta {
                         let n = match val {
                             Value::BigInt(b) => bigint_to_i64_modular(b),
-                            _ => to_bigint_i64(mc, env, val)?,
+                            _ => to_bigint_i64(ctx, env, val)?,
                         };
-                        ta.set_bigint(mc, i, n)?;
+                        ta.set_bigint(ctx, i, n)?;
                     } else {
-                        let n = crate::core::to_number_with_env(mc, env, val)?;
-                        ta.set(mc, i, n)?;
+                        let n = crate::core::to_number_with_env(ctx, env, val)?;
+                        ta.set(ctx, i, n)?;
                     };
                 }
             }
@@ -5689,7 +5693,7 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 fn get_base64_options<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     options_val: &Value<'gc>,
 ) -> Result<(bool, String), EvalError<'gc>> {
@@ -5699,7 +5703,7 @@ fn get_base64_options<'gc>(
     if let Value::Object(opts) = options_val {
         // alphabet
         if let Some(alph_rc) = object_get_key_value(opts, "alphabet") {
-            let alph = get_property_with_accessors(mc, env, opts, "alphabet")?;
+            let alph = get_property_with_accessors(ctx, env, opts, "alphabet")?;
             let _ = alph_rc;
             match &alph {
                 Value::Undefined => {} // default
@@ -5716,7 +5720,7 @@ fn get_base64_options<'gc>(
         }
         // lastChunkHandling
         if let Some(_lch_rc) = object_get_key_value(opts, "lastChunkHandling") {
-            let lch = get_property_with_accessors(mc, env, opts, "lastChunkHandling")?;
+            let lch = get_property_with_accessors(ctx, env, opts, "lastChunkHandling")?;
             match &lch {
                 Value::Undefined => {} // default
                 Value::String(s) => {
@@ -5735,7 +5739,7 @@ fn get_base64_options<'gc>(
 }
 
 /// Validate that `this` is a Uint8Array. Returns (obj, ta_len, byte_offset, is_detached).
-fn validate_uint8array_info<'gc>(_mc: &GcContext<'gc>, this_val: &Value<'gc>) -> Result<(usize, usize, bool), EvalError<'gc>> {
+fn validate_uint8array_info<'gc>(_ctx: &GcContext<'gc>, this_val: &Value<'gc>) -> Result<(usize, usize, bool), EvalError<'gc>> {
     if let Value::Object(obj) = this_val {
         if let Some(ta_val) = slot_get(obj, &InternalSlot::TypedArray)
             && let Value::TypedArray(ta) = &*ta_val.borrow()
@@ -5774,7 +5778,7 @@ fn read_uint8array_data<'gc>(this_val: &Value<'gc>) -> Result<Vec<u8>, EvalError
 }
 
 pub fn handle_uint8array_proto_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -5783,13 +5787,13 @@ pub fn handle_uint8array_proto_method<'gc>(
     match method {
         "toBase64" => {
             // Step 1: Validate this is Uint8Array (but don't read data yet — options may detach)
-            let (_, _, _) = validate_uint8array_info(mc, this_val)?;
+            let (_, _, _) = validate_uint8array_info(ctx, this_val)?;
             // Step 2: Process options (getters may have side effects including detaching)
             let options = args.first().cloned().unwrap_or(Value::Undefined);
-            let (is_base64url, _) = get_base64_options(mc, env, &options)?;
+            let (is_base64url, _) = get_base64_options(ctx, env, &options)?;
             let omit_padding = if let Value::Object(opts) = &options {
                 if object_get_key_value(opts, "omitPadding").is_some() {
-                    let v = get_property_with_accessors(mc, env, opts, "omitPadding")?;
+                    let v = get_property_with_accessors(ctx, env, opts, "omitPadding")?;
                     // ToBoolean: any truthy value
                     match &v {
                         Value::Boolean(b) => *b,
@@ -5811,7 +5815,7 @@ pub fn handle_uint8array_proto_method<'gc>(
             Ok(Value::String(utf8_to_utf16(&result)))
         }
         "toHex" => {
-            let (_, _, detached) = validate_uint8array_info(mc, this_val)?;
+            let (_, _, detached) = validate_uint8array_info(ctx, this_val)?;
             if detached {
                 return Err(raise_type_error!("Cannot perform operation on a detached ArrayBuffer").into());
             }
@@ -5821,7 +5825,7 @@ pub fn handle_uint8array_proto_method<'gc>(
         }
         "setFromBase64" => {
             // Validate this is Uint8Array
-            let (ta_len, _, _) = validate_uint8array_info(mc, this_val)?;
+            let (ta_len, _, _) = validate_uint8array_info(ctx, this_val)?;
             let string_arg = args.first().cloned().unwrap_or(Value::Undefined);
             let input = if let Value::String(s) = &string_arg {
                 crate::utf16_to_utf8(s)
@@ -5829,7 +5833,7 @@ pub fn handle_uint8array_proto_method<'gc>(
                 return Err(raise_type_error!("First argument must be a string").into());
             };
             let options = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let (is_base64url, last_chunk_handling) = get_base64_options(mc, env, &options)?;
+            let (is_base64url, last_chunk_handling) = get_base64_options(ctx, env, &options)?;
 
             // Decode with max_bytes = target array length
             let result = base64_decode(&input, is_base64url, &last_chunk_handling, Some(ta_len));
@@ -5855,10 +5859,10 @@ pub fn handle_uint8array_proto_method<'gc>(
                 if let Some(err) = result.error {
                     return Err(EvalError::from(raise_syntax_error!(err)));
                 }
-                let result_obj = new_js_object_data(mc);
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &result_obj, env, "Object");
-                object_set_key_value(mc, &result_obj, "read", &Value::Number(result.read as f64))?;
-                object_set_key_value(mc, &result_obj, "written", &Value::Number(write_len as f64))?;
+                let result_obj = new_js_object_data(ctx);
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &result_obj, env, "Object");
+                object_set_key_value(ctx, &result_obj, "read", &Value::Number(result.read as f64))?;
+                object_set_key_value(ctx, &result_obj, "written", &Value::Number(write_len as f64))?;
                 Ok(Value::Object(result_obj))
             } else {
                 Err(raise_type_error!("Method requires a Uint8Array").into())
@@ -5866,7 +5870,7 @@ pub fn handle_uint8array_proto_method<'gc>(
         }
         "setFromHex" => {
             // Validate this is Uint8Array
-            let (ta_len, _, _) = validate_uint8array_info(mc, this_val)?;
+            let (ta_len, _, _) = validate_uint8array_info(ctx, this_val)?;
             let string_arg = args.first().cloned().unwrap_or(Value::Undefined);
             let input = if let Value::String(s) = &string_arg {
                 crate::utf16_to_utf8(s)
@@ -5897,10 +5901,10 @@ pub fn handle_uint8array_proto_method<'gc>(
                 if let Some(err) = result.error {
                     return Err(EvalError::from(raise_syntax_error!(err)));
                 }
-                let result_obj = new_js_object_data(mc);
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &result_obj, env, "Object");
-                object_set_key_value(mc, &result_obj, "read", &Value::Number(result.read as f64))?;
-                object_set_key_value(mc, &result_obj, "written", &Value::Number(write_len as f64))?;
+                let result_obj = new_js_object_data(ctx);
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &result_obj, env, "Object");
+                object_set_key_value(ctx, &result_obj, "read", &Value::Number(result.read as f64))?;
+                object_set_key_value(ctx, &result_obj, "written", &Value::Number(write_len as f64))?;
                 Ok(Value::Object(result_obj))
             } else {
                 Err(raise_type_error!("Method requires a Uint8Array").into())
@@ -5911,7 +5915,7 @@ pub fn handle_uint8array_proto_method<'gc>(
 }
 
 pub fn handle_uint8array_static_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -5925,12 +5929,12 @@ pub fn handle_uint8array_static_method<'gc>(
                 return Err(raise_type_error!("First argument must be a string").into());
             };
             let options = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let (is_base64url, last_chunk_handling) = get_base64_options(mc, env, &options)?;
+            let (is_base64url, last_chunk_handling) = get_base64_options(ctx, env, &options)?;
             let result = base64_decode(&input, is_base64url, &last_chunk_handling, None);
             if let Some(err) = result.error {
                 return Err(EvalError::from(raise_syntax_error!(err)));
             }
-            let u8arr = create_uint8array_from_bytes(mc, env, &result.bytes)?;
+            let u8arr = create_uint8array_from_bytes(ctx, env, &result.bytes)?;
             Ok(Value::Object(u8arr))
         }
         "fromHex" => {
@@ -5944,7 +5948,7 @@ pub fn handle_uint8array_static_method<'gc>(
             if let Some(err) = result.error {
                 return Err(EvalError::from(raise_syntax_error!(err)));
             }
-            let u8arr = create_uint8array_from_bytes(mc, env, &result.bytes)?;
+            let u8arr = create_uint8array_from_bytes(ctx, env, &result.bytes)?;
             Ok(Value::Object(u8arr))
         }
         _ => Err(raise_type_error!(format!("Uint8Array.{} is not a function", method)).into()),
@@ -5953,7 +5957,7 @@ pub fn handle_uint8array_static_method<'gc>(
 
 /// Create a Uint8Array from raw bytes
 fn create_uint8array_from_bytes<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     data: &[u8],
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
@@ -5965,10 +5969,10 @@ fn create_uint8array_from_bytes<'gc>(
         detached: false,
         immutable: false,
     };
-    let ab_obj = new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &ab_obj, env, "ArrayBuffer");
-    let ab_cell = new_gc_cell_ptr(mc, ab);
-    slot_set(mc, &ab_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(ab_cell));
+    let ab_obj = new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &ab_obj, env, "ArrayBuffer");
+    let ab_cell = new_gc_cell_ptr(ctx, ab);
+    slot_set(ctx, &ab_obj, InternalSlot::ArrayBuffer, &Value::ArrayBuffer(ab_cell));
 
     // Create the TypedArray view
     let ta = JSTypedArray {
@@ -5978,22 +5982,22 @@ fn create_uint8array_from_bytes<'gc>(
         length: data.len(),
         length_tracking: false,
     };
-    let ta_obj = new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &ta_obj, env, "Uint8Array");
-    slot_set(mc, &ta_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(mc, ta)));
-    slot_set(mc, &ta_obj, InternalSlot::Kind, &Value::Number(1.0)); // Uint8 = 1
+    let ta_obj = new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &ta_obj, env, "Uint8Array");
+    slot_set(ctx, &ta_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(ctx, ta)));
+    slot_set(ctx, &ta_obj, InternalSlot::Kind, &Value::Number(1.0)); // Uint8 = 1
     // Store the ArrayBuffer JS object so that .buffer accessor works
-    slot_set(mc, &ta_obj, InternalSlot::BufferObject, &Value::Object(ab_obj));
+    slot_set(ctx, &ta_obj, InternalSlot::BufferObject, &Value::Object(ab_obj));
 
     // Set length as a non-enumerable property for compatibility
-    object_set_key_value(mc, &ta_obj, "length", &Value::Number(data.len() as f64)).map_err(EvalError::from)?;
-    ta_obj.borrow_mut(mc).set_non_enumerable("length");
+    object_set_key_value(ctx, &ta_obj, "length", &Value::Number(data.len() as f64)).map_err(EvalError::from)?;
+    ta_obj.borrow_mut(ctx).set_non_enumerable("length");
 
     Ok(ta_obj)
 }
 
 pub fn handle_typedarray_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: &Value<'gc>,
     method: &str,
     _args: &[Value<'gc>],
@@ -6097,7 +6101,7 @@ pub fn handle_typedarray_method<'gc>(
                     }
                     Some(Value::Undefined) | None => Ok(default),
                     Some(v) => {
-                        let n = crate::core::to_number_with_env(mc, _env, v)?;
+                        let n = crate::core::to_number_with_env(ctx, _env, v)?;
                         Ok(if n.is_nan() { 0 } else { n as i64 })
                     }
                 }
@@ -6135,7 +6139,7 @@ pub fn handle_typedarray_method<'gc>(
                         "entries" => "entries",
                         _ => "values",
                     };
-                    Ok(crate::js_array::create_array_iterator(mc, _env, *obj, kind)?)
+                    Ok(crate::js_array::create_array_iterator(ctx, _env, *obj, kind)?)
                 }
                 "fill" => {
                     let len = get_len();
@@ -6147,7 +6151,7 @@ pub fn handle_typedarray_method<'gc>(
                             Value::BigInt(b) => bigint_to_i64_modular(b),
                             _ => {
                                 // ToBigInt coercion
-                                crate::js_typedarray::to_bigint_i64(mc, _env, &fill_val)?
+                                crate::js_typedarray::to_bigint_i64(ctx, _env, &fill_val)?
                             }
                         };
                         // Per spec: recheck OOB after value/start/end coercion
@@ -6155,16 +6159,16 @@ pub fn handle_typedarray_method<'gc>(
                         let start = resolve_index(start_rel, len);
                         let end = resolve_index(end_rel, len);
                         for i in start..end {
-                            ta.set_bigint(mc, i, fill_i64)?;
+                            ta.set_bigint(ctx, i, fill_i64)?;
                         }
                     } else {
-                        let fill_f64 = crate::core::to_number_with_env(mc, _env, &fill_val)?;
+                        let fill_f64 = crate::core::to_number_with_env(ctx, _env, &fill_val)?;
                         // Per spec: recheck OOB after value/start/end coercion
                         let len = recheck_oob()?;
                         let start = resolve_index(start_rel, len);
                         let end = resolve_index(end_rel, len);
                         for i in start..end {
-                            ta.set(mc, i, fill_f64)?;
+                            ta.set(ctx, i, fill_f64)?;
                         }
                     };
                     Ok(Value::Object(*obj))
@@ -6172,7 +6176,7 @@ pub fn handle_typedarray_method<'gc>(
                 "at" => {
                     let len = get_len();
                     let idx_arg = _args.first().cloned().unwrap_or(Value::Undefined);
-                    let rel = crate::core::to_number_with_env(mc, _env, &idx_arg)?;
+                    let rel = crate::core::to_number_with_env(ctx, _env, &idx_arg)?;
                     let rel = if rel.is_nan() { 0i64 } else { rel as i64 };
                     let actual = if rel < 0 { len as i64 + rel } else { rel };
                     if actual < 0 || actual as usize >= len {
@@ -6188,7 +6192,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in 0..len {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6207,7 +6211,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in 0..len {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6226,7 +6230,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in 0..len {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val.clone(), Value::Number(i as f64), Value::Object(*obj)],
@@ -6245,7 +6249,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in 0..len {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6264,7 +6268,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in (0..len).rev() {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val.clone(), Value::Number(i as f64), Value::Object(*obj)],
@@ -6283,7 +6287,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in (0..len).rev() {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6302,7 +6306,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in 0..len {
                         let val = get_val(i)?;
                         crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6316,14 +6320,14 @@ pub fn handle_typedarray_method<'gc>(
                     let callback = _args.first().cloned().unwrap_or(Value::Undefined);
                     let this_arg = _args.get(1).cloned().unwrap_or(Value::Undefined);
                     // TypedArraySpeciesCreate: use SpeciesConstructor to create result
-                    let result_ta = typed_array_species_create(mc, _env, obj, len)?;
+                    let result_ta = typed_array_species_create(ctx, _env, obj, len)?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
                         for i in 0..len {
                             let val = get_val(i)?;
                             let mapped = crate::js_promise::call_function_with_this(
-                                mc,
+                                ctx,
                                 &callback,
                                 Some(&this_arg),
                                 &[val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6332,16 +6336,16 @@ pub fn handle_typedarray_method<'gc>(
                             let n = if is_bigint {
                                 match &mapped {
                                     Value::BigInt(b) => bigint_to_i64_modular(b),
-                                    _ => to_bigint_i64(mc, _env, &mapped)?,
+                                    _ => to_bigint_i64(ctx, _env, &mapped)?,
                                 }
                             } else {
                                 0i64 // unused
                             };
                             if is_bigint {
-                                rta.set_bigint(mc, i, n)?;
+                                rta.set_bigint(ctx, i, n)?;
                             } else {
-                                let nf = crate::core::to_number_with_env(mc, _env, &mapped)?;
-                                rta.set(mc, i, nf)?;
+                                let nf = crate::core::to_number_with_env(ctx, _env, &mapped)?;
+                                rta.set(ctx, i, nf)?;
                             }
                         }
                     }
@@ -6355,7 +6359,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in 0..len {
                         let val = get_val(i)?;
                         let result = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&this_arg),
                             &[val.clone(), Value::Number(i as f64), Value::Object(*obj)],
@@ -6365,7 +6369,7 @@ pub fn handle_typedarray_method<'gc>(
                             kept.push(val);
                         }
                     }
-                    let result_ta = typed_array_species_create(mc, _env, obj, kept.len())?;
+                    let result_ta = typed_array_species_create(ctx, _env, obj, kept.len())?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
@@ -6375,10 +6379,10 @@ pub fn handle_typedarray_method<'gc>(
                                     Value::BigInt(b) => bigint_to_i64_modular(b),
                                     _ => 0,
                                 };
-                                rta.set_bigint(mc, i, n)?;
+                                rta.set_bigint(ctx, i, n)?;
                             } else {
                                 let n = crate::core::to_number(val).unwrap_or(0.0);
-                                rta.set(mc, i, n)?;
+                                rta.set(ctx, i, n)?;
                             };
                         }
                     }
@@ -6399,7 +6403,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in start_idx..len {
                         let val = get_val(i)?;
                         accumulator = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&Value::Undefined),
                             &[accumulator, val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6423,7 +6427,7 @@ pub fn handle_typedarray_method<'gc>(
                     for i in (0..end_idx).rev() {
                         let val = get_val(i)?;
                         accumulator = crate::js_promise::call_function_with_this(
-                            mc,
+                            ctx,
                             &callback,
                             Some(&Value::Undefined),
                             &[accumulator, val, Value::Number(i as f64), Value::Object(*obj)],
@@ -6439,7 +6443,7 @@ pub fn handle_typedarray_method<'gc>(
                     }
                     let search = _args.first().cloned().unwrap_or(Value::Undefined);
                     let from = if let Some(f) = _args.get(1) {
-                        let n = crate::core::to_number_with_env(mc, _env, f)?;
+                        let n = crate::core::to_number_with_env(ctx, _env, f)?;
                         if n.is_nan() { 0i64 } else { n as i64 }
                     } else {
                         0
@@ -6478,7 +6482,7 @@ pub fn handle_typedarray_method<'gc>(
                     }
                     let search = _args.first().cloned().unwrap_or(Value::Undefined);
                     let from = if let Some(f) = _args.get(1) {
-                        let n = crate::core::to_number_with_env(mc, _env, f)?;
+                        let n = crate::core::to_number_with_env(ctx, _env, f)?;
                         if n.is_nan() { 0i64 } else { n as i64 }
                     } else {
                         len as i64 - 1
@@ -6521,7 +6525,7 @@ pub fn handle_typedarray_method<'gc>(
                     }
                     let search = _args.first().cloned().unwrap_or(Value::Undefined);
                     let from = if let Some(f) = _args.get(1) {
-                        let n = crate::core::to_number_with_env(mc, _env, f)?;
+                        let n = crate::core::to_number_with_env(ctx, _env, f)?;
                         if n.is_nan() { 0i64 } else { n as i64 }
                     } else {
                         0
@@ -6552,7 +6556,7 @@ pub fn handle_typedarray_method<'gc>(
                                     return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                                 }
                                 Value::Object(_) => {
-                                    let prim = crate::core::to_primitive(mc, s, "string", _env)?;
+                                    let prim = crate::core::to_primitive(ctx, s, "string", _env)?;
                                     if matches!(prim, Value::Symbol(_)) {
                                         return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                                     }
@@ -6584,8 +6588,8 @@ pub fn handle_typedarray_method<'gc>(
                     while i < j {
                         let vi = ta.get(i)?;
                         let vj = ta.get(j)?;
-                        ta.set(mc, i, vj)?;
-                        ta.set(mc, j, vi)?;
+                        ta.set(ctx, i, vj)?;
+                        ta.set(ctx, j, vi)?;
                         i += 1;
                         j -= 1;
                     }
@@ -6598,7 +6602,7 @@ pub fn handle_typedarray_method<'gc>(
                     let start = resolve_index(start_rel, len);
                     let end = resolve_index(end_rel, len);
                     let count = end.saturating_sub(start);
-                    let result_ta = typed_array_species_create(mc, _env, obj, count)?;
+                    let result_ta = typed_array_species_create(ctx, _env, obj, count)?;
                     // Per spec step 14: only check detached / copy if count > 0
                     if count > 0 {
                         // Recheck OOB after coercion + species create (which may resize buffer)
@@ -6610,9 +6614,9 @@ pub fn handle_typedarray_method<'gc>(
                             for i in 0..actual_count {
                                 let v = get_val(start + i)?;
                                 match v {
-                                    Value::Number(n) => rta.set(mc, i, n)?,
-                                    Value::BigInt(b) => rta.set_bigint(mc, i, bigint_to_i64_modular(&b))?,
-                                    _ => rta.set(mc, i, 0.0)?,
+                                    Value::Number(n) => rta.set(ctx, i, n)?,
+                                    Value::BigInt(b) => rta.set_bigint(ctx, i, bigint_to_i64_modular(&b))?,
+                                    _ => rta.set(ctx, i, 0.0)?,
                                 }
                             }
                         }
@@ -6646,7 +6650,7 @@ pub fn handle_typedarray_method<'gc>(
                         }
                         for (i, v) in vals.into_iter().enumerate() {
                             if is_valid_integer_index(&ta, (target_idx + i) as f64) {
-                                ta.set(mc, target_idx + i, v)?;
+                                ta.set(ctx, target_idx + i, v)?;
                             }
                         }
                     }
@@ -6705,13 +6709,13 @@ pub fn handle_typedarray_method<'gc>(
                                 } else {
                                     Value::Number(*b)
                                 };
-                                match crate::js_promise::call_function_with_this(mc, cmp, None, &[av, bv], _env) {
+                                match crate::js_promise::call_function_with_this(ctx, cmp, None, &[av, bv], _env) {
                                     Ok(result) => {
                                         // ToNumber on comparefn result
                                         let n = match &result {
                                             Value::Number(n) => *n,
                                             Value::Undefined => f64::NAN,
-                                            _ => match crate::core::to_number_with_env(mc, _env, &result) {
+                                            _ => match crate::core::to_number_with_env(ctx, _env, &result) {
                                                 Ok(n) => n,
                                                 Err(e) => {
                                                     err = Some(e);
@@ -6745,14 +6749,14 @@ pub fn handle_typedarray_method<'gc>(
                     }
                     // Write back
                     for (i, v) in vals.into_iter().enumerate() {
-                        ta.set(mc, i, v)?;
+                        ta.set(ctx, i, v)?;
                     }
                     Ok(Value::Object(*obj))
                 }
                 "set" => {
                     // TypedArray.prototype.set(source [, offset])
                     let offset = if let Some(off) = _args.get(1) {
-                        let n = crate::core::to_number_with_env(mc, _env, off)?;
+                        let n = crate::core::to_number_with_env(ctx, _env, off)?;
                         // ToIntegerOrInfinity: NaN → 0
                         let int_n = if n.is_nan() { 0.0 } else { n.trunc() };
                         if int_n < 0.0 || int_n == f64::INFINITY {
@@ -6809,26 +6813,26 @@ pub fn handle_typedarray_method<'gc>(
                                     vals.push(src_ta.get(i)?);
                                 }
                                 for (i, v) in vals.into_iter().enumerate() {
-                                    ta.set(mc, offset + i, v)?;
+                                    ta.set(ctx, offset + i, v)?;
                                 }
                             } else {
                                 // Array-like source
-                                let src_len_val = get_property_with_accessors(mc, _env, src_obj, "length")?;
-                                let src_len = crate::core::to_number_with_env(mc, _env, &src_len_val)? as usize;
+                                let src_len_val = get_property_with_accessors(ctx, _env, src_obj, "length")?;
+                                let src_len = crate::core::to_number_with_env(ctx, _env, &src_len_val)? as usize;
                                 if offset + src_len > len {
                                     return Err(raise_range_error!("offset is out of bounds").into());
                                 }
                                 for i in 0..src_len {
-                                    let v = get_property_with_accessors(mc, _env, src_obj, i)?;
+                                    let v = get_property_with_accessors(ctx, _env, src_obj, i)?;
                                     if is_bigint {
                                         let n = match &v {
                                             Value::BigInt(b) => bigint_to_i64_modular(b),
-                                            _ => to_bigint_i64(mc, _env, &v)?,
+                                            _ => to_bigint_i64(ctx, _env, &v)?,
                                         };
-                                        ta.set_bigint(mc, offset + i, n)?;
+                                        ta.set_bigint(ctx, offset + i, n)?;
                                     } else {
-                                        let n = crate::core::to_number_with_env(mc, _env, &v)?;
-                                        ta.set(mc, offset + i, n)?;
+                                        let n = crate::core::to_number_with_env(ctx, _env, &v)?;
+                                        ta.set(ctx, offset + i, n)?;
                                     };
                                 }
                             }
@@ -6849,12 +6853,12 @@ pub fn handle_typedarray_method<'gc>(
                                 for i in 0..src_len {
                                     let ch = &s[i..i + 1];
                                     if is_bigint {
-                                        let n = to_bigint_i64(mc, _env, &Value::String(ch.to_vec()))?;
-                                        ta.set_bigint(mc, offset + i, n)?;
+                                        let n = to_bigint_i64(ctx, _env, &Value::String(ch.to_vec()))?;
+                                        ta.set_bigint(ctx, offset + i, n)?;
                                     } else {
                                         let ch_str = crate::unicode::utf16_to_utf8(ch);
                                         let n = ch_str.parse::<f64>().unwrap_or(f64::NAN);
-                                        ta.set(mc, offset + i, n)?;
+                                        ta.set(ctx, offset + i, n)?;
                                     };
                                 }
                             }
@@ -6878,7 +6882,7 @@ pub fn handle_typedarray_method<'gc>(
                     let new_len = end.saturating_sub(begin);
 
                     // SpeciesConstructor lookup
-                    let species = get_species_constructor(mc, _env, obj)?;
+                    let species = get_species_constructor(ctx, _env, obj)?;
 
                     if let Some(ctor) = species {
                         let new_byte_offset = ta.byte_offset + begin * ta.element_size();
@@ -6895,7 +6899,7 @@ pub fn handle_typedarray_method<'gc>(
                         } else {
                             vec![buf_val, Value::Number(new_byte_offset as f64), Value::Number(new_len as f64)]
                         };
-                        let new_val = crate::js_class::evaluate_new(mc, _env, &ctor, &args, None)?;
+                        let new_val = crate::js_class::evaluate_new(ctx, _env, &ctor, &args, None)?;
                         match new_val {
                             Value::Object(o) => {
                                 // ValidateTypedArray: result must have [[TypedArrayName]]
@@ -6914,14 +6918,14 @@ pub fn handle_typedarray_method<'gc>(
                             return Err(raise_type_error!("Cannot create subarray on a detached ArrayBuffer").into());
                         }
                         let new_byte_offset = ta.byte_offset + begin * ta.element_size();
-                        let sa_obj = new_js_object_data(mc);
+                        let sa_obj = new_js_object_data(ctx);
 
                         // Set prototype from the original object's constructor
                         if let Some(proto_val) = {
                             let borrowed = obj.borrow();
                             borrowed.prototype
                         } {
-                            sa_obj.borrow_mut(mc).prototype = Some(proto_val);
+                            sa_obj.borrow_mut(ctx).prototype = Some(proto_val);
                         }
 
                         let new_ta = JSTypedArray {
@@ -6931,10 +6935,10 @@ pub fn handle_typedarray_method<'gc>(
                             length: new_len,
                             length_tracking: false,
                         };
-                        slot_set(mc, &sa_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(mc, new_ta)));
+                        slot_set(ctx, &sa_obj, InternalSlot::TypedArray, &Value::TypedArray(Gc::new(ctx, new_ta)));
                         // Copy the BufferObject slot
                         if let Some(buf_obj_val) = slot_get_chained(obj, &InternalSlot::BufferObject) {
-                            slot_set(mc, &sa_obj, InternalSlot::BufferObject, &buf_obj_val.borrow());
+                            slot_set(ctx, &sa_obj, InternalSlot::BufferObject, &buf_obj_val.borrow());
                         }
                         Ok(Value::Object(sa_obj))
                     }
@@ -6956,18 +6960,18 @@ pub fn handle_typedarray_method<'gc>(
                                 if let Some(proto_val) = object_get_key_value(ctor_obj, "prototype")
                                     && let Value::Object(proto_obj) = &*proto_val.borrow()
                                 {
-                                    get_property_with_accessors(mc, _env, proto_obj, "toLocaleString")?
+                                    get_property_with_accessors(ctx, _env, proto_obj, "toLocaleString")?
                                 } else {
                                     Value::Undefined
                                 }
                             } else {
                                 Value::Undefined
                             };
-                            let result = crate::js_promise::call_function_with_this(mc, &tls_method, Some(&val), &[], _env)?;
+                            let result = crate::js_promise::call_function_with_this(ctx, &tls_method, Some(&val), &[], _env)?;
                             // ToString(result) — must call toPrimitive for objects
                             let s = match &result {
                                 Value::Object(_) => {
-                                    let prim = crate::core::to_primitive(mc, &result, "string", _env)?;
+                                    let prim = crate::core::to_primitive(ctx, &result, "string", _env)?;
                                     if matches!(prim, Value::Symbol(_)) {
                                         return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                                     }
@@ -6994,13 +6998,13 @@ pub fn handle_typedarray_method<'gc>(
                 }
                 "toReversed" => {
                     let len = get_len();
-                    let result_ta = create_same_type_typedarray(mc, _env, obj, len)?;
+                    let result_ta = create_same_type_typedarray(ctx, _env, obj, len)?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
                         for i in 0..len {
                             let v = ta.get(i)?;
-                            rta.set(mc, len - 1 - i, v)?;
+                            rta.set(ctx, len - 1 - i, v)?;
                         }
                     }
                     Ok(Value::Object(result_ta))
@@ -7068,12 +7072,12 @@ pub fn handle_typedarray_method<'gc>(
                                 } else {
                                     Value::Number(*b)
                                 };
-                                match crate::js_promise::call_function_with_this(mc, cmp, None, &[av, bv], _env) {
+                                match crate::js_promise::call_function_with_this(ctx, cmp, None, &[av, bv], _env) {
                                     Ok(result) => {
                                         let n = match &result {
                                             Value::Number(n) => *n,
                                             Value::Undefined => f64::NAN,
-                                            _ => match crate::core::to_number_with_env(mc, _env, &result) {
+                                            _ => match crate::core::to_number_with_env(ctx, _env, &result) {
                                                 Ok(n) => n,
                                                 Err(e) => {
                                                     err = Some(e);
@@ -7104,12 +7108,12 @@ pub fn handle_typedarray_method<'gc>(
                     } else {
                         vals.sort_by(default_sort);
                     }
-                    let result_ta = create_same_type_typedarray(mc, _env, obj, len)?;
+                    let result_ta = create_same_type_typedarray(ctx, _env, obj, len)?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
                         for (i, v) in vals.into_iter().enumerate() {
-                            rta.set(mc, i, v)?;
+                            rta.set(ctx, i, v)?;
                         }
                     }
                     Ok(Value::Object(result_ta))
@@ -7120,7 +7124,7 @@ pub fn handle_typedarray_method<'gc>(
 
                     // Step 4: Let relativeIndex be ? ToIntegerOrInfinity(index).
                     let idx_arg = _args.first().cloned().unwrap_or(Value::Undefined);
-                    let idx_num = crate::core::to_number_with_env(mc, _env, &idx_arg)?;
+                    let idx_num = crate::core::to_number_with_env(ctx, _env, &idx_arg)?;
                     let rel = if idx_num.is_nan() || idx_num == 0.0 {
                         0i64
                     } else if !idx_num.is_finite() {
@@ -7138,10 +7142,10 @@ pub fn handle_typedarray_method<'gc>(
                     let numeric_value = if is_bigint {
                         match &value {
                             Value::BigInt(b) => Value::BigInt(b.clone()),
-                            _ => Value::BigInt(Box::new(num_bigint::BigInt::from(to_bigint_i64(mc, _env, &value)?))),
+                            _ => Value::BigInt(Box::new(num_bigint::BigInt::from(to_bigint_i64(ctx, _env, &value)?))),
                         }
                     } else {
-                        Value::Number(crate::core::to_number_with_env(mc, _env, &value)?)
+                        Value::Number(crate::core::to_number_with_env(ctx, _env, &value)?)
                     };
 
                     // Step 9: Use IsValidIntegerIndex (checks current buffer state)
@@ -7150,7 +7154,7 @@ pub fn handle_typedarray_method<'gc>(
                     }
 
                     // Step 10: create result with ORIGINAL length
-                    let result_ta_obj = create_same_type_typedarray(mc, _env, obj, orig_len)?;
+                    let result_ta_obj = create_same_type_typedarray(ctx, _env, obj, orig_len)?;
                     if let Some(rta_cell) = slot_get_chained(&result_ta_obj, &InternalSlot::TypedArray)
                         && let Value::TypedArray(rta) = &*rta_cell.borrow()
                     {
@@ -7158,17 +7162,17 @@ pub fn handle_typedarray_method<'gc>(
                             if i == actual as usize {
                                 if is_bigint {
                                     if let Value::BigInt(b) = &numeric_value {
-                                        rta.set_bigint(mc, i, bigint_to_i64_modular(b))?;
+                                        rta.set_bigint(ctx, i, bigint_to_i64_modular(b))?;
                                     }
                                 } else if let Value::Number(n) = numeric_value {
-                                    rta.set(mc, i, n)?;
+                                    rta.set(ctx, i, n)?;
                                 }
                             } else {
                                 let v = get_val(i)?;
                                 match v {
-                                    Value::Number(n) => rta.set(mc, i, n)?,
-                                    Value::BigInt(b) => rta.set_bigint(mc, i, bigint_to_i64_modular(&b))?,
-                                    _ => rta.set(mc, i, 0.0)?,
+                                    Value::Number(n) => rta.set(ctx, i, n)?,
+                                    Value::BigInt(b) => rta.set_bigint(ctx, i, bigint_to_i64_modular(&b))?,
+                                    _ => rta.set(ctx, i, 0.0)?,
                                 }
                             }
                         }
@@ -7185,19 +7189,19 @@ pub fn handle_typedarray_method<'gc>(
     }
 }
 
-pub fn initialize_typedarray<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let arraybuffer = make_arraybuffer_constructor(mc, env)?;
-    crate::core::env_set(mc, env, "ArrayBuffer", &Value::Object(arraybuffer))?;
+pub fn initialize_typedarray<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let arraybuffer = make_arraybuffer_constructor(ctx, env)?;
+    crate::core::env_set(ctx, env, "ArrayBuffer", &Value::Object(arraybuffer))?;
 
-    let dataview = make_dataview_constructor(mc, env)?;
-    crate::core::env_set(mc, env, "DataView", &Value::Object(dataview))?;
+    let dataview = make_dataview_constructor(ctx, env)?;
+    crate::core::env_set(ctx, env, "DataView", &Value::Object(dataview))?;
 
     // Create the abstract %TypedArray% intrinsic first
-    let (ta_intrinsic, ta_proto_intrinsic) = make_typedarray_intrinsic(mc, env)?;
+    let (ta_intrinsic, ta_proto_intrinsic) = make_typedarray_intrinsic(ctx, env)?;
 
-    let typed_arrays = make_typedarray_constructors(mc, env, &ta_intrinsic, &ta_proto_intrinsic)?;
+    let typed_arrays = make_typedarray_constructors(ctx, env, &ta_intrinsic, &ta_proto_intrinsic)?;
     for (name, ctor) in &typed_arrays {
-        crate::core::env_set(mc, env, name, &Value::Object(*ctor))?;
+        crate::core::env_set(ctx, env, name, &Value::Object(*ctor))?;
     }
 
     // Now fix up constructor properties on per-type prototypes to point to actual constructors
@@ -7205,8 +7209,8 @@ pub fn initialize_typedarray<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc
         if let Some(proto_val) = object_get_key_value(ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
-            object_set_key_value(mc, proto, "constructor", &Value::Object(*ctor))?;
-            proto.borrow_mut(mc).set_non_enumerable("constructor");
+            object_set_key_value(ctx, proto, "constructor", &Value::Object(*ctor))?;
+            proto.borrow_mut(ctx).set_non_enumerable("constructor");
         }
         // Also make name and length on prototype available (not needed per spec, but name helps for .name tests)
         let _ = name; // just to avoid unused warning
@@ -7243,9 +7247,9 @@ pub fn initialize_typedarray<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc
 
         // Static methods on Uint8Array
         for &(name, dispatch_name, length) in &[("fromBase64", "Uint8Array.fromBase64", 1.0), ("fromHex", "Uint8Array.fromHex", 1.0)] {
-            let fn_obj = mk(mc, name, dispatch_name, length)?;
-            let desc = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-            crate::js_object::define_property_internal(mc, u8_ctor, name, &desc)?;
+            let fn_obj = mk(ctx, name, dispatch_name, length)?;
+            let desc = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+            crate::js_object::define_property_internal(ctx, u8_ctor, name, &desc)?;
         }
 
         // Prototype methods
@@ -7258,18 +7262,18 @@ pub fn initialize_typedarray<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc
                 ("setFromBase64", "Uint8Array.prototype.setFromBase64", 1.0),
                 ("setFromHex", "Uint8Array.prototype.setFromHex", 1.0),
             ] {
-                let fn_obj = mk(mc, name, dispatch_name, length)?;
-                let desc = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-                crate::js_object::define_property_internal(mc, proto, name, &desc)?;
+                let fn_obj = mk(ctx, name, dispatch_name, length)?;
+                let desc = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+                crate::js_object::define_property_internal(ctx, proto, name, &desc)?;
             }
         }
     }
 
-    let atomics = make_atomics_object(mc, env)?;
-    crate::core::env_set(mc, env, "Atomics", &Value::Object(atomics))?;
+    let atomics = make_atomics_object(ctx, env)?;
+    crate::core::env_set(ctx, env, "Atomics", &Value::Object(atomics))?;
 
-    let shared_ab = make_sharedarraybuffer_constructor(mc, env)?;
-    crate::core::env_set(mc, env, "SharedArrayBuffer", &Value::Object(shared_ab))?;
+    let shared_ab = make_sharedarraybuffer_constructor(ctx, env)?;
+    crate::core::env_set(ctx, env, "SharedArrayBuffer", &Value::Object(shared_ab))?;
 
     Ok(())
 }

@@ -9,7 +9,7 @@ use crate::{
 
 /// Handle `new WeakRef(target)` constructor calls (spec §26.1.1)
 pub(crate) fn handle_weakref_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -24,7 +24,7 @@ pub(crate) fn handle_weakref_constructor<'gc>(
     };
 
     // Step 4: Create the WeakRef wrapper object.
-    let weakref_obj = new_js_object_data(mc);
+    let weakref_obj = new_js_object_data(ctx);
 
     // Store the weak key in an internal slot.
     // We use InternalSlot::WeakRefTarget to store the WeakKey encoded as a Value.
@@ -37,17 +37,17 @@ pub(crate) fn handle_weakref_constructor<'gc>(
 
     // Store the WeakKey in the object's internal data via a Value encoding.
     // We'll store the original value so we can return it from deref().
-    slot_set(mc, &weakref_obj, InternalSlot::WeakRefTarget, &target);
+    slot_set(ctx, &weakref_obj, InternalSlot::WeakRefTarget, &target);
 
     // Also indicate this is a WeakRef
-    slot_set(mc, &weakref_obj, InternalSlot::WeakRefMarker, &Value::Boolean(true));
+    slot_set(ctx, &weakref_obj, InternalSlot::WeakRefMarker, &Value::Boolean(true));
 
     // OrdinaryCreateFromConstructor(NewTarget, "%WeakRef.prototype%")
     let mut proto_set = false;
     if let Some(Value::Object(nt_obj)) = new_target
-        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "WeakRef")?
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "WeakRef")?
     {
-        weakref_obj.borrow_mut(mc).prototype = Some(proto);
+        weakref_obj.borrow_mut(ctx).prototype = Some(proto);
         proto_set = true;
     }
     if !proto_set
@@ -56,30 +56,30 @@ pub(crate) fn handle_weakref_constructor<'gc>(
         && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        weakref_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+        weakref_obj.borrow_mut(ctx).prototype = Some(*proto_obj);
     }
 
     Ok(Value::Object(weakref_obj))
 }
 
 /// Initialize WeakRef constructor and prototype (spec §26.1.2, §26.1.3)
-pub fn initialize_weakref<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let weakref_ctor = new_js_object_data(mc);
-    slot_set(mc, &weakref_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+pub fn initialize_weakref<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let weakref_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &weakref_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
-        mc,
+        ctx,
         &weakref_ctor,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("WeakRef")),
     );
 
     // WeakRef.length = 1, WeakRef.name = "WeakRef"
-    object_set_key_value(mc, &weakref_ctor, "length", &Value::Number(1.0))?;
-    weakref_ctor.borrow_mut(mc).set_non_enumerable("length");
-    weakref_ctor.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &weakref_ctor, "name", &Value::String(utf8_to_utf16("WeakRef")))?;
-    weakref_ctor.borrow_mut(mc).set_non_enumerable("name");
-    weakref_ctor.borrow_mut(mc).set_non_writable("name");
+    object_set_key_value(ctx, &weakref_ctor, "length", &Value::Number(1.0))?;
+    weakref_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    weakref_ctor.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &weakref_ctor, "name", &Value::String(utf8_to_utf16("WeakRef")))?;
+    weakref_ctor.borrow_mut(ctx).set_non_enumerable("name");
+    weakref_ctor.borrow_mut(ctx).set_non_writable("name");
 
     // Set WeakRef's [[Prototype]] to Function.prototype
     if let Some(func_val) = object_get_key_value(env, "Function")
@@ -87,7 +87,7 @@ pub fn initialize_weakref<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        weakref_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        weakref_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     // Get Object.prototype
@@ -101,26 +101,26 @@ pub fn initialize_weakref<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         None
     };
 
-    let weakref_proto = new_js_object_data(mc);
+    let weakref_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        weakref_proto.borrow_mut(mc).prototype = Some(proto);
+        weakref_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &weakref_ctor, "prototype", &Value::Object(weakref_proto))?;
-    weakref_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    weakref_ctor.borrow_mut(mc).set_non_writable("prototype");
-    weakref_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &weakref_proto, "constructor", &Value::Object(weakref_ctor))?;
+    object_set_key_value(ctx, &weakref_ctor, "prototype", &Value::Object(weakref_proto))?;
+    weakref_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    weakref_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    weakref_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &weakref_proto, "constructor", &Value::Object(weakref_ctor))?;
 
     // Register instance methods: deref, toString
     let methods = vec!["deref", "toString"];
     for method in methods {
         let val = Value::Function(format!("WeakRef.prototype.{}", method));
-        object_set_key_value(mc, &weakref_proto, method, &val)?;
-        weakref_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &weakref_proto, method, &val)?;
+        weakref_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    weakref_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    weakref_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Symbol.toStringTag = "WeakRef"
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -128,17 +128,17 @@ pub fn initialize_weakref<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(s) = &*tag_sym.borrow()
     {
-        let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("WeakRef")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &weakref_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
+        let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("WeakRef")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &weakref_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
     }
 
-    env_set(mc, env, "WeakRef", &Value::Object(weakref_ctor))?;
+    env_set(ctx, env, "WeakRef", &Value::Object(weakref_ctor))?;
     Ok(())
 }
 
 /// Handle WeakRef instance method calls.
 pub(crate) fn handle_weakref_instance_method<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     method: &str,
     _args: &[Value<'gc>],
@@ -188,6 +188,6 @@ pub(crate) fn handle_weakref_instance_method<'gc>(
 
 /// Check if a JS object wraps an internal WeakRef
 #[allow(dead_code)]
-pub fn is_weakref_object(_mc: &GcContext<'_>, obj: &JSObjectDataPtr<'_>) -> bool {
+pub fn is_weakref_object(_ctx: &GcContext<'_>, obj: &JSObjectDataPtr<'_>) -> bool {
     slot_get_chained(obj, &InternalSlot::WeakRefMarker).is_some()
 }

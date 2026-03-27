@@ -14,7 +14,7 @@ use crate::{
 /// {value: V, writable: true, enumerable: true, configurable: true}.
 /// Throws TypeError if the define fails (non-extensible or non-configurable property).
 pub(crate) fn create_data_property_or_throw<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
     val: &Value<'gc>,
@@ -24,14 +24,14 @@ pub(crate) fn create_data_property_or_throw<'gc>(
     if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
-        let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &key, val)?;
+        let ok = crate::js_proxy::proxy_define_data_property(ctx, proxy, &key, val)?;
         if !ok {
             return Err(raise_type_error!("Cannot define property on proxy").into());
         }
         return Ok(());
     }
-    let desc = crate::core::create_descriptor_object(mc, val, true, true, true).map_err(EvalError::from)?;
-    crate::js_object::define_property_internal(mc, obj, key, &desc).map_err(EvalError::from)
+    let desc = crate::core::create_descriptor_object(ctx, val, true, true, true).map_err(EvalError::from)?;
+    crate::js_object::define_property_internal(ctx, obj, key, &desc).map_err(EvalError::from)
 }
 
 /// Checks whether a value is a constructor (can be called with `new`).
@@ -50,9 +50,9 @@ fn is_constructor_val<'gc>(v: &Value<'gc>) -> bool {
 
 /// IsArray(argument) — spec 7.2.2, with recursive Proxy support.
 /// Returns true if argument is an Array (directly or through proxy chain).
-fn is_array_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
+fn is_array_spec<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<bool, EvalError<'gc>> {
     // Direct array?
-    if is_array(mc, obj) {
+    if is_array(ctx, obj) {
         return Ok(true);
     }
     // Proxy exotic object — recurse into target
@@ -63,7 +63,7 @@ fn is_array_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result
             return Err(raise_type_error!("Cannot perform 'IsArray' on a revoked proxy").into());
         }
         if let Value::Object(target) = &*proxy.target {
-            return is_array_spec(mc, target);
+            return is_array_spec(ctx, target);
         }
     }
     Ok(false)
@@ -73,25 +73,25 @@ fn is_array_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result
 /// Returns a new array-like object created via the array's @@species constructor,
 /// falling back to a plain Array if no species is found.
 pub(crate) fn array_species_create_impl<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     length: f64,
 ) -> Result<JSObjectDataPtr<'gc>, EvalError<'gc>> {
     // Step 1-2: If IsArray(receiver) is false, just create a plain array.
-    if !is_array_spec(mc, receiver)? {
-        let arr = create_array(mc, env)?;
-        set_array_length(mc, &arr, length as usize)?;
+    if !is_array_spec(ctx, receiver)? {
+        let arr = create_array(ctx, env)?;
+        set_array_length(ctx, &arr, length as usize)?;
         return Ok(arr);
     }
 
     // Step 3: Let C = receiver.constructor
-    let ctor_val = crate::core::get_property_with_accessors(mc, env, receiver, "constructor")?;
+    let ctor_val = crate::core::get_property_with_accessors(ctx, env, receiver, "constructor")?;
 
     // Step 6: If C is undefined, return ArrayCreate(length)
     if matches!(ctor_val, Value::Undefined) {
-        let arr = create_array(mc, env)?;
-        set_array_length(mc, &arr, length as usize)?;
+        let arr = create_array(ctx, env)?;
+        set_array_length(ctx, &arr, length as usize)?;
         return Ok(arr);
     }
 
@@ -118,8 +118,8 @@ pub(crate) fn array_species_create_impl<'gc>(
             false
         };
         if is_foreign_array {
-            let arr = create_array(mc, env)?;
-            set_array_length(mc, &arr, length as usize)?;
+            let arr = create_array(ctx, env)?;
+            set_array_length(ctx, &arr, length as usize)?;
             return Ok(arr);
         }
     }
@@ -131,11 +131,11 @@ pub(crate) fn array_species_create_impl<'gc>(
         && let Some(species_sym_val) = object_get_key_value(sym_obj, "species")
         && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
     {
-        let species = crate::core::get_property_with_accessors(mc, env, ctor_obj, *species_sym)?;
+        let species = crate::core::get_property_with_accessors(ctx, env, ctor_obj, *species_sym)?;
         match species {
             Value::Null | Value::Undefined => {
-                let arr = create_array(mc, env)?;
-                set_array_length(mc, &arr, length as usize)?;
+                let arr = create_array(ctx, env)?;
+                set_array_length(ctx, &arr, length as usize)?;
                 return Ok(arr);
             }
             other => c = other,
@@ -144,8 +144,8 @@ pub(crate) fn array_species_create_impl<'gc>(
 
     // Step 6: If C is still undefined after species lookup, return ArrayCreate(length)
     if matches!(c, Value::Undefined) {
-        let arr = create_array(mc, env)?;
-        set_array_length(mc, &arr, length as usize)?;
+        let arr = create_array(ctx, env)?;
+        set_array_length(ctx, &arr, length as usize)?;
         return Ok(arr);
     }
 
@@ -155,20 +155,20 @@ pub(crate) fn array_species_create_impl<'gc>(
     }
 
     // Step 8: Return Construct(C, «length»)
-    let constructed = crate::js_class::evaluate_new(mc, env, &c, &[Value::Number(length)], None)?;
+    let constructed = crate::js_class::evaluate_new(ctx, env, &c, &[Value::Number(length)], None)?;
     match constructed {
         Value::Object(obj) => Ok(obj),
         _ => Err(raise_type_error!("Array species constructor must return an object").into()),
     }
 }
 
-pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let array_ctor = new_js_object_data(mc);
-    slot_set(mc, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
-    let array_ctor = new_js_object_data(mc);
-    slot_set(mc, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
+pub fn initialize_array<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let array_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
+    let array_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &array_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &array_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Array")));
 
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
@@ -180,29 +180,29 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
         None
     };
 
-    let array_proto = new_js_object_data(mc);
+    let array_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        array_proto.borrow_mut(mc).prototype = Some(proto);
+        array_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
-    slot_set(mc, &array_proto, InternalSlot::IsArray, &Value::Boolean(true));
+    slot_set(ctx, &array_proto, InternalSlot::IsArray, &Value::Boolean(true));
 
-    object_set_key_value(mc, &array_ctor, "prototype", &Value::Object(array_proto))?;
-    array_ctor.borrow_mut(mc).set_non_writable("prototype");
-    array_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    array_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &array_proto, "constructor", &Value::Object(array_ctor))?;
-    array_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &array_ctor, "prototype", &Value::Object(array_proto))?;
+    array_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    array_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    array_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &array_proto, "constructor", &Value::Object(array_ctor))?;
+    array_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     for (method, method_length) in [("isArray", 1.0_f64), ("from", 1.0_f64), ("of", 0.0_f64), ("fromAsync", 1.0_f64)] {
-        let func_obj = new_js_object_data(mc);
+        let func_obj = new_js_object_data(ctx);
 
         if let Some(func_ctor_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            func_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            func_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
 
         let closure = ClosureData {
@@ -212,17 +212,17 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
             ..ClosureData::default()
         };
         func_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, closure)))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Closure(Gc::new(ctx, closure)))));
 
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &func_obj, "name", &name_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(method)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &func_obj, "name", &name_desc)?;
 
-        let length_desc = crate::core::create_descriptor_object(mc, &Value::Number(method_length), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &func_obj, "length", &length_desc)?;
+        let length_desc = crate::core::create_descriptor_object(ctx, &Value::Number(method_length), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &func_obj, "length", &length_desc)?;
 
-        object_set_key_value(mc, &array_ctor, method, &Value::Object(func_obj))?;
-        array_ctor.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &array_ctor, method, &Value::Object(func_obj))?;
+        array_ctor.borrow_mut(ctx).set_non_enumerable(method);
     }
 
     let methods = vec![
@@ -268,13 +268,13 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
 
     for method in methods {
         let val = Value::Function(format!("Array.prototype.{method}"));
-        object_set_key_value(mc, &array_proto, method, &val)?;
-        array_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &array_proto, method, &val)?;
+        array_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
 
-    object_set_key_value(mc, &array_proto, "length", &Value::Number(0.0))?;
-    array_proto.borrow_mut(mc).set_non_enumerable("length");
-    array_proto.borrow_mut(mc).set_non_configurable("length");
+    object_set_key_value(ctx, &array_proto, "length", &Value::Number(0.0))?;
+    array_proto.borrow_mut(ctx).set_non_enumerable("length");
+    array_proto.borrow_mut(ctx).set_non_configurable("length");
 
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
@@ -283,22 +283,22 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
             && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
         {
             let val = Value::Function("Array.prototype.values".to_string());
-            object_set_key_value(mc, &array_proto, iter_sym, &val)?;
-            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
+            object_set_key_value(ctx, &array_proto, iter_sym, &val)?;
+            array_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
         }
 
         if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
-            object_set_key_value(mc, &array_proto, tag_sym, &Value::String(utf8_to_utf16("Array")))?;
-            array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+            object_set_key_value(ctx, &array_proto, tag_sym, &Value::String(utf8_to_utf16("Array")))?;
+            array_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
         }
 
         if let Some(unscopables_sym_val) = object_get_key_value(sym_ctor, "unscopables")
             && let Value::Symbol(unscopables_sym) = &*unscopables_sym_val.borrow()
         {
-            let unscopables_obj = new_js_object_data(mc);
-            unscopables_obj.borrow_mut(mc).prototype = None;
+            let unscopables_obj = new_js_object_data(ctx);
+            unscopables_obj.borrow_mut(ctx).prototype = None;
 
             for name in [
                 "copyWithin",
@@ -317,24 +317,24 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
                 "toSpliced",
                 "values",
             ] {
-                object_set_key_value(mc, &unscopables_obj, name, &Value::Boolean(true))?;
+                object_set_key_value(ctx, &unscopables_obj, name, &Value::Boolean(true))?;
             }
 
-            let unscopables_desc = crate::core::create_descriptor_object(mc, &Value::Object(unscopables_obj), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &array_proto, PropertyKey::Symbol(*unscopables_sym), &unscopables_desc)?;
+            let unscopables_desc = crate::core::create_descriptor_object(ctx, &Value::Object(unscopables_obj), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &array_proto, PropertyKey::Symbol(*unscopables_sym), &unscopables_desc)?;
         }
 
         // Array[Symbol.species] — accessor getter returning `this`, non-enumerable, configurable
         if let Some(species_sym_val) = object_get_key_value(sym_ctor, "species")
             && let Value::Symbol(species_sym) = &*species_sym_val.borrow()
         {
-            let getter_fn = new_js_object_data(mc);
+            let getter_fn = new_js_object_data(ctx);
             if let Some(func_ctor_val) = object_get_key_value(env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                 && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(func_proto) = &*proto_val.borrow()
             {
-                getter_fn.borrow_mut(mc).prototype = Some(*func_proto);
+                getter_fn.borrow_mut(ctx).prototype = Some(*func_proto);
             }
             let getter_closure = ClosureData {
                 env: Some(*env),
@@ -343,34 +343,34 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
                 ..ClosureData::default()
             };
             getter_fn
-                .borrow_mut(mc)
-                .set_closure(Some(new_gc_cell_ptr(mc, Value::Closure(Gc::new(mc, getter_closure)))));
+                .borrow_mut(ctx)
+                .set_closure(Some(new_gc_cell_ptr(ctx, Value::Closure(Gc::new(ctx, getter_closure)))));
             let gname_desc =
-                crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &getter_fn, "name", &gname_desc)?;
-            let glen_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &getter_fn, "length", &glen_desc)?;
+                crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("get [Symbol.species]")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &getter_fn, "name", &gname_desc)?;
+            let glen_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &getter_fn, "length", &glen_desc)?;
 
-            let species_desc_obj = new_js_object_data(mc);
-            object_set_key_value(mc, &species_desc_obj, "get", &Value::Object(getter_fn))?;
-            object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
-            object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
-            crate::js_object::define_property_internal(mc, &array_ctor, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
+            let species_desc_obj = new_js_object_data(ctx);
+            object_set_key_value(ctx, &species_desc_obj, "get", &Value::Object(getter_fn))?;
+            object_set_key_value(ctx, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+            object_set_key_value(ctx, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+            crate::js_object::define_property_internal(ctx, &array_ctor, PropertyKey::Symbol(*species_sym), &species_desc_obj)?;
         }
     }
 
-    let arr_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Array")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &array_ctor, "name", &arr_name_desc)?;
+    let arr_name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Array")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &array_ctor, "name", &arr_name_desc)?;
 
-    let arr_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &array_ctor, "length", &arr_len_desc)?;
+    let arr_len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &array_ctor, "length", &arr_len_desc)?;
 
     // --- Create %IteratorPrototype% and %ArrayIteratorPrototype% ---
     // %IteratorPrototype% has [[Prototype]] = Object.prototype and a
     // Symbol.iterator method that returns `this`.
-    let iterator_proto = new_js_object_data(mc);
+    let iterator_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        iterator_proto.borrow_mut(mc).prototype = Some(proto);
+        iterator_proto.borrow_mut(ctx).prototype = Some(proto);
     }
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
@@ -378,24 +378,24 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
     {
         // Create a proper function object with name="[Symbol.iterator]" and length=0
-        let iter_fn_obj = new_js_object_data(mc);
+        let iter_fn_obj = new_js_object_data(ctx);
         if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            iter_fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            iter_fn_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
         iter_fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function("IteratorSelf".to_string()))));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.iterator]"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &iter_fn_obj, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &iter_fn_obj, "length", &len_desc)?;
+            .borrow_mut(ctx)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(ctx, Value::Function("IteratorSelf".to_string()))));
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::from("[Symbol.iterator]"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &iter_fn_obj, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &iter_fn_obj, "length", &len_desc)?;
 
-        object_set_key_value(mc, &iterator_proto, iter_sym, &Value::Object(iter_fn_obj))?;
-        iterator_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
+        object_set_key_value(ctx, &iterator_proto, iter_sym, &Value::Object(iter_fn_obj))?;
+        iterator_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*iter_sym));
     }
 
     // Add [Symbol.dispose] to %IteratorPrototype%
@@ -405,44 +405,44 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
         && let Some(dispose_sym_val) = object_get_key_value(sym_ctor, "dispose")
         && let Value::Symbol(dispose_sym) = &*dispose_sym_val.borrow()
     {
-        let dispose_fn_obj = new_js_object_data(mc);
+        let dispose_fn_obj = new_js_object_data(ctx);
         if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
             && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
             && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            dispose_fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+            dispose_fn_obj.borrow_mut(ctx).prototype = Some(*func_proto);
         }
-        dispose_fn_obj.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
-            mc,
+        dispose_fn_obj.borrow_mut(ctx).set_closure(Some(crate::core::new_gc_cell_ptr(
+            ctx,
             Value::Function("IteratorPrototype.dispose".to_string()),
         )));
-        slot_set(mc, &dispose_fn_obj, InternalSlot::Callable, &Value::Boolean(true));
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.dispose]"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &dispose_fn_obj, "name", &name_desc)?;
-        let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &dispose_fn_obj, "length", &len_desc)?;
+        slot_set(ctx, &dispose_fn_obj, InternalSlot::Callable, &Value::Boolean(true));
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::from("[Symbol.dispose]"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &dispose_fn_obj, "name", &name_desc)?;
+        let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &dispose_fn_obj, "length", &len_desc)?;
 
-        let desc = crate::core::create_descriptor_object(mc, &Value::Object(dispose_fn_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &iterator_proto, PropertyKey::Symbol(*dispose_sym), &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, &Value::Object(dispose_fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &iterator_proto, PropertyKey::Symbol(*dispose_sym), &desc)?;
     }
 
     // Store %IteratorPrototype% in env so Iterator helpers init can find it
-    slot_set(mc, env, InternalSlot::IteratorPrototype, &Value::Object(iterator_proto));
+    slot_set(ctx, env, InternalSlot::IteratorPrototype, &Value::Object(iterator_proto));
 
     // %ArrayIteratorPrototype% has [[Prototype]] = %IteratorPrototype%,
     // a `next` method, and Symbol.toStringTag = "Array Iterator".
-    let array_iter_proto = new_js_object_data(mc);
-    array_iter_proto.borrow_mut(mc).prototype = Some(iterator_proto);
+    let array_iter_proto = new_js_object_data(ctx);
+    array_iter_proto.borrow_mut(ctx).prototype = Some(iterator_proto);
 
     // next method (writable, non-enumerable, configurable)
     object_set_key_value(
-        mc,
+        ctx,
         &array_iter_proto,
         "next",
         &Value::Function("ArrayIterator.prototype.next".to_string()),
     )?;
-    array_iter_proto.borrow_mut(mc).set_non_enumerable("next");
+    array_iter_proto.borrow_mut(ctx).set_non_enumerable("next");
 
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
@@ -451,21 +451,21 @@ pub fn initialize_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) ->
         if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
-            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Array Iterator")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &array_iter_proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+            let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Array Iterator")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &array_iter_proto, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
         }
     }
 
     // Store %ArrayIteratorPrototype% in env (hidden via internal slot)
-    slot_set(mc, env, InternalSlot::ArrayIteratorPrototype, &Value::Object(array_iter_proto));
+    slot_set(ctx, env, InternalSlot::ArrayIteratorPrototype, &Value::Object(array_iter_proto));
 
-    env_set(mc, env, "Array", &Value::Object(array_ctor))?;
+    env_set(ctx, env, "Array", &Value::Object(array_ctor))?;
     Ok(())
 }
 
 /// Handle Array static method calls (Array.isArray, Array.from, Array.of)
 pub(crate) fn handle_array_static_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -535,8 +535,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                             .map(|p| !crate::core::Gc::ptr_eq(p, proto_obj))
                             .unwrap_or(true);
                         if should_update {
-                            out_obj.borrow_mut(mc).prototype = Some(proto_obj);
-                            slot_set(mc, &out_obj, InternalSlot::Proto, &Value::Object(proto_obj));
+                            out_obj.borrow_mut(ctx).prototype = Some(proto_obj);
+                            slot_set(ctx, &out_obj, InternalSlot::Proto, &Value::Object(proto_obj));
                         }
                     }
                 }
@@ -551,14 +551,14 @@ pub(crate) fn handle_array_static_method<'gc>(
             };
 
             let attempt = match tv {
-                Value::Function(name) if name == "Array" => crate::js_array::handle_array_constructor(mc, &ctor_args, env, None),
-                Value::Function(name) if name == "Object" => crate::js_class::handle_object_constructor(mc, &ctor_args, env),
+                Value::Function(name) if name == "Array" => crate::js_array::handle_array_constructor(ctx, &ctor_args, env, None),
+                Value::Function(name) if name == "Object" => crate::js_class::handle_object_constructor(ctx, &ctor_args, env),
                 Value::Function(name) => {
                     if let Some(resolved) = crate::core::env_get(env, name) {
                         let resolved_val = resolved.borrow().clone();
-                        crate::js_class::evaluate_new(mc, env, &resolved_val, &ctor_args, None)
+                        crate::js_class::evaluate_new(ctx, env, &resolved_val, &ctor_args, None)
                     } else {
-                        crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
+                        crate::js_class::evaluate_new(ctx, env, tv, &ctor_args, None)
                     }
                 }
                 Value::Object(obj) if slot_get_chained(obj, &InternalSlot::NativeCtor).is_some() => {
@@ -567,17 +567,17 @@ pub(crate) fn handle_array_static_method<'gc>(
                     {
                         let native_name = utf16_to_utf8(name_u16);
                         if native_name == "Array" {
-                            crate::js_array::handle_array_constructor(mc, &ctor_args, env, None)
+                            crate::js_array::handle_array_constructor(ctx, &ctor_args, env, None)
                         } else if native_name == "Object" {
-                            crate::js_class::handle_object_constructor(mc, &ctor_args, env)
+                            crate::js_class::handle_object_constructor(ctx, &ctor_args, env)
                         } else {
-                            crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
+                            crate::js_class::evaluate_new(ctx, env, tv, &ctor_args, None)
                         }
                     } else {
-                        crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None)
+                        crate::js_class::evaluate_new(ctx, env, tv, &ctor_args, None)
                     }
                 }
-                _ => crate::js_class::evaluate_new(mc, env, tv, &ctor_args, None),
+                _ => crate::js_class::evaluate_new(ctx, env, tv, &ctor_args, None),
             };
 
             match attempt {
@@ -605,14 +605,14 @@ pub(crate) fn handle_array_static_method<'gc>(
         if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
             && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
         {
-            match crate::js_class::evaluate_new(mc, env, &Value::Object(*array_ctor_obj), &[Value::Number(fallback_len)], None) {
+            match crate::js_class::evaluate_new(ctx, env, &Value::Object(*array_ctor_obj), &[Value::Number(fallback_len)], None) {
                 Ok(Value::Object(out_obj)) => return Ok(out_obj),
                 Ok(_) => {}              // fall through
                 Err(e) => return Err(e), // propagate RangeError etc.
             }
         }
 
-        let out = create_array(mc, env).map_err(EvalError::from)?;
+        let out = create_array(ctx, env).map_err(EvalError::from)?;
         if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
             && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
             && let Some(array_proto_rc) = object_get_key_value(array_ctor_obj, "prototype")
@@ -633,8 +633,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                     .map(|p| !crate::core::Gc::ptr_eq(p, array_proto))
                     .unwrap_or(true);
                 if should_update {
-                    out.borrow_mut(mc).prototype = Some(array_proto);
-                    slot_set(mc, &out, InternalSlot::Proto, &Value::Object(array_proto));
+                    out.borrow_mut(ctx).prototype = Some(array_proto);
+                    slot_set(ctx, &out, InternalSlot::Proto, &Value::Object(array_proto));
                 }
             }
         }
@@ -646,15 +646,15 @@ pub(crate) fn handle_array_static_method<'gc>(
             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
         {
             let prop_key = PropertyKey::from(key.to_string());
-            let ok = crate::js_proxy::proxy_define_data_property(mc, proxy, &prop_key, value)?;
+            let ok = crate::js_proxy::proxy_define_data_property(ctx, proxy, &prop_key, value)?;
             if !ok {
                 return Err(raise_type_error!("Cannot define property").into());
             }
             return Ok(());
         }
 
-        let desc = crate::core::create_descriptor_object(mc, value, true, true, true)?;
-        crate::js_object::define_property_internal(mc, target, key.to_string(), &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, value, true, true, true)?;
+        crate::js_object::define_property_internal(ctx, target, key.to_string(), &desc)?;
         Ok(())
     };
 
@@ -663,7 +663,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
         {
             let prop_key = PropertyKey::from("length");
-            let ok = crate::js_proxy::proxy_set_property(mc, proxy, &prop_key, &Value::Number(len as f64))?;
+            let ok = crate::js_proxy::proxy_set_property(ctx, proxy, &prop_key, &Value::Number(len as f64))?;
             if !ok {
                 return Err(raise_type_error!("Cannot set property 'length'").into());
             }
@@ -682,7 +682,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                         setter: Some(setter_fn),
                     } => {
                         let setter_args = vec![Value::Number(len as f64)];
-                        let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*target)), &setter_args)?;
+                        let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*target)), &setter_args)?;
                         return Ok(());
                     }
                     Value::Property {
@@ -693,14 +693,14 @@ pub(crate) fn handle_array_static_method<'gc>(
                         if !obj.borrow().is_writable(&key) {
                             return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
                         }
-                        object_set_key_value(mc, target, "length", &Value::Number(len as f64))?;
+                        object_set_key_value(ctx, target, "length", &Value::Number(len as f64))?;
                         return Ok(());
                     }
                     _ => {
                         if !obj.borrow().is_writable(&key) {
                             return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
                         }
-                        object_set_key_value(mc, target, "length", &Value::Number(len as f64))?;
+                        object_set_key_value(ctx, target, "length", &Value::Number(len as f64))?;
                         return Ok(());
                     }
                 }
@@ -708,7 +708,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             owner = obj.borrow().prototype;
         }
 
-        object_set_key_value(mc, target, "length", &Value::Number(len as f64))?;
+        object_set_key_value(ctx, target, "length", &Value::Number(len as f64))?;
         Ok(())
     };
 
@@ -731,7 +731,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             }
                             break false;
                         }
-                        break is_array(mc, &current);
+                        break is_array(ctx, &current);
                     }
                 }
                 _ => false,
@@ -777,7 +777,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             let mut used_iterator_or_string = false;
 
             fn map_value<'gc>(
-                mc: &GcContext<'gc>,
+                ctx: &GcContext<'gc>,
                 env: &JSObjectDataPtr<'gc>,
                 mapper: &Option<Value<'gc>>,
                 this_arg: &Value<'gc>,
@@ -796,7 +796,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                         }
                     }
                     let call_args = vec![value, Value::Number(idx as f64)];
-                    evaluate_call_dispatch(mc, env, &actual_fn, Some(this_arg), &call_args)
+                    evaluate_call_dispatch(ctx, env, &actual_fn, Some(this_arg), &call_args)
                 } else {
                     Ok(value)
                 }
@@ -806,7 +806,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                 Value::String(s) => {
                     used_iterator_or_string = true;
                     for (idx, ch) in s.into_iter().enumerate() {
-                        result.push(map_value(mc, env, &mapper, &this_arg, idx, Value::String(vec![ch]))?);
+                        result.push(map_value(ctx, env, &mapper, &this_arg, idx, Value::String(vec![ch]))?);
                     }
                 }
                 Value::Object(object) => {
@@ -815,18 +815,18 @@ pub(crate) fn handle_array_static_method<'gc>(
                         && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
                     {
-                        let iter_fn = crate::core::get_property_with_accessors(mc, env, &object, iter_sym)?;
+                        let iter_fn = crate::core::get_property_with_accessors(ctx, env, &object, iter_sym)?;
                         if !matches!(iter_fn, Value::Undefined) {
                             let out = create_with_ctor_or_array(None)?;
                             let close_iterator = |iter_obj: &JSObjectDataPtr<'gc>| {
-                                if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
+                                if let Ok(return_fn) = crate::core::get_property_with_accessors(ctx, env, iter_obj, "return")
                                     && !matches!(return_fn, Value::Undefined | Value::Null)
                                 {
-                                    let _ = evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
+                                    let _ = evaluate_call_dispatch(ctx, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
                                 }
                             };
 
-                            let iterator = evaluate_call_dispatch(mc, env, &iter_fn, Some(&Value::Object(object)), &[])?;
+                            let iterator = evaluate_call_dispatch(ctx, env, &iter_fn, Some(&Value::Object(object)), &[])?;
                             let iter_obj = match iterator {
                                 Value::Object(o) => o,
                                 _ => return Err(raise_type_error!("Array.from iterator must return an object").into()),
@@ -834,14 +834,14 @@ pub(crate) fn handle_array_static_method<'gc>(
 
                             let mut idx = 0usize;
                             loop {
-                                let next_fn = match crate::core::get_property_with_accessors(mc, env, &iter_obj, "next") {
+                                let next_fn = match crate::core::get_property_with_accessors(ctx, env, &iter_obj, "next") {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
                                         return Err(err);
                                     }
                                 };
-                                let next_res = match evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
+                                let next_res = match evaluate_call_dispatch(ctx, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -855,7 +855,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                         return Err(raise_type_error!("Iterator.next must return an object").into());
                                     }
                                 };
-                                let done_val = match crate::core::get_property_with_accessors(mc, env, &next_obj, "done") {
+                                let done_val = match crate::core::get_property_with_accessors(ctx, env, &next_obj, "done") {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -865,14 +865,14 @@ pub(crate) fn handle_array_static_method<'gc>(
                                 if done_val.to_truthy() {
                                     break;
                                 }
-                                let value = match crate::core::get_property_with_accessors(mc, env, &next_obj, "value") {
+                                let value = match crate::core::get_property_with_accessors(ctx, env, &next_obj, "value") {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
                                         return Err(err);
                                     }
                                 };
-                                let mapped = match map_value(mc, env, &mapper, &this_arg, idx, value) {
+                                let mapped = match map_value(ctx, env, &mapper, &this_arg, idx, value) {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -891,8 +891,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                         }
                     }
 
-                    let len_val = crate::core::get_property_with_accessors(mc, env, &object, "length")?;
-                    let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                    let len_val = crate::core::get_property_with_accessors(ctx, env, &object, "length")?;
+                    let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                     let len_num = crate::core::to_number(&len_prim)?;
                     let max_len = 9007199254740991.0_f64;
                     let len = if len_num.is_nan() || len_num <= 0.0 {
@@ -904,8 +904,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                     };
 
                     for i in 0..len {
-                        let element = crate::core::get_property_with_accessors(mc, env, &object, i.to_string())?;
-                        result.push(map_value(mc, env, &mapper, &this_arg, i, element)?);
+                        let element = crate::core::get_property_with_accessors(ctx, env, &object, i.to_string())?;
+                        result.push(map_value(ctx, env, &mapper, &this_arg, i, element)?);
                     }
                 }
                 _ => {
@@ -932,7 +932,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                         let iter_fn = method_ref.borrow().clone();
                         if !matches!(iter_fn, Value::Undefined | Value::Null) {
                             // used_iterator_or_string = true;
-                            let iterator_val = evaluate_call_dispatch(mc, env, &iter_fn, Some(&items), &[])?;
+                            let iterator_val = evaluate_call_dispatch(ctx, env, &iter_fn, Some(&items), &[])?;
                             let iter_obj = match iterator_val {
                                 Value::Object(o) => o,
                                 _ => return Err(raise_type_error!("Array.from iterator must return an object").into()),
@@ -940,23 +940,23 @@ pub(crate) fn handle_array_static_method<'gc>(
 
                             let out = create_with_ctor_or_array(None)?;
                             let close_iterator = |iter_obj: &JSObjectDataPtr<'gc>| {
-                                if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
+                                if let Ok(return_fn) = crate::core::get_property_with_accessors(ctx, env, iter_obj, "return")
                                     && !matches!(return_fn, Value::Undefined | Value::Null)
                                 {
-                                    let _ = evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
+                                    let _ = evaluate_call_dispatch(ctx, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
                                 }
                             };
 
                             let mut idx = 0usize;
                             loop {
-                                let next_fn = match crate::core::get_property_with_accessors(mc, env, &iter_obj, "next") {
+                                let next_fn = match crate::core::get_property_with_accessors(ctx, env, &iter_obj, "next") {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
                                         return Err(err);
                                     }
                                 };
-                                let next_res = match evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
+                                let next_res = match evaluate_call_dispatch(ctx, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -970,7 +970,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                         return Err(raise_type_error!("Iterator.next must return an object").into());
                                     }
                                 };
-                                let done_val = match crate::core::get_property_with_accessors(mc, env, &next_obj, "done") {
+                                let done_val = match crate::core::get_property_with_accessors(ctx, env, &next_obj, "done") {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -980,14 +980,14 @@ pub(crate) fn handle_array_static_method<'gc>(
                                 if done_val.to_truthy() {
                                     break;
                                 }
-                                let value = match crate::core::get_property_with_accessors(mc, env, &next_obj, "value") {
+                                let value = match crate::core::get_property_with_accessors(ctx, env, &next_obj, "value") {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
                                         return Err(err);
                                     }
                                 };
-                                let mapped = match map_value(mc, env, &mapper, &this_arg, idx, value) {
+                                let mapped = match map_value(ctx, env, &mapper, &this_arg, idx, value) {
                                     Ok(v) => v,
                                     Err(err) => {
                                         close_iterator(&iter_obj);
@@ -1026,7 +1026,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
             // Create promise capability — always uses intrinsic %Promise%
-            let (promise, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
+            let (promise, resolve, reject) = crate::js_promise::create_promise_capability(ctx, env)?;
 
             // Execute the body; errors turn into rejections
             let body_result: Result<Value<'gc>, EvalError<'gc>> = (|| {
@@ -1070,9 +1070,9 @@ pub(crate) fn handle_array_static_method<'gc>(
                             }
                         }
                         let call_args = vec![val, Value::Number(idx as f64)];
-                        let mapped = evaluate_call_dispatch(mc, env, &actual_fn, Some(&this_arg), &call_args)?;
+                        let mapped = evaluate_call_dispatch(ctx, env, &actual_fn, Some(&this_arg), &call_args)?;
                         // Await the mapped value
-                        crate::core::await_promise_value(mc, env, &mapped)
+                        crate::core::await_promise_value(ctx, env, &mapped)
                     } else {
                         Ok(val)
                     }
@@ -1090,7 +1090,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                         && let Value::Symbol(async_sym_data) = &*async_iter_sym.borrow()
                     {
                         let method = match &async_items {
-                            Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, async_sym_data)?,
+                            Value::Object(obj) => crate::core::get_property_with_accessors(ctx, env, obj, async_sym_data)?,
                             _ => Value::Undefined,
                         };
                         if !matches!(method, Value::Undefined | Value::Null) {
@@ -1106,9 +1106,9 @@ pub(crate) fn handle_array_static_method<'gc>(
                         let method = match &async_items {
                             Value::String(_) => {
                                 // Strings are iterable
-                                crate::core::get_primitive_prototype_property(mc, env, &async_items, iter_sym_data)?
+                                crate::core::get_primitive_prototype_property(ctx, env, &async_items, iter_sym_data)?
                             }
-                            Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, iter_sym_data)?,
+                            Value::Object(obj) => crate::core::get_property_with_accessors(ctx, env, obj, iter_sym_data)?,
                             _ => Value::Undefined,
                         };
                         if !matches!(method, Value::Undefined | Value::Null) {
@@ -1129,30 +1129,30 @@ pub(crate) fn handle_array_static_method<'gc>(
                     // If IsConstructor(C), let A = Construct(C); else A = ArrayCreate(0)
                     let out = create_with_ctor_or_array(None)?;
 
-                    let iter_result = evaluate_call_dispatch(mc, env, &iter_fn, Some(&async_items), &[])?;
+                    let iter_result = evaluate_call_dispatch(ctx, env, &iter_fn, Some(&async_items), &[])?;
                     let iter_obj = match iter_result {
                         Value::Object(o) => o,
                         _ => return Err(raise_type_error!("Iterator result must be an object").into()),
                     };
 
                     let close_iterator = |iter_obj: &crate::core::JSObjectDataPtr<'gc>| {
-                        if let Ok(return_fn) = crate::core::get_property_with_accessors(mc, env, iter_obj, "return")
+                        if let Ok(return_fn) = crate::core::get_property_with_accessors(ctx, env, iter_obj, "return")
                             && !matches!(return_fn, Value::Undefined | Value::Null)
                         {
-                            let _ = evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
+                            let _ = evaluate_call_dispatch(ctx, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
                         }
                     };
 
                     let mut k = 0usize;
                     loop {
-                        let next_fn = match crate::core::get_property_with_accessors(mc, env, &iter_obj, "next") {
+                        let next_fn = match crate::core::get_property_with_accessors(ctx, env, &iter_obj, "next") {
                             Ok(v) => v,
                             Err(e) => {
                                 close_iterator(&iter_obj);
                                 return Err(e);
                             }
                         };
-                        let mut next_result = match evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
+                        let mut next_result = match evaluate_call_dispatch(ctx, env, &next_fn, Some(&Value::Object(iter_obj)), &[]) {
                             Ok(v) => v,
                             Err(e) => {
                                 close_iterator(&iter_obj);
@@ -1162,7 +1162,7 @@ pub(crate) fn handle_array_static_method<'gc>(
 
                         // For async iterators, await the next result
                         if is_async {
-                            next_result = match crate::core::await_promise_value(mc, env, &next_result) {
+                            next_result = match crate::core::await_promise_value(ctx, env, &next_result) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     close_iterator(&iter_obj);
@@ -1179,7 +1179,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             }
                         };
 
-                        let done_val = match crate::core::get_property_with_accessors(mc, env, &next_obj, "done") {
+                        let done_val = match crate::core::get_property_with_accessors(ctx, env, &next_obj, "done") {
                             Ok(v) => v,
                             Err(e) => {
                                 close_iterator(&iter_obj);
@@ -1190,7 +1190,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             break;
                         }
 
-                        let value = match crate::core::get_property_with_accessors(mc, env, &next_obj, "value") {
+                        let value = match crate::core::get_property_with_accessors(ctx, env, &next_obj, "value") {
                             Ok(v) => v,
                             Err(e) => {
                                 close_iterator(&iter_obj);
@@ -1199,7 +1199,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                         };
 
                         // Await the value
-                        let awaited = match crate::core::await_promise_value(mc, env, &value) {
+                        let awaited = match crate::core::await_promise_value(ctx, env, &value) {
                             Ok(v) => v,
                             Err(e) => {
                                 close_iterator(&iter_obj);
@@ -1235,15 +1235,15 @@ pub(crate) fn handle_array_static_method<'gc>(
                         Value::Object(obj) => *obj,
                         _ => {
                             // ToObject
-                            match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&async_items), env)? {
+                            match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&async_items), env)? {
                                 Value::Object(obj) => obj,
                                 _ => return Err(raise_type_error!("Cannot convert to object").into()),
                             }
                         }
                     };
 
-                    let len_val = crate::core::get_property_with_accessors(mc, env, &array_like, "length")?;
-                    let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                    let len_val = crate::core::get_property_with_accessors(ctx, env, &array_like, "length")?;
+                    let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                     let len_num = crate::core::to_number(&len_prim)?;
                     let max_len = 9007199254740991.0_f64;
                     let len = if len_num.is_nan() || len_num <= 0.0 {
@@ -1258,10 +1258,10 @@ pub(crate) fn handle_array_static_method<'gc>(
                     let out = create_with_ctor_or_array(Some(len))?;
 
                     for k in 0..len {
-                        let element = crate::core::get_property_with_accessors(mc, env, &array_like, k.to_string())?;
+                        let element = crate::core::get_property_with_accessors(ctx, env, &array_like, k.to_string())?;
 
                         // Await the element value
-                        let awaited = crate::core::await_promise_value(mc, env, &element)?;
+                        let awaited = crate::core::await_promise_value(ctx, env, &element)?;
 
                         // Apply mapping
                         let mapped = do_map(awaited, k)?;
@@ -1277,7 +1277,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             // Resolve or reject the promise
             match body_result {
                 Ok(result_val) => {
-                    if let Err(e) = crate::js_promise::call_function(mc, &resolve, &[result_val], env) {
+                    if let Err(e) = crate::js_promise::call_function(ctx, &resolve, &[result_val], env) {
                         log::debug!("Error resolving Array.fromAsync promise: {:?}", e);
                     }
                 }
@@ -1286,16 +1286,16 @@ pub(crate) fn handle_array_static_method<'gc>(
                         EvalError::Throw(v, _, _) => v,
                         EvalError::Js(je) => {
                             let msg = je.message();
-                            crate::core::create_error(mc, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined)
+                            crate::core::create_error(ctx, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined)
                         }
                     };
-                    if let Err(e) = crate::js_promise::call_function(mc, &reject, &[rej_val], env) {
+                    if let Err(e) = crate::js_promise::call_function(ctx, &reject, &[rej_val], env) {
                         log::debug!("Error rejecting Array.fromAsync promise: {:?}", e);
                     }
                 }
             }
 
-            let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+            let promise_obj = crate::js_promise::make_promise_js_object(ctx, promise, Some(*env))?;
             Ok(Value::Object(promise_obj))
         }
         "of" => {
@@ -1311,15 +1311,15 @@ pub(crate) fn handle_array_static_method<'gc>(
 }
 
 pub(crate) fn handle_array_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let result = if args.is_empty() {
         // Array() - create empty array
-        let array_obj = create_array(mc, env)?;
-        set_array_length(mc, &array_obj, 0)?;
+        let array_obj = create_array(ctx, env)?;
+        set_array_length(ctx, &array_obj, 0)?;
         Value::Object(array_obj)
     } else if args.len() == 1 {
         // Array(length) or Array(element)
@@ -1339,26 +1339,26 @@ pub(crate) fn handle_array_constructor<'gc>(
                     return Err(raise_range_error!("Invalid array length").into());
                 }
                 // Array(length) - create array with specified length
-                let array_obj = create_array(mc, env)?;
-                set_array_length(mc, &array_obj, n as usize)?;
+                let array_obj = create_array(ctx, env)?;
+                set_array_length(ctx, &array_obj, n as usize)?;
                 Value::Object(array_obj)
             }
             _ => {
                 // Array(element) - create array with single element
-                let array_obj = create_array(mc, env)?;
-                object_set_key_value(mc, &array_obj, "0", &arg_val)?;
-                set_array_length(mc, &array_obj, 1)?;
+                let array_obj = create_array(ctx, env)?;
+                object_set_key_value(ctx, &array_obj, "0", &arg_val)?;
+                set_array_length(ctx, &array_obj, 1)?;
                 Value::Object(array_obj)
             }
         }
     } else {
         // Array(element1, element2, ...) - create array with multiple elements
-        let array_obj = create_array(mc, env)?;
+        let array_obj = create_array(ctx, env)?;
         for (i, arg) in args.iter().enumerate() {
             let arg_val = arg.clone();
-            object_set_key_value(mc, &array_obj, i, &arg_val)?;
+            object_set_key_value(ctx, &array_obj, i, &arg_val)?;
         }
-        set_array_length(mc, &array_obj, args.len())?;
+        set_array_length(ctx, &array_obj, args.len())?;
         Value::Object(array_obj)
     };
 
@@ -1366,10 +1366,10 @@ pub(crate) fn handle_array_constructor<'gc>(
     if let Some(_nt) = new_target
         && let Value::Object(array_obj) = &result
         && let Value::Object(nt_obj) = _nt
-        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "Array")?
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "Array")?
     {
-        array_obj.borrow_mut(mc).prototype = Some(proto);
-        slot_set(mc, array_obj, InternalSlot::Proto, &Value::Object(proto));
+        array_obj.borrow_mut(ctx).prototype = Some(proto);
+        slot_set(ctx, array_obj, InternalSlot::Proto, &Value::Object(proto));
     }
 
     Ok(result)
@@ -1377,7 +1377,7 @@ pub(crate) fn handle_array_constructor<'gc>(
 
 /// Handle Array instance method calls
 pub(crate) fn handle_array_instance_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -1385,8 +1385,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "at" => {
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let mut len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -1400,7 +1400,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let index = if !args.is_empty() {
-                let idx_prim = crate::core::to_primitive(mc, &args[0], "number", env)?;
+                let idx_prim = crate::core::to_primitive(ctx, &args[0], "number", env)?;
                 let idx_num = crate::core::to_number(&idx_prim)?;
                 if idx_num.is_nan() || idx_num == 0.0 {
                     0isize
@@ -1418,24 +1418,24 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if k < 0 || (k as usize) >= len {
                 Ok(Value::Undefined)
             } else {
-                Ok(crate::core::get_property_with_accessors(mc, env, object, k as usize)?)
+                Ok(crate::core::get_property_with_accessors(ctx, env, object, k as usize)?)
             }
         }
         "push" => {
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
-            let is_array_receiver = is_array(mc, object);
+            let is_array_receiver = is_array(ctx, object);
             let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
                 let desc = crate::js_object::handle_object_method(
-                    mc,
+                    ctx,
                     "getOwnPropertyDescriptor",
                     &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
-                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    let writable = crate::core::get_property_with_accessors(ctx, env, &desc_obj, "writable")?;
                     if matches!(writable, Value::Boolean(false)) {
                         return Ok(true);
                     }
@@ -1473,7 +1473,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 setter: Some(setter_fn), ..
                             } => {
                                 let setter_args = vec![arg.clone()];
-                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                                let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                                 handled_by_setter = true;
                             }
                             Value::Property {
@@ -1490,7 +1490,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     cur_proto = proto.borrow().prototype;
                 }
 
-                if !handled_by_setter && object_set_key_value(mc, object, current_len, arg).is_err() {
+                if !handled_by_setter && object_set_key_value(ctx, object, current_len, arg).is_err() {
                     return Err(raise_type_error!("Cannot set array element").into());
                 }
                 current_len += 1;
@@ -1504,30 +1504,30 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if current_len > u32::MAX as usize {
                     return Err(raise_range_error!("Invalid array length").into());
                 }
-                if set_array_length(mc, object, current_len).is_err() {
+                if set_array_length(ctx, object, current_len).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
-            } else if object_set_key_value(mc, object, "length", &Value::Number(current_len as f64)).is_err() {
+            } else if object_set_key_value(ctx, object, "length", &Value::Number(current_len as f64)).is_err() {
                 return Err(raise_type_error!("Cannot set length").into());
             }
 
             Ok(Value::Number(current_len as f64))
         }
         "pop" => {
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
-            let is_array_receiver = is_array(mc, object);
+            let is_array_receiver = is_array(ctx, object);
             let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
                 let desc = crate::js_object::handle_object_method(
-                    mc,
+                    ctx,
                     "getOwnPropertyDescriptor",
                     &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
-                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    let writable = crate::core::get_property_with_accessors(ctx, env, &desc_obj, "writable")?;
                     if matches!(writable, Value::Boolean(false)) {
                         return Ok(true);
                     }
@@ -1548,10 +1548,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
                 }
                 if is_array_receiver {
-                    if set_array_length(mc, object, 0).is_err() {
+                    if set_array_length(ctx, object, 0).is_err() {
                         return Err(raise_type_error!("Cannot set length").into());
                     }
-                } else if object_set_key_value(mc, object, "length", &Value::Number(0.0)).is_err() {
+                } else if object_set_key_value(ctx, object, "length", &Value::Number(0.0)).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
                 return Ok(Value::Undefined);
@@ -1559,13 +1559,16 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let new_len = current_len - 1;
             let index_key = new_len.to_string();
-            let element = crate::core::get_property_with_accessors(mc, env, object, new_len)?;
+            let element = crate::core::get_property_with_accessors(ctx, env, object, new_len)?;
 
             if crate::core::get_own_property(object, index_key.as_str()).is_some() {
                 if !object.borrow().is_configurable(index_key.as_str()) {
                     return Err(raise_type_error!("Cannot delete non-configurable property").into());
                 }
-                object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(index_key.clone()));
+                object
+                    .borrow_mut(ctx)
+                    .properties
+                    .shift_remove(&PropertyKey::from(index_key.clone()));
             }
 
             if !object.borrow().is_writable("length") || length_is_non_writable()? {
@@ -1573,17 +1576,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             if is_array_receiver {
-                if set_array_length(mc, object, new_len).is_err() {
+                if set_array_length(ctx, object, new_len).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
-            } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+            } else if object_set_key_value(ctx, object, "length", &Value::Number(new_len as f64)).is_err() {
                 return Err(raise_type_error!("Cannot set length").into());
             }
 
             Ok(element)
         }
         "length" => {
-            let length = Value::Number(get_array_length(mc, object).unwrap_or(0) as f64);
+            let length = Value::Number(get_array_length(ctx, object).unwrap_or(0) as f64);
             Ok(length)
         }
         "join" => {
@@ -1618,8 +1621,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 let max_len = 9007199254740991.0_f64;
                 if len_num.is_nan() || len_num <= 0.0 {
@@ -1635,7 +1638,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if matches!(sep_val, Value::Undefined) {
                     ",".to_string()
                 } else {
-                    let prim = crate::core::to_primitive(mc, sep_val, "string", env)?;
+                    let prim = crate::core::to_primitive(ctx, sep_val, "string", env)?;
                     if matches!(prim, Value::Symbol(_)) {
                         return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                     }
@@ -1654,11 +1657,11 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if i > 0 {
                     result.push_str(&separator);
                 }
-                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                 match element {
                     Value::Undefined | Value::Null => {}
                     _ => {
-                        let prim = crate::core::to_primitive(mc, &element, "string", env)?;
+                        let prim = crate::core::to_primitive(ctx, &element, "string", env)?;
                         if matches!(prim, Value::Symbol(_)) {
                             return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                         }
@@ -1700,8 +1703,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 let max_len = 9007199254740991.0_f64;
                 if len_num.is_nan() || len_num <= 0.0 {
@@ -1714,7 +1717,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
-                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let prim = crate::core::to_primitive(ctx, value, "number", env)?;
                 if matches!(prim, Value::Symbol(_)) {
                     return Err(raise_type_error!("Cannot convert a Symbol value to a number").into());
                 }
@@ -1769,7 +1772,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
 
-            let new_array = array_species_create_impl(mc, env, object, count as f64)?;
+            let new_array = array_species_create_impl(ctx, env, object, count as f64)?;
             let mut n = 0usize;
             let mut k = start;
             while k < end {
@@ -1789,7 +1792,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     k < effective_len
                 } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        crate::js_proxy::proxy_has_property(mc, proxy, k.to_string())?
+                        crate::js_proxy::proxy_has_property(ctx, proxy, k.to_string())?
                     } else {
                         object_get_key_value(object, k.to_string()).is_some()
                     }
@@ -1798,15 +1801,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let val = crate::core::get_property_with_accessors(mc, env, object, k.to_string())?;
-                    create_data_property_or_throw(mc, &new_array, n, &val)?;
+                    let val = crate::core::get_property_with_accessors(ctx, env, object, k.to_string())?;
+                    create_data_property_or_throw(ctx, &new_array, n, &val)?;
                 }
 
                 n += 1;
                 k += 1;
             }
 
-            set_array_length(mc, &new_array, count)?;
+            set_array_length(ctx, &new_array, count)?;
             Ok(Value::Object(new_array))
         }
         "forEach" => {
@@ -1820,8 +1823,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -1890,9 +1893,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let val = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                     let call_args = vec![val, Value::Number(i as f64), Value::Object(*object)];
-                    evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 }
             }
 
@@ -1907,8 +1910,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -1940,7 +1943,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let new_array = array_species_create_impl(mc, env, object, current_len as f64)?;
+            let new_array = array_species_create_impl(ctx, env, object, current_len as f64)?;
 
             let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
                 if let Value::TypedArray(ta) = &*ta_cell.borrow() {
@@ -1972,7 +1975,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let val = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                     let call_args = vec![val, Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback_val.clone();
@@ -1987,8 +1990,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         }
                     }
 
-                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
-                    create_data_property_or_throw(mc, &new_array, i, &res)?;
+                    let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    create_data_property_or_throw(ctx, &new_array, i, &res)?;
                 }
             }
 
@@ -2004,8 +2007,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2037,7 +2040,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let new_array = array_species_create_impl(mc, env, object, 0.0)?;
+            let new_array = array_species_create_impl(ctx, env, object, 0.0)?;
             let mut idx = 0usize;
 
             let typed_array_ptr = if let Some(ta_cell) = slot_get_chained(object, &InternalSlot::TypedArray) {
@@ -2070,7 +2073,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let element_val = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let element_val = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                     let call_args = vec![element_val.clone(), Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback_val.clone();
@@ -2085,15 +2088,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         }
                     }
 
-                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                     if res.to_truthy() {
-                        create_data_property_or_throw(mc, &new_array, idx, &element_val)?;
+                        create_data_property_or_throw(ctx, &new_array, idx, &element_val)?;
                         idx += 1;
                     }
                 }
             }
 
-            set_array_length(mc, &new_array, idx)?;
+            set_array_length(ctx, &new_array, idx)?;
             Ok(Value::Object(new_array))
         }
         "reduce" => {
@@ -2107,8 +2110,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let initial_value = if args.len() >= 2 { Some(args[1].clone()) } else { None };
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2185,7 +2188,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let mut acc = Value::Undefined;
                 while k < current_len {
                     if has_property_at(k) {
-                        acc = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                        acc = crate::core::get_property_with_accessors(ctx, env, object, k)?;
                         found = true;
                         k += 1;
                         break;
@@ -2212,9 +2215,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             while k < current_len {
                 if has_property_at(k) {
-                    let k_value = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                    let k_value = crate::core::get_property_with_accessors(ctx, env, object, k)?;
                     let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(*object)];
-                    accumulator = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
+                    accumulator = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
                 }
                 k += 1;
             }
@@ -2232,8 +2235,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let initial_value = if args.len() >= 2 { Some(args[1].clone()) } else { None };
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2305,7 +2308,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let mut acc = Value::Undefined;
                 loop {
                     if has_property_at(k) {
-                        acc = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                        acc = crate::core::get_property_with_accessors(ctx, env, object, k)?;
                         found = true;
                         break;
                     }
@@ -2338,9 +2341,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             loop {
                 if has_property_at(k) {
-                    let k_value = crate::core::get_property_with_accessors(mc, env, object, k)?;
+                    let k_value = crate::core::get_property_with_accessors(ctx, env, object, k)?;
                     let call_args = vec![accumulator.clone(), k_value, Value::Number(k as f64), Value::Object(*object)];
-                    accumulator = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
+                    accumulator = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&Value::Undefined), &call_args)?;
                 }
 
                 if k == 0 {
@@ -2362,8 +2365,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2403,9 +2406,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             for i in 0..current_len {
-                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                 let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(*object)];
-                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(element);
                 }
@@ -2424,8 +2427,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2465,9 +2468,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             for i in 0..current_len {
-                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                 let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
-                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(Value::Number(i as f64));
                 }
@@ -2478,8 +2481,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
         "some" => {
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2538,7 +2541,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                     let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback.clone();
@@ -2553,7 +2556,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         }
                     }
 
-                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                     if res.to_truthy() {
                         return Ok(Value::Boolean(true));
                     }
@@ -2565,8 +2568,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
         "every" => {
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -2625,7 +2628,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                     let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
 
                     let mut actual_callback_val = callback.clone();
@@ -2640,7 +2643,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         }
                     }
 
-                    let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                    let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                     if !res.to_truthy() {
                         return Ok(Value::Boolean(false));
                     }
@@ -2651,8 +2654,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "concat" => {
             let length_of_array_like = |obj: &JSObjectDataPtr<'gc>| -> Result<usize, EvalError<'gc>> {
-                let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, obj, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 let max_len = 9007199254740991.0_f64;
                 let len = if len_num.is_nan() || len_num <= 0.0 {
@@ -2675,13 +2678,13 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Some(sym_val) = object_get_key_value(sym_obj, "isConcatSpreadable")
                     && let Value::Symbol(spread_sym) = &*sym_val.borrow()
                 {
-                    let spreadable_val = crate::core::get_property_with_accessors(mc, env, obj, *spread_sym)?;
+                    let spreadable_val = crate::core::get_property_with_accessors(ctx, env, obj, *spread_sym)?;
                     if !matches!(spreadable_val, Value::Undefined) {
                         return Ok(spreadable_val.to_truthy());
                     }
                 }
 
-                is_array_spec(mc, obj)
+                is_array_spec(ctx, obj)
             };
 
             // HasProperty that goes through Proxy/TypedArray
@@ -2689,7 +2692,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
-                    return crate::js_proxy::proxy_has_property(mc, proxy, key.to_string());
+                    return crate::js_proxy::proxy_has_property(ctx, proxy, key.to_string());
                 }
                 // TypedArray: check via canonical numeric index
                 if let Some(ta_cell) = crate::core::slot_get(obj, &InternalSlot::TypedArray)
@@ -2703,7 +2706,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             const MAX_SAFE_INTEGER: usize = 9007199254740991;
 
-            let out = array_species_create_impl(mc, env, object, 0.0)?;
+            let out = array_species_create_impl(ctx, env, object, 0.0)?;
             let mut n = 0usize;
             let mut items: Vec<Value<'gc>> = Vec::with_capacity(args.len() + 1);
             items.push(Value::Object(*object));
@@ -2722,8 +2725,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     for k in 0..src_len {
                         let k_str = k.to_string();
                         if has_property_compat(&src_obj, &k_str)? {
-                            let sub = crate::core::get_property_with_accessors(mc, env, &src_obj, k_str)?;
-                            create_data_property_or_throw(mc, &out, n, &sub)?;
+                            let sub = crate::core::get_property_with_accessors(ctx, env, &src_obj, k_str)?;
+                            create_data_property_or_throw(ctx, &out, n, &sub)?;
                         }
                         n += 1;
                     }
@@ -2732,12 +2735,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if n >= MAX_SAFE_INTEGER {
                         return Err(raise_type_error!("Array.prototype.concat: resulting array length exceeds 2^53 - 1").into());
                     }
-                    create_data_property_or_throw(mc, &out, n, &item)?;
+                    create_data_property_or_throw(ctx, &out, n, &item)?;
                     n += 1;
                 }
             }
 
-            set_array_length(mc, &out, n)?;
+            set_array_length(ctx, &out, n)?;
             Ok(Value::Object(out))
         }
         "indexOf" => {
@@ -2772,7 +2775,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 } else {
                     let search_element = args.first().cloned().unwrap_or(Value::Undefined);
                     let from_index = if args.len() > 1 {
-                        let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                        let prim = crate::core::to_primitive(ctx, &args[1], "number", env)?;
                         let n = crate::core::to_number(&prim)?;
                         if n.is_nan() || n == 0.0 {
                             0isize
@@ -2861,8 +2864,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 if len_num.is_nan() || len_num <= 0.0 {
                     0usize
@@ -2879,7 +2882,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let search_element = args.first().cloned().unwrap_or(Value::Undefined);
             let from_index = if args.len() > 1 {
-                let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let prim = crate::core::to_primitive(ctx, &args[1], "number", env)?;
                 let n = crate::core::to_number(&prim)?;
                 if n.is_nan() || n == 0.0 {
                     0isize
@@ -3088,7 +3091,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Ok(Value::Number(-1.0));
             }
 
-            let can_use_sparse_fast_path = if !is_typed_array_receiver && is_array(mc, object) {
+            let can_use_sparse_fast_path = if !is_typed_array_receiver && is_array(ctx, object) {
                 let mut proto_has_numeric_key = false;
                 let mut cur_proto = object.borrow().prototype;
                 while let Some(proto) = cur_proto {
@@ -3138,10 +3141,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     indices.sort_unstable();
 
                     for i in indices {
-                        let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                        let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                         let is_match = match (&element, &search_element) {
                             (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
-                            _ => values_equal(mc, &element, &search_element),
+                            _ => values_equal(ctx, &element, &search_element),
                         };
                         if is_match {
                             return Ok(Value::Number(i as f64));
@@ -3173,10 +3176,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                    let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                     let is_match = match (&element, &search_element) {
                         (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
-                        _ => values_equal(mc, &element, &search_element),
+                        _ => values_equal(ctx, &element, &search_element),
                     };
                     if is_match {
                         return Ok(Value::Number(i as f64));
@@ -3189,8 +3192,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
         "includes" => {
             // ToLength: cap at 2^53-1
             const MAX_SAFE_LEN: usize = (1u64 << 53) as usize - 1; // 9007199254740991
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -3206,7 +3209,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let search_element = args.first().cloned().unwrap_or(Value::Undefined);
             let from_index = if args.len() > 1 {
-                let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let prim = crate::core::to_primitive(ctx, &args[1], "number", env)?;
                 let n = crate::core::to_number(&prim)?;
                 if n.is_nan() || n == 0.0 {
                     0isize
@@ -3226,7 +3229,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..current_len {
-                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                 // Array.prototype.includes uses SameValueZero (not SameValue)
                 if crate::core::same_value_zero(&element, &search_element) {
                     return Ok(Value::Boolean(true));
@@ -3257,8 +3260,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             }
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
@@ -3299,7 +3302,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     i < effective_len
                 } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        crate::js_proxy::proxy_has_property(mc, proxy, i.to_string())?
+                        crate::js_proxy::proxy_has_property(ctx, proxy, i.to_string())?
                     } else {
                         object_get_key_value(object, i.to_string()).is_some()
                     }
@@ -3308,7 +3311,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_property {
-                    let v = crate::core::get_property_with_accessors(mc, env, object, i.to_string())?;
+                    let v = crate::core::get_property_with_accessors(ctx, env, object, i.to_string())?;
                     items.push(v);
                 }
             }
@@ -3325,8 +3328,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if has_compare_fn {
                     let compare_args = vec![a.clone(), b.clone()];
                     let this_arg = Value::Undefined;
-                    let result = evaluate_call_dispatch(mc, env, &compare_fn, Some(&this_arg), &compare_args)?;
-                    let num_prim = crate::core::to_primitive(mc, &result, "number", env)?;
+                    let result = evaluate_call_dispatch(ctx, env, &compare_fn, Some(&this_arg), &compare_args)?;
+                    let num_prim = crate::core::to_primitive(ctx, &result, "number", env)?;
                     let num = crate::core::to_number(&num_prim)?;
                     if num.is_nan() || num == 0.0 {
                         Ok(std::cmp::Ordering::Equal)
@@ -3336,8 +3339,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         Ok(std::cmp::Ordering::Greater)
                     }
                 } else {
-                    let a_prim = crate::core::to_primitive(mc, a, "string", env)?;
-                    let b_prim = crate::core::to_primitive(mc, b, "string", env)?;
+                    let a_prim = crate::core::to_primitive(ctx, a, "string", env)?;
+                    let b_prim = crate::core::to_primitive(ctx, b, "string", env)?;
                     if matches!(a_prim, Value::Symbol(_)) || matches!(b_prim, Value::Symbol(_)) {
                         return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                     }
@@ -3375,7 +3378,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             setter: Some(setter_fn), ..
                         } => {
                             let setter_args = vec![value.clone()];
-                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                            let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                             return Ok(());
                         }
                         Value::Property {
@@ -3401,7 +3404,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 setter: Some(setter_fn), ..
                             } => {
                                 let setter_args = vec![value.clone()];
-                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                                let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                                 handled_by_setter = true;
                             }
                             Value::Property {
@@ -3418,7 +3421,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     cur_proto = proto.borrow().prototype;
                 }
 
-                if !handled_by_setter && object_set_key_value(mc, object, index, value).is_err() {
+                if !handled_by_setter && object_set_key_value(ctx, object, index, value).is_err() {
                     return Err(raise_type_error!("Cannot set array element").into());
                 }
 
@@ -3435,7 +3438,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         let key_prop = PropertyKey::from(idx.to_string());
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                        let deleted = crate::js_proxy::proxy_delete_property(ctx, proxy, &key_prop)?;
                         if !deleted {
                             return Err(raise_type_error!("Cannot delete target property").into());
                         }
@@ -3444,14 +3447,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         if !object.borrow().is_configurable(key_prop.clone()) {
                             return Err(raise_type_error!("Cannot delete target property").into());
                         }
-                        object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                        object.borrow_mut(ctx).properties.shift_remove(&key_prop);
                     }
                 } else if crate::core::get_own_property(object, idx).is_some() {
                     let key_prop = PropertyKey::from(idx.to_string());
                     if !object.borrow().is_configurable(key_prop.clone()) {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
-                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                    object.borrow_mut(ctx).properties.shift_remove(&key_prop);
                 }
                 idx += 1;
             }
@@ -3459,8 +3462,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(*object))
         }
         "reverse" => {
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
@@ -3498,7 +3501,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     Ok(index < effective_len)
                 } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                        Ok(crate::js_proxy::proxy_has_property(ctx, proxy, index.to_string())?)
                     } else {
                         Ok(object_get_key_value(object, index.to_string()).is_some())
                     }
@@ -3512,7 +3515,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
-                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    let deleted = crate::js_proxy::proxy_delete_property(ctx, proxy, &key_prop)?;
                     if !deleted {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
@@ -3524,7 +3527,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if !object.borrow().is_configurable(key_prop.clone()) {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
-                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                    object.borrow_mut(ctx).properties.shift_remove(&key_prop);
                 }
                 Ok(())
             };
@@ -3534,14 +3537,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
-                    let ok = proxy_set_property_with_receiver(mc, proxy, &key_prop, value, Some(&Value::Object(*object)))?;
+                    let ok = proxy_set_property_with_receiver(ctx, proxy, &key_prop, value, Some(&Value::Object(*object)))?;
                     if !ok {
                         return Err(raise_type_error!("Cannot set target property").into());
                     }
                     return Ok(());
                 }
 
-                object_set_key_value(mc, object, index, value)?;
+                object_set_key_value(ctx, object, index, value)?;
                 Ok(())
             };
 
@@ -3551,14 +3554,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 let lower_exists = has_property_at(lower)?;
                 let lower_value = if lower_exists {
-                    Some(crate::core::get_property_with_accessors(mc, env, object, lower.to_string())?)
+                    Some(crate::core::get_property_with_accessors(ctx, env, object, lower.to_string())?)
                 } else {
                     None
                 };
 
                 let upper_exists = has_property_at(upper)?;
                 let upper_value = if upper_exists {
-                    Some(crate::core::get_property_with_accessors(mc, env, object, upper.to_string())?)
+                    Some(crate::core::get_property_with_accessors(ctx, env, object, upper.to_string())?)
                 } else {
                     None
                 };
@@ -3585,8 +3588,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_type_error!("Cannot perform operation on a revoked proxy").into());
             }
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
@@ -3598,7 +3601,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
-                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let prim = crate::core::to_primitive(ctx, value, "number", env)?;
                 let num = crate::core::to_number(&prim)?;
                 if num.is_nan() || num == 0.0 {
                     Ok(0.0)
@@ -3647,7 +3650,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     match setter_val {
                         Value::Setter(params, body, captured_env, home_opt) => {
                             let call_env = crate::core::prepare_function_call_env_with_home(
-                                mc,
+                                ctx,
                                 Some(captured_env),
                                 Some(&Value::Object(*object)),
                                 Some(params),
@@ -3656,11 +3659,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 Some(env),
                                 home_opt.clone(),
                             )?;
-                            let _ = crate::core::evaluate_statements(mc, &call_env, body)?;
+                            let _ = crate::core::evaluate_statements(ctx, &call_env, body)?;
                             Ok(())
                         }
                         Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::Object(_) => {
-                            let _ = evaluate_call_dispatch(mc, env, setter_val, Some(&Value::Object(*object)), std::slice::from_ref(&arg))?;
+                            let _ =
+                                evaluate_call_dispatch(ctx, env, setter_val, Some(&Value::Object(*object)), std::slice::from_ref(&arg))?;
                             Ok(())
                         }
                         _ => Err(raise_type_error!("Cannot assign to read only property 'length'").into()),
@@ -3734,12 +3738,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
                 }
 
-                if is_array(mc, object) {
+                if is_array(ctx, object) {
                     if new_len > u32::MAX as usize {
                         return Err(raise_range_error!("Invalid array length").into());
                     }
-                    set_array_length(mc, object, new_len).map_err(EvalError::from)?;
-                } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+                    set_array_length(ctx, object, new_len).map_err(EvalError::from)?;
+                } else if object_set_key_value(ctx, object, "length", &Value::Number(new_len as f64)).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
 
@@ -3754,7 +3758,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
                 if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                        Ok(crate::js_proxy::proxy_has_property(ctx, proxy, index.to_string())?)
                     } else {
                         Ok(object_get_key_value(object, index.to_string()).is_some())
                     }
@@ -3768,7 +3772,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
-                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    let deleted = crate::js_proxy::proxy_delete_property(ctx, proxy, &key_prop)?;
                     if !deleted {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
@@ -3780,17 +3784,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if !object.borrow().is_configurable(key_prop.clone()) {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
-                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                    object.borrow_mut(ctx).properties.shift_remove(&key_prop);
                 }
                 Ok(())
             };
 
-            let deleted_array = array_species_create_impl(mc, env, object, actual_delete_count as f64)?;
+            let deleted_array = array_species_create_impl(ctx, env, object, actual_delete_count as f64)?;
             for k in 0..actual_delete_count {
                 let from = actual_start + k;
                 if has_property_at(from)? {
-                    let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
-                    create_data_property_or_throw(mc, &deleted_array, k, &from_val)?;
+                    let from_val = crate::core::get_property_with_accessors(ctx, env, object, from.to_string())?;
+                    create_data_property_or_throw(ctx, &deleted_array, k, &from_val)?;
                 }
             }
             // Step 12: Perform ? Set(A, "length", actualDeleteCount, true) — must go through [[Set]] for proxy support
@@ -3798,14 +3802,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
                 let key = PropertyKey::from("length");
-                let ok = crate::js_proxy::proxy_set_property(mc, proxy, &key, &Value::Number(actual_delete_count as f64))?;
+                let ok = crate::js_proxy::proxy_set_property(ctx, proxy, &key, &Value::Number(actual_delete_count as f64))?;
                 if !ok {
                     return Err(raise_type_error!("Cannot set property 'length' on proxy").into());
                 }
-            } else if is_array(mc, &deleted_array) {
-                set_array_length(mc, &deleted_array, actual_delete_count)?;
+            } else if is_array(ctx, &deleted_array) {
+                set_array_length(ctx, &deleted_array, actual_delete_count)?;
             } else {
-                object_set_key_value(mc, &deleted_array, "length", &Value::Number(actual_delete_count as f64))?;
+                object_set_key_value(ctx, &deleted_array, "length", &Value::Number(actual_delete_count as f64))?;
             }
 
             if insert_count < actual_delete_count {
@@ -3814,8 +3818,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let from = k + actual_delete_count;
                     let to = k + insert_count;
                     if has_property_at(from)? {
-                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
-                        object_set_key_value(mc, object, to, &from_val)?;
+                        let from_val = crate::core::get_property_with_accessors(ctx, env, object, from.to_string())?;
+                        object_set_key_value(ctx, object, to, &from_val)?;
                     } else {
                         delete_property_or_throw(to)?;
                     }
@@ -3833,8 +3837,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let from = k + actual_delete_count - 1;
                     let to = k + insert_count - 1;
                     if has_property_at(from)? {
-                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from.to_string())?;
-                        object_set_key_value(mc, object, to, &from_val)?;
+                        let from_val = crate::core::get_property_with_accessors(ctx, env, object, from.to_string())?;
+                        object_set_key_value(ctx, object, to, &from_val)?;
                     } else {
                         delete_property_or_throw(to)?;
                     }
@@ -3844,7 +3848,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut item_index = actual_start;
             for item in args.iter().skip(2) {
-                object_set_key_value(mc, object, item_index, item)?;
+                object_set_key_value(ctx, object, item_index, item)?;
                 item_index += 1;
             }
 
@@ -3853,8 +3857,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Object(deleted_array))
         }
         "shift" => {
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
@@ -3867,13 +3871,13 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
                 let desc = crate::js_object::handle_object_method(
-                    mc,
+                    ctx,
                     "getOwnPropertyDescriptor",
                     &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
-                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    let writable = crate::core::get_property_with_accessors(ctx, env, &desc_obj, "writable")?;
                     if matches!(writable, Value::Boolean(false)) {
                         return Ok(true);
                     }
@@ -3884,7 +3888,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
                 if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                        Ok(crate::js_proxy::proxy_has_property(ctx, proxy, index.to_string())?)
                     } else {
                         Ok(object_get_key_value(object, index.to_string()).is_some())
                     }
@@ -3898,7 +3902,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
-                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    let deleted = crate::js_proxy::proxy_delete_property(ctx, proxy, &key_prop)?;
                     if !deleted {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
@@ -3910,13 +3914,13 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if !object.borrow().is_configurable(key_prop.clone()) {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
-                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                    object.borrow_mut(ctx).properties.shift_remove(&key_prop);
                 }
                 Ok(())
             };
 
             let first = if current_len > 0 {
-                crate::core::get_property_with_accessors(mc, env, object, 0)?
+                crate::core::get_property_with_accessors(ctx, env, object, 0)?
             } else {
                 Value::Undefined
             };
@@ -3926,8 +3930,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let from = k;
                     let to = k - 1;
                     if has_property_at(from)? {
-                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from)?;
-                        object_set_key_value(mc, object, to, &from_val)?;
+                        let from_val = crate::core::get_property_with_accessors(ctx, env, object, from)?;
+                        object_set_key_value(ctx, object, to, &from_val)?;
                     } else {
                         delete_property_or_throw(to)?;
                     }
@@ -3940,26 +3944,26 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let new_len = current_len.saturating_sub(1);
-            if is_array(mc, object) {
-                if set_array_length(mc, object, new_len).is_err() {
+            if is_array(ctx, object) {
+                if set_array_length(ctx, object, new_len).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
-            } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+            } else if object_set_key_value(ctx, object, "length", &Value::Number(new_len as f64)).is_err() {
                 return Err(raise_type_error!("Cannot set length").into());
             }
 
             Ok(first)
         }
         "unshift" => {
-            if !is_array(mc, object)
+            if !is_array(ctx, object)
                 && let Some(wrapped) = slot_get_chained(object, &InternalSlot::PrimitiveValue)
                 && matches!(*wrapped.borrow(), Value::String(_))
             {
                 return Err(raise_type_error!("Cannot assign to read only property").into());
             }
 
-            let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             let max_len = 9007199254740991.0_f64;
             let current_len = if len_num.is_nan() || len_num <= 0.0 {
@@ -3972,13 +3976,13 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let length_is_non_writable = || -> Result<bool, EvalError<'gc>> {
                 let desc = crate::js_object::handle_object_method(
-                    mc,
+                    ctx,
                     "getOwnPropertyDescriptor",
                     &[Value::Object(*object), Value::String(utf8_to_utf16("length"))],
                     env,
                 )?;
                 if let Value::Object(desc_obj) = desc {
-                    let writable = crate::core::get_property_with_accessors(mc, env, &desc_obj, "writable")?;
+                    let writable = crate::core::get_property_with_accessors(ctx, env, &desc_obj, "writable")?;
                     if matches!(writable, Value::Boolean(false)) {
                         return Ok(true);
                     }
@@ -3991,14 +3995,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if !object.borrow().is_writable("length") || length_is_non_writable()? {
                     return Err(raise_type_error!("Cannot assign to read only property 'length'").into());
                 }
-                if is_array(mc, object) {
+                if is_array(ctx, object) {
                     if current_len > u32::MAX as usize {
                         return Err(raise_range_error!("Invalid array length").into());
                     }
-                    if set_array_length(mc, object, current_len).is_err() {
+                    if set_array_length(ctx, object, current_len).is_err() {
                         return Err(raise_type_error!("Cannot set length").into());
                     }
-                } else if object_set_key_value(mc, object, "length", &Value::Number(current_len as f64)).is_err() {
+                } else if object_set_key_value(ctx, object, "length", &Value::Number(current_len as f64)).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
                 return Ok(Value::Number(current_len as f64));
@@ -4024,7 +4028,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             setter: Some(setter_fn), ..
                         } => {
                             let setter_args = vec![value.clone()];
-                            let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                            let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                             return Ok(());
                         }
                         Value::Property {
@@ -4054,7 +4058,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                                 setter: Some(setter_fn), ..
                             } => {
                                 let setter_args = vec![value.clone()];
-                                let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                                let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                                 handled_by_setter = true;
                             }
                             Value::Property {
@@ -4071,7 +4075,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     cur_proto = proto.borrow().prototype;
                 }
 
-                if !handled_by_setter && object_set_key_value(mc, object, index, value).is_err() {
+                if !handled_by_setter && object_set_key_value(ctx, object, index, value).is_err() {
                     return Err(raise_type_error!("Cannot set array element").into());
                 }
 
@@ -4081,7 +4085,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let has_property_at = |index: usize| -> Result<bool, EvalError<'gc>> {
                 if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        Ok(crate::js_proxy::proxy_has_property(mc, proxy, index.to_string())?)
+                        Ok(crate::js_proxy::proxy_has_property(ctx, proxy, index.to_string())?)
                     } else {
                         Ok(object_get_key_value(object, index.to_string()).is_some())
                     }
@@ -4095,7 +4099,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
                     let key_prop = PropertyKey::from(index.to_string());
-                    let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &key_prop)?;
+                    let deleted = crate::js_proxy::proxy_delete_property(ctx, proxy, &key_prop)?;
                     if !deleted {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
@@ -4107,7 +4111,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if !object.borrow().is_configurable(key_prop.clone()) {
                         return Err(raise_type_error!("Cannot delete target property").into());
                     }
-                    object.borrow_mut(mc).properties.shift_remove(&key_prop);
+                    object.borrow_mut(ctx).properties.shift_remove(&key_prop);
                 }
                 Ok(())
             };
@@ -4118,7 +4122,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let from = k - 1;
                     let to = from + arg_count;
                     if has_property_at(from)? {
-                        let from_val = crate::core::get_property_with_accessors(mc, env, object, from)?;
+                        let from_val = crate::core::get_property_with_accessors(ctx, env, object, from)?;
                         set_index_or_throw(to, &from_val)?;
                     } else {
                         delete_property_or_throw(to)?;
@@ -4136,14 +4140,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let new_len = current_len + arg_count;
-            if is_array(mc, object) {
+            if is_array(ctx, object) {
                 if new_len > u32::MAX as usize {
                     return Err(raise_range_error!("Invalid array length").into());
                 }
-                if set_array_length(mc, object, new_len).is_err() {
+                if set_array_length(ctx, object, new_len).is_err() {
                     return Err(raise_type_error!("Cannot set length").into());
                 }
-            } else if object_set_key_value(mc, object, "length", &Value::Number(new_len as f64)).is_err() {
+            } else if object_set_key_value(ctx, object, "length", &Value::Number(new_len as f64)).is_err() {
                 return Err(raise_type_error!("Cannot set length").into());
             }
 
@@ -4183,8 +4187,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 if len_num.is_nan() || len_num <= 0.0 {
                     0usize
@@ -4196,7 +4200,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
-                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let prim = crate::core::to_primitive(ctx, value, "number", env)?;
                 let num = crate::core::to_number(&prim)?;
                 if num.is_nan() || num == 0.0 {
                     Ok(0.0)
@@ -4243,7 +4247,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut k = start;
             while k < end {
                 if let Some(ta) = typed_array_ptr {
-                    let _ = crate::core::to_primitive(mc, &fill_value, "number", env)?;
+                    let _ = crate::core::to_primitive(ctx, &fill_value, "number", env)?;
 
                     let effective_len = if ta.length_tracking {
                         let buf_len = ta.buffer.borrow().data.lock().unwrap().len();
@@ -4271,12 +4275,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     } = &*existing_prop.borrow()
                 {
                     let setter_args = vec![fill_value.clone()];
-                    let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                    let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                     k += 1;
                     continue;
                 }
 
-                object_set_key_value(mc, object, k, &fill_value)?;
+                object_set_key_value(ctx, object, k, &fill_value)?;
                 k += 1;
             }
 
@@ -4309,8 +4313,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if buf_len < needed { 0 } else { ta.length }
                 }
             } else {
-                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 if len_num.is_nan() || len_num <= 0.0 {
                     0usize
@@ -4326,7 +4330,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let from_index = if args.len() > 1 {
-                let prim = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let prim = crate::core::to_primitive(ctx, &args[1], "number", env)?;
                 let n = crate::core::to_number(&prim)?;
                 if n.is_nan() || n == 0.0 {
                     0isize
@@ -4527,7 +4531,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Ok(Value::Number(-1.0));
             }
 
-            let can_use_sparse_fast_path = if is_array(mc, object) {
+            let can_use_sparse_fast_path = if is_array(ctx, object) {
                 let mut proto_has_numeric_key = false;
                 let mut cur_proto = object.borrow().prototype;
                 while let Some(proto) = cur_proto {
@@ -4575,10 +4579,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if only_plain_data_elements {
                     indices.sort_unstable();
                     for idx in indices.into_iter().rev() {
-                        let element = crate::core::get_property_with_accessors(mc, env, object, idx)?;
+                        let element = crate::core::get_property_with_accessors(ctx, env, object, idx)?;
                         let is_match = match (&element, &search_element) {
                             (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
-                            _ => values_equal(mc, &element, &search_element),
+                            _ => values_equal(ctx, &element, &search_element),
                         };
                         if is_match {
                             return Ok(Value::Number(idx as f64));
@@ -4592,10 +4596,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let idx = k as usize;
                 let has_property = object_get_key_value(object, idx).is_some();
                 if has_property {
-                    let element = crate::core::get_property_with_accessors(mc, env, object, idx)?;
+                    let element = crate::core::get_property_with_accessors(ctx, env, object, idx)?;
                     let is_match = match (&element, &search_element) {
                         (Value::Number(a), Value::Number(b)) => !a.is_nan() && !b.is_nan() && a == b,
-                        _ => values_equal(mc, &element, &search_element),
+                        _ => values_equal(ctx, &element, &search_element),
                     };
                     if is_match {
                         return Ok(Value::Number(idx as f64));
@@ -4607,7 +4611,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             Ok(Value::Number(-1.0))
         }
         "toString" => {
-            let join_method = crate::core::get_property_with_accessors(mc, env, object, "join")?;
+            let join_method = crate::core::get_property_with_accessors(ctx, env, object, "join")?;
             let join_callable = match &join_method {
                 Value::Closure(_)
                 | Value::AsyncClosure(_)
@@ -4624,7 +4628,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             if join_callable {
                 let this_arg = Value::Object(*object);
-                return evaluate_call_dispatch(mc, env, &join_method, Some(&this_arg), &[]);
+                return evaluate_call_dispatch(ctx, env, &join_method, Some(&this_arg), &[]);
             }
 
             if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
@@ -4639,13 +4643,13 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
                 && let Value::Symbol(s) = &*tag_sym.borrow()
             {
-                let _ = crate::core::get_property_with_accessors(mc, env, object, *s)?;
+                let _ = crate::core::get_property_with_accessors(ctx, env, object, *s)?;
             }
 
-            Ok(crate::core::handle_object_prototype_to_string(mc, &Value::Object(*object), env)?)
+            Ok(crate::core::handle_object_prototype_to_string(ctx, &Value::Object(*object), env)?)
         }
         "toLocaleString" => {
-            let length_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
+            let length_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
             let current_len = match length_val {
                 Value::Number(n) if n.is_finite() && n > 0.0 => n.floor() as usize,
                 _ => 0,
@@ -4664,7 +4668,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     && let Value::Object(ctor) = &*ctor_rc.borrow()
                     && let Some(proto_rc) = object_get_key_value(ctor, "prototype")
                     && let Value::Object(proto) = &*proto_rc.borrow()
-                    && let Ok(method) = crate::core::get_property_with_accessors(mc, env, proto, "toLocaleString")
+                    && let Ok(method) = crate::core::get_property_with_accessors(ctx, env, proto, "toLocaleString")
                 {
                     return Some(method);
                 }
@@ -4677,12 +4681,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     result.push(',');
                 }
                 let key = i.to_string();
-                let element = crate::core::get_property_with_accessors(mc, env, object, key.as_str())?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, key.as_str())?;
                 match element {
                     Value::Undefined | Value::Null => {}
                     other => {
                         let method = if let Value::Object(o) = &other {
-                            crate::core::get_property_with_accessors(mc, env, o, "toLocaleString")?
+                            crate::core::get_property_with_accessors(ctx, env, o, "toLocaleString")?
                         } else if let Some(m) = get_primitive_locale_method(&other) {
                             m
                         } else {
@@ -4693,7 +4697,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             return Err(raise_type_error!("Array.prototype.toLocaleString element method is not callable").into());
                         }
 
-                        let locale_str = evaluate_call_dispatch(mc, env, &method, Some(&other), &[])?;
+                        let locale_str = evaluate_call_dispatch(ctx, env, &method, Some(&other), &[])?;
                         result.push_str(&value_to_sort_string(&locale_str));
                     }
                 }
@@ -4704,27 +4708,27 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // §23.1.3.12  Array.prototype.flat ( [ depth ] )
             // 1. Let O be ? ToObject(this value).
             // 2. Let sourceLen be ? LengthOfArrayLike(O).
-            let source_len = length_of_array_like(mc, env, object)?;
+            let source_len = length_of_array_like(ctx, env, object)?;
 
             // 3. Let depthNum be 1 (default).
             // 4. If depth is not undefined, let depthNum be ? ToIntegerOrInfinity(depth).
             let depth_num: f64 = if args.is_empty() || matches!(args[0], Value::Undefined) {
                 1.0
             } else {
-                to_integer_or_infinity_local(mc, env, &args[0])?
+                to_integer_or_infinity_local(ctx, env, &args[0])?
             };
 
             // 5. Let A be ? ArraySpeciesCreate(O, 0).
-            let new_array = array_species_create_impl(mc, env, object, 0.0)?;
+            let new_array = array_species_create_impl(ctx, env, object, 0.0)?;
 
             // 6. Perform ? FlattenIntoArray(A, O, sourceLen, 0, depthNum).
-            flatten_into_array_spec(mc, env, &new_array, object, source_len, 0, depth_num, None, None)?;
+            flatten_into_array_spec(ctx, env, &new_array, object, source_len, 0, depth_num, None, None)?;
 
             // 7. Return A.
             // For true arrays, update length; for species objects, leave it alone.
-            if is_array(mc, &new_array) {
+            if is_array(ctx, &new_array) {
                 let final_len = object_get_length(&new_array).unwrap_or(0);
-                set_array_length(mc, &new_array, final_len)?;
+                set_array_length(ctx, &new_array, final_len)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -4732,7 +4736,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // §23.1.3.11  Array.prototype.flatMap ( mapperFunction [ , thisArg ] )
             // 1. Let O be ? ToObject(this value).
             // 2. Let sourceLen be ? LengthOfArrayLike(O).
-            let source_len = length_of_array_like(mc, env, object)?;
+            let source_len = length_of_array_like(ctx, env, object)?;
 
             // 3. If IsCallable(mapperFunction) is false, throw a TypeError exception.
             let callback_val = args.first().cloned().unwrap_or(Value::Undefined);
@@ -4741,12 +4745,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             // 4. Let A be ? ArraySpeciesCreate(O, 0).
-            let new_array = array_species_create_impl(mc, env, object, 0.0)?;
+            let new_array = array_species_create_impl(ctx, env, object, 0.0)?;
 
             // 5. Perform ? FlattenIntoArray(A, O, sourceLen, 0, 1, mapperFunction, thisArg).
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
             flatten_into_array_spec(
-                mc,
+                ctx,
                 env,
                 &new_array,
                 object,
@@ -4758,9 +4762,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             )?;
 
             // 6. Return A.
-            if is_array(mc, &new_array) {
+            if is_array(ctx, &new_array) {
                 let final_len = object_get_length(&new_array).unwrap_or(0);
-                set_array_length(mc, &new_array, final_len)?;
+                set_array_length(ctx, &new_array, final_len)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -4796,8 +4800,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if buf_len < needed { 0usize } else { ta.length }
                 }
             } else {
-                let len_val = crate::core::get_property_with_accessors(mc, env, object, "length")?;
-                let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+                let len_val = crate::core::get_property_with_accessors(ctx, env, object, "length")?;
+                let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
                 let len_num = crate::core::to_number(&len_prim)?;
                 let max_len = 9007199254740991.0_f64;
                 if len_num.is_nan() || len_num <= 0.0 {
@@ -4814,7 +4818,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             let to_integer_or_infinity = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
-                let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                let prim = crate::core::to_primitive(ctx, value, "number", env)?;
                 let num = crate::core::to_number(&prim)?;
                 if num.is_nan() || num == 0.0 {
                     Ok(0.0)
@@ -4900,7 +4904,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     from_key < effective_len
                 } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
-                        crate::js_proxy::proxy_has_property(mc, proxy, from_key.to_string())?
+                        crate::js_proxy::proxy_has_property(ctx, proxy, from_key.to_string())?
                     } else {
                         object_get_key_value(object, from_key.to_string()).is_some()
                     }
@@ -4909,7 +4913,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 };
 
                 if has_from {
-                    let from_val = crate::core::get_property_with_accessors(mc, env, object, from_key.to_string())?;
+                    let from_val = crate::core::get_property_with_accessors(ctx, env, object, from_key.to_string())?;
 
                     if let Some(existing_prop) = crate::core::get_own_property(object, to_key)
                         && let Value::Property {
@@ -4919,14 +4923,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         } = &*existing_prop.borrow()
                     {
                         let setter_args = vec![from_val];
-                        let _ = evaluate_call_dispatch(mc, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
+                        let _ = evaluate_call_dispatch(ctx, env, setter_fn, Some(&Value::Object(*object)), &setter_args)?;
                     } else {
-                        object_set_key_value(mc, object, to_key, &from_val)?;
+                        object_set_key_value(ctx, object, to_key, &from_val)?;
                     }
                 } else if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy) {
                     if let Value::Proxy(proxy) = &*proxy_cell.borrow() {
                         let to_key_prop = PropertyKey::from(to_key.to_string());
-                        let deleted = crate::js_proxy::proxy_delete_property(mc, proxy, &to_key_prop)?;
+                        let deleted = crate::js_proxy::proxy_delete_property(ctx, proxy, &to_key_prop)?;
                         if !deleted {
                             return Err(raise_type_error!("Cannot delete target property").into());
                         }
@@ -4934,7 +4938,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         return Err(raise_type_error!("Cannot delete target property").into());
                     } else {
                         let _ = object
-                            .borrow_mut(mc)
+                            .borrow_mut(ctx)
                             .properties
                             .shift_remove(&PropertyKey::from(to_key.to_string()));
                     }
@@ -4942,7 +4946,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     return Err(raise_type_error!("Cannot delete target property").into());
                 } else {
                     let _ = object
-                        .borrow_mut(mc)
+                        .borrow_mut(ctx)
                         .properties
                         .shift_remove(&PropertyKey::from(to_key.to_string()));
                 }
@@ -4958,19 +4962,19 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if !args.is_empty() {
                 return Err(raise_eval_error!("Array.prototype.keys takes no arguments").into());
             }
-            Ok(create_array_iterator(mc, env, *object, "keys")?)
+            Ok(create_array_iterator(ctx, env, *object, "keys")?)
         }
         "values" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Array.prototype.values takes no arguments").into());
             }
-            Ok(create_array_iterator(mc, env, *object, "values")?)
+            Ok(create_array_iterator(ctx, env, *object, "values")?)
         }
         "entries" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Array.prototype.entries takes no arguments").into());
             }
-            Ok(create_array_iterator(mc, env, *object, "entries")?)
+            Ok(create_array_iterator(ctx, env, *object, "entries")?)
         }
         "findLast" => {
             if let Some(proxy_cell) = crate::core::slot_get(object, &InternalSlot::Proxy)
@@ -4984,7 +4988,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
             // 2. Let len be ? LengthOfArrayLike(O).
-            let current_len = length_of_array_like(mc, env, object)?;
+            let current_len = length_of_array_like(ctx, env, object)?;
 
             let callback_callable = match &callback_val {
                 Value::Closure(_)
@@ -5016,9 +5020,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             for i in (0..current_len).rev() {
-                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                 let call_args = vec![element.clone(), Value::Number(i as f64), Value::Object(*object)];
-                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(element);
                 }
@@ -5038,7 +5042,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
             // 2. Let len be ? LengthOfArrayLike(O).
-            let current_len = length_of_array_like(mc, env, object)?;
+            let current_len = length_of_array_like(ctx, env, object)?;
 
             let callback_callable = match &callback_val {
                 Value::Closure(_)
@@ -5070,9 +5074,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             }
 
             for i in (0..current_len).rev() {
-                let element = crate::core::get_property_with_accessors(mc, env, object, i)?;
+                let element = crate::core::get_property_with_accessors(ctx, env, object, i)?;
                 let call_args = vec![element, Value::Number(i as f64), Value::Object(*object)];
-                let res = evaluate_call_dispatch(mc, env, &actual_callback_val, Some(&this_arg), &call_args)?;
+                let res = evaluate_call_dispatch(ctx, env, &actual_callback_val, Some(&this_arg), &call_args)?;
                 if res.to_truthy() {
                     return Ok(Value::Number(i as f64));
                 }
@@ -5083,17 +5087,17 @@ pub(crate) fn handle_array_instance_method<'gc>(
         // --- change-array-by-copy methods ---
         "toReversed" => {
             // §23.1.3.32 Array.prototype.toReversed()
-            let len = length_of_array_like(mc, env, object)?;
+            let len = length_of_array_like(ctx, env, object)?;
             if len as u64 > 0xFFFF_FFFF {
                 return Err(raise_range_error!("Invalid array length").into());
             }
-            let new_arr = create_array(mc, env)?;
+            let new_arr = create_array(ctx, env)?;
             for i in 0..len {
                 let from_index = len - 1 - i;
-                let val = crate::core::get_property_with_accessors(mc, env, object, from_index)?;
-                object_set_key_value(mc, &new_arr, i, &val)?;
+                let val = crate::core::get_property_with_accessors(ctx, env, object, from_index)?;
+                object_set_key_value(ctx, &new_arr, i, &val)?;
             }
-            set_array_length(mc, &new_arr, len)?;
+            set_array_length(ctx, &new_arr, len)?;
             Ok(Value::Object(new_arr))
         }
         "toSorted" => {
@@ -5103,14 +5107,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if has_compare_fn && !is_callable_val(&compare_fn) {
                 return Err(raise_type_error!("The comparison function must be either a function or undefined").into());
             }
-            let len = length_of_array_like(mc, env, object)?;
+            let len = length_of_array_like(ctx, env, object)?;
             if len as u64 > 0xFFFF_FFFF {
                 return Err(raise_range_error!("Invalid array length").into());
             }
             // Collect all elements (no holes -- undefined for missing)
             let mut items: Vec<Value<'gc>> = Vec::with_capacity(len);
             for i in 0..len {
-                items.push(crate::core::get_property_with_accessors(mc, env, object, i)?);
+                items.push(crate::core::get_property_with_accessors(ctx, env, object, i)?);
             }
             // Insertion sort (same approach as sort)
             let compare_items = |a: &Value<'gc>, b: &Value<'gc>| -> Result<std::cmp::Ordering, EvalError<'gc>> {
@@ -5124,11 +5128,11 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     return Ok(std::cmp::Ordering::Less);
                 }
                 if has_compare_fn {
-                    let res = evaluate_call_dispatch(mc, env, &compare_fn, None, &[a.clone(), b.clone()])?;
+                    let res = evaluate_call_dispatch(ctx, env, &compare_fn, None, &[a.clone(), b.clone()])?;
                     let n = match &res {
                         Value::Number(n) => *n,
                         _ => {
-                            let p = crate::core::to_primitive(mc, &res, "number", env)?;
+                            let p = crate::core::to_primitive(ctx, &res, "number", env)?;
                             crate::core::to_number(&p)?
                         }
                     };
@@ -5158,20 +5162,20 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
                 i += 1;
             }
-            let new_arr = create_array(mc, env)?;
+            let new_arr = create_array(ctx, env)?;
             for (idx, val) in items.iter().enumerate() {
-                object_set_key_value(mc, &new_arr, idx, val)?;
+                object_set_key_value(ctx, &new_arr, idx, val)?;
             }
-            set_array_length(mc, &new_arr, items.len())?;
+            set_array_length(ctx, &new_arr, items.len())?;
             Ok(Value::Object(new_arr))
         }
         "toSpliced" => {
             // §23.1.3.34 Array.prototype.toSpliced(start, skipCount, ...items)
-            let len = length_of_array_like(mc, env, object)?;
+            let len = length_of_array_like(ctx, env, object)?;
             let len_i = len as i128;
 
             let relative_start = if let Some(start_arg) = args.first() {
-                let p = crate::core::to_primitive(mc, start_arg, "number", env)?;
+                let p = crate::core::to_primitive(ctx, start_arg, "number", env)?;
                 let n = crate::core::to_number(&p)?;
                 if n.is_nan() || n == 0.0 {
                     0i128
@@ -5195,7 +5199,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             } else if args.len() == 1 {
                 len.saturating_sub(actual_start)
             } else {
-                let p = crate::core::to_primitive(mc, &args[1], "number", env)?;
+                let p = crate::core::to_primitive(ctx, &args[1], "number", env)?;
                 let n = crate::core::to_number(&p)?;
                 let dc = if n.is_nan() || n == 0.0 || n == f64::NEG_INFINITY {
                     0i128
@@ -5215,33 +5219,33 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
 
-            let new_arr = create_array(mc, env)?;
+            let new_arr = create_array(ctx, env)?;
             let mut to = 0usize;
             // Copy [0, actual_start)
             for i in 0..actual_start {
-                let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                object_set_key_value(mc, &new_arr, to, &val)?;
+                let val = crate::core::get_property_with_accessors(ctx, env, object, i)?;
+                object_set_key_value(ctx, &new_arr, to, &val)?;
                 to += 1;
             }
             // Insert new items
             for item in args.iter().skip(2) {
-                object_set_key_value(mc, &new_arr, to, item)?;
+                object_set_key_value(ctx, &new_arr, to, item)?;
                 to += 1;
             }
             // Copy [actual_start + actual_delete_count, len)
             for i in (actual_start + actual_delete_count)..len {
-                let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                object_set_key_value(mc, &new_arr, to, &val)?;
+                let val = crate::core::get_property_with_accessors(ctx, env, object, i)?;
+                object_set_key_value(ctx, &new_arr, to, &val)?;
                 to += 1;
             }
-            set_array_length(mc, &new_arr, new_len)?;
+            set_array_length(ctx, &new_arr, new_len)?;
             Ok(Value::Object(new_arr))
         }
         "with" => {
             // §23.1.3.37 Array.prototype.with(index, value)
-            let len = length_of_array_like(mc, env, object)?;
+            let len = length_of_array_like(ctx, env, object)?;
             let relative_index = if let Some(idx_arg) = args.first() {
-                let p = crate::core::to_primitive(mc, idx_arg, "number", env)?;
+                let p = crate::core::to_primitive(ctx, idx_arg, "number", env)?;
                 let n = crate::core::to_number(&p)?;
                 if n.is_nan() || n == 0.0 {
                     0i64
@@ -5269,16 +5273,16 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 return Err(raise_range_error!("Invalid array length").into());
             }
             let replace_value = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let new_arr = create_array(mc, env)?;
+            let new_arr = create_array(ctx, env)?;
             for i in 0..len {
                 if i == actual_index {
-                    object_set_key_value(mc, &new_arr, i, &replace_value)?;
+                    object_set_key_value(ctx, &new_arr, i, &replace_value)?;
                 } else {
-                    let val = crate::core::get_property_with_accessors(mc, env, object, i)?;
-                    object_set_key_value(mc, &new_arr, i, &val)?;
+                    let val = crate::core::get_property_with_accessors(ctx, env, object, i)?;
+                    object_set_key_value(ctx, &new_arr, i, &val)?;
                 }
             }
-            set_array_length(mc, &new_arr, len)?;
+            set_array_length(ctx, &new_arr, len)?;
             Ok(Value::Object(new_arr))
         }
         _ => Err(raise_eval_error!(format!("Array.{method} not found")).into()),
@@ -5287,8 +5291,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
 // Helper functions for array flattening
 /// ToIntegerOrInfinity (local helper for array methods)
-fn to_integer_or_infinity_local<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
-    let n = crate::core::to_number_with_env(mc, env, val)?;
+fn to_integer_or_infinity_local<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
+    let n = crate::core::to_number_with_env(ctx, env, val)?;
     if n.is_nan() || n == 0.0 {
         Ok(0.0)
     } else if !n.is_finite() {
@@ -5300,14 +5304,18 @@ fn to_integer_or_infinity_local<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<
 
 /// LengthOfArrayLike(obj) — spec 7.3.2
 /// Returns ℝ(ToLength(Get(obj, "length"))).
-fn length_of_array_like<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
-    let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
-    to_length(mc, env, &len_val)
+fn length_of_array_like<'gc>(
+    ctx: &GcContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+) -> Result<usize, EvalError<'gc>> {
+    let len_val = crate::core::get_property_with_accessors(ctx, env, obj, "length")?;
+    to_length(ctx, env, &len_val)
 }
 
 /// ToLength(argument) — spec 7.1.20
-fn to_length<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
-    let len = to_integer_or_infinity_local(mc, env, val)?;
+fn to_length<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<usize, EvalError<'gc>> {
+    let len = to_integer_or_infinity_local(ctx, env, val)?;
     if len <= 0.0 {
         Ok(0)
     } else {
@@ -5335,11 +5343,11 @@ fn is_callable_val<'gc>(val: &Value<'gc>) -> bool {
 }
 
 /// HasProperty through proxy / TypedArray if needed
-fn has_property_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
+fn has_property_spec<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str) -> Result<bool, EvalError<'gc>> {
     if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
     {
-        Ok(crate::js_proxy::proxy_has_property(mc, proxy, key.to_string())?)
+        Ok(crate::js_proxy::proxy_has_property(ctx, proxy, key.to_string())?)
     } else if let Some(ta_cell) = crate::core::slot_get(obj, &InternalSlot::TypedArray) {
         // TypedArray [[HasProperty]]: check if key is a valid integer index
         if let Value::TypedArray(ta) = &*ta_cell.borrow()
@@ -5365,7 +5373,7 @@ fn has_property_spec<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: 
 /// Returns: the next target index after insertion
 #[allow(clippy::too_many_arguments)]
 fn flatten_into_array_spec<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     target: &JSObjectDataPtr<'gc>,
     source: &JSObjectDataPtr<'gc>,
@@ -5381,26 +5389,26 @@ fn flatten_into_array_spec<'gc>(
         let p = source_index.to_string();
 
         // b. Let exists be ? HasProperty(source, P).
-        if !has_property_spec(mc, source, &p)? {
+        if !has_property_spec(ctx, source, &p)? {
             continue;
         }
 
         // c.i. Let element be ? Get(source, P).
-        let mut element = crate::core::get_property_with_accessors(mc, env, source, &*p)?;
+        let mut element = crate::core::get_property_with_accessors(ctx, env, source, &*p)?;
 
         // c.ii. If mapperFunction is present, let element be ? Call(mapperFunction, thisArg, «element, sourceIndex, source»).
         if let Some(mapper) = mapper_function {
             let default_this = Value::Undefined;
             let t = this_arg.unwrap_or(&default_this);
             let call_args = vec![element, Value::Number(source_index as f64), Value::Object(*source)];
-            element = crate::core::evaluate_call_dispatch(mc, env, mapper, Some(t), &call_args)?;
+            element = crate::core::evaluate_call_dispatch(ctx, env, mapper, Some(t), &call_args)?;
         }
 
         // c.iii. Let shouldFlatten be false.
         // c.iv. If depth > 0, let shouldFlatten be ? IsArray(element).
         let should_flatten = if depth > 0.0 {
             match &element {
-                Value::Object(obj) => is_array_spec(mc, obj)?,
+                Value::Object(obj) => is_array_spec(ctx, obj)?,
                 _ => false,
             }
         } else {
@@ -5412,8 +5420,8 @@ fn flatten_into_array_spec<'gc>(
             //   1. If depth is +∞, let newDepth be +∞. Otherwise, let newDepth be depth - 1.
             let new_depth = if depth == f64::INFINITY { f64::INFINITY } else { depth - 1.0 };
             if let Value::Object(inner_obj) = &element {
-                let inner_len = length_of_array_like(mc, env, inner_obj)?;
-                target_index = flatten_into_array_spec(mc, env, target, inner_obj, inner_len, target_index, new_depth, None, None)?;
+                let inner_len = length_of_array_like(ctx, env, inner_obj)?;
+                target_index = flatten_into_array_spec(ctx, env, target, inner_obj, inner_len, target_index, new_depth, None, None)?;
             }
         } else {
             // c.vi. Else:
@@ -5422,7 +5430,7 @@ fn flatten_into_array_spec<'gc>(
                 return Err(raise_type_error!("FlattenIntoArray: target index exceeds safe integer limit").into());
             }
             //   2. Perform ? CreateDataPropertyOrThrow(target, targetIndex, element).
-            create_data_property_or_throw(mc, target, target_index, &element)?;
+            create_data_property_or_throw(ctx, target, target_index, &element)?;
             target_index += 1;
         }
     }
@@ -5431,7 +5439,7 @@ fn flatten_into_array_spec<'gc>(
 }
 
 /// Check if an object is an Array
-pub(crate) fn is_array<'gc>(_mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
+pub(crate) fn is_array<'gc>(_ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
     if let Some(val) = slot_get(obj, &InternalSlot::IsArray)
         && let Value::Boolean(b) = *val.borrow()
     {
@@ -5440,22 +5448,22 @@ pub(crate) fn is_array<'gc>(_mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) ->
     false
 }
 
-pub(crate) fn get_array_length<'gc>(_mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
+pub(crate) fn get_array_length<'gc>(_ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
     object_get_length(obj)
 }
 
-pub(crate) fn set_array_length<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
-    object_set_length(mc, obj, new_length)
+pub(crate) fn set_array_length<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
+    object_set_length(ctx, obj, new_length)
 }
 
-pub(crate) fn create_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let arr = new_js_object_data(mc);
-    set_array_length(mc, &arr, 0)?;
+pub(crate) fn create_array<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let arr = new_js_object_data(ctx);
+    set_array_length(ctx, &arr, 0)?;
 
-    slot_set(mc, &arr, InternalSlot::IsArray, &Value::Boolean(true));
+    slot_set(ctx, &arr, InternalSlot::IsArray, &Value::Boolean(true));
     // Mark 'length' as non-enumerable on arrays per spec
-    arr.borrow_mut(mc).set_non_enumerable("length");
-    arr.borrow_mut(mc).set_non_configurable("length");
+    arr.borrow_mut(ctx).set_non_enumerable("length");
+    arr.borrow_mut(ctx).set_non_configurable("length");
 
     if let Some(array_ctor_rc) = crate::core::env_get(env, "Array")
         && let Value::Object(array_ctor_obj) = &*array_ctor_rc.borrow()
@@ -5471,8 +5479,8 @@ pub(crate) fn create_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         };
 
         if let Some(array_proto) = array_proto_candidate {
-            arr.borrow_mut(mc).prototype = Some(array_proto);
-            slot_set(mc, &arr, InternalSlot::Proto, &Value::Object(array_proto));
+            arr.borrow_mut(ctx).prototype = Some(array_proto);
+            slot_set(ctx, &arr, InternalSlot::Proto, &Value::Object(array_proto));
             return Ok(arr);
         }
     }
@@ -5488,9 +5496,9 @@ pub(crate) fn create_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
     }
     if let Some(root_env) = root_env_opt {
         // Try to set prototype to Array.prototype
-        if crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Array").is_err() {
+        if crate::core::set_internal_prototype_from_constructor(ctx, &arr, &root_env, "Array").is_err() {
             // Fallback to Object.prototype
-            let _ = crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Object");
+            let _ = crate::core::set_internal_prototype_from_constructor(ctx, &arr, &root_env, "Object");
         }
     }
 
@@ -5499,32 +5507,32 @@ pub(crate) fn create_array<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
 
 /// Create a new Array Iterator
 pub(crate) fn create_array_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     object: JSObjectDataPtr<'gc>,
     kind: &str,
 ) -> Result<Value<'gc>, JSError> {
-    let iterator = new_js_object_data(mc);
+    let iterator = new_js_object_data(ctx);
 
     // Set [[Prototype]] to %ArrayIteratorPrototype%
     if let Some(proto_val) = slot_get_chained(env, &InternalSlot::ArrayIteratorPrototype)
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        iterator.borrow_mut(mc).prototype = Some(*proto);
+        iterator.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     // Store array
-    slot_set(mc, &iterator, InternalSlot::IteratorArray, &Value::Object(object));
+    slot_set(ctx, &iterator, InternalSlot::IteratorArray, &Value::Object(object));
     // Store index
-    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
+    slot_set(ctx, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
     // Store kind
-    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
+    slot_set(ctx, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
 
     Ok(Value::Object(iterator))
 }
 
 pub(crate) fn handle_array_iterator_next<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -5537,9 +5545,9 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
         *o
     } else if matches!(&*arr_val.borrow(), Value::Undefined) {
-        let result_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
-        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        let result_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     } else {
         return Err(raise_eval_error!("Iterator array is invalid").into());
@@ -5594,8 +5602,8 @@ pub(crate) fn handle_array_iterator_next<'gc>(
                 ta.length
             }
         } else {
-            let len_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, "length")?;
-            let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+            let len_val = crate::core::get_property_with_accessors(ctx, env, &arr_ptr, "length")?;
+            let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
             let len_num = crate::core::to_number(&len_prim)?;
             if len_num.is_nan() || len_num <= 0.0 {
                 0usize
@@ -5606,8 +5614,8 @@ pub(crate) fn handle_array_iterator_next<'gc>(
             }
         }
     } else {
-        let len_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, "length")?;
-        let len_prim = crate::core::to_primitive(mc, &len_val, "number", env)?;
+        let len_val = crate::core::get_property_with_accessors(ctx, env, &arr_ptr, "length")?;
+        let len_prim = crate::core::to_primitive(ctx, &len_val, "number", env)?;
         let len_num = crate::core::to_number(&len_prim)?;
         if len_num.is_nan() || len_num <= 0.0 {
             0usize
@@ -5619,23 +5627,23 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     if index >= length {
-        slot_set(mc, iterator, InternalSlot::IteratorArray, &Value::Undefined);
-        let result_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
-        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        slot_set(ctx, iterator, InternalSlot::IteratorArray, &Value::Undefined);
+        let result_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
-    let element_val = crate::core::get_property_with_accessors(mc, env, &arr_ptr, index)?;
+    let element_val = crate::core::get_property_with_accessors(ctx, env, &arr_ptr, index)?;
 
     let result_value = match kind.as_str() {
         "keys" => Value::Number(index as f64),
         "values" => element_val,
         "entries" => {
-            let entry = create_array(mc, env)?;
-            object_set_key_value(mc, &entry, "0", &Value::Number(index as f64))?;
-            object_set_key_value(mc, &entry, "1", &element_val)?;
-            set_array_length(mc, &entry, 2)?;
+            let entry = create_array(ctx, env)?;
+            object_set_key_value(ctx, &entry, "0", &Value::Number(index as f64))?;
+            object_set_key_value(ctx, &entry, "1", &element_val)?;
+            set_array_length(ctx, &entry, 2)?;
             Value::Object(entry)
         }
         _ => return Err(raise_eval_error!("Unknown iterator kind").into()),
@@ -5643,17 +5651,17 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
+    slot_set(ctx, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
-    let result_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &result_obj, "value", &result_value)?;
-    object_set_key_value(mc, &result_obj, "done", &Value::Boolean(false))?;
+    let result_obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &result_obj, "value", &result_value)?;
+    object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(false))?;
     Ok(Value::Object(result_obj))
 }
 
 /// Serialize an array as "[a,b]" using the same element formatting used by Array.prototype.toString.
-pub fn serialize_array_for_eval<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<String, JSError> {
-    let current_len = get_array_length(mc, object).unwrap_or(0);
+pub fn serialize_array_for_eval<'gc>(ctx: &GcContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<String, JSError> {
+    let current_len = get_array_length(ctx, object).unwrap_or(0);
     let mut parts = Vec::new();
     for i in 0..current_len {
         if let Some(val_rc) = object_get_key_value(object, i) {
@@ -5664,8 +5672,8 @@ pub fn serialize_array_for_eval<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataP
                 Value::Boolean(b) => parts.push(b.to_string()),
                 Value::BigInt(b) => parts.push(b.to_string()),
                 Value::Object(o) => {
-                    if is_array(mc, o) {
-                        parts.push(serialize_array_for_eval(mc, o)?);
+                    if is_array(ctx, o) {
+                        parts.push(serialize_array_for_eval(ctx, o)?);
                     } else {
                         // Serialize nested object properties similarly to top-level object serialization
                         let mut seen_keys = std::collections::HashSet::new();
@@ -5693,8 +5701,8 @@ pub fn serialize_array_for_eval<'gc>(mc: &GcContext<'gc>, object: &JSObjectDataP
                                         Value::Undefined => "undefined".to_string(),
                                         Value::Null => "null".to_string(),
                                         Value::Object(o2) => {
-                                            if is_array(mc, &o2) {
-                                                serialize_array_for_eval(mc, &o2)?
+                                            if is_array(ctx, &o2) {
+                                                serialize_array_for_eval(ctx, &o2)?
                                             } else {
                                                 "[object Object]".to_string()
                                             }

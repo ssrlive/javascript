@@ -8,7 +8,7 @@ use crate::js_promise::{call_function_with_this, make_promise_js_object, queue_a
 use crate::unicode::utf8_to_utf16;
 
 pub fn handle_async_closure_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     closure: &ClosureData<'gc>,
     _this_val: Option<&Value<'gc>>,
     args: &[Value<'gc>],
@@ -19,18 +19,18 @@ pub fn handle_async_closure_call<'gc>(
     // and wrap the result in a resolved/rejected promise.
     // This allows the caller to receive the promise immediately (pending)
     // and facilitates interleaving of async tasks.
-    let (promise, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
+    let (promise, resolve, reject) = crate::js_promise::create_promise_capability(ctx, env)?;
 
     // Create a new Closure wrapped in Value to pass to the task.
     // Instead of deferring the entire execution, synchronously start the generator
     // so that the body runs up to the first `await` (per spec) before returning the Promise.
-    match crate::js_generator::handle_generator_function_call(mc, closure, args, _this_val, None, None) {
+    match crate::js_generator::handle_generator_function_call(ctx, closure, args, _this_val, None, None) {
         Ok(gen_val) => {
             if let Value::Object(gen_obj) = gen_val
                 && let Some(gen_inner) = slot_get_chained(&gen_obj, &InternalSlot::Generator)
                 && let Value::Generator(gen_ptr) = &*gen_inner.borrow()
-                && let Err(e) = continue_async_step_direct(mc, *gen_ptr, &resolve, &reject, &Ok(Value::Undefined), env)
-                && let Err(e) = crate::js_promise::call_function(mc, &reject, &[Value::String(utf8_to_utf16(&e.message()))], env)
+                && let Err(e) = continue_async_step_direct(ctx, *gen_ptr, &resolve, &reject, &Ok(Value::Undefined), env)
+                && let Err(e) = crate::js_promise::call_function(ctx, &reject, &[Value::String(utf8_to_utf16(&e.message()))], env)
             {
                 log::debug!("error calling reject on promise: {e:?}");
             }
@@ -40,31 +40,31 @@ pub fn handle_async_closure_call<'gc>(
                 EvalError::Throw(v, _, _) => v,
                 EvalError::Js(je) => {
                     let msg = je.message();
-                    let err_val = crate::core::create_error(mc, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+                    let err_val = crate::core::create_error(ctx, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &err_val {
                         if let Some(line) = je.js_line() {
-                            slot_set(mc, obj, InternalSlot::Line, &Value::Number(line as f64));
+                            slot_set(ctx, obj, InternalSlot::Line, &Value::Number(line as f64));
                         }
                         if let Some(col) = je.js_column() {
-                            slot_set(mc, obj, InternalSlot::Column, &Value::Number(col as f64));
+                            slot_set(ctx, obj, InternalSlot::Column, &Value::Number(col as f64));
                         }
                     }
                     err_val
                 }
             };
-            if let Err(e) = crate::js_promise::call_function(mc, &reject, &[rej_val], env) {
+            if let Err(e) = crate::js_promise::call_function(ctx, &reject, &[rej_val], env) {
                 log::debug!("error calling reject on promise: {:?}", e);
             }
         }
     }
 
     // The rest of execution (after yields) will be handled via microtasks in step()
-    let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
+    let promise_obj = make_promise_js_object(ctx, promise, Some(*env))?;
     Ok(Value::Object(promise_obj))
 }
 
 fn step<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,
@@ -75,8 +75,8 @@ fn step<'gc>(
     // Invoke generator.next(val) or generator.throw(err)
     // println!("STEP: next_val={:?}", next_val);
     let result = match next_val {
-        Ok(val) => crate::js_generator::generator_next(mc, &generator, val),
-        Err(err) => crate::js_generator::generator_throw(mc, &generator, err),
+        Ok(val) => crate::js_generator::generator_next(ctx, &generator, val),
+        Err(err) => crate::js_generator::generator_throw(ctx, &generator, err),
     };
 
     match result {
@@ -104,7 +104,7 @@ fn step<'gc>(
 
             if done {
                 // Resolve the outer promise with the return value
-                crate::js_promise::call_function(mc, resolve, &[value], env)?;
+                crate::js_promise::call_function(ctx, resolve, &[value], env)?;
             } else {
                 // Not done, "value" is the yielded promise (or value to be awaited)
                 // Promise.resolve(value).then(res => step(next(res)), err => step(throw(err)))
@@ -125,19 +125,19 @@ fn step<'gc>(
                 };
 
                 // Call Promise.resolve(value) with `this` = Promise constructor
-                let p_val = call_function_with_this(mc, &promise_resolve, Some(&promise_ctor_val), &[value], env)?;
+                let p_val = call_function_with_this(ctx, &promise_resolve, Some(&promise_ctor_val), &[value], env)?;
 
-                let on_fulfilled = create_async_step_callback(mc, generator, resolve, reject, *env, false);
-                let on_rejected = create_async_step_callback(mc, generator, resolve, reject, *env, true);
+                let on_fulfilled = create_async_step_callback(ctx, generator, resolve, reject, *env, false);
+                let on_rejected = create_async_step_callback(ctx, generator, resolve, reject, *env, true);
 
                 log::trace!("DEBUG: p_val type: {:?}", p_val);
 
                 if let Value::Object(p_obj) = &p_val {
                     if let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(p_obj) {
-                        crate::js_promise::perform_promise_then(mc, promise_ref, Some(on_fulfilled), Some(on_rejected), None, env)?;
+                        crate::js_promise::perform_promise_then(ctx, promise_ref, Some(on_fulfilled), Some(on_rejected), None, env)?;
                     } else if let Some(then_method) = object_get_key_value(p_obj, "then") {
                         log::trace!("DEBUG: Calling then method with this");
-                        call_function_with_this(mc, &then_method.borrow(), Some(&p_val), &[on_fulfilled, on_rejected], env)?;
+                        call_function_with_this(ctx, &then_method.borrow(), Some(&p_val), &[on_fulfilled, on_rejected], env)?;
                     }
                 }
             }
@@ -148,38 +148,38 @@ fn step<'gc>(
                 EvalError::Throw(v, _, _) => v,
                 EvalError::Js(j) => {
                     let msg = j.message();
-                    let val = crate::core::create_error(mc, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
+                    let val = crate::core::create_error(ctx, None, &Value::String(utf8_to_utf16(&msg))).unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = &val {
                         if let Some(line) = j.js_line() {
-                            slot_set(mc, obj, InternalSlot::Line, &Value::Number(line as f64));
+                            slot_set(ctx, obj, InternalSlot::Line, &Value::Number(line as f64));
                         }
                         if let Some(col) = j.js_column() {
-                            slot_set(mc, obj, InternalSlot::Column, &Value::Number(col as f64));
+                            slot_set(ctx, obj, InternalSlot::Column, &Value::Number(col as f64));
                         }
                     }
                     val
                 }
             };
-            crate::js_promise::call_function(mc, reject, &[err_val], env)?;
+            crate::js_promise::call_function(ctx, reject, &[err_val], env)?;
         }
     }
     Ok(())
 }
 
 fn create_async_step_callback<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,
     global_env: JSObjectDataPtr<'gc>,
     is_reject: bool,
 ) -> Value<'gc> {
-    let env = crate::new_js_object_data(mc);
-    env.borrow_mut(mc).prototype = Some(global_env);
+    let env = crate::new_js_object_data(ctx);
+    env.borrow_mut(ctx).prototype = Some(global_env);
 
-    slot_set(mc, &env, InternalSlot::AsyncGenerator, &Value::Generator(generator));
-    slot_set(mc, &env, InternalSlot::AsyncResolve, resolve);
-    slot_set(mc, &env, InternalSlot::AsyncReject, reject);
+    slot_set(ctx, &env, InternalSlot::AsyncGenerator, &Value::Generator(generator));
+    slot_set(ctx, &env, InternalSlot::AsyncResolve, resolve);
+    slot_set(ctx, &env, InternalSlot::AsyncReject, reject);
 
     let func_name = if is_reject {
         "__internal_async_step_reject"
@@ -193,13 +193,13 @@ fn create_async_step_callback<'gc>(
     ))];
 
     Value::Closure(Gc::new(
-        mc,
+        ctx,
         ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, Some(env), None),
     ))
 }
 
 pub fn __internal_async_step_resolve<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -208,21 +208,21 @@ pub fn __internal_async_step_resolve<'gc>(
         log::trace!("DEBUG: __internal_async_step_resolve arg[0]={:?}", args[0]);
     }
     let value = args.first().cloned().unwrap_or(Value::Undefined);
-    queue_async_step_from_env(mc, env, &value, false)
+    queue_async_step_from_env(ctx, env, &value, false)
 }
 
 pub fn __internal_async_step_reject<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     log::trace!("DEBUG: __internal_async_step_reject called with arg count {}", args.len());
     let reason = args.first().cloned().unwrap_or(Value::Undefined);
-    queue_async_step_from_env(mc, env, &reason, true)
+    queue_async_step_from_env(ctx, env, &reason, true)
 }
 
 fn queue_async_step_from_env<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     value: &Value<'gc>,
     is_reject: bool,
@@ -232,14 +232,14 @@ fn queue_async_step_from_env<'gc>(
     let reject_val = slot_get_chained(env, &InternalSlot::AsyncReject).unwrap().borrow().clone();
 
     if let Value::Generator(gen_ref) = generator_val {
-        queue_async_step(mc, gen_ref, &resolve_val, &reject_val, value, is_reject, env);
+        queue_async_step(ctx, gen_ref, &resolve_val, &reject_val, value, is_reject, env);
     }
 
     Ok(Value::Undefined)
 }
 
 pub fn continue_async_step_direct<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     generator: GcPtr<'gc, JSGenerator<'gc>>,
     resolve: &Value<'gc>,
     reject: &Value<'gc>,
@@ -254,5 +254,5 @@ pub fn continue_async_step_direct<'gc>(
         }
     };
 
-    step(mc, generator, resolve, reject, &call_env, result)
+    step(ctx, generator, resolve, reject, &call_env, result)
 }

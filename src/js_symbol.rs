@@ -4,14 +4,14 @@ use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
 pub fn initialize_symbol<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     parent_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<(), JSError> {
-    let symbol_ctor = new_js_object_data(mc);
+    let symbol_ctor = new_js_object_data(ctx);
 
-    slot_set(mc, &symbol_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &symbol_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Symbol")));
+    slot_set(ctx, &symbol_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &symbol_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Symbol")));
 
     // Symbol() is not a constructor (cannot new Symbol()), but a function. All good `__is_constructor` usually means it is callable as a class/function.
     // Spec says `new Symbol()` throws TypeError, but `Symbol()` works.
@@ -19,7 +19,7 @@ pub fn initialize_symbol<'gc>(
     // I might need to handle `new Symbol()` check inside the handler.
 
     // Symbol.prototype
-    let symbol_proto = new_js_object_data(mc);
+    let symbol_proto = new_js_object_data(ctx);
 
     // Get Object.prototype
     if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -27,26 +27,26 @@ pub fn initialize_symbol<'gc>(
         && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*proto_val.borrow()
     {
-        symbol_proto.borrow_mut(mc).prototype = Some(*obj_proto);
+        symbol_proto.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
-    object_set_key_value(mc, &symbol_ctor, "prototype", &Value::Object(symbol_proto))?;
-    object_set_key_value(mc, &symbol_proto, "constructor", &Value::Object(symbol_ctor))?;
+    object_set_key_value(ctx, &symbol_ctor, "prototype", &Value::Object(symbol_proto))?;
+    object_set_key_value(ctx, &symbol_proto, "constructor", &Value::Object(symbol_ctor))?;
 
     // §20.4.2: Symbol.length = 0 (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &symbol_ctor, "length", &Value::Number(0.0))?;
-    symbol_ctor.borrow_mut(mc).set_non_enumerable("length");
-    symbol_ctor.borrow_mut(mc).set_non_writable("length");
+    object_set_key_value(ctx, &symbol_ctor, "length", &Value::Number(0.0))?;
+    symbol_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    symbol_ctor.borrow_mut(ctx).set_non_writable("length");
 
     // §20.4.2: Symbol.name = "Symbol" (non-writable, non-enumerable, configurable)
-    object_set_key_value(mc, &symbol_ctor, "name", &Value::String(utf8_to_utf16("Symbol")))?;
-    symbol_ctor.borrow_mut(mc).set_non_enumerable("name");
-    symbol_ctor.borrow_mut(mc).set_non_writable("name");
+    object_set_key_value(ctx, &symbol_ctor, "name", &Value::String(utf8_to_utf16("Symbol")))?;
+    symbol_ctor.borrow_mut(ctx).set_non_enumerable("name");
+    symbol_ctor.borrow_mut(ctx).set_non_writable("name");
 
     // prototype descriptor: non-enumerable, non-writable, non-configurable
-    symbol_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    symbol_ctor.borrow_mut(mc).set_non_writable("prototype");
-    symbol_ctor.borrow_mut(mc).set_non_configurable("prototype");
+    symbol_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    symbol_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    symbol_ctor.borrow_mut(ctx).set_non_configurable("prototype");
 
     // §20.4.2: Symbol's [[Prototype]] is Function.prototype
     if let Some(func_val) = object_get_key_value(env, "Function")
@@ -54,7 +54,7 @@ pub fn initialize_symbol<'gc>(
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        symbol_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        symbol_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     // Helper: try to get a well-known symbol from the parent realm's Symbol constructor.
@@ -70,76 +70,76 @@ pub fn initialize_symbol<'gc>(
                     if let Value::Symbol(_) = &*val.borrow() {
                         val.borrow().clone()
                     } else {
-                        Value::Symbol(Gc::new(mc, SymbolData::new(Some($desc))))
+                        Value::Symbol(Gc::new(ctx, SymbolData::new(Some($desc))))
                     }
                 } else {
-                    Value::Symbol(Gc::new(mc, SymbolData::new(Some($desc))))
+                    Value::Symbol(Gc::new(ctx, SymbolData::new(Some($desc))))
                 }
             } else {
-                Value::Symbol(Gc::new(mc, SymbolData::new(Some($desc))))
+                Value::Symbol(Gc::new(ctx, SymbolData::new(Some($desc))))
             }
         }};
     }
 
     // Symbol.iterator
     let iterator_sym = wk_symbol!("iterator", "Symbol.iterator");
-    object_set_key_value(mc, &symbol_ctor, "iterator", &iterator_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "iterator", &iterator_sym)?;
 
     // Symbol.asyncIterator
     let async_iterator_sym = wk_symbol!("asyncIterator", "Symbol.asyncIterator");
-    object_set_key_value(mc, &symbol_ctor, "asyncIterator", &async_iterator_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "asyncIterator", &async_iterator_sym)?;
 
     // Symbol.toPrimitive
     let to_primitive_sym = wk_symbol!("toPrimitive", "Symbol.toPrimitive");
-    object_set_key_value(mc, &symbol_ctor, "toPrimitive", &to_primitive_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "toPrimitive", &to_primitive_sym)?;
 
     // Symbol.toStringTag
     let to_string_tag_sym = wk_symbol!("toStringTag", "Symbol.toStringTag");
-    object_set_key_value(mc, &symbol_ctor, "toStringTag", &to_string_tag_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "toStringTag", &to_string_tag_sym)?;
 
     // Symbol.species
     let species_sym = wk_symbol!("species", "Symbol.species");
-    object_set_key_value(mc, &symbol_ctor, "species", &species_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "species", &species_sym)?;
 
     // Symbol.match
     let match_sym = wk_symbol!("match", "Symbol.match");
-    object_set_key_value(mc, &symbol_ctor, "match", &match_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "match", &match_sym)?;
 
     // Symbol.replace
     let replace_sym = wk_symbol!("replace", "Symbol.replace");
-    object_set_key_value(mc, &symbol_ctor, "replace", &replace_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "replace", &replace_sym)?;
 
     // Symbol.search
     let search_sym = wk_symbol!("search", "Symbol.search");
-    object_set_key_value(mc, &symbol_ctor, "search", &search_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "search", &search_sym)?;
 
     // Symbol.split
     let split_sym = wk_symbol!("split", "Symbol.split");
-    object_set_key_value(mc, &symbol_ctor, "split", &split_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "split", &split_sym)?;
 
     // Symbol.matchAll
     let match_all_sym = wk_symbol!("matchAll", "Symbol.matchAll");
-    object_set_key_value(mc, &symbol_ctor, "matchAll", &match_all_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "matchAll", &match_all_sym)?;
 
     // Symbol.hasInstance
     let has_instance_sym = wk_symbol!("hasInstance", "Symbol.hasInstance");
-    object_set_key_value(mc, &symbol_ctor, "hasInstance", &has_instance_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "hasInstance", &has_instance_sym)?;
 
     // Symbol.unscopables
     let unscopables_sym = wk_symbol!("unscopables", "Symbol.unscopables");
-    object_set_key_value(mc, &symbol_ctor, "unscopables", &unscopables_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "unscopables", &unscopables_sym)?;
 
     // Symbol.dispose
     let dispose_sym = wk_symbol!("dispose", "Symbol.dispose");
-    object_set_key_value(mc, &symbol_ctor, "dispose", &dispose_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "dispose", &dispose_sym)?;
 
     // Symbol.asyncDispose
     let async_dispose_sym = wk_symbol!("asyncDispose", "Symbol.asyncDispose");
-    object_set_key_value(mc, &symbol_ctor, "asyncDispose", &async_dispose_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "asyncDispose", &async_dispose_sym)?;
 
     // Symbol.isConcatSpreadable
     let is_concat_spreadable_sym = wk_symbol!("isConcatSpreadable", "Symbol.isConcatSpreadable");
-    object_set_key_value(mc, &symbol_ctor, "isConcatSpreadable", &is_concat_spreadable_sym)?;
+    object_set_key_value(ctx, &symbol_ctor, "isConcatSpreadable", &is_concat_spreadable_sym)?;
 
     // All well-known symbol properties on Symbol are non-writable, non-enumerable, non-configurable
     // per the ECMAScript spec (they are immutable values, not methods).
@@ -160,20 +160,20 @@ pub fn initialize_symbol<'gc>(
         "asyncDispose",
         "isConcatSpreadable",
     ] {
-        symbol_ctor.borrow_mut(mc).set_non_enumerable(*wk);
-        symbol_ctor.borrow_mut(mc).set_non_writable(*wk);
-        symbol_ctor.borrow_mut(mc).set_non_configurable(*wk);
+        symbol_ctor.borrow_mut(ctx).set_non_enumerable(*wk);
+        symbol_ctor.borrow_mut(ctx).set_non_writable(*wk);
+        symbol_ctor.borrow_mut(ctx).set_non_configurable(*wk);
     }
 
     // toString method
     let val = Value::Function("Symbol.prototype.toString".to_string());
-    object_set_key_value(mc, &symbol_proto, "toString", &val)?;
-    symbol_proto.borrow_mut(mc).set_non_enumerable("toString");
+    object_set_key_value(ctx, &symbol_proto, "toString", &val)?;
+    symbol_proto.borrow_mut(ctx).set_non_enumerable("toString");
 
     // valueOf method
     let val_of = Value::Function("Symbol.prototype.valueOf".to_string());
-    object_set_key_value(mc, &symbol_proto, "valueOf", &val_of)?;
-    symbol_proto.borrow_mut(mc).set_non_enumerable("valueOf");
+    object_set_key_value(ctx, &symbol_proto, "valueOf", &val_of)?;
+    symbol_proto.borrow_mut(ctx).set_non_enumerable("valueOf");
 
     // description getter (accessor property)
     let desc_getter = Value::Function("Symbol.prototype.description.get".to_string());
@@ -182,59 +182,59 @@ pub fn initialize_symbol<'gc>(
         getter: Some(Box::new(desc_getter)),
         setter: None,
     };
-    object_set_key_value(mc, &symbol_proto, "description", &desc_prop)?;
-    symbol_proto.borrow_mut(mc).set_non_enumerable("description");
+    object_set_key_value(ctx, &symbol_proto, "description", &desc_prop)?;
+    symbol_proto.borrow_mut(ctx).set_non_enumerable("description");
 
-    symbol_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    symbol_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Symbol.for and Symbol.keyFor (static) — wrap in distinct function objects
     // so each realm has its own identity (cross-realm tests require notSameValue).
     {
         use crate::core::new_gc_cell_ptr;
-        let for_obj = new_js_object_data(mc);
+        let for_obj = new_js_object_data(ctx);
         for_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Symbol.for".to_string()))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function("Symbol.for".to_string()))));
         // length = 1, name = "for" — {writable: false, enumerable: false, configurable: true}
-        object_set_key_value(mc, &for_obj, "length", &Value::Number(1.0))?;
-        for_obj.borrow_mut(mc).set_non_enumerable("length");
-        for_obj.borrow_mut(mc).set_non_writable("length");
-        object_set_key_value(mc, &for_obj, "name", &Value::from("for"))?;
-        for_obj.borrow_mut(mc).set_non_enumerable("name");
-        for_obj.borrow_mut(mc).set_non_writable("name");
-        object_set_key_value(mc, &symbol_ctor, "for", &Value::Object(for_obj))?;
-        symbol_ctor.borrow_mut(mc).set_non_enumerable("for");
+        object_set_key_value(ctx, &for_obj, "length", &Value::Number(1.0))?;
+        for_obj.borrow_mut(ctx).set_non_enumerable("length");
+        for_obj.borrow_mut(ctx).set_non_writable("length");
+        object_set_key_value(ctx, &for_obj, "name", &Value::from("for"))?;
+        for_obj.borrow_mut(ctx).set_non_enumerable("name");
+        for_obj.borrow_mut(ctx).set_non_writable("name");
+        object_set_key_value(ctx, &symbol_ctor, "for", &Value::Object(for_obj))?;
+        symbol_ctor.borrow_mut(ctx).set_non_enumerable("for");
     }
 
     {
         use crate::core::new_gc_cell_ptr;
-        let keyfor_obj = new_js_object_data(mc);
+        let keyfor_obj = new_js_object_data(ctx);
         keyfor_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Symbol.keyFor".to_string()))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function("Symbol.keyFor".to_string()))));
         // length = 1, name = "keyFor" — {writable: false, enumerable: false, configurable: true}
-        object_set_key_value(mc, &keyfor_obj, "length", &Value::Number(1.0))?;
-        keyfor_obj.borrow_mut(mc).set_non_enumerable("length");
-        keyfor_obj.borrow_mut(mc).set_non_writable("length");
-        object_set_key_value(mc, &keyfor_obj, "name", &Value::from("keyFor"))?;
-        keyfor_obj.borrow_mut(mc).set_non_enumerable("name");
-        keyfor_obj.borrow_mut(mc).set_non_writable("name");
-        object_set_key_value(mc, &symbol_ctor, "keyFor", &Value::Object(keyfor_obj))?;
-        symbol_ctor.borrow_mut(mc).set_non_enumerable("keyFor");
+        object_set_key_value(ctx, &keyfor_obj, "length", &Value::Number(1.0))?;
+        keyfor_obj.borrow_mut(ctx).set_non_enumerable("length");
+        keyfor_obj.borrow_mut(ctx).set_non_writable("length");
+        object_set_key_value(ctx, &keyfor_obj, "name", &Value::from("keyFor"))?;
+        keyfor_obj.borrow_mut(ctx).set_non_enumerable("name");
+        keyfor_obj.borrow_mut(ctx).set_non_writable("name");
+        object_set_key_value(ctx, &symbol_ctor, "keyFor", &Value::Object(keyfor_obj))?;
+        symbol_ctor.borrow_mut(ctx).set_non_enumerable("keyFor");
     }
 
     // Create per-environment symbol registry object used by Symbol.for / Symbol.keyFor
-    let registry_obj = new_js_object_data(mc);
-    slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(registry_obj));
+    let registry_obj = new_js_object_data(ctx);
+    slot_set(ctx, env, InternalSlot::SymbolRegistry, &Value::Object(registry_obj));
 
     // Set Symbol.prototype[@@toStringTag] = "Symbol"
     // §20.4.3.6: { writable: false, enumerable: false, configurable: true }
     if let Some(tag_sym_val) = object_get_key_value(&symbol_ctor, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        object_set_key_value(mc, &symbol_proto, *tag_sym, &Value::String(utf8_to_utf16("Symbol")))?;
-        symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
-        symbol_proto.borrow_mut(mc).set_non_writable(PropertyKey::Symbol(*tag_sym));
+        object_set_key_value(ctx, &symbol_proto, *tag_sym, &Value::String(utf8_to_utf16("Symbol")))?;
+        symbol_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+        symbol_proto.borrow_mut(ctx).set_non_writable(PropertyKey::Symbol(*tag_sym));
     }
 
     // §20.4.3.5 Symbol.prototype[@@toPrimitive](hint)
@@ -244,19 +244,19 @@ pub fn initialize_symbol<'gc>(
         && let Value::Symbol(tp_sym) = &*tp_sym_val.borrow()
     {
         let tp_fn = Value::Function("Symbol.prototype.[Symbol.toPrimitive]".to_string());
-        object_set_key_value(mc, &symbol_proto, *tp_sym, &tp_fn)?;
-        symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tp_sym));
-        symbol_proto.borrow_mut(mc).set_non_writable(PropertyKey::Symbol(*tp_sym));
+        object_set_key_value(ctx, &symbol_proto, *tp_sym, &tp_fn)?;
+        symbol_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*tp_sym));
+        symbol_proto.borrow_mut(ctx).set_non_writable(PropertyKey::Symbol(*tp_sym));
         // configurable: true (default) — do NOT set non-configurable
     }
 
-    env_set(mc, env, "Symbol", &Value::Object(symbol_ctor))?;
+    env_set(ctx, env, "Symbol", &Value::Object(symbol_ctor))?;
 
     Ok(())
 }
 
 pub(crate) fn handle_symbol_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -275,11 +275,11 @@ pub(crate) fn handle_symbol_call<'gc>(
         None
     };
 
-    let sym = Gc::new(mc, SymbolData::new(description.as_deref()));
+    let sym = Gc::new(ctx, SymbolData::new(description.as_deref()));
     Ok(Value::Symbol(sym))
 }
 
-pub(crate) fn handle_symbol_tostring<'gc>(_mc: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_tostring<'gc>(_ctx: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
     let sym = match this_value {
         Value::Symbol(s) => *s,
         Value::Object(obj) => {
@@ -313,7 +313,7 @@ pub(crate) fn handle_symbol_tostring<'gc>(_mc: &GcContext<'gc>, this_value: &Val
     Ok(Value::String(utf8_to_utf16(&s)))
 }
 
-pub(crate) fn handle_symbol_valueof<'gc>(_mc: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_valueof<'gc>(_ctx: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
     match this_value {
         Value::Symbol(s) => Ok(Value::Symbol(*s)),
         Value::Object(obj) => {
@@ -328,7 +328,7 @@ pub(crate) fn handle_symbol_valueof<'gc>(_mc: &GcContext<'gc>, this_value: &Valu
     }
 }
 
-pub(crate) fn handle_symbol_description_get<'gc>(_mc: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_description_get<'gc>(_ctx: &GcContext<'gc>, this_value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
     let sym = match this_value {
         Value::Symbol(s) => *s,
         Value::Object(obj) => {
@@ -354,7 +354,7 @@ pub(crate) fn handle_symbol_description_get<'gc>(_mc: &GcContext<'gc>, this_valu
     }
 }
 
-pub(crate) fn handle_symbol_for<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_symbol_for<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // §20.4.2.2 Symbol.for(key): step 1 — let stringKey be ? ToString(key).
     // ToString on a Symbol throws TypeError. On undefined, produces "undefined".
     let arg = if args.is_empty() { &Value::Undefined } else { &args[0] };
@@ -369,14 +369,14 @@ pub(crate) fn handle_symbol_for<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], e
             if let Value::Object(obj) = &*val.borrow() {
                 *obj
             } else {
-                let obj = new_js_object_data(mc);
-                slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(obj));
+                let obj = new_js_object_data(ctx);
+                slot_set(ctx, env, InternalSlot::SymbolRegistry, &Value::Object(obj));
                 obj
             }
         }
         None => {
-            let obj = new_js_object_data(mc);
-            slot_set(mc, env, InternalSlot::SymbolRegistry, &Value::Object(obj));
+            let obj = new_js_object_data(ctx);
+            slot_set(ctx, env, InternalSlot::SymbolRegistry, &Value::Object(obj));
             obj
         }
     };
@@ -389,13 +389,13 @@ pub(crate) fn handle_symbol_for<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], e
     }
 
     // Otherwise create and store a new symbol associated with the key
-    let sym = Gc::new(mc, SymbolData::new_registered(Some(&key)));
-    object_set_key_value(mc, &registry_obj, &key, &Value::Symbol(sym))?;
+    let sym = Gc::new(ctx, SymbolData::new_registered(Some(&key)));
+    object_set_key_value(ctx, &registry_obj, &key, &Value::Symbol(sym))?;
     Ok(Value::Symbol(sym))
 }
 
 pub(crate) fn handle_symbol_keyfor<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {

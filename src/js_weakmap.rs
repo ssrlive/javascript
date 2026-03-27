@@ -10,24 +10,24 @@ use crate::{
 
 /// Handle WeakMap constructor calls (spec §24.3.1.1)
 pub(crate) fn handle_weakmap_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let weakmap = new_gc_cell_ptr(mc, JSWeakMap { entries: Vec::new() });
+    let weakmap = new_gc_cell_ptr(ctx, JSWeakMap { entries: Vec::new() });
 
     // Create a wrapper object for the WeakMap
-    let weakmap_obj = new_js_object_data(mc);
+    let weakmap_obj = new_js_object_data(ctx);
     // Store the actual weakmap data
-    slot_set(mc, &weakmap_obj, InternalSlot::WeakMap, &Value::WeakMap(weakmap));
+    slot_set(ctx, &weakmap_obj, InternalSlot::WeakMap, &Value::WeakMap(weakmap));
 
     // OrdinaryCreateFromConstructor(NewTarget, "%WeakMap.prototype%")
     let mut proto_set = false;
     if let Some(Value::Object(nt_obj)) = new_target
-        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "WeakMap")?
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "WeakMap")?
     {
-        weakmap_obj.borrow_mut(mc).prototype = Some(proto);
+        weakmap_obj.borrow_mut(ctx).prototype = Some(proto);
         proto_set = true;
     }
     if !proto_set
@@ -36,7 +36,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
         && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        weakmap_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+        weakmap_obj.borrow_mut(ctx).prototype = Some(*proto_obj);
     }
 
     // Step 3: If iterable is not present, or is undefined/null, return.
@@ -46,7 +46,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     }
 
     // Step 4-5: Get "set" method from the map object and check IsCallable.
-    let set_fn = crate::core::get_property_with_accessors(mc, env, &weakmap_obj, "set")?;
+    let set_fn = crate::core::get_property_with_accessors(ctx, env, &weakmap_obj, "set")?;
     let set_is_callable = match &set_fn {
         Value::Object(obj) => {
             obj.borrow().get_closure().is_some()
@@ -61,53 +61,53 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     }
 
     // Step 6: GetIterator.
-    let (iter_obj, next_fn) = crate::js_map::get_iterator(mc, env, &iterable)?;
+    let (iter_obj, next_fn) = crate::js_map::get_iterator(ctx, env, &iterable)?;
 
     // Step 7: Iterate
     loop {
-        let next_result = crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn)?;
-        let done = crate::js_map::get_iterator_done(mc, env, &next_result)?;
+        let next_result = crate::js_map::call_iterator_next(ctx, env, &iter_obj, &next_fn)?;
+        let done = crate::js_map::get_iterator_done(ctx, env, &next_result)?;
         if done {
             break;
         }
-        let item = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+        let item = match crate::js_map::get_iterator_value(ctx, env, &next_result) {
             Ok(v) => v,
             Err(e) => {
-                let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // 7a: If item is not an Object, throw TypeError and close iterator
         if !matches!(item, Value::Object(_)) {
-            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+            let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
             return Err(raise_type_error!("Iterator value is not an entry object").into());
         }
 
         let item_obj = if let Value::Object(o) = &item { *o } else { unreachable!() };
 
         // 7b: Let k = Get(item, "0")
-        let k = match crate::core::get_property_with_accessors(mc, env, &item_obj, "0") {
+        let k = match crate::core::get_property_with_accessors(ctx, env, &item_obj, "0") {
             Ok(v) => v,
             Err(e) => {
-                let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // 7c: Let v = Get(item, "1")
-        let v = match crate::core::get_property_with_accessors(mc, env, &item_obj, "1") {
+        let v = match crate::core::get_property_with_accessors(ctx, env, &item_obj, "1") {
             Ok(v) => v,
             Err(e) => {
-                let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // 7d: Call(adder, map, [k, v])
-        let call_result = crate::core::evaluate_call_dispatch(mc, env, &set_fn, Some(&Value::Object(weakmap_obj)), &[k, v]);
+        let call_result = crate::core::evaluate_call_dispatch(ctx, env, &set_fn, Some(&Value::Object(weakmap_obj)), &[k, v]);
         if let Err(e) = call_result {
-            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+            let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
             return Err(e);
         }
     }
@@ -116,23 +116,23 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
 }
 
 /// Initialize WeakMap constructor and prototype
-pub fn initialize_weakmap<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let weakmap_ctor = new_js_object_data(mc);
-    slot_set(mc, &weakmap_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+pub fn initialize_weakmap<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let weakmap_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &weakmap_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
-        mc,
+        ctx,
         &weakmap_ctor,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("WeakMap")),
     );
 
     // WeakMap.length = 0, WeakMap.name = "WeakMap" (non-enumerable, non-writable, configurable)
-    object_set_key_value(mc, &weakmap_ctor, "length", &Value::Number(0.0))?;
-    weakmap_ctor.borrow_mut(mc).set_non_enumerable("length");
-    weakmap_ctor.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &weakmap_ctor, "name", &Value::String(utf8_to_utf16("WeakMap")))?;
-    weakmap_ctor.borrow_mut(mc).set_non_enumerable("name");
-    weakmap_ctor.borrow_mut(mc).set_non_writable("name");
+    object_set_key_value(ctx, &weakmap_ctor, "length", &Value::Number(0.0))?;
+    weakmap_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    weakmap_ctor.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &weakmap_ctor, "name", &Value::String(utf8_to_utf16("WeakMap")))?;
+    weakmap_ctor.borrow_mut(ctx).set_non_enumerable("name");
+    weakmap_ctor.borrow_mut(ctx).set_non_writable("name");
 
     // Set WeakMap's [[Prototype]] to Function.prototype
     if let Some(func_val) = object_get_key_value(env, "Function")
@@ -140,7 +140,7 @@ pub fn initialize_weakmap<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        weakmap_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        weakmap_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     // Get Object.prototype
@@ -154,27 +154,27 @@ pub fn initialize_weakmap<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         None
     };
 
-    let weakmap_proto = new_js_object_data(mc);
+    let weakmap_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        weakmap_proto.borrow_mut(mc).prototype = Some(proto);
+        weakmap_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &weakmap_ctor, "prototype", &Value::Object(weakmap_proto))?;
-    weakmap_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    weakmap_ctor.borrow_mut(mc).set_non_writable("prototype");
-    weakmap_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &weakmap_proto, "constructor", &Value::Object(weakmap_ctor))?;
+    object_set_key_value(ctx, &weakmap_ctor, "prototype", &Value::Object(weakmap_proto))?;
+    weakmap_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    weakmap_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    weakmap_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &weakmap_proto, "constructor", &Value::Object(weakmap_ctor))?;
 
     // Register instance methods
     let methods = vec!["set", "get", "has", "delete", "toString", "getOrInsert", "getOrInsertComputed"];
 
     for method in methods {
         let val = Value::Function(format!("WeakMap.prototype.{method}"));
-        object_set_key_value(mc, &weakmap_proto, method, &val)?;
-        weakmap_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &weakmap_proto, method, &val)?;
+        weakmap_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    weakmap_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    weakmap_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -184,20 +184,20 @@ pub fn initialize_weakmap<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("WeakMap")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &weakmap_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
+            let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("WeakMap")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &weakmap_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
         }
     }
 
-    env_set(mc, env, "WeakMap", &Value::Object(weakmap_ctor))?;
+    env_set(ctx, env, "WeakMap", &Value::Object(weakmap_ctor))?;
     Ok(())
 }
 
 /// Check if WeakMap has a key
-fn weakmap_has_key<'gc>(mc: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
+fn weakmap_has_key<'gc>(ctx: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
     let weakmap = weakmap.borrow();
     for (k, _) in &weakmap.entries {
-        if k.matches(mc, key) {
+        if k.matches(ctx, key) {
             return true;
         }
     }
@@ -205,16 +205,16 @@ fn weakmap_has_key<'gc>(mc: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<
 }
 
 /// Delete a key from WeakMap
-fn weakmap_delete_key<'gc>(mc: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
-    let mut weakmap_mut = weakmap.borrow_mut(mc);
+fn weakmap_delete_key<'gc>(ctx: &GcContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key: &Value<'gc>) -> bool {
+    let mut weakmap_mut = weakmap.borrow_mut(ctx);
     let len_before = weakmap_mut.entries.len();
-    weakmap_mut.entries.retain(|(k, _)| !k.matches(mc, key));
+    weakmap_mut.entries.retain(|(k, _)| !k.matches(ctx, key));
     weakmap_mut.entries.len() < len_before
 }
 
 /// Handle WeakMap instance method calls
 pub(crate) fn handle_weakmap_instance_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
     method: &str,
     args: &[Value<'gc>],
@@ -233,10 +233,10 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             };
 
             // Remove existing entry with same key
-            weakmap.borrow_mut(mc).entries.retain(|(k, _)| !k.matches(mc, &key));
+            weakmap.borrow_mut(ctx).entries.retain(|(k, _)| !k.matches(ctx, &key));
 
             // Add new entry
-            weakmap.borrow_mut(mc).entries.push((weak_key, value));
+            weakmap.borrow_mut(ctx).entries.push((weak_key, value));
 
             // Return this (the wrapper object)
             Ok(this_obj.clone())
@@ -251,7 +251,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
             let weakmap_ref = weakmap.borrow();
             for (k, v) in &weakmap_ref.entries {
-                if k.matches(mc, &key) {
+                if k.matches(ctx, &key) {
                     return Ok(v.clone());
                 }
             }
@@ -265,7 +265,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
                 return Ok(Value::Boolean(false));
             }
 
-            Ok(Value::Boolean(weakmap_has_key(mc, weakmap, &key)))
+            Ok(Value::Boolean(weakmap_has_key(ctx, weakmap, &key)))
         }
         "delete" => {
             let key = args.first().cloned().unwrap_or(Value::Undefined);
@@ -274,7 +274,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
                 return Ok(Value::Boolean(false));
             }
 
-            Ok(Value::Boolean(weakmap_delete_key(mc, weakmap, &key)))
+            Ok(Value::Boolean(weakmap_delete_key(ctx, weakmap, &key)))
         }
         "toString" => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
         "getOrInsert" => {
@@ -289,12 +289,12 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
             // If key already exists, return existing value
             for (k, v) in &weakmap.borrow().entries {
-                if k.matches(mc, &key) {
+                if k.matches(ctx, &key) {
                     return Ok(v.clone());
                 }
             }
             // Insert and return the default
-            weakmap.borrow_mut(mc).entries.push((weak_key, default_value.clone()));
+            weakmap.borrow_mut(ctx).entries.push((weak_key, default_value.clone()));
             Ok(default_value)
         }
         "getOrInsertComputed" => {
@@ -324,20 +324,20 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
             // If key already exists, return existing value
             for (k, v) in &weakmap.borrow().entries {
-                if k.matches(mc, &key) {
+                if k.matches(ctx, &key) {
                     return Ok(v.clone());
                 }
             }
             // Call callback(key) to compute the value
-            let computed = crate::core::evaluate_call_dispatch(mc, _env, &callback, None, std::slice::from_ref(&key))?;
+            let computed = crate::core::evaluate_call_dispatch(ctx, _env, &callback, None, std::slice::from_ref(&key))?;
             // Re-check: if callback caused insertion of same key, OVERWRITE with computed value
-            for (k, v) in &mut weakmap.borrow_mut(mc).entries {
-                if k.matches(mc, &key) {
+            for (k, v) in &mut weakmap.borrow_mut(ctx).entries {
+                if k.matches(ctx, &key) {
                     *v = computed.clone();
                     return Ok(computed);
                 }
             }
-            weakmap.borrow_mut(mc).entries.push((weak_key, computed.clone()));
+            weakmap.borrow_mut(ctx).entries.push((weak_key, computed.clone()));
             Ok(computed)
         }
         _ => Err(raise_type_error!(format!("WeakMap.prototype.{} is not a function", method)).into()),
@@ -345,7 +345,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 }
 
 /// Check if a JS object wraps an internal WeakMap
-pub fn is_weakmap_object<'gc>(_mc: &GcContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
+pub fn is_weakmap_object<'gc>(_ctx: &GcContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
     if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::WeakMap) {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakMap(_))
     } else {

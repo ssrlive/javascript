@@ -6,11 +6,11 @@ use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
-pub fn initialize_boolean<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let boolean_ctor = new_js_object_data(mc);
-    slot_set(mc, &boolean_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+pub fn initialize_boolean<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let boolean_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &boolean_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
-        mc,
+        ctx,
         &boolean_ctor,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("Boolean")),
@@ -27,46 +27,46 @@ pub fn initialize_boolean<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         None
     };
 
-    let boolean_proto = new_js_object_data(mc);
+    let boolean_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        boolean_proto.borrow_mut(mc).prototype = Some(proto);
+        boolean_proto.borrow_mut(ctx).prototype = Some(proto);
     }
     // Per spec, Boolean.prototype has [[BooleanData]] internal slot with value false
-    slot_set(mc, &boolean_proto, InternalSlot::PrimitiveValue, &Value::Boolean(false));
+    slot_set(ctx, &boolean_proto, InternalSlot::PrimitiveValue, &Value::Boolean(false));
 
-    object_set_key_value(mc, &boolean_ctor, "prototype", &Value::Object(boolean_proto))?;
-    object_set_key_value(mc, &boolean_proto, "constructor", &Value::Object(boolean_ctor))?;
-    boolean_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &boolean_ctor, "prototype", &Value::Object(boolean_proto))?;
+    object_set_key_value(ctx, &boolean_proto, "constructor", &Value::Object(boolean_ctor))?;
+    boolean_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     let val = Value::Function("Boolean.prototype.toString".to_string());
-    object_set_key_value(mc, &boolean_proto, "toString", &val)?;
-    boolean_proto.borrow_mut(mc).set_non_enumerable("toString");
+    object_set_key_value(ctx, &boolean_proto, "toString", &val)?;
+    boolean_proto.borrow_mut(ctx).set_non_enumerable("toString");
 
     let val = Value::Function("Boolean.prototype.valueOf".to_string());
-    object_set_key_value(mc, &boolean_proto, "valueOf", &val)?;
-    boolean_proto.borrow_mut(mc).set_non_enumerable("valueOf");
+    object_set_key_value(ctx, &boolean_proto, "valueOf", &val)?;
+    boolean_proto.borrow_mut(ctx).set_non_enumerable("valueOf");
 
-    boolean_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    boolean_ctor.borrow_mut(mc).set_non_writable("prototype");
-    boolean_ctor.borrow_mut(mc).set_non_configurable("prototype");
+    boolean_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    boolean_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    boolean_ctor.borrow_mut(ctx).set_non_configurable("prototype");
 
     // Boolean.length = 1 (non-writable, non-enumerable, non-configurable)
-    object_set_key_value(mc, &boolean_ctor, "length", &Value::Number(1.0))?;
-    boolean_ctor.borrow_mut(mc).set_non_enumerable("length");
-    boolean_ctor.borrow_mut(mc).set_non_writable("length");
+    object_set_key_value(ctx, &boolean_ctor, "length", &Value::Number(1.0))?;
+    boolean_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    boolean_ctor.borrow_mut(ctx).set_non_writable("length");
 
     // Ensure the Boolean constructor object uses Function.prototype as its internal prototype
     // (Function may have already been initialized).
-    if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &boolean_ctor, env, "Function") {
+    if let Err(e) = crate::core::set_internal_prototype_from_constructor(ctx, &boolean_ctor, env, "Function") {
         log::warn!("Failed to set Boolean constructor's internal prototype from Function: {e:?}");
     }
 
-    env_set(mc, env, "Boolean", &Value::Object(boolean_ctor))?;
+    env_set(ctx, env, "Boolean", &Value::Object(boolean_ctor))?;
     Ok(())
 }
 
 pub(crate) fn handle_boolean_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -75,14 +75,14 @@ pub(crate) fn handle_boolean_constructor<'gc>(
     } else {
         evaluated_args[0].to_truthy()
     };
-    let obj = new_js_object_data(mc);
-    slot_set(mc, &obj, InternalSlot::PrimitiveValue, &Value::Boolean(bool_val));
-    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
+    let obj = new_js_object_data(ctx);
+    slot_set(ctx, &obj, InternalSlot::PrimitiveValue, &Value::Boolean(bool_val));
+    crate::core::set_internal_prototype_from_constructor(ctx, &obj, env, "Boolean")?;
     Ok(Value::Object(obj))
 }
 
 pub fn boolean_prototype_to_string<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -93,7 +93,7 @@ pub fn boolean_prototype_to_string<'gc>(
 }
 
 pub fn boolean_prototype_value_of<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {

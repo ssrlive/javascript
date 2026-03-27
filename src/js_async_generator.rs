@@ -9,7 +9,7 @@ use crate::error::{JSError, JSErrorKind};
 use crate::js_generator::YieldKind;
 use crate::js_promise::{make_promise_js_object, perform_promise_then, reject_promise, resolve_promise};
 
-fn js_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, j: &JSError) -> Value<'gc> {
+fn js_error_to_value<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, j: &JSError) -> Value<'gc> {
     let fallback_msg = j.message();
     let (ctor_name, msg) = match j.kind() {
         JSErrorKind::TypeError { message } => ("TypeError", message.as_str()),
@@ -29,24 +29,24 @@ fn js_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, j: &J
         && let Some(proto_val) = object_get_key_value(ctor_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        return crate::core::create_error(mc, Some(*proto_obj), &msg_val).unwrap_or(Value::from(msg));
+        return crate::core::create_error(ctx, Some(*proto_obj), &msg_val).unwrap_or(Value::from(msg));
     }
 
     Value::from(msg)
 }
 
-fn eval_error_to_value<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
+fn eval_error_to_value<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, err: EvalError<'gc>) -> Value<'gc> {
     match err {
         EvalError::Throw(v, ..) => v,
-        EvalError::Js(j) => js_error_to_value(mc, env, &j),
+        EvalError::Js(j) => js_error_to_value(ctx, env, &j),
     }
 }
 
-fn await_value<'gc>(mc: &GcContext<'gc>, _env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Value<'gc>> {
+fn await_value<'gc>(ctx: &GcContext<'gc>, _env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Value<'gc>> {
     if let Value::Object(obj) = &value
         && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(obj)
     {
-        crate::js_promise::mark_promise_handled(mc, promise_ref, _env).expect("must succeed");
+        crate::js_promise::mark_promise_handled(ctx, promise_ref, _env).expect("must succeed");
         let state = promise_ref.borrow().state.clone();
         match state {
             crate::core::PromiseState::Pending => {
@@ -74,7 +74,7 @@ fn has_async_iterator<'gc>(env: &JSObjectDataPtr<'gc>, obj: &JSObjectDataPtr<'gc
 
 // Create an async generator instance (object) when an async generator function is called.
 pub fn handle_async_generator_function_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     closure: &ClosureData<'gc>,
     args: &[Value<'gc>],
     fn_obj: Option<JSObjectDataPtr<'gc>>,
@@ -90,17 +90,17 @@ pub fn handle_async_generator_function_call<'gc>(
         None
     };
     let call_env =
-        prepare_function_call_env_with_home(mc, Some(&closure_env), None, Some(&closure.params[..]), args, None, None, home_opt)?;
+        prepare_function_call_env_with_home(ctx, Some(&closure_env), None, Some(&closure.params[..]), args, None, None, home_opt)?;
 
     // Ensure an `arguments` object is available on the call environment.
-    crate::js_class::create_arguments_object(mc, &call_env, args, None)?;
+    crate::js_class::create_arguments_object(ctx, &call_env, args, None)?;
 
     // Create the async generator instance object
-    let gen_obj = new_js_object_data(mc);
+    let gen_obj = new_js_object_data(ctx);
 
     // Create internal async generator struct
     let async_gen = new_gc_cell_ptr(
-        mc,
+        ctx,
         JSAsyncGenerator {
             params: closure.params.clone(),
             body: closure.body.clone(),
@@ -116,7 +116,7 @@ pub fn handle_async_generator_function_call<'gc>(
     );
 
     // Store it on the object under a hidden key
-    slot_set(mc, &gen_obj, InternalSlot::AsyncGeneratorState, &Value::AsyncGenerator(async_gen));
+    slot_set(ctx, &gen_obj, InternalSlot::AsyncGeneratorState, &Value::AsyncGenerator(async_gen));
 
     // Determine prototype for the async generator object.
     // Prefer the function object's own `prototype` if it's an object; otherwise
@@ -171,40 +171,40 @@ pub fn handle_async_generator_function_call<'gc>(
                 proto_obj = async_proto;
             }
         }
-        gen_obj.borrow_mut(mc).prototype = Some(proto_obj);
+        gen_obj.borrow_mut(ctx).prototype = Some(proto_obj);
     }
 
     // Create 'next' function as a native Function; name it so call_native_function can route
     let next_func = Value::Function("AsyncGenerator.prototype.next".to_string());
-    object_set_key_value(mc, &gen_obj, "next", &next_func)?;
+    object_set_key_value(ctx, &gen_obj, "next", &next_func)?;
     // Create 'throw' and 'return' functions
     let throw_func = Value::Function("AsyncGenerator.prototype.throw".to_string());
-    object_set_key_value(mc, &gen_obj, "throw", &throw_func)?;
+    object_set_key_value(ctx, &gen_obj, "throw", &throw_func)?;
     let return_func = Value::Function("AsyncGenerator.prototype.return".to_string());
-    object_set_key_value(mc, &gen_obj, "return", &return_func)?;
+    object_set_key_value(ctx, &gen_obj, "return", &return_func)?;
     // Return the object
     Ok(Value::Object(gen_obj))
 }
 
 /// Initialize AsyncGenerator constructor/prototype and attach prototype methods
-pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_async_generator<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     // Create constructor object and async generator prototype
-    let async_gen_ctor = crate::core::new_js_object_data(mc);
+    let async_gen_ctor = crate::core::new_js_object_data(ctx);
     // Set __proto__ to Function.prototype if present
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        async_gen_ctor.borrow_mut(mc).prototype = Some(*proto_obj);
+        async_gen_ctor.borrow_mut(ctx).prototype = Some(*proto_obj);
     }
 
-    let async_gen_proto = crate::core::new_js_object_data(mc);
+    let async_gen_proto = crate::core::new_js_object_data(ctx);
     // Create an AsyncIteratorPrototype object and make AsyncGenerator.prototype
     // inherit from it (instead of directly from Object.prototype).
-    let async_iter_proto = crate::core::new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &async_iter_proto, env, "Object");
-    async_gen_proto.borrow_mut(mc).prototype = Some(async_iter_proto);
+    let async_iter_proto = crate::core::new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &async_iter_proto, env, "Object");
+    async_gen_proto.borrow_mut(ctx).prototype = Some(async_iter_proto);
 
     // Attach prototype methods as proper function objects so they expose
     // correct `length` and `name` properties with the right descriptors.
@@ -222,69 +222,69 @@ pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPt
         ("return", "AsyncGenerator.prototype.return", 1),
         ("throw", "AsyncGenerator.prototype.throw", 1),
     ] {
-        let fn_obj = new_js_object_data(mc);
+        let fn_obj = new_js_object_data(ctx);
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function(dispatch_name.to_string()))));
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function(dispatch_name.to_string()))));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::from(method_name), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(length as f64), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
-        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_gen_proto, method_name, &desc_method)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::from(method_name), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(length as f64), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &desc_len)?;
+        let desc_method = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_gen_proto, method_name, &desc_method)?;
     }
 
     // Register internal helpers for awaits
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_await_resolve",
         &Value::Function("__internal_async_gen_await_resolve".to_string()),
     )?;
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_await_reject",
         &Value::Function("__internal_async_gen_await_reject".to_string()),
     )?;
 
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_yield_resolve",
         &Value::Function("__internal_async_gen_yield_resolve".to_string()),
     )?;
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_yield_reject",
         &Value::Function("__internal_async_gen_yield_reject".to_string()),
     )?;
 
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_yield_star_resolve",
         &Value::Function("__internal_async_gen_yield_star_resolve".to_string()),
     )?;
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_yield_star_reject",
         &Value::Function("__internal_async_gen_yield_star_reject".to_string()),
     )?;
 
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_return_resolve",
         &Value::Function("__internal_async_gen_return_resolve".to_string()),
     )?;
     crate::core::env_set(
-        mc,
+        ctx,
         env,
         "__internal_async_gen_return_reject",
         &Value::Function("__internal_async_gen_return_reject".to_string()),
@@ -298,22 +298,22 @@ pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPt
         && let Some(async_iter_sym_val) = object_get_key_value(sym_obj, "asyncIterator")
         && let Value::Symbol(async_iter_sym) = &*async_iter_sym_val.borrow()
     {
-        let fn_obj = new_js_object_data(mc);
-        fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        let fn_obj = new_js_object_data(ctx);
+        fn_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("AsyncGenerator.prototype.asyncIterator".to_string()),
         )));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.asyncIterator]"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::from("[Symbol.asyncIterator]"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &desc_len)?;
 
         // Set on AsyncIteratorPrototype (writable: true, enumerable: false, configurable: true)
-        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_iter_proto, *async_iter_sym, &desc_method)?;
+        let desc_method = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_iter_proto, *async_iter_sym, &desc_method)?;
     }
 
     // Register Symbol.asyncDispose on %AsyncIteratorPrototype%
@@ -323,22 +323,22 @@ pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPt
         && let Some(async_dispose_sym_val) = object_get_key_value(sym_obj, "asyncDispose")
         && let Value::Symbol(async_dispose_sym) = &*async_dispose_sym_val.borrow()
     {
-        let fn_obj = new_js_object_data(mc);
-        fn_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(
-            mc,
+        let fn_obj = new_js_object_data(ctx);
+        fn_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(
+            ctx,
             Value::Function("AsyncIteratorPrototype.asyncDispose".to_string()),
         )));
-        slot_set(mc, &fn_obj, InternalSlot::Callable, &Value::Boolean(true));
+        slot_set(ctx, &fn_obj, InternalSlot::Callable, &Value::Boolean(true));
         if let Some(fp) = func_proto_opt {
-            fn_obj.borrow_mut(mc).prototype = Some(fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(fp);
         }
-        let desc_name = crate::core::create_descriptor_object(mc, &Value::from("[Symbol.asyncDispose]"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &desc_name)?;
-        let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &desc_len)?;
+        let desc_name = crate::core::create_descriptor_object(ctx, &Value::from("[Symbol.asyncDispose]"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &desc_name)?;
+        let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &desc_len)?;
 
-        let desc_method = crate::core::create_descriptor_object(mc, &Value::Object(fn_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_iter_proto, *async_dispose_sym, &desc_method)?;
+        let desc_method = crate::core::create_descriptor_object(ctx, &Value::Object(fn_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_iter_proto, *async_dispose_sym, &desc_method)?;
     }
 
     // Set AsyncGenerator.prototype[@@toStringTag] = "AsyncGenerator"
@@ -347,21 +347,21 @@ pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPt
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("AsyncGenerator"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_gen_proto, *tag_sym, &desc_tag)?;
+        let desc_tag = crate::core::create_descriptor_object(ctx, &Value::from("AsyncGenerator"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_gen_proto, *tag_sym, &desc_tag)?;
     }
 
     // Defer setting constructor and env binding until after AsyncGeneratorFunction.prototype
     // is created, because per spec %AsyncGenerator% IS %AsyncGeneratorFunction%.prototype.
     // Set 'prototype' on the temporary async_gen_ctor (used internally)
-    let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), true, false, false)?;
-    crate::js_object::define_property_internal(mc, &async_gen_ctor, "prototype", &desc_proto)?;
+    let desc_proto = crate::core::create_descriptor_object(ctx, &Value::Object(async_gen_proto), true, false, false)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_ctor, "prototype", &desc_proto)?;
 
     // Create AsyncGeneratorFunction constructor/prototype so async generator
     // function objects inherit from a distinct AsyncGeneratorFunction.prototype,
     // whose own "prototype" points to AsyncGenerator.prototype.
-    let async_gen_func_ctor = crate::core::new_js_object_data(mc);
-    let async_gen_func_proto = crate::core::new_js_object_data(mc);
+    let async_gen_func_ctor = crate::core::new_js_object_data(ctx);
+    let async_gen_func_proto = crate::core::new_js_object_data(ctx);
 
     // AsyncGeneratorFunction itself inherits from Function (constructor).
     // AsyncGeneratorFunction.prototype inherits from Function.prototype.
@@ -369,41 +369,41 @@ pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPt
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
     {
         // [[Prototype]] of AsyncGeneratorFunction is Function
-        async_gen_func_ctor.borrow_mut(mc).prototype = Some(*func_ctor);
+        async_gen_func_ctor.borrow_mut(ctx).prototype = Some(*func_ctor);
         // AsyncGeneratorFunction.prototype.[[Prototype]] is Function.prototype
         if let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(func_proto) = &*proto_val.borrow()
         {
-            async_gen_func_proto.borrow_mut(mc).prototype = Some(*func_proto);
+            async_gen_func_proto.borrow_mut(ctx).prototype = Some(*func_proto);
         }
     }
 
     slot_set(
-        mc,
+        ctx,
         &async_gen_func_ctor,
         InternalSlot::NativeCtor,
         &Value::from("AsyncGeneratorFunction"),
     );
     // Mark as constructor so typeof returns "function" and isConstructor is true
-    slot_set(mc, &async_gen_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &async_gen_func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
 
     // AsyncGeneratorFunction.length = 1 (non-writable, non-enumerable, configurable)
-    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "length", &desc_len)?;
+    let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_func_ctor, "length", &desc_len)?;
 
     // AsyncGeneratorFunction.name = "AsyncGeneratorFunction" (non-writable, non-enumerable, configurable)
-    let desc_name = crate::core::create_descriptor_object(mc, &Value::from("AsyncGeneratorFunction"), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "name", &desc_name)?;
+    let desc_name = crate::core::create_descriptor_object(ctx, &Value::from("AsyncGeneratorFunction"), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_func_ctor, "name", &desc_name)?;
 
     // AsyncGeneratorFunction.prototype.prototype → %AsyncGenerator.prototype%
     // writable=false, enumerable=false, configurable=true
-    let desc_fn_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_proto), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &async_gen_func_proto, "prototype", &desc_fn_proto)?;
+    let desc_fn_proto = crate::core::create_descriptor_object(ctx, &Value::Object(async_gen_proto), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_func_proto, "prototype", &desc_fn_proto)?;
 
     // AsyncGeneratorFunction.prototype.constructor → AsyncGeneratorFunction
     // writable=false, enumerable=false, configurable=true
-    let desc_fn_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_ctor), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &async_gen_func_proto, "constructor", &desc_fn_ctor)?;
+    let desc_fn_ctor = crate::core::create_descriptor_object(ctx, &Value::Object(async_gen_func_ctor), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_func_proto, "constructor", &desc_fn_ctor)?;
 
     // Set AsyncGeneratorFunction.prototype[@@toStringTag] = "AsyncGeneratorFunction"
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -411,32 +411,32 @@ pub fn initialize_async_generator<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPt
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        let desc_tag = crate::core::create_descriptor_object(mc, &Value::from("AsyncGeneratorFunction"), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &async_gen_func_proto, *tag_sym, &desc_tag)?;
+        let desc_tag = crate::core::create_descriptor_object(ctx, &Value::from("AsyncGeneratorFunction"), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &async_gen_func_proto, *tag_sym, &desc_tag)?;
     }
 
     // AsyncGeneratorFunction.prototype: non-writable, non-enumerable, non-configurable
-    let desc_ctor_proto = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), false, false, false)?;
-    crate::js_object::define_property_internal(mc, &async_gen_func_ctor, "prototype", &desc_ctor_proto)?;
+    let desc_ctor_proto = crate::core::create_descriptor_object(ctx, &Value::Object(async_gen_func_proto), false, false, false)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_func_ctor, "prototype", &desc_ctor_proto)?;
 
     // Per spec, %AsyncGenerator% IS %AsyncGeneratorFunction%.prototype.
     // Set 'constructor' on AsyncGenerator.prototype → async_gen_func_proto
     // { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
-    let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(async_gen_func_proto), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &async_gen_proto, "constructor", &desc_ctor)?;
+    let desc_ctor = crate::core::create_descriptor_object(ctx, &Value::Object(async_gen_func_proto), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &async_gen_proto, "constructor", &desc_ctor)?;
     // Expose %AsyncGenerator% on the environment as async_gen_func_proto (not the old async_gen_ctor)
-    crate::core::env_set(mc, env, "AsyncGenerator", &Value::Object(async_gen_func_proto))?;
+    crate::core::env_set(ctx, env, "AsyncGenerator", &Value::Object(async_gen_func_proto))?;
 
     // Store as hidden intrinsic (NOT a global) via internal slot
     slot_set(
-        mc,
+        ctx,
         env,
         InternalSlot::AsyncGeneratorFunctionCtor,
         &Value::Object(async_gen_func_ctor),
     );
 
     // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
-    slot_set(mc, &async_gen_func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
+    slot_set(ctx, &async_gen_func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
 
     Ok(())
 }
@@ -539,10 +539,10 @@ fn stmt_contains_yield_or_await(s: &Statement) -> bool {
     }
 }
 
-fn create_iterator_result_obj<'gc>(mc: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "value", &value)?;
-    object_set_key_value(mc, &obj, "done", &Value::Boolean(done))?;
+fn create_iterator_result_obj<'gc>(ctx: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &obj, "value", &value)?;
+    object_set_key_value(ctx, &obj, "done", &Value::Boolean(done))?;
     Ok(obj)
 }
 
@@ -552,11 +552,11 @@ enum AsyncGeneratorCompletion<'gc> {
 }
 
 fn evaluate_async_generator_completion<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<AsyncGeneratorCompletion<'gc>, EvalError<'gc>> {
-    match crate::core::evaluate_statements_with_labels(mc, env, statements, &[], &[])? {
+    match crate::core::evaluate_statements_with_labels(ctx, env, statements, &[], &[])? {
         crate::core::ControlFlow::Normal(_) => Ok(AsyncGeneratorCompletion::Normal),
         crate::core::ControlFlow::Return(v) => Ok(AsyncGeneratorCompletion::Return(v)),
         crate::core::ControlFlow::Throw(v, line, column) => Err(EvalError::Throw(v, line, column)),
@@ -566,9 +566,9 @@ fn evaluate_async_generator_completion<'gc>(
 }
 
 // Helper to create a new internal JSPromise cell and corresponding JS Promise object
-fn create_promise_cell_and_obj<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> (GcPtr<'gc, JSPromise<'gc>>, Value<'gc>) {
-    let promise_cell = new_gc_cell_ptr(mc, crate::core::JSPromise::new());
-    let promise_obj = make_promise_js_object(mc, promise_cell, Some(*env)).unwrap();
+fn create_promise_cell_and_obj<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> (GcPtr<'gc, JSPromise<'gc>>, Value<'gc>) {
+    let promise_cell = new_gc_cell_ptr(ctx, crate::core::JSPromise::new());
+    let promise_obj = make_promise_js_object(ctx, promise_cell, Some(*env)).unwrap();
     (promise_cell, Value::Object(promise_obj))
 }
 
@@ -582,7 +582,7 @@ fn extract_simple_yield_expr(body: &[Statement]) -> Option<Expr> {
 }
 
 fn eval_yield_inner_expr<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     yield_kind: crate::js_generator::YieldKind,
     inner_expr: &Expr,
@@ -597,7 +597,7 @@ fn eval_yield_inner_expr<'gc>(
         inner_expr
     };
 
-    crate::core::evaluate_expr(mc, env, expr)
+    crate::core::evaluate_expr(ctx, env, expr)
 }
 
 fn allow_loop_fallback(stmt: &Statement) -> bool {
@@ -614,7 +614,7 @@ fn allow_loop_fallback(stmt: &Statement) -> bool {
 }
 
 fn get_for_await_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_val: &Value<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, bool), EvalError<'gc>> {
@@ -627,14 +627,14 @@ fn get_for_await_iterator<'gc>(
         && let Value::Symbol(async_iter_sym_data) = &*async_iter_sym.borrow()
         && let Value::Object(obj) = iter_val
     {
-        let method = crate::core::get_property_with_accessors(mc, env, obj, async_iter_sym_data)?;
+        let method = crate::core::get_property_with_accessors(ctx, env, obj, async_iter_sym_data)?;
         let method = match method {
             Value::Property { value: Some(v), .. } => v.borrow().clone(),
             other => other,
         };
         if !matches!(method, Value::Undefined | Value::Null) {
-            let res = evaluate_call_dispatch(mc, env, &method, Some(iter_val), &[])?;
-            let res = await_value(mc, env, res).map_err(|v| EvalError::Throw(v, None, None))?;
+            let res = evaluate_call_dispatch(ctx, env, &method, Some(iter_val), &[])?;
+            let res = await_value(ctx, env, res).map_err(|v| EvalError::Throw(v, None, None))?;
             if let Value::Object(iter_obj) = res {
                 iterator = Some(iter_obj);
                 is_async_iter = true;
@@ -649,13 +649,13 @@ fn get_for_await_iterator<'gc>(
         && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
         && let Value::Object(obj) = iter_val
     {
-        let method = crate::core::get_property_with_accessors(mc, env, obj, iter_sym_data)?;
+        let method = crate::core::get_property_with_accessors(ctx, env, obj, iter_sym_data)?;
         let method = match method {
             Value::Property { value: Some(v), .. } => v.borrow().clone(),
             other => other,
         };
         if !matches!(method, Value::Undefined | Value::Null) {
-            let res = evaluate_call_dispatch(mc, env, &method, Some(iter_val), &[])?;
+            let res = evaluate_call_dispatch(ctx, env, &method, Some(iter_val), &[])?;
             if let Value::Object(iter_obj) = res {
                 iterator = Some(iter_obj);
                 is_async_iter = false;
@@ -671,12 +671,12 @@ fn get_for_await_iterator<'gc>(
 }
 
 fn for_await_next_value<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: JSObjectDataPtr<'gc>,
     is_async_iter: bool,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
-    let next_method = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
+    let next_method = crate::core::get_property_with_accessors(ctx, env, &iter_obj, "next")?;
     // unwrap descriptor if necessary
     let next_method = match next_method {
         Value::Property { value: Some(v), .. } => v.borrow().clone(),
@@ -686,9 +686,9 @@ fn for_await_next_value<'gc>(
         return Err(EvalError::Js(raise_type_error!("Iterator has no next method")));
     }
 
-    let mut next_res_val = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+    let mut next_res_val = evaluate_call_dispatch(ctx, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
     if is_async_iter {
-        next_res_val = await_value(mc, env, next_res_val).map_err(|v| EvalError::Throw(v, None, None))?;
+        next_res_val = await_value(ctx, env, next_res_val).map_err(|v| EvalError::Throw(v, None, None))?;
     }
 
     if let Value::Object(next_res) = next_res_val {
@@ -708,7 +708,7 @@ fn for_await_next_value<'gc>(
             Value::Undefined
         };
 
-        value = await_value(mc, env, value).map_err(|v| EvalError::Throw(v, None, None))?;
+        value = await_value(ctx, env, value).map_err(|v| EvalError::Throw(v, None, None))?;
         Ok(Some(value))
     } else {
         Err(raise_type_error!("Iterator result is not an object").into())
@@ -718,7 +718,7 @@ fn for_await_next_value<'gc>(
 // Process pending requests (next/throw/return) for the given async generator
 // Processes requests until the generator suspends or the pending queue is empty.
 fn process_one_pending<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -726,9 +726,9 @@ fn process_one_pending<'gc>(
 
     loop {
         // Drain any requests that were deferred while the generator was executing.
-        drain_deferred_requests(mc, gen_ptr, env)?;
+        drain_deferred_requests(ctx, gen_ptr, env)?;
 
-        let mut gen_ptr_mut_guard = gen_ptr.borrow_mut(mc);
+        let mut gen_ptr_mut_guard = gen_ptr.borrow_mut(ctx);
         let gen_ptr_mut = &mut *gen_ptr_mut_guard;
 
         if gen_ptr_mut.pending.is_empty() {
@@ -746,7 +746,7 @@ fn process_one_pending<'gc>(
                 AsyncGeneratorRequest::Return(val) => ("return", vec![val]),
             };
 
-            handle_yield_star_call(mc, env, gen_ptr, promise_cell, iter_obj, method, args)?;
+            handle_yield_star_call(ctx, env, gen_ptr, promise_cell, iter_obj, method, args)?;
             // Delegation handles the request; return to event loop (or wait for callback)
             return Ok(());
         }
@@ -766,7 +766,7 @@ fn process_one_pending<'gc>(
                         prep_env
                     } else {
                         let env = crate::core::prepare_function_call_env(
-                            mc,
+                            ctx,
                             Some(&gen_ptr_mut.env),
                             None,
                             Some(&gen_ptr_mut.params[..]),
@@ -778,7 +778,7 @@ fn process_one_pending<'gc>(
                         // Ensure an `arguments` object is available to the function body so
                         // parameter accesses (and `arguments.length`) reflect the passed args.
                         // This mirrors what `call_closure`/function calls do for ordinary functions.
-                        crate::js_class::create_arguments_object(mc, &env, &gen_ptr_mut.args, None)?;
+                        crate::js_class::create_arguments_object(ctx, &env, &gen_ptr_mut.args, None)?;
                         env
                     };
 
@@ -788,51 +788,51 @@ fn process_one_pending<'gc>(
                     {
                         if idx > 0 {
                             let pre_stmts = gen_ptr_mut.body[0..idx].to_vec();
-                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                            let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                         }
                         let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
                         if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = decl_kind_opt {
-                            let he = new_js_object_data(mc);
-                            he.borrow_mut(mc).prototype = Some(func_env);
-                            env_set(mc, &he, var_name, &Value::Uninitialized)?;
+                            let he = new_js_object_data(ctx);
+                            he.borrow_mut(ctx).prototype = Some(func_env);
+                            env_set(ctx, &he, var_name, &Value::Uninitialized)?;
                             head_env = Some(he);
                         }
                         let iter_eval_env = head_env.as_ref().unwrap_or(&func_env);
-                        let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
-                        let (iter_obj, is_async_iter) = match get_for_await_iterator(mc, &func_env, &iter_val) {
+                        let iter_val = evaluate_expr(ctx, iter_eval_env, iterable)?;
+                        let (iter_obj, is_async_iter) = match get_for_await_iterator(ctx, &func_env, &iter_val) {
                             Ok(v) => v,
                             Err(EvalError::Throw(v, _, _)) => {
                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                reject_promise(mc, &promise_cell, v, env);
+                                reject_promise(ctx, &promise_cell, v, env);
                                 return Ok(());
                             }
                             Err(e) => {
                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                 return Ok(());
                             }
                         };
 
-                        match for_await_next_value(mc, &func_env, iter_obj, is_async_iter) {
+                        match for_await_next_value(ctx, &func_env, iter_obj, is_async_iter) {
                             Ok(Some(value)) => {
                                 let iter_env = if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = decl_kind_opt {
-                                    let e = new_js_object_data(mc);
-                                    e.borrow_mut(mc).prototype = Some(func_env);
-                                    env_set(mc, &e, var_name, &value.clone())?;
+                                    let e = new_js_object_data(ctx);
+                                    e.borrow_mut(ctx).prototype = Some(func_env);
+                                    env_set(ctx, &e, var_name, &value.clone())?;
                                     e
                                 } else {
-                                    env_set_recursive(mc, &func_env, var_name, &value.clone())?;
+                                    env_set_recursive(ctx, &func_env, var_name, &value.clone())?;
                                     func_env
                                 };
 
-                                let mut yielded = evaluate_expr(mc, &iter_env, &yield_expr)?;
-                                match await_value(mc, env, yielded.clone()) {
+                                let mut yielded = evaluate_expr(ctx, &iter_env, &yield_expr)?;
+                                match await_value(ctx, env, yielded.clone()) {
                                     Ok(awaited) => {
                                         yielded = awaited;
                                     }
                                     Err(reason) => {
                                         gen_ptr_mut.state = GeneratorState::Completed;
-                                        reject_promise(mc, &promise_cell, reason, env);
+                                        reject_promise(ctx, &promise_cell, reason, env);
                                         return Ok(());
                                     }
                                 }
@@ -850,19 +850,19 @@ fn process_one_pending<'gc>(
                                     yield_expr,
                                 });
 
-                                let res_obj = create_iterator_result_obj(mc, yielded, false)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, yielded, false)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 return Ok(());
                             }
                             Ok(None) => {
                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 return Ok(());
                             }
                             Err(e) => {
                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                 return Ok(());
                             }
                         }
@@ -875,22 +875,22 @@ fn process_one_pending<'gc>(
                         // Execute pre-loop statements
                         if idx > 0 {
                             let pre_stmts = gen_ptr_mut.body[0..idx].to_vec();
-                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                            crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                         }
 
                         // Execute for-loop init
                         if let Some(init_stmt) = &for_stmt.init {
                             let init_clone = init_stmt.clone();
-                            crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&init_clone))?;
+                            crate::core::evaluate_statements(ctx, &func_env, std::slice::from_ref(&init_clone))?;
                         }
 
                         // Check test condition
                         if let Some(test_expr) = &for_stmt.test {
-                            let test_val = crate::core::evaluate_expr(mc, &func_env, test_expr)?;
+                            let test_val = crate::core::evaluate_expr(ctx, &func_env, test_expr)?;
                             if !test_val.to_truthy() {
                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 return Ok(());
                             }
                         }
@@ -901,16 +901,16 @@ fn process_one_pending<'gc>(
                             && inner_idx > 0
                         {
                             let pre_stmts = body_clone[0..inner_idx].to_vec();
-                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                            crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                         }
 
                         // Evaluate yield expression
                         let yielded = if let Some(ref inner_expr) = yield_inner {
-                            match crate::core::evaluate_expr(mc, &func_env, inner_expr) {
+                            match crate::core::evaluate_expr(ctx, &func_env, inner_expr) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     gen_ptr_mut.state = GeneratorState::Completed;
-                                    reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                    reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                     return Ok(());
                                 }
                             }
@@ -929,20 +929,20 @@ fn process_one_pending<'gc>(
                             pre_env: Some(func_env),
                         };
                         gen_ptr_mut.cached_initial_yield = Some(yielded.clone());
-                        let res_obj = create_iterator_result_obj(mc, yielded, false)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, yielded, false)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         return Ok(());
                     }
 
                     if idx > 0 {
                         let pre_stmts = gen_ptr_mut.body[0..idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                     } else if let Some(inner_idx) = inner_idx_opt
                         && inner_idx > 0
                         && let StatementKind::Block(inner_stmts) = &*gen_ptr_mut.body[idx].kind
                     {
                         let pre_stmts = inner_stmts[0..inner_idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                     }
 
                     gen_ptr_mut.state = GeneratorState::Suspended {
@@ -953,9 +953,9 @@ fn process_one_pending<'gc>(
 
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
-                        let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        slot_set(mc, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
-                        match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
+                        let inner_eval_env = crate::core::prepare_function_call_env(ctx, Some(parent_env), None, None, &[], None, None)?;
+                        slot_set(ctx, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
+                        match eval_yield_inner_expr(ctx, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == crate::js_generator::YieldKind::YieldStar {
                                     let mut should_await = false;
@@ -976,7 +976,7 @@ fn process_one_pending<'gc>(
 
                                     if should_await {
                                         let promise = promise_ref_opt.unwrap();
-                                        crate::js_promise::mark_promise_handled(mc, promise, env).ok();
+                                        crate::js_promise::mark_promise_handled(ctx, promise, env).ok();
                                         let state = promise.borrow().state.clone();
                                         match state {
                                             crate::core::PromiseState::Pending => {
@@ -984,7 +984,7 @@ fn process_one_pending<'gc>(
                                                 let promise_cell_val = Value::Promise(promise_cell);
 
                                                 let on_fulfilled = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("value".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1000,10 +1000,10 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1011,7 +1011,7 @@ fn process_one_pending<'gc>(
                                                 ));
 
                                                 let on_rejected = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1027,17 +1027,17 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
                                                     ),
                                                 ));
 
-                                                perform_promise_then(mc, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
+                                                perform_promise_then(ctx, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
                                                 return Ok(());
                                             }
                                             crate::core::PromiseState::Fulfilled(v) => {
@@ -1045,29 +1045,29 @@ fn process_one_pending<'gc>(
                                             }
                                             crate::core::PromiseState::Rejected(r) => {
                                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                                reject_promise(mc, &promise_cell, r, env);
+                                                reject_promise(ctx, &promise_cell, r, env);
                                                 return Ok(());
                                             }
                                         }
                                     }
 
-                                    let (iter_obj, _) = match get_for_await_iterator(mc, env, &val) {
+                                    let (iter_obj, _) = match get_for_await_iterator(ctx, env, &val) {
                                         Ok(v) => v,
                                         Err(EvalError::Throw(v, _, _)) => {
                                             gen_ptr_mut.state = GeneratorState::Completed;
-                                            reject_promise(mc, &promise_cell, v, env);
+                                            reject_promise(ctx, &promise_cell, v, env);
                                             return Ok(());
                                         }
                                         Err(e) => {
                                             gen_ptr_mut.state = GeneratorState::Completed;
-                                            reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                            reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                             return Ok(());
                                         }
                                     };
                                     gen_ptr_mut.yield_star_iterator = Some(iter_obj);
                                     drop(gen_ptr_mut_guard);
 
-                                    handle_yield_star_call(mc, env, gen_ptr, promise_cell, iter_obj, "next", vec![Value::Undefined])?;
+                                    handle_yield_star_call(ctx, env, gen_ptr, promise_cell, iter_obj, "next", vec![Value::Undefined])?;
                                     return Ok(());
                                 }
 
@@ -1095,7 +1095,7 @@ fn process_one_pending<'gc>(
                                     if should_await {
                                         // It is a promise. Check state.
                                         let promise = promise_ref_opt.unwrap();
-                                        crate::js_promise::mark_promise_handled(mc, promise, env).ok();
+                                        crate::js_promise::mark_promise_handled(ctx, promise, env).ok();
 
                                         let state = promise.borrow().state.clone();
                                         match state {
@@ -1114,7 +1114,7 @@ fn process_one_pending<'gc>(
 
                                                 // Create on_fulfilled callback
                                                 let on_fulfilled = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("value".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1126,10 +1126,10 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1137,7 +1137,7 @@ fn process_one_pending<'gc>(
                                                 ));
 
                                                 let on_rejected = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1149,17 +1149,17 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
                                                     ),
                                                 ));
 
-                                                perform_promise_then(mc, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
+                                                perform_promise_then(ctx, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
                                                 return Ok(());
                                             }
                                             crate::core::PromiseState::Fulfilled(v) => {
@@ -1167,7 +1167,7 @@ fn process_one_pending<'gc>(
                                             }
                                             crate::core::PromiseState::Rejected(r) => {
                                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                                reject_promise(mc, &promise_cell, r, env);
+                                                reject_promise(ctx, &promise_cell, r, env);
                                                 return Ok(());
                                             }
                                         }
@@ -1175,22 +1175,22 @@ fn process_one_pending<'gc>(
                                 }
                                 // Treat val as the result
                                 gen_ptr_mut.cached_initial_yield = Some(val.clone());
-                                let res_obj = create_iterator_result_obj(mc, val, false)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, val, false)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 return Ok(());
                             }
                             Err(_) => {
                                 gen_ptr_mut.cached_initial_yield = Some(Value::Undefined);
-                                let res_obj = create_iterator_result_obj(mc, Value::Undefined, false)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, Value::Undefined, false)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 return Ok(());
                             }
                         }
                     }
 
                     gen_ptr_mut.cached_initial_yield = Some(Value::Undefined);
-                    let res_obj = create_iterator_result_obj(mc, Value::Undefined, false)?;
-                    resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                    let res_obj = create_iterator_result_obj(ctx, Value::Undefined, false)?;
+                    resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                     return Ok(());
                 } else {
                     // No yields: run to completion and keep processing next requests
@@ -1198,7 +1198,7 @@ fn process_one_pending<'gc>(
                         prep_env
                     } else {
                         let env = prepare_function_call_env(
-                            mc,
+                            ctx,
                             Some(&gen_ptr_mut.env),
                             None,
                             Some(&gen_ptr_mut.params[..]),
@@ -1208,39 +1208,39 @@ fn process_one_pending<'gc>(
                         )?;
 
                         // Ensure `arguments` exists for the no-yield completion path too.
-                        crate::js_class::create_arguments_object(mc, &env, &gen_ptr_mut.args, None)?;
+                        crate::js_class::create_arguments_object(ctx, &env, &gen_ptr_mut.args, None)?;
                         env
                     };
 
-                    match evaluate_async_generator_completion(mc, &func_env, &gen_ptr_mut.body) {
+                    match evaluate_async_generator_completion(ctx, &func_env, &gen_ptr_mut.body) {
                         Ok(AsyncGeneratorCompletion::Normal) => {
                             gen_ptr_mut.state = GeneratorState::Completed;
-                            let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                         Ok(AsyncGeneratorCompletion::Return(v)) => {
                             gen_ptr_mut.state = GeneratorState::Completed;
-                            let res_obj = create_iterator_result_obj(mc, v, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, v, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                         Err(e) => {
                             gen_ptr_mut.state = GeneratorState::Completed;
-                            reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                            reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                             continue;
                         }
                     }
                 }
             }
             (GeneratorState::NotStarted, AsyncGeneratorRequest::Throw(throw_val)) => {
-                reject_promise(mc, &promise_cell, throw_val, env);
+                reject_promise(ctx, &promise_cell, throw_val, env);
                 continue;
             }
             (GeneratorState::NotStarted, AsyncGeneratorRequest::Return(ret_val)) => {
                 gen_ptr_mut.state = GeneratorState::Completed;
-                let res_obj = create_iterator_result_obj(mc, ret_val, true)?;
-                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                let res_obj = create_iterator_result_obj(ctx, ret_val, true)?;
+                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                 continue;
             }
             (GeneratorState::Suspended { pc, pre_env, .. }, AsyncGeneratorRequest::Next(_send_value)) => {
@@ -1248,50 +1248,50 @@ fn process_one_pending<'gc>(
                     let func_env = if let Some(env) = pre_env.as_ref() {
                         *env
                     } else {
-                        crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                        crate::core::prepare_function_call_env(ctx, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                     };
 
-                    match for_await_next_value(mc, &func_env, for_await.iterator, for_await.is_async) {
+                    match for_await_next_value(ctx, &func_env, for_await.iterator, for_await.is_async) {
                         Ok(Some(value)) => {
                             let iter_env = if let Some(VarDeclKind::Let) | Some(VarDeclKind::Const) = for_await.decl_kind {
-                                let e = new_js_object_data(mc);
-                                e.borrow_mut(mc).prototype = Some(func_env);
-                                env_set(mc, &e, &for_await.var_name, &value.clone())?;
+                                let e = new_js_object_data(ctx);
+                                e.borrow_mut(ctx).prototype = Some(func_env);
+                                env_set(ctx, &e, &for_await.var_name, &value.clone())?;
                                 e
                             } else {
-                                env_set_recursive(mc, &func_env, &for_await.var_name, &value.clone())?;
+                                env_set_recursive(ctx, &func_env, &for_await.var_name, &value.clone())?;
                                 func_env
                             };
 
-                            let mut yielded = evaluate_expr(mc, &iter_env, &for_await.yield_expr)?;
-                            match await_value(mc, env, yielded.clone()) {
+                            let mut yielded = evaluate_expr(ctx, &iter_env, &for_await.yield_expr)?;
+                            match await_value(ctx, env, yielded.clone()) {
                                 Ok(awaited) => {
                                     yielded = awaited;
                                 }
                                 Err(reason) => {
                                     gen_ptr_mut.state = GeneratorState::Completed;
                                     gen_ptr_mut.pending_for_await = None;
-                                    reject_promise(mc, &promise_cell, reason, env);
+                                    reject_promise(ctx, &promise_cell, reason, env);
                                     continue;
                                 }
                             }
 
                             gen_ptr_mut.pending_for_await = Some(for_await);
-                            let res_obj = create_iterator_result_obj(mc, yielded, false)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, yielded, false)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                         Ok(None) => {
                             gen_ptr_mut.state = GeneratorState::Completed;
                             gen_ptr_mut.pending_for_await = None;
-                            let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                         Err(e) => {
                             gen_ptr_mut.state = GeneratorState::Completed;
                             gen_ptr_mut.pending_for_await = None;
-                            reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                            reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                             continue;
                         }
                     }
@@ -1303,14 +1303,14 @@ fn process_one_pending<'gc>(
                     let func_env = if let Some(env) = pre_env.as_ref() {
                         *env
                     } else {
-                        crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                        crate::core::prepare_function_call_env(ctx, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                     };
 
                     // Execute init if it still exists (first resume after NotStarted may have cleared it)
                     if let StatementKind::For(for_stmt_m) = gen_ptr_mut.body[pc_val].kind.as_mut()
                         && let Some(init_stmt) = for_stmt_m.init.take()
                     {
-                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(&init_stmt))?;
+                        crate::core::evaluate_statements(ctx, &func_env, std::slice::from_ref(&init_stmt))?;
                     }
 
                     // Re-borrow immutably for test/update/body access
@@ -1322,34 +1322,34 @@ fn process_one_pending<'gc>(
 
                     // Execute update
                     if let Some(update_stmt) = &update_stmt_clone {
-                        crate::core::evaluate_statements(mc, &func_env, std::slice::from_ref(update_stmt))?;
+                        crate::core::evaluate_statements(ctx, &func_env, std::slice::from_ref(update_stmt))?;
                     }
 
                     // Check test condition
                     if let Some(test_expr) = &test_expr_clone {
-                        let test_val = crate::core::evaluate_expr(mc, &func_env, test_expr)?;
+                        let test_val = crate::core::evaluate_expr(ctx, &func_env, test_expr)?;
                         if !test_val.to_truthy() {
                             // Loop is done — run remaining post-loop statements
                             if pc_val + 1 < gen_ptr_mut.body.len() {
                                 let post_stmts = gen_ptr_mut.body[pc_val + 1..].to_vec();
                                 drop(gen_ptr_mut_guard);
-                                match crate::core::evaluate_statements(mc, &func_env, &post_stmts) {
+                                match crate::core::evaluate_statements(ctx, &func_env, &post_stmts) {
                                     Ok(_) => {
-                                        gen_ptr.borrow_mut(mc).state = GeneratorState::Completed;
-                                        let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                        gen_ptr.borrow_mut(ctx).state = GeneratorState::Completed;
+                                        let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                         return Ok(());
                                     }
                                     Err(e) => {
-                                        gen_ptr.borrow_mut(mc).state = GeneratorState::Completed;
-                                        reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                        gen_ptr.borrow_mut(ctx).state = GeneratorState::Completed;
+                                        reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                         return Ok(());
                                     }
                                 }
                             }
                             gen_ptr_mut.state = GeneratorState::Completed;
-                            let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                     }
@@ -1361,16 +1361,16 @@ fn process_one_pending<'gc>(
                         // Execute pre-yield body statements
                         if body_yield_idx > 0 {
                             let pre_stmts = body_clone[0..body_yield_idx].to_vec();
-                            crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                            crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                         }
 
                         // Evaluate yield expression
                         let yielded = if let Some(inner_expr) = yield_inner_opt {
-                            match crate::core::evaluate_expr(mc, &func_env, &inner_expr) {
+                            match crate::core::evaluate_expr(ctx, &func_env, &inner_expr) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     gen_ptr_mut.state = GeneratorState::Completed;
-                                    reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                    reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                     return Ok(());
                                 }
                             }
@@ -1384,15 +1384,15 @@ fn process_one_pending<'gc>(
                             pre_env: Some(func_env),
                         };
                         gen_ptr_mut.cached_initial_yield = Some(yielded.clone());
-                        let res_obj = create_iterator_result_obj(mc, yielded, false)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, yielded, false)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
 
                     // No more yields in for body — run to completion
                     gen_ptr_mut.state = GeneratorState::Completed;
-                    let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                    resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                    let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                    resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                     continue;
                 }
 
@@ -1435,23 +1435,23 @@ fn process_one_pending<'gc>(
                 let func_env = if let Some(env) = pre_env.as_ref() {
                     *env
                 } else {
-                    crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                    crate::core::prepare_function_call_env(ctx, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
 
                 // Prefer the queued send value if it is concrete; otherwise fall back
                 // to the cached initially-yielded value if present.
-                env_set(mc, &func_env, &var_name, &_send_value.clone())?;
+                env_set(ctx, &func_env, &var_name, &_send_value.clone())?;
 
                 if let Some((idx, inner_idx_opt, yield_kind, yield_inner)) = crate::js_generator::find_first_yield_in_statements(&tail) {
                     if idx > 0 {
                         let pre_stmts = tail[0..idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                     } else if let Some(inner_idx) = inner_idx_opt
                         && inner_idx > 0
                         && let StatementKind::Block(inner_stmts) = &*tail[idx].kind
                     {
                         let pre_stmts = inner_stmts[0..inner_idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                     }
 
                     // If the yield is inside a while loop, ensure the loop condition
@@ -1459,12 +1459,12 @@ fn process_one_pending<'gc>(
                     if let Some(stmt) = tail.get(idx)
                         && let StatementKind::While(while_stmt, _) = &*stmt.kind
                     {
-                        let cond_val = crate::core::evaluate_expr(mc, &func_env, while_stmt)?;
+                        let cond_val = crate::core::evaluate_expr(ctx, &func_env, while_stmt)?;
                         let cond_bool = cond_val.to_truthy();
                         if !cond_bool {
                             gen_ptr_mut.state = GeneratorState::Completed;
-                            let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                     }
@@ -1477,9 +1477,9 @@ fn process_one_pending<'gc>(
 
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
-                        let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        slot_set(mc, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
-                        match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
+                        let inner_eval_env = crate::core::prepare_function_call_env(ctx, Some(parent_env), None, None, &[], None, None)?;
+                        slot_set(ctx, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
+                        match eval_yield_inner_expr(ctx, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == crate::js_generator::YieldKind::YieldStar {
                                     let mut should_await = false;
@@ -1500,7 +1500,7 @@ fn process_one_pending<'gc>(
 
                                     if should_await {
                                         let promise = promise_ref_opt.unwrap();
-                                        crate::js_promise::mark_promise_handled(mc, promise, env).ok();
+                                        crate::js_promise::mark_promise_handled(ctx, promise, env).ok();
                                         let state = promise.borrow().state.clone();
                                         match state {
                                             crate::core::PromiseState::Pending => {
@@ -1508,7 +1508,7 @@ fn process_one_pending<'gc>(
                                                 let promise_cell_val = Value::Promise(promise_cell);
 
                                                 let on_fulfilled = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("value".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1524,10 +1524,10 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1535,7 +1535,7 @@ fn process_one_pending<'gc>(
                                                 ));
 
                                                 let on_rejected = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1551,17 +1551,17 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
                                                     ),
                                                 ));
 
-                                                perform_promise_then(mc, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
+                                                perform_promise_then(ctx, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
                                                 return Ok(());
                                             }
                                             crate::core::PromiseState::Fulfilled(v) => {
@@ -1569,29 +1569,29 @@ fn process_one_pending<'gc>(
                                             }
                                             crate::core::PromiseState::Rejected(r) => {
                                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                                reject_promise(mc, &promise_cell, r, env);
+                                                reject_promise(ctx, &promise_cell, r, env);
                                                 return Ok(());
                                             }
                                         }
                                     }
 
-                                    let (iter_obj, _) = match get_for_await_iterator(mc, env, &val) {
+                                    let (iter_obj, _) = match get_for_await_iterator(ctx, env, &val) {
                                         Ok(v) => v,
                                         Err(EvalError::Throw(v, _, _)) => {
                                             gen_ptr_mut.state = GeneratorState::Completed;
-                                            reject_promise(mc, &promise_cell, v, env);
+                                            reject_promise(ctx, &promise_cell, v, env);
                                             return Ok(());
                                         }
                                         Err(e) => {
                                             gen_ptr_mut.state = GeneratorState::Completed;
-                                            reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                            reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                             return Ok(());
                                         }
                                     };
                                     gen_ptr_mut.yield_star_iterator = Some(iter_obj);
                                     drop(gen_ptr_mut_guard);
 
-                                    handle_yield_star_call(mc, env, gen_ptr, promise_cell, iter_obj, "next", vec![Value::Undefined])?;
+                                    handle_yield_star_call(ctx, env, gen_ptr, promise_cell, iter_obj, "next", vec![Value::Undefined])?;
                                     return Ok(());
                                 }
                                 // Helper to immediately resume if Await on non-promise
@@ -1615,7 +1615,7 @@ fn process_one_pending<'gc>(
                                     if should_await {
                                         // It is a promise. Check state.
                                         let promise = promise_ref_opt.unwrap();
-                                        crate::js_promise::mark_promise_handled(mc, promise, env).ok();
+                                        crate::js_promise::mark_promise_handled(ctx, promise, env).ok();
 
                                         let state = promise.borrow().state.clone();
                                         match state {
@@ -1631,7 +1631,7 @@ fn process_one_pending<'gc>(
 
                                                 // Create on_fulfilled callback
                                                 let on_fulfilled = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("value".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1643,10 +1643,10 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1654,7 +1654,7 @@ fn process_one_pending<'gc>(
                                                 ));
 
                                                 let on_rejected = Value::Closure(crate::core::Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1666,17 +1666,17 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
                                                     ),
                                                 ));
 
-                                                perform_promise_then(mc, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
+                                                perform_promise_then(ctx, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
                                                 return Ok(());
                                             }
                                             crate::core::PromiseState::Fulfilled(v) => {
@@ -1684,38 +1684,38 @@ fn process_one_pending<'gc>(
                                             }
                                             crate::core::PromiseState::Rejected(r) => {
                                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                                reject_promise(mc, &promise_cell, r, env);
+                                                reject_promise(ctx, &promise_cell, r, env);
                                                 return Ok(());
                                             }
                                         }
                                     }
                                 }
-                                match await_value(mc, env, val.clone()) {
+                                match await_value(ctx, env, val.clone()) {
                                     Ok(awaited) => {
                                         gen_ptr_mut.cached_initial_yield = Some(awaited.clone());
-                                        let res_obj = create_iterator_result_obj(mc, awaited, false)?;
-                                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                        let res_obj = create_iterator_result_obj(ctx, awaited, false)?;
+                                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                         continue;
                                     }
                                     Err(reason) => {
                                         gen_ptr_mut.state = GeneratorState::Completed;
-                                        reject_promise(mc, &promise_cell, reason, env);
+                                        reject_promise(ctx, &promise_cell, reason, env);
                                         continue;
                                     }
                                 }
                             }
                             Err(_) => {
                                 gen_ptr_mut.cached_initial_yield = Some(Value::Undefined);
-                                let res_obj = create_iterator_result_obj(mc, Value::Undefined, false)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, Value::Undefined, false)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 continue;
                             }
                         }
                     }
 
                     gen_ptr_mut.cached_initial_yield = Some(Value::Undefined);
-                    let res_obj = create_iterator_result_obj(mc, Value::Undefined, false)?;
-                    resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                    let res_obj = create_iterator_result_obj(ctx, Value::Undefined, false)?;
+                    resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                     continue;
                 }
 
@@ -1733,24 +1733,24 @@ fn process_one_pending<'gc>(
                 {
                     if idx > 0 {
                         let pre_stmts = original_tail[0..idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                     } else if let Some(inner_idx) = inner_idx_opt
                         && inner_idx > 0
                         && let StatementKind::Block(inner_stmts) = &*original_tail[idx].kind
                     {
                         let pre_stmts = inner_stmts[0..inner_idx].to_vec();
-                        let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        let _ = crate::core::evaluate_statements(ctx, &func_env, &pre_stmts)?;
                     }
 
                     if let Some(stmt) = original_tail.get(idx)
                         && let StatementKind::While(while_stmt, _) = &*stmt.kind
                     {
-                        let cond_val = crate::core::evaluate_expr(mc, &func_env, while_stmt)?;
+                        let cond_val = crate::core::evaluate_expr(ctx, &func_env, while_stmt)?;
                         let cond_bool = cond_val.to_truthy();
                         if !cond_bool {
                             gen_ptr_mut.state = GeneratorState::Completed;
-                            let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                     }
@@ -1763,28 +1763,28 @@ fn process_one_pending<'gc>(
 
                     if let Some(inner_expr_box) = yield_inner {
                         let parent_env = &func_env;
-                        let inner_eval_env = crate::core::prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                        slot_set(mc, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
-                        match eval_yield_inner_expr(mc, &inner_eval_env, yield_kind, &inner_expr_box) {
+                        let inner_eval_env = crate::core::prepare_function_call_env(ctx, Some(parent_env), None, None, &[], None, None)?;
+                        slot_set(ctx, &inner_eval_env, InternalSlot::GenThrowVal, &Value::Undefined);
+                        match eval_yield_inner_expr(ctx, &inner_eval_env, yield_kind, &inner_expr_box) {
                             Ok(mut val) => {
                                 if yield_kind == YieldKind::YieldStar {
-                                    let (iter_obj, _) = match get_for_await_iterator(mc, env, &val) {
+                                    let (iter_obj, _) = match get_for_await_iterator(ctx, env, &val) {
                                         Ok(v) => v,
                                         Err(EvalError::Throw(v, _, _)) => {
                                             gen_ptr_mut.state = GeneratorState::Completed;
-                                            reject_promise(mc, &promise_cell, v, env);
+                                            reject_promise(ctx, &promise_cell, v, env);
                                             return Ok(());
                                         }
                                         Err(e) => {
                                             gen_ptr_mut.state = GeneratorState::Completed;
-                                            reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                                            reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                                             return Ok(());
                                         }
                                     };
                                     gen_ptr_mut.yield_star_iterator = Some(iter_obj);
                                     drop(gen_ptr_mut_guard);
 
-                                    handle_yield_star_call(mc, env, gen_ptr, promise_cell, iter_obj, "next", vec![Value::Undefined])?;
+                                    handle_yield_star_call(ctx, env, gen_ptr, promise_cell, iter_obj, "next", vec![Value::Undefined])?;
                                     return Ok(());
                                 }
                                 // Helper to immediately resume if Await on non-promise
@@ -1808,7 +1808,7 @@ fn process_one_pending<'gc>(
                                     if should_await {
                                         // It is a promise. Check state.
                                         let promise = promise_ref_opt.unwrap();
-                                        crate::js_promise::mark_promise_handled(mc, promise, env).ok();
+                                        crate::js_promise::mark_promise_handled(ctx, promise, env).ok();
 
                                         let state = promise.borrow().state.clone();
                                         match state {
@@ -1824,7 +1824,7 @@ fn process_one_pending<'gc>(
 
                                                 // Create on_fulfilled callback
                                                 let on_fulfilled = Value::Closure(Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("value".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1836,10 +1836,10 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val.clone());
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val.clone());
                                                             Some(e)
                                                         },
                                                         None,
@@ -1847,7 +1847,7 @@ fn process_one_pending<'gc>(
                                                 ));
 
                                                 let on_rejected = Value::Closure(Gc::new(
-                                                    mc,
+                                                    ctx,
                                                     ClosureData::new(
                                                         &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                                                         &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -1859,17 +1859,17 @@ fn process_one_pending<'gc>(
                                                             ],
                                                         )))],
                                                         {
-                                                            let e = new_js_object_data(mc);
-                                                            e.borrow_mut(mc).prototype = Some(*env);
-                                                            slot_set(mc, &e, InternalSlot::Gen, &gen_val);
-                                                            slot_set(mc, &e, InternalSlot::P, &promise_cell_val);
+                                                            let e = new_js_object_data(ctx);
+                                                            e.borrow_mut(ctx).prototype = Some(*env);
+                                                            slot_set(ctx, &e, InternalSlot::Gen, &gen_val);
+                                                            slot_set(ctx, &e, InternalSlot::P, &promise_cell_val);
                                                             Some(e)
                                                         },
                                                         None,
                                                     ),
                                                 ));
 
-                                                perform_promise_then(mc, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
+                                                perform_promise_then(ctx, promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
                                                 return Ok(());
                                             }
                                             crate::core::PromiseState::Fulfilled(v) => {
@@ -1877,58 +1877,58 @@ fn process_one_pending<'gc>(
                                             }
                                             crate::core::PromiseState::Rejected(r) => {
                                                 gen_ptr_mut.state = GeneratorState::Completed;
-                                                reject_promise(mc, &promise_cell, r, env);
+                                                reject_promise(ctx, &promise_cell, r, env);
                                                 return Ok(());
                                             }
                                         }
                                     }
                                 }
-                                match await_value(mc, env, val.clone()) {
+                                match await_value(ctx, env, val.clone()) {
                                     Ok(awaited) => {
                                         gen_ptr_mut.cached_initial_yield = Some(awaited.clone());
-                                        let res_obj = create_iterator_result_obj(mc, awaited, false)?;
-                                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                        let res_obj = create_iterator_result_obj(ctx, awaited, false)?;
+                                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                         continue;
                                     }
                                     Err(reason) => {
                                         gen_ptr_mut.state = GeneratorState::Completed;
-                                        reject_promise(mc, &promise_cell, reason, env);
+                                        reject_promise(ctx, &promise_cell, reason, env);
                                         continue;
                                     }
                                 }
                             }
                             Err(_) => {
                                 gen_ptr_mut.cached_initial_yield = Some(Value::Undefined);
-                                let res_obj = create_iterator_result_obj(mc, Value::Undefined, false)?;
-                                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                                let res_obj = create_iterator_result_obj(ctx, Value::Undefined, false)?;
+                                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                                 continue;
                             }
                         }
                     }
 
                     gen_ptr_mut.cached_initial_yield = Some(Value::Undefined);
-                    let res_obj = create_iterator_result_obj(mc, Value::Undefined, false)?;
-                    resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                    let res_obj = create_iterator_result_obj(ctx, Value::Undefined, false)?;
+                    resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                     continue;
                 }
 
                 // No further yields: execute tail to completion
-                match evaluate_async_generator_completion(mc, &func_env, &tail) {
+                match evaluate_async_generator_completion(ctx, &func_env, &tail) {
                     Ok(AsyncGeneratorCompletion::Normal) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     Ok(AsyncGeneratorCompletion::Return(v)) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        let res_obj = create_iterator_result_obj(mc, v, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, v, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     Err(e) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                        reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                         continue;
                     }
                 }
@@ -1938,7 +1938,7 @@ fn process_one_pending<'gc>(
                 let pc_val = *pc;
                 if pc_val >= gen_ptr_mut.body.len() {
                     gen_ptr_mut.state = GeneratorState::Completed;
-                    reject_promise(mc, &promise_cell, throw_val, env);
+                    reject_promise(ctx, &promise_cell, throw_val, env);
                     continue;
                 }
                 let mut tail: Vec<Statement> = gen_ptr_mut.body[pc_val..].to_vec();
@@ -1956,26 +1956,26 @@ fn process_one_pending<'gc>(
                 let func_env = if let Some(env) = pre_env.as_ref() {
                     *env
                 } else {
-                    crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                    crate::core::prepare_function_call_env(ctx, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
-                slot_set(mc, &func_env, InternalSlot::GenThrowVal, &throw_val.clone());
+                slot_set(ctx, &func_env, InternalSlot::GenThrowVal, &throw_val.clone());
 
-                match evaluate_async_generator_completion(mc, &func_env, &tail) {
+                match evaluate_async_generator_completion(ctx, &func_env, &tail) {
                     Ok(AsyncGeneratorCompletion::Normal) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     Ok(AsyncGeneratorCompletion::Return(v)) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        let res_obj = create_iterator_result_obj(mc, v, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, v, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     Err(e) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                        reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                         continue;
                     }
                 }
@@ -1987,8 +1987,8 @@ fn process_one_pending<'gc>(
                 let pc_val = *pc;
                 if pc_val >= gen_ptr_mut.body.len() {
                     gen_ptr_mut.state = GeneratorState::Completed;
-                    let res_obj = create_iterator_result_obj(mc, ret_val, true)?;
-                    resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                    let res_obj = create_iterator_result_obj(ctx, ret_val, true)?;
+                    resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                     continue;
                 }
 
@@ -2007,26 +2007,26 @@ fn process_one_pending<'gc>(
                 let func_env = if let Some(env) = pre_env.as_ref() {
                     *env
                 } else {
-                    crate::core::prepare_function_call_env(mc, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
+                    crate::core::prepare_function_call_env(ctx, Some(&gen_ptr_mut.env), None, None, &[], None, None)?
                 };
-                slot_set(mc, &func_env, InternalSlot::GenThrowVal, &ret_val.clone());
+                slot_set(ctx, &func_env, InternalSlot::GenThrowVal, &ret_val.clone());
 
-                match evaluate_async_generator_completion(mc, &func_env, &tail) {
+                match evaluate_async_generator_completion(ctx, &func_env, &tail) {
                     Ok(AsyncGeneratorCompletion::Normal) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     Ok(AsyncGeneratorCompletion::Return(v)) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        let res_obj = create_iterator_result_obj(mc, v, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, v, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     Err(e) => {
                         gen_ptr_mut.state = GeneratorState::Completed;
-                        reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                        reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                         continue;
                     }
                 }
@@ -2034,7 +2034,7 @@ fn process_one_pending<'gc>(
             (GeneratorState::Running { .. }, _) => {
                 // Shouldn't happen; reject the promise
                 let reason = Value::from("Async generator already running");
-                reject_promise(mc, &promise_cell, reason, env);
+                reject_promise(ctx, &promise_cell, reason, env);
                 // continue processing remaining requests (unlikely)
                 continue;
             }
@@ -2044,7 +2044,7 @@ fn process_one_pending<'gc>(
                     .unwrap_or(Value::Undefined);
 
                 let resolved = match crate::js_promise::handle_promise_static_method_val(
-                    mc,
+                    ctx,
                     "resolve",
                     std::slice::from_ref(&ret_val),
                     Some(&promise_ctor),
@@ -2052,7 +2052,7 @@ fn process_one_pending<'gc>(
                 ) {
                     Ok(v) => v,
                     Err(e) => {
-                        reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                        reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                         continue;
                     }
                 };
@@ -2063,26 +2063,26 @@ fn process_one_pending<'gc>(
                         if let Some(p) = crate::js_promise::get_promise_from_js_object(&obj) {
                             p
                         } else {
-                            let res_obj = create_iterator_result_obj(mc, ret_val, true)?;
-                            resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                            let res_obj = create_iterator_result_obj(ctx, ret_val, true)?;
+                            resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                             continue;
                         }
                     }
                     _ => {
-                        let res_obj = create_iterator_result_obj(mc, ret_val, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, ret_val, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                 };
 
                 match resolved_promise.borrow().state.clone() {
                     crate::core::PromiseState::Pending => {
-                        let resolve_env = new_js_object_data(mc);
-                        resolve_env.borrow_mut(mc).prototype = Some(*env);
-                        env_set(mc, &resolve_env, "__promise_cell", &Value::Promise(promise_cell))?;
+                        let resolve_env = new_js_object_data(ctx);
+                        resolve_env.borrow_mut(ctx).prototype = Some(*env);
+                        env_set(ctx, &resolve_env, "__promise_cell", &Value::Promise(promise_cell))?;
 
                         let on_fulfilled = Value::Closure(crate::core::Gc::new(
-                            mc,
+                            ctx,
                             ClosureData::new(
                                 &[crate::core::DestructuringElement::Variable("v".to_string(), None)],
                                 &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -2097,12 +2097,12 @@ fn process_one_pending<'gc>(
                             ),
                         ));
 
-                        let reject_env = new_js_object_data(mc);
-                        reject_env.borrow_mut(mc).prototype = Some(*env);
-                        env_set(mc, &reject_env, "__promise_cell", &Value::Promise(promise_cell))?;
+                        let reject_env = new_js_object_data(ctx);
+                        reject_env.borrow_mut(ctx).prototype = Some(*env);
+                        env_set(ctx, &reject_env, "__promise_cell", &Value::Promise(promise_cell))?;
 
                         let on_rejected = Value::Closure(crate::core::Gc::new(
-                            mc,
+                            ctx,
                             ClosureData::new(
                                 &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                                 &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -2117,26 +2117,26 @@ fn process_one_pending<'gc>(
                             ),
                         ));
 
-                        if let Err(e) = perform_promise_then(mc, resolved_promise, Some(on_fulfilled), Some(on_rejected), None, env) {
-                            reject_promise(mc, &promise_cell, js_error_to_value(mc, env, &e), env);
+                        if let Err(e) = perform_promise_then(ctx, resolved_promise, Some(on_fulfilled), Some(on_rejected), None, env) {
+                            reject_promise(ctx, &promise_cell, js_error_to_value(ctx, env, &e), env);
                         }
                         continue;
                     }
                     crate::core::PromiseState::Fulfilled(v) => {
-                        let res_obj = create_iterator_result_obj(mc, v, true)?;
-                        resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                        let res_obj = create_iterator_result_obj(ctx, v, true)?;
+                        resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                         continue;
                     }
                     crate::core::PromiseState::Rejected(reason) => {
-                        reject_promise(mc, &promise_cell, reason, env);
+                        reject_promise(ctx, &promise_cell, reason, env);
                         continue;
                     }
                 }
             }
             (GeneratorState::Completed, _) => {
                 // Already completed: fulfill with done=true
-                let res_obj = create_iterator_result_obj(mc, Value::Undefined, true)?;
-                resolve_promise(mc, &promise_cell, Value::Object(res_obj), env);
+                let res_obj = create_iterator_result_obj(ctx, Value::Undefined, true)?;
+                resolve_promise(ctx, &promise_cell, Value::Object(res_obj), env);
                 continue;
             }
         }
@@ -2146,8 +2146,8 @@ fn process_one_pending<'gc>(
 /// Helper: create a rejected promise with a TypeError for bad `this` values.
 /// Per spec, AsyncGeneratorEnqueue returns a rejected promise (not a thrown error)
 /// when the generator argument is invalid.
-fn reject_with_type_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> Result<Option<Value<'gc>>, JSError> {
-    let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
+fn reject_with_type_error<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, message: &str) -> Result<Option<Value<'gc>>, JSError> {
+    let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(ctx, env);
     // Build a TypeError value from the current realm's TypeError constructor
     let err_val = {
         let msg_val: Value<'gc> = Value::from(message);
@@ -2159,27 +2159,27 @@ fn reject_with_type_error<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, 
         {
             proto_opt = Some(*proto);
         }
-        crate::core::create_error(mc, proto_opt, &msg_val).unwrap_or(Value::from(message))
+        crate::core::create_error(ctx, proto_opt, &msg_val).unwrap_or(Value::from(message))
     };
-    reject_promise(mc, &promise_cell, err_val, env);
+    reject_promise(ctx, &promise_cell, err_val, env);
     Ok(Some(promise_obj_val))
 }
 
 /// Helper: enqueue a request on an async generator, using try_borrow_mut to
 /// avoid panicking when the generator is already executing.
 fn enqueue_async_generator_request<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     promise_cell: GcPtr<'gc, JSPromise<'gc>>,
     request: AsyncGeneratorRequest<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
-    match gen_ptr.try_borrow_mut(mc) {
+    match gen_ptr.try_borrow_mut(ctx) {
         Ok(mut gen_mut) => {
             gen_mut.pending.push((promise_cell, request));
             if gen_mut.pending.len() == 1 {
                 drop(gen_mut);
-                process_one_pending(mc, gen_ptr, env)?;
+                process_one_pending(ctx, gen_ptr, env)?;
             }
         }
         Err(_) => {
@@ -2212,7 +2212,7 @@ thread_local! {
 /// Drain any deferred async generator requests that were parked while the
 /// generator was executing. Called from process_one_pending after each step.
 fn drain_deferred_requests<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     target_gen: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -2221,7 +2221,7 @@ fn drain_deferred_requests<'gc>(
         let (gen_ptr, promise_cell, request): DeferredRequest<'gc> = unsafe { std::mem::transmute(entry) };
         // Only process entries for the current generator
         if Gc::ptr_eq(gen_ptr, target_gen) {
-            let mut gen_mut = gen_ptr.borrow_mut(mc);
+            let mut gen_mut = gen_ptr.borrow_mut(ctx);
             gen_mut.pending.push((promise_cell, request));
         } else {
             // Put back entries for other generators
@@ -2236,7 +2236,7 @@ fn drain_deferred_requests<'gc>(
 
 // Native implementation for AsyncGenerator.prototype.next
 pub fn handle_async_generator_prototype_next<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: Option<Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2246,25 +2246,25 @@ pub fn handle_async_generator_prototype_next<'gc>(
     // Per spec: if this is not an Object or lacks [[AsyncGeneratorState]], reject.
     let this = match this_val {
         Some(Value::Object(obj)) => obj,
-        _ => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
+        _ => return reject_with_type_error(ctx, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
     };
     let inner = match slot_get_chained(&this, &InternalSlot::AsyncGeneratorState) {
         Some(v) => v,
-        None => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
+        None => return reject_with_type_error(ctx, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
     };
     match &*inner.borrow() {
         Value::AsyncGenerator(gen_ptr) => {
-            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
-            enqueue_async_generator_request(mc, *gen_ptr, promise_cell, AsyncGeneratorRequest::Next(send_value), env)?;
+            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(ctx, env);
+            enqueue_async_generator_request(ctx, *gen_ptr, promise_cell, AsyncGeneratorRequest::Next(send_value), env)?;
             Ok(Some(promise_obj_val))
         }
-        _ => reject_with_type_error(mc, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
+        _ => reject_with_type_error(ctx, env, "AsyncGenerator.prototype.next called on incompatible receiver"),
     }
 }
 
 // Native implementation for AsyncGenerator.prototype.throw
 pub fn handle_async_generator_prototype_throw<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: Option<Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2273,25 +2273,25 @@ pub fn handle_async_generator_prototype_throw<'gc>(
 
     let this = match this_val {
         Some(Value::Object(obj)) => obj,
-        _ => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
+        _ => return reject_with_type_error(ctx, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
     };
     let inner = match slot_get_chained(&this, &InternalSlot::AsyncGeneratorState) {
         Some(v) => v,
-        None => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
+        None => return reject_with_type_error(ctx, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
     };
     match &*inner.borrow() {
         Value::AsyncGenerator(gen_ptr) => {
-            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
-            enqueue_async_generator_request(mc, *gen_ptr, promise_cell, AsyncGeneratorRequest::Throw(throw_val), env)?;
+            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(ctx, env);
+            enqueue_async_generator_request(ctx, *gen_ptr, promise_cell, AsyncGeneratorRequest::Throw(throw_val), env)?;
             Ok(Some(promise_obj_val))
         }
-        _ => reject_with_type_error(mc, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
+        _ => reject_with_type_error(ctx, env, "AsyncGenerator.prototype.throw called on incompatible receiver"),
     }
 }
 
 // Native implementation for AsyncGenerator.prototype.return
 pub fn handle_async_generator_prototype_return<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_val: Option<Value<'gc>>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -2300,24 +2300,24 @@ pub fn handle_async_generator_prototype_return<'gc>(
 
     let this = match this_val {
         Some(Value::Object(obj)) => obj,
-        _ => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
+        _ => return reject_with_type_error(ctx, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
     };
     let inner = match slot_get_chained(&this, &InternalSlot::AsyncGeneratorState) {
         Some(v) => v,
-        None => return reject_with_type_error(mc, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
+        None => return reject_with_type_error(ctx, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
     };
     match &*inner.borrow() {
         Value::AsyncGenerator(gen_ptr) => {
-            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(mc, env);
-            enqueue_async_generator_request(mc, *gen_ptr, promise_cell, AsyncGeneratorRequest::Return(ret_val), env)?;
+            let (promise_cell, promise_obj_val) = create_promise_cell_and_obj(ctx, env);
+            enqueue_async_generator_request(ctx, *gen_ptr, promise_cell, AsyncGeneratorRequest::Return(ret_val), env)?;
             Ok(Some(promise_obj_val))
         }
-        _ => reject_with_type_error(mc, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
+        _ => reject_with_type_error(ctx, env, "AsyncGenerator.prototype.return called on incompatible receiver"),
     }
 }
 
 pub fn __internal_async_gen_await_resolve<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2329,18 +2329,18 @@ pub fn __internal_async_gen_await_resolve<'gc>(
     if let Value::AsyncGenerator(gen_ptr) = gen_val
         && let Value::Promise(promise_cell) = promise_val
     {
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         // Push continuation to front
         gen_mut.pending.insert(0, (*promise_cell, AsyncGeneratorRequest::Next(value)));
         drop(gen_mut);
 
-        process_one_pending(mc, *gen_ptr, env)?;
+        process_one_pending(ctx, *gen_ptr, env)?;
     }
     Ok(Value::Undefined)
 }
 
 pub fn __internal_async_gen_await_reject<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2352,17 +2352,17 @@ pub fn __internal_async_gen_await_reject<'gc>(
     if let Value::AsyncGenerator(gen_ptr) = gen_val
         && let Value::Promise(promise_cell) = promise_val
     {
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.pending.insert(0, (*promise_cell, AsyncGeneratorRequest::Throw(reason)));
         drop(gen_mut);
 
-        process_one_pending(mc, *gen_ptr, env)?;
+        process_one_pending(ctx, *gen_ptr, env)?;
     }
     Ok(Value::Undefined)
 }
 
 pub fn __internal_async_gen_yield_resolve<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2373,18 +2373,18 @@ pub fn __internal_async_gen_yield_resolve<'gc>(
     if let Value::AsyncGenerator(gen_ptr) = gen_val
         && let Value::Promise(promise_cell) = promise_val
     {
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.cached_initial_yield = Some(value.clone());
         drop(gen_mut);
 
-        let res_obj = create_iterator_result_obj(mc, value, false)?;
-        resolve_promise(mc, promise_cell, Value::Object(res_obj), env);
+        let res_obj = create_iterator_result_obj(ctx, value, false)?;
+        resolve_promise(ctx, promise_cell, Value::Object(res_obj), env);
     }
     Ok(Value::Undefined)
 }
 
 pub fn __internal_async_gen_yield_reject<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2395,42 +2395,42 @@ pub fn __internal_async_gen_yield_reject<'gc>(
     if let Value::AsyncGenerator(gen_ptr) = gen_val
         && let Value::Promise(promise_cell) = promise_val
     {
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.state = crate::core::GeneratorState::Completed;
         drop(gen_mut);
 
-        reject_promise(mc, promise_cell, reason, env);
+        reject_promise(ctx, promise_cell, reason, env);
     }
     Ok(Value::Undefined)
 }
 
 pub fn __internal_async_gen_return_resolve<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     if let Some(Value::Promise(promise_cell)) = args.get(1) {
-        let res_obj = create_iterator_result_obj(mc, value, true)?;
-        resolve_promise(mc, promise_cell, Value::Object(res_obj), env);
+        let res_obj = create_iterator_result_obj(ctx, value, true)?;
+        resolve_promise(ctx, promise_cell, Value::Object(res_obj), env);
     }
     Ok(Value::Undefined)
 }
 
 pub fn __internal_async_gen_return_reject<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let reason = args.first().cloned().unwrap_or(Value::Undefined);
     if let Some(Value::Promise(promise_cell)) = args.get(1) {
-        reject_promise(mc, promise_cell, reason, env);
+        reject_promise(ctx, promise_cell, reason, env);
     }
     Ok(Value::Undefined)
 }
 
 pub fn __internal_async_gen_yield_star_resolve<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2444,30 +2444,30 @@ pub fn __internal_async_gen_yield_star_resolve<'gc>(
         let mut done = false;
         let mut value = Value::Undefined;
         if let Value::Object(obj) = &result_obj_val {
-            let done_val = crate::core::get_property_with_accessors(mc, env, obj, "done")?;
+            let done_val = crate::core::get_property_with_accessors(ctx, env, obj, "done")?;
             done = done_val.to_truthy();
-            let value_val = crate::core::get_property_with_accessors(mc, env, obj, "value")?;
+            let value_val = crate::core::get_property_with_accessors(ctx, env, obj, "value")?;
             value = value_val;
         }
 
         if done {
-            let mut gen_mut = gen_ptr.borrow_mut(mc);
+            let mut gen_mut = gen_ptr.borrow_mut(ctx);
             gen_mut.yield_star_iterator = None;
             gen_mut.pending.insert(0, (*outer_p_cell, AsyncGeneratorRequest::Next(value)));
             drop(gen_mut);
-            process_one_pending(mc, *gen_ptr, env)?;
+            process_one_pending(ctx, *gen_ptr, env)?;
         } else {
-            match await_value(mc, env, value.clone()) {
+            match await_value(ctx, env, value.clone()) {
                 Ok(awaited) => {
-                    let res_obj = create_iterator_result_obj(mc, awaited, false)?;
-                    resolve_promise(mc, outer_p_cell, Value::Object(res_obj), env);
+                    let res_obj = create_iterator_result_obj(ctx, awaited, false)?;
+                    resolve_promise(ctx, outer_p_cell, Value::Object(res_obj), env);
                 }
                 Err(reason) => {
-                    let mut gen_mut = gen_ptr.borrow_mut(mc);
+                    let mut gen_mut = gen_ptr.borrow_mut(ctx);
                     gen_mut.yield_star_iterator = None;
                     gen_mut.state = crate::core::GeneratorState::Completed;
                     drop(gen_mut);
-                    reject_promise(mc, outer_p_cell, reason, env);
+                    reject_promise(ctx, outer_p_cell, reason, env);
                 }
             }
         }
@@ -2476,7 +2476,7 @@ pub fn __internal_async_gen_yield_star_resolve<'gc>(
 }
 
 pub fn __internal_async_gen_yield_star_reject<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -2487,18 +2487,18 @@ pub fn __internal_async_gen_yield_star_reject<'gc>(
     if let Value::AsyncGenerator(gen_ptr) = gen_val
         && let Value::Promise(outer_p_cell) = outer_p_val
     {
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.yield_star_iterator = None;
         gen_mut.pending.insert(0, (*outer_p_cell, AsyncGeneratorRequest::Throw(reason)));
         drop(gen_mut);
 
-        process_one_pending(mc, *gen_ptr, env)?;
+        process_one_pending(ctx, *gen_ptr, env)?;
     }
     Ok(Value::Undefined)
 }
 
 fn handle_yield_star_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     gen_ptr: GcPtr<'gc, JSAsyncGenerator<'gc>>,
     promise_cell: GcPtr<'gc, JSPromise<'gc>>,
@@ -2511,14 +2511,14 @@ fn handle_yield_star_call<'gc>(
         if let Some(cached) = slot_get(&iter_obj, &InternalSlot::YieldStarNextMethod) {
             cached.borrow().clone()
         } else {
-            let fetched = match crate::core::get_property_with_accessors(mc, env, &iter_obj, method) {
+            let fetched = match crate::core::get_property_with_accessors(ctx, env, &iter_obj, method) {
                 Ok(v) => v,
                 Err(e) => {
-                    let mut gen_mut = gen_ptr.borrow_mut(mc);
+                    let mut gen_mut = gen_ptr.borrow_mut(ctx);
                     gen_mut.yield_star_iterator = None;
                     gen_mut.state = crate::core::GeneratorState::Completed;
                     drop(gen_mut);
-                    reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                    reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                     return Ok(());
                 }
             };
@@ -2528,20 +2528,20 @@ fn handle_yield_star_call<'gc>(
                 other => other,
             };
             if !matches!(fetched, Value::Undefined | Value::Null) {
-                slot_set(mc, &iter_obj, InternalSlot::YieldStarNextMethod, &fetched.clone());
-                iter_obj.borrow_mut(mc).set_non_enumerable("__yield_star_next_method");
+                slot_set(ctx, &iter_obj, InternalSlot::YieldStarNextMethod, &fetched.clone());
+                iter_obj.borrow_mut(ctx).set_non_enumerable("__yield_star_next_method");
             }
             fetched
         }
     } else {
-        match crate::core::get_property_with_accessors(mc, env, &iter_obj, method) {
+        match crate::core::get_property_with_accessors(ctx, env, &iter_obj, method) {
             Ok(v) => v,
             Err(e) => {
-                let mut gen_mut = gen_ptr.borrow_mut(mc);
+                let mut gen_mut = gen_ptr.borrow_mut(ctx);
                 gen_mut.yield_star_iterator = None;
                 gen_mut.state = crate::core::GeneratorState::Completed;
                 drop(gen_mut);
-                reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                 return Ok(());
             }
         }
@@ -2578,16 +2578,16 @@ fn handle_yield_star_call<'gc>(
             method,
             method_func
         );
-        let call_res = evaluate_call_dispatch(mc, env, &method_func, Some(&Value::Object(iter_obj)), &args);
+        let call_res = evaluate_call_dispatch(ctx, env, &method_func, Some(&Value::Object(iter_obj)), &args);
 
         let res_val = match call_res {
             Ok(v) => v,
             Err(e) => {
-                let mut gen_mut = gen_ptr.borrow_mut(mc);
+                let mut gen_mut = gen_ptr.borrow_mut(ctx);
                 gen_mut.yield_star_iterator = None;
                 gen_mut.state = crate::core::GeneratorState::Completed;
                 drop(gen_mut);
-                reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                 return Ok(());
             }
         };
@@ -2599,22 +2599,22 @@ fn handle_yield_star_call<'gc>(
                 if let Some(p) = crate::js_promise::get_promise_from_js_object(&obj) {
                     p
                 } else {
-                    let then_val = match crate::core::get_property_with_accessors(mc, env, &obj, "then") {
+                    let then_val = match crate::core::get_property_with_accessors(ctx, env, &obj, "then") {
                         Ok(v) => v,
                         Err(e) => {
-                            let mut gen_mut = gen_ptr.borrow_mut(mc);
+                            let mut gen_mut = gen_ptr.borrow_mut(ctx);
                             gen_mut.yield_star_iterator = None;
                             gen_mut.state = crate::core::GeneratorState::Completed;
                             drop(gen_mut);
-                            reject_promise(mc, &promise_cell, eval_error_to_value(mc, env, e), env);
+                            reject_promise(ctx, &promise_cell, eval_error_to_value(ctx, env, e), env);
                             return Ok(());
                         }
                     };
                     let is_then_callable = matches!(then_val, Value::Function(_) | Value::Closure(_) | Value::Object(_));
-                    let (p, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
+                    let (p, resolve, reject) = crate::js_promise::create_promise_capability(ctx, env)?;
                     if !matches!(then_val, Value::Undefined | Value::Null) && is_then_callable {
                         let call_env = crate::js_class::prepare_call_env_with_this(
-                            mc,
+                            ctx,
                             Some(env),
                             Some(&Value::Object(obj)),
                             None,
@@ -2623,18 +2623,18 @@ fn handle_yield_star_call<'gc>(
                             Some(env),
                             None,
                         )?;
-                        if let Err(e) = evaluate_call_dispatch(mc, &call_env, &then_val, Some(&Value::Object(obj)), &[resolve, reject]) {
-                            reject_promise(mc, &p, eval_error_to_value(mc, env, e), env);
+                        if let Err(e) = evaluate_call_dispatch(ctx, &call_env, &then_val, Some(&Value::Object(obj)), &[resolve, reject]) {
+                            reject_promise(ctx, &p, eval_error_to_value(ctx, env, e), env);
                         }
                     } else {
-                        crate::js_promise::call_function(mc, &resolve, &[Value::Object(obj)], env)?;
+                        crate::js_promise::call_function(ctx, &resolve, &[Value::Object(obj)], env)?;
                     }
                     p
                 }
             }
             _ => {
-                let (p, r, _) = crate::js_promise::create_promise_capability(mc, env)?;
-                crate::js_promise::call_function(mc, &r, &[res_val], env)?;
+                let (p, r, _) = crate::js_promise::create_promise_capability(ctx, env)?;
+                crate::js_promise::call_function(ctx, &r, &[res_val], env)?;
                 p
             }
         };
@@ -2643,7 +2643,7 @@ fn handle_yield_star_call<'gc>(
         let p_val = Value::Promise(promise_cell);
 
         let on_fulfilled = Value::Closure(crate::core::Gc::new(
-            mc,
+            ctx,
             ClosureData::new(
                 &[crate::core::DestructuringElement::Variable("res".to_string(), None)],
                 &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -2655,10 +2655,10 @@ fn handle_yield_star_call<'gc>(
                     ],
                 )))],
                 {
-                    let e = new_js_object_data(mc);
-                    e.borrow_mut(mc).prototype = Some(*env);
-                    slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                    slot_set(mc, &e, InternalSlot::P, &p_val.clone());
+                    let e = new_js_object_data(ctx);
+                    e.borrow_mut(ctx).prototype = Some(*env);
+                    slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                    slot_set(ctx, &e, InternalSlot::P, &p_val.clone());
                     Some(e)
                 },
                 None,
@@ -2666,7 +2666,7 @@ fn handle_yield_star_call<'gc>(
         ));
 
         let on_rejected = Value::Closure(crate::core::Gc::new(
-            mc,
+            ctx,
             ClosureData::new(
                 &[crate::core::DestructuringElement::Variable("reason".to_string(), None)],
                 &[Statement::from(StatementKind::Expr(Expr::Call(
@@ -2678,38 +2678,38 @@ fn handle_yield_star_call<'gc>(
                     ],
                 )))],
                 {
-                    let e = new_js_object_data(mc);
-                    e.borrow_mut(mc).prototype = Some(*env);
-                    slot_set(mc, &e, InternalSlot::Gen, &gen_val.clone());
-                    slot_set(mc, &e, InternalSlot::P, &p_val.clone());
+                    let e = new_js_object_data(ctx);
+                    e.borrow_mut(ctx).prototype = Some(*env);
+                    slot_set(ctx, &e, InternalSlot::Gen, &gen_val.clone());
+                    slot_set(ctx, &e, InternalSlot::P, &p_val.clone());
                     Some(e)
                 },
                 None,
             ),
         ));
 
-        perform_promise_then(mc, res_promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
+        perform_promise_then(ctx, res_promise, Some(on_fulfilled), Some(on_rejected), None, env)?;
     } else if method == "return" {
         let arg = args.first().cloned().unwrap_or(Value::Undefined);
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.yield_star_iterator = None;
         gen_mut.state = crate::core::GeneratorState::Completed;
         drop(gen_mut);
-        let res = create_iterator_result_obj(mc, arg, true)?;
-        resolve_promise(mc, &promise_cell, Value::Object(res), env);
+        let res = create_iterator_result_obj(ctx, arg, true)?;
+        resolve_promise(ctx, &promise_cell, Value::Object(res), env);
     } else if method == "throw" {
         let arg = args.first().cloned().unwrap_or(Value::Undefined);
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.yield_star_iterator = None;
         drop(gen_mut);
-        reject_promise(mc, &promise_cell, arg, env);
+        reject_promise(ctx, &promise_cell, arg, env);
     } else {
-        let mut gen_mut = gen_ptr.borrow_mut(mc);
+        let mut gen_mut = gen_ptr.borrow_mut(ctx);
         gen_mut.yield_star_iterator = None;
         gen_mut.state = crate::core::GeneratorState::Completed;
         drop(gen_mut);
         let err = Value::from("TypeError: Iterator has no next method");
-        reject_promise(mc, &promise_cell, err, env);
+        reject_promise(ctx, &promise_cell, err, env);
     }
     Ok(())
 }

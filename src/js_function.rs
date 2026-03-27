@@ -18,7 +18,7 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 /// Returns a vector of evaluated arguments or an error
 #[allow(dead_code)]
 fn extract_internal_args<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
     expected_count: usize,
@@ -30,7 +30,7 @@ fn extract_internal_args<'gc>(
 
     let mut evaluated_args = Vec::with_capacity(expected_count);
     for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
+        evaluated_args.push(evaluate_expr(ctx, env, arg)?);
     }
     Ok(evaluated_args)
 }
@@ -64,7 +64,7 @@ fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSErro
 }
 
 fn propagate_closure_strictness<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     func_env: &JSObjectDataPtr<'gc>,
     data: &crate::core::ClosureData<'gc>,
 ) -> Result<(), JSError> {
@@ -79,17 +79,17 @@ fn propagate_closure_strictness<'gc>(
             proto_iter = cur.borrow().prototype;
         }
     }
-    crate::core::env_set_strictness(mc, func_env, data.is_strict || env_strict_ancestor)?;
+    crate::core::env_set_strictness(ctx, func_env, data.is_strict || env_strict_ancestor)?;
     Ok(())
 }
 
-fn attach_function_prototype_if_present<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, func_obj: &JSObjectDataPtr<'gc>) {
+fn attach_function_prototype_if_present<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, func_obj: &JSObjectDataPtr<'gc>) {
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
         && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        func_obj.borrow_mut(mc).prototype = Some(*proto);
+        func_obj.borrow_mut(ctx).prototype = Some(*proto);
     }
 }
 
@@ -154,23 +154,23 @@ fn is_constructor_value<'gc>(value: &Value<'gc>) -> bool {
 }
 
 pub fn handle_global_function<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     func_name: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Handle functions that expect unevaluated expressions
     match func_name {
-        "import" => return dynamic_import_function(mc, args, env),
-        "import.defer" => return dynamic_import_defer_function(mc, args, env),
-        "import.source" => return dynamic_import_source_function(mc, args, env),
-        "Function" => return function_constructor(mc, args, env),
-        "GeneratorFunction" => return generator_function_constructor(mc, args, env),
-        "AsyncFunction" => return async_function_constructor(mc, args, env),
-        "AsyncGeneratorFunction" => return async_generator_function_constructor(mc, args, env),
-        "new" => return evaluate_new_expression(mc, args, env),
-        "eval" => return evalute_eval_function(mc, args, env),
-        "Date" => return handle_date_constructor(mc, args, env, None),
+        "import" => return dynamic_import_function(ctx, args, env),
+        "import.defer" => return dynamic_import_defer_function(ctx, args, env),
+        "import.source" => return dynamic_import_source_function(ctx, args, env),
+        "Function" => return function_constructor(ctx, args, env),
+        "GeneratorFunction" => return generator_function_constructor(ctx, args, env),
+        "AsyncFunction" => return async_function_constructor(ctx, args, env),
+        "AsyncGeneratorFunction" => return async_generator_function_constructor(ctx, args, env),
+        "new" => return evaluate_new_expression(ctx, args, env),
+        "eval" => return evalute_eval_function(ctx, args, env),
+        "Date" => return handle_date_constructor(ctx, args, env, None),
         "Error.isError" => {
             let arg = args.first().cloned().unwrap_or(Value::Undefined);
             return Ok(Value::Boolean(crate::core::js_error::is_error(&arg)));
@@ -178,9 +178,9 @@ pub fn handle_global_function<'gc>(
         "AbstractModuleSource.prototype.@@toStringTag" => return Ok(Value::Undefined),
 
         "__createRealm__" => {
-            let new_env = crate::core::create_new_realm(mc, env)?;
-            let result = crate::core::new_js_object_data(mc);
-            crate::core::object_set_key_value(mc, &result, "global", &Value::Object(new_env))?;
+            let new_env = crate::core::create_new_realm(ctx, env)?;
+            let result = crate::core::new_js_object_data(ctx);
+            crate::core::object_set_key_value(ctx, &result, "global", &Value::Object(new_env))?;
             return Ok(Value::Object(result));
         }
 
@@ -196,7 +196,7 @@ pub fn handle_global_function<'gc>(
                     Value::Object(o) => Ok(Value::Object(o)),
                     Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object").into()),
                     Value::Null => Err(raise_type_error!("Cannot convert null to object").into()),
-                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&this_val), env)? {
+                    _ => match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&this_val), env)? {
                         Value::Object(o) => Ok(Value::Object(o)),
                         _ => Err(raise_type_error!("Cannot convert value to object").into()),
                     },
@@ -207,20 +207,20 @@ pub fn handle_global_function<'gc>(
         "Object.prototype.toString" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                return crate::core::handle_object_prototype_to_string(mc, &this_val, env);
+                return crate::core::handle_object_prototype_to_string(ctx, &this_val, env);
             }
             return Err(raise_eval_error!("Object.prototype.toString called without this").into());
         }
-        "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(mc, args, env),
-        "Object.prototype.isPrototypeOf" => return handle_object_is_prototype_of(mc, args, env),
-        "Object.prototype.propertyIsEnumerable" => return handle_object_property_is_enumerable(mc, args, env),
-        "Object.prototype.get __proto__" => return handle_object_proto_get(mc, args, env),
-        "Object.prototype.set __proto__" => return handle_object_proto_set(mc, args, env),
+        "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(ctx, args, env),
+        "Object.prototype.isPrototypeOf" => return handle_object_is_prototype_of(ctx, args, env),
+        "Object.prototype.propertyIsEnumerable" => return handle_object_property_is_enumerable(ctx, args, env),
+        "Object.prototype.get __proto__" => return handle_object_proto_get(ctx, args, env),
+        "Object.prototype.set __proto__" => return handle_object_proto_set(ctx, args, env),
         "RegExp.prototype.exec" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_regexp::handle_regexp_method(mc, &obj, "exec", args, env);
+                    return crate::js_regexp::handle_regexp_method(ctx, &obj, "exec", args, env);
                 } else {
                     return Err(raise_type_error!("RegExp.prototype.exec called on non-object receiver").into());
                 }
@@ -231,7 +231,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_regexp::handle_regexp_method(mc, &obj, "test", args, env);
+                    return crate::js_regexp::handle_regexp_method(ctx, &obj, "test", args, env);
                 } else {
                     return Err(raise_type_error!("RegExp.prototype.test called on non-object receiver").into());
                 }
@@ -242,7 +242,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_regexp::handle_regexp_method(mc, &obj, "toString", args, env);
+                    return crate::js_regexp::handle_regexp_method(ctx, &obj, "toString", args, env);
                 } else {
                     return Err(raise_type_error!("RegExp.prototype.toString called on non-object receiver").into());
                 }
@@ -253,7 +253,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_regexp::handle_regexp_method(mc, &obj, "compile", args, env);
+                    return crate::js_regexp::handle_regexp_method(ctx, &obj, "compile", args, env);
                 } else {
                     return Err(raise_type_error!("RegExp.prototype.compile called on non-object receiver").into());
                 }
@@ -265,7 +265,7 @@ pub fn handle_global_function<'gc>(
             let prop = &func_name["RegExp.prototype.get ".len()..];
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_v = this_rc.borrow().clone();
-                if let Some(val) = crate::js_regexp::handle_regexp_getter_with_this(mc, env, &this_v, prop)? {
+                if let Some(val) = crate::js_regexp::handle_regexp_getter_with_this(ctx, env, &this_v, prop)? {
                     return Ok(val);
                 }
             }
@@ -338,21 +338,21 @@ pub fn handle_global_function<'gc>(
             }
             return Ok(Value::Undefined);
         }
-        "parseInt" => return parse_int_function(mc, args, env),
-        "parseFloat" => return parse_float_function(mc, args, env),
-        "isNaN" => return is_nan_function(mc, args, env),
-        "isFinite" => return is_finite_function(mc, args, env),
-        "encodeURIComponent" => return encode_uri_component(mc, args, env),
-        "decodeURIComponent" => return decode_uri_component(mc, args, env),
-        "Object" => return crate::js_class::handle_object_constructor(mc, args, env),
-        "BigInt" => return crate::js_bigint::bigint_constructor(mc, args, env),
+        "parseInt" => return parse_int_function(ctx, args, env),
+        "parseFloat" => return parse_float_function(ctx, args, env),
+        "isNaN" => return is_nan_function(ctx, args, env),
+        "isFinite" => return is_finite_function(ctx, args, env),
+        "encodeURIComponent" => return encode_uri_component(ctx, args, env),
+        "decodeURIComponent" => return decode_uri_component(ctx, args, env),
+        "Object" => return crate::js_class::handle_object_constructor(ctx, args, env),
+        "BigInt" => return crate::js_bigint::bigint_constructor(ctx, args, env),
         "BigInt.asIntN" | "BigInt.asUintN" => {
             let method = if func_name == "BigInt.asIntN" { "asIntN" } else { "asUintN" };
-            return crate::js_bigint::handle_bigint_static_method(mc, method, args, env);
+            return crate::js_bigint::handle_bigint_static_method(ctx, method, args, env);
         }
-        "Number" => return crate::js_number::number_constructor(mc, args, env),
+        "Number" => return crate::js_number::number_constructor(ctx, args, env),
         "Boolean" => return boolean_constructor(args),
-        "Proxy.revocable" => return crate::js_proxy::handle_proxy_revocable(mc, args, env),
+        "Proxy.revocable" => return crate::js_proxy::handle_proxy_revocable(ctx, args, env),
         "Proxy.__internal_revoke" => {
             // Revoke the proxy stored in the captured closure environment
             if let Some(revoke_rc) = crate::core::slot_get_chained(env, &InternalSlot::ProxyWrapper) {
@@ -367,29 +367,29 @@ pub fn handle_global_function<'gc>(
                         if let Some(p) = old_proxy {
                             // Create a new proxy with revoked=true and same target/handler
                             let new_proxy = Gc::new(
-                                mc,
+                                ctx,
                                 crate::core::JSProxy {
                                     target: p.target.clone(),
                                     handler: p.handler.clone(),
                                     revoked: true,
                                 },
                             );
-                            slot_set(mc, &wrapper_obj, InternalSlot::Proxy, &Value::Proxy(new_proxy));
+                            slot_set(ctx, &wrapper_obj, InternalSlot::Proxy, &Value::Proxy(new_proxy));
                         }
                     }
                 }
             }
             return Ok(Value::Undefined);
         }
-        "Boolean_toString" => return Ok(crate::js_boolean::boolean_prototype_to_string(mc, args, env)?),
-        "Boolean_valueOf" => return Ok(crate::js_boolean::boolean_prototype_value_of(mc, args, env)?),
-        "Symbol" => return symbol_constructor(mc, args),
-        "Symbol_valueOf" => return symbol_prototype_value_of(mc, args, env),
-        "Symbol_toString" => return symbol_prototype_to_string(mc, args, env),
-        "encodeURI" => return encode_uri(mc, args, env),
-        "decodeURI" => return decode_uri(mc, args, env),
-        "escape" => return annexb_escape(mc, args, env),
-        "unescape" => return annexb_unescape(mc, args, env),
+        "Boolean_toString" => return Ok(crate::js_boolean::boolean_prototype_to_string(ctx, args, env)?),
+        "Boolean_valueOf" => return Ok(crate::js_boolean::boolean_prototype_value_of(ctx, args, env)?),
+        "Symbol" => return symbol_constructor(ctx, args),
+        "Symbol_valueOf" => return symbol_prototype_value_of(ctx, args, env),
+        "Symbol_toString" => return symbol_prototype_to_string(ctx, args, env),
+        "encodeURI" => return encode_uri(ctx, args, env),
+        "decodeURI" => return decode_uri(ctx, args, env),
+        "escape" => return annexb_escape(ctx, args, env),
+        "unescape" => return annexb_unescape(ctx, args, env),
         "IteratorSelf" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -401,26 +401,26 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_array::handle_array_iterator_next(mc, &obj, env);
+                    return crate::js_array::handle_array_iterator_next(ctx, &obj, env);
                 }
             }
             return Err(raise_eval_error!("ArrayIterator.prototype.next called on non-object").into());
         }
-        // "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
-        // "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
-        // "__internal_promise_allsettled_resolve" => return internal_promise_allsettled_resolve(mc, args, env),
-        // "__internal_promise_allsettled_reject" => return internal_promise_allsettled_reject(mc, args, env),
-        // "__internal_allsettled_state_record_fulfilled" => return internal_allsettled_state_record_fulfilled(mc, args, env),
-        // "__internal_allsettled_state_record_rejected" => return internal_allsettled_state_record_rejected(mc, args, env),
-        // "__internal_promise_any_resolve" => return internal_promise_any_resolve(mc, args, env),
-        // "__internal_promise_any_reject" => return internal_promise_any_reject(mc, args, env),
-        // "__internal_promise_race_resolve" => return internal_promise_race_resolve(mc, args, env),
-        "__internal_promise_all_resolve" => return crate::js_promise::__internal_promise_all_resolve(mc, args, env),
-        "__internal_promise_all_reject" => return crate::js_promise::__internal_promise_all_reject(mc, args, env),
-        "__internal_allsettled_resolve" => return crate::js_promise::__internal_allsettled_resolve(mc, args, env),
-        "__internal_allsettled_reject" => return crate::js_promise::__internal_allsettled_reject(mc, args, env),
-        "__internal_any_resolve" => return crate::js_promise::__internal_any_resolve(mc, args, env),
-        "__internal_any_reject" => return crate::js_promise::__internal_any_reject(mc, args, env),
+        // "__internal_resolve_promise" => return internal_resolve_promise(ctx, args, env),
+        // "__internal_reject_promise" => return internal_reject_promise(ctx, args, env),
+        // "__internal_promise_allsettled_resolve" => return internal_promise_allsettled_resolve(ctx, args, env),
+        // "__internal_promise_allsettled_reject" => return internal_promise_allsettled_reject(ctx, args, env),
+        // "__internal_allsettled_state_record_fulfilled" => return internal_allsettled_state_record_fulfilled(ctx, args, env),
+        // "__internal_allsettled_state_record_rejected" => return internal_allsettled_state_record_rejected(ctx, args, env),
+        // "__internal_promise_any_resolve" => return internal_promise_any_resolve(ctx, args, env),
+        // "__internal_promise_any_reject" => return internal_promise_any_reject(ctx, args, env),
+        // "__internal_promise_race_resolve" => return internal_promise_race_resolve(ctx, args, env),
+        "__internal_promise_all_resolve" => return crate::js_promise::__internal_promise_all_resolve(ctx, args, env),
+        "__internal_promise_all_reject" => return crate::js_promise::__internal_promise_all_reject(ctx, args, env),
+        "__internal_allsettled_resolve" => return crate::js_promise::__internal_allsettled_resolve(ctx, args, env),
+        "__internal_allsettled_reject" => return crate::js_promise::__internal_allsettled_reject(ctx, args, env),
+        "__internal_any_resolve" => return crate::js_promise::__internal_any_resolve(ctx, args, env),
+        "__internal_any_reject" => return crate::js_promise::__internal_any_reject(ctx, args, env),
         "Promise.resolve"
         | "Promise.reject"
         | "Promise.all"
@@ -432,21 +432,21 @@ pub fn handle_global_function<'gc>(
             let method = func_name.strip_prefix("Promise.").unwrap();
             // Get `this` value (C) — for SubPromise.resolve() etc.
             let this_val = crate::core::env_get(env, "this").map(|rc| rc.borrow().clone());
-            return crate::js_promise::handle_promise_static_method_val(mc, method, args, this_val.as_ref(), env);
+            return crate::js_promise::handle_promise_static_method_val(ctx, method, args, this_val.as_ref(), env);
         }
 
-        "__internal_capability_executor" => return crate::js_promise::__internal_capability_executor(mc, args, env),
-        "__internal_promise_resolve_captured" => return Ok(crate::js_promise::__internal_promise_resolve_captured(mc, args, env)?),
-        "__internal_promise_reject_captured" => return Ok(crate::js_promise::__internal_promise_reject_captured(mc, args, env)?),
+        "__internal_capability_executor" => return crate::js_promise::__internal_capability_executor(ctx, args, env),
+        "__internal_promise_resolve_captured" => return Ok(crate::js_promise::__internal_promise_resolve_captured(ctx, args, env)?),
+        "__internal_promise_reject_captured" => return Ok(crate::js_promise::__internal_promise_reject_captured(ctx, args, env)?),
 
-        "__internal_promise_finally_resolve" => return Ok(crate::js_promise::__internal_promise_finally_resolve(mc, args, env)?),
-        "__internal_promise_finally_reject" => return Ok(crate::js_promise::__internal_promise_finally_reject(mc, args, env)?),
+        "__internal_promise_finally_resolve" => return Ok(crate::js_promise::__internal_promise_finally_resolve(ctx, args, env)?),
+        "__internal_promise_finally_reject" => return Ok(crate::js_promise::__internal_promise_finally_reject(ctx, args, env)?),
 
-        "__internal_finally_then_wrapper" => return crate::js_promise::__internal_finally_then_wrapper(mc, args, env),
-        "__internal_finally_catch_wrapper" => return crate::js_promise::__internal_finally_catch_wrapper(mc, args, env),
+        "__internal_finally_then_wrapper" => return crate::js_promise::__internal_finally_then_wrapper(ctx, args, env),
+        "__internal_finally_catch_wrapper" => return crate::js_promise::__internal_finally_catch_wrapper(ctx, args, env),
 
-        "__internal_async_step_resolve" => return Ok(crate::js_async::__internal_async_step_resolve(mc, args, env)?),
-        "__internal_async_step_reject" => return Ok(crate::js_async::__internal_async_step_reject(mc, args, env)?),
+        "__internal_async_step_resolve" => return Ok(crate::js_async::__internal_async_step_resolve(ctx, args, env)?),
+        "__internal_async_step_reject" => return Ok(crate::js_async::__internal_async_step_reject(ctx, args, env)?),
 
         "__internal_allsettled_state_record_fulfilled_env" => {
             if args.len() < 3 {
@@ -456,10 +456,14 @@ pub fn handle_global_function<'gc>(
                 Value::Number(n) => n,
                 _ => return Err(raise_eval_error!("internal function expected number").into()),
             };
-            return Ok(
-                crate::js_promise::__internal_allsettled_state_record_fulfilled_env(mc, args[0].clone(), idx, args[2].clone(), env)
-                    .map(|_| Value::Undefined)?,
-            );
+            return Ok(crate::js_promise::__internal_allsettled_state_record_fulfilled_env(
+                ctx,
+                args[0].clone(),
+                idx,
+                args[2].clone(),
+                env,
+            )
+            .map(|_| Value::Undefined)?);
         }
         "__internal_allsettled_state_record_rejected_env" => {
             if args.len() < 3 {
@@ -470,13 +474,13 @@ pub fn handle_global_function<'gc>(
                 _ => return Err(raise_eval_error!("internal function expected number").into()),
             };
             return Ok(
-                crate::js_promise::__internal_allsettled_state_record_rejected_env(mc, args[0].clone(), idx, args[2].clone(), env)
+                crate::js_promise::__internal_allsettled_state_record_rejected_env(ctx, args[0].clone(), idx, args[2].clone(), env)
                     .map(|_| Value::Undefined)?,
             );
         }
 
-        "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
-        "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
+        "__internal_resolve_promise" => return internal_resolve_promise(ctx, args, env),
+        "__internal_reject_promise" => return internal_reject_promise(ctx, args, env),
 
         "Promise.prototype.catch" => {
             // §27.2.5.1: catch(onRejected) = Invoke(this, "then", «undefined, onRejected»)
@@ -488,7 +492,7 @@ pub fn handle_global_function<'gc>(
             // Invoke(this, "then", «undefined, onRejected»):
             // Step 1: GetV(this, "then") which does ToObject(this).[[Get]]("then", this)
             let then_fn = match &this_val {
-                Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, "then")?,
+                Value::Object(obj) => crate::core::get_property_with_accessors(ctx, env, obj, "then")?,
                 Value::Undefined | Value::Null => {
                     return Err(raise_type_error!("Cannot read properties of null/undefined").into());
                 }
@@ -523,14 +527,14 @@ pub fn handle_global_function<'gc>(
             };
             // Call then(undefined, onRejected) with `this` as receiver
             let call_args = vec![Value::Undefined, on_rejected];
-            return crate::js_promise::call_function_with_this(mc, &then_fn, Some(&this_val), &call_args, env);
+            return crate::js_promise::call_function_with_this(ctx, &then_fn, Some(&this_val), &call_args, env);
         }
 
         "Promise.prototype.then" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_promise::handle_promise_prototype_method(mc, &obj, "then", args, env);
+                    return crate::js_promise::handle_promise_prototype_method(ctx, &obj, "then", args, env);
                 }
             }
             return Err(raise_type_error!("Promise prototype method called without object this").into());
@@ -560,32 +564,32 @@ pub fn handle_global_function<'gc>(
                 // Step 5: Create spec wrapper closures
                 // Get C = SpeciesConstructor(promise, %Promise%) for the wrappers
                 let c_val = if let Value::Object(obj) = &this_val {
-                    crate::js_promise::get_species_constructor_pub(mc, obj, env)?
+                    crate::js_promise::get_species_constructor_pub(ctx, obj, env)?
                         .unwrap_or_else(|| crate::js_promise::get_default_promise_ctor_pub(env))
                 } else {
                     crate::js_promise::get_default_promise_ctor_pub(env)
                 };
 
-                let then_f = crate::js_promise::create_finally_then_wrapper(mc, &on_finally, &c_val, env)?;
-                let catch_f = crate::js_promise::create_finally_catch_wrapper(mc, &on_finally, &c_val, env)?;
+                let then_f = crate::js_promise::create_finally_then_wrapper(ctx, &on_finally, &c_val, env)?;
+                let catch_f = crate::js_promise::create_finally_catch_wrapper(ctx, &on_finally, &c_val, env)?;
                 (then_f, catch_f)
             };
 
             // Step 6: Return Invoke(promise, "then", «thenFinally, catchFinally»)
             let then_fn = match &this_val {
-                Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, "then")?,
+                Value::Object(obj) => crate::core::get_property_with_accessors(ctx, env, obj, "then")?,
                 _ => Value::Undefined,
             };
             if !crate::js_promise::is_callable_val_pub(&then_fn) {
                 return Err(raise_type_error!("finally: this.then is not a function").into());
             }
-            return crate::js_promise::call_function_with_this(mc, &then_fn, Some(&this_val), &[then_finally, catch_finally], env);
+            return crate::js_promise::call_function_with_this(ctx, &then_fn, Some(&this_val), &[then_finally, catch_finally], env);
         }
 
-        "setTimeout" => return Ok(crate::js_promise::handle_set_timeout_val(mc, args, env)?),
-        "clearTimeout" => return Ok(crate::js_promise::handle_clear_timeout_val(mc, args, env)?),
-        "setInterval" => return Ok(crate::js_promise::handle_set_interval_val(mc, args, env)?),
-        "clearInterval" => return Ok(crate::js_promise::handle_clear_interval_val(mc, args, env)?),
+        "setTimeout" => return Ok(crate::js_promise::handle_set_timeout_val(ctx, args, env)?),
+        "clearTimeout" => return Ok(crate::js_promise::handle_clear_timeout_val(ctx, args, env)?),
+        "setInterval" => return Ok(crate::js_promise::handle_set_interval_val(ctx, args, env)?),
+        "clearInterval" => return Ok(crate::js_promise::handle_clear_interval_val(ctx, args, env)?),
         "Function.prototype.call" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -633,9 +637,9 @@ pub fn handle_global_function<'gc>(
                         return Ok(Value::Boolean(false));
                     }
 
-                    let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                    let call_env = prepare_call_env_with_this(ctx, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
                     return crate::core::evaluate_call_dispatch(
-                        mc,
+                        ctx,
                         &call_env,
                         &Value::Function(func_name.clone()),
                         Some(&receiver_val),
@@ -657,9 +661,9 @@ pub fn handle_global_function<'gc>(
                         if ctor_name == "Promise" {
                             return Err(raise_type_error!("Promise constructor cannot be invoked without 'new'").into());
                         }
-                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                        let call_env = prepare_call_env_with_this(ctx, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
                         return crate::core::evaluate_call_dispatch(
-                            mc,
+                            ctx,
                             &call_env,
                             &Value::Function(ctor_name),
                             Some(&receiver_val),
@@ -672,12 +676,12 @@ pub fn handle_global_function<'gc>(
                 {
                     let cl_val = cl_prop.borrow().clone();
                     if let Value::Closure(cl) = cl_val {
-                        return crate::core::call_closure(mc, &cl, Some(&receiver_val), &evaluated_args, env, Some(*obj));
+                        return crate::core::call_closure(ctx, &cl, Some(&receiver_val), &evaluated_args, env, Some(*obj));
                     }
                     if let Value::Function(name) = cl_val {
-                        let call_env = prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                        let call_env = prepare_call_env_with_this(ctx, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
                         return crate::core::evaluate_call_dispatch(
-                            mc,
+                            ctx,
                             &call_env,
                             &Value::Function(name),
                             Some(&receiver_val),
@@ -685,7 +689,7 @@ pub fn handle_global_function<'gc>(
                         );
                     }
                 }
-                return crate::core::evaluate_call_dispatch(mc, env, &this_val, Some(&receiver_val), &evaluated_args);
+                return crate::core::evaluate_call_dispatch(ctx, env, &this_val, Some(&receiver_val), &evaluated_args);
             } else {
                 return Err(raise_eval_error!("Function.prototype.call called without this").into());
             }
@@ -705,7 +709,7 @@ pub fn handle_global_function<'gc>(
                             let mut forwarded_args: Vec<Value> = Vec::new();
                             if args.len() >= 2 {
                                 match args[1].clone() {
-                                    Value::Object(arr_obj) if crate::js_array::is_array(mc, &arr_obj) => {
+                                    Value::Object(arr_obj) if crate::js_array::is_array(ctx, &arr_obj) => {
                                         let mut i = 0usize;
                                         loop {
                                             let key = i.to_string();
@@ -721,8 +725,8 @@ pub fn handle_global_function<'gc>(
                                 }
                             }
                             let call_env =
-                                prepare_call_env_with_this(mc, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
-                            return handle_global_function(mc, &func_name, &forwarded_args, &call_env);
+                                prepare_call_env_with_this(ctx, Some(env), Some(&receiver_val), None, &[], None, Some(env), None)?;
+                            return handle_global_function(ctx, &func_name, &forwarded_args, &call_env);
                         }
                         return Err(raise_eval_error!(format!("Function.prototype.apply target not supported: {}", func_name)).into());
                     }
@@ -734,7 +738,7 @@ pub fn handle_global_function<'gc>(
                         let mut evaluated_args: Vec<Value> = Vec::new();
                         if args.len() >= 2 {
                             match args[1].clone() {
-                                Value::Object(arr_obj) if crate::js_array::is_array(mc, &arr_obj) => {
+                                Value::Object(arr_obj) if crate::js_array::is_array(ctx, &arr_obj) => {
                                     let mut i = 0usize;
                                     loop {
                                         let key = i.to_string();
@@ -753,7 +757,7 @@ pub fn handle_global_function<'gc>(
                         let body = &data.body;
                         let captured_env = &data.env;
                         let func_env = prepare_function_call_env(
-                            mc,
+                            ctx,
                             captured_env.as_ref(),
                             Some(&receiver_val),
                             Some(params),
@@ -762,11 +766,11 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
-                        propagate_closure_strictness(mc, &func_env, &data)?;
+                        propagate_closure_strictness(ctx, &func_env, &data)?;
 
-                        crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(&callee_for_arguments))?;
+                        crate::js_class::create_arguments_object(ctx, &func_env, &evaluated_args, Some(&callee_for_arguments))?;
 
-                        return crate::core::evaluate_statements(mc, &func_env, body);
+                        return crate::core::evaluate_statements(ctx, &func_env, body);
                     }
                     Value::Object(object) => {
                         if let Some(cl_rc) = object.borrow().get_closure() {
@@ -777,7 +781,7 @@ pub fn handle_global_function<'gc>(
                             let mut evaluated_args: Vec<Value> = Vec::new();
                             if args.len() >= 2 {
                                 match args[1].clone() {
-                                    Value::Object(arr_obj) if crate::js_array::is_array(mc, &arr_obj) => {
+                                    Value::Object(arr_obj) if crate::js_array::is_array(ctx, &arr_obj) => {
                                         let mut i = 0usize;
                                         loop {
                                             let key = i.to_string();
@@ -798,7 +802,7 @@ pub fn handle_global_function<'gc>(
                                     let body = &data.body;
                                     let captured_env = &data.env;
                                     let func_env = prepare_function_call_env(
-                                        mc,
+                                        ctx,
                                         captured_env.as_ref(),
                                         Some(&receiver_val),
                                         Some(params),
@@ -807,15 +811,20 @@ pub fn handle_global_function<'gc>(
                                         Some(env),
                                     )?;
 
-                                    propagate_closure_strictness(mc, &func_env, data)?;
+                                    propagate_closure_strictness(ctx, &func_env, data)?;
 
-                                    crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(&Value::Object(object)))?;
+                                    crate::js_class::create_arguments_object(
+                                        ctx,
+                                        &func_env,
+                                        &evaluated_args,
+                                        Some(&Value::Object(object)),
+                                    )?;
 
-                                    return crate::core::evaluate_statements(mc, &func_env, body);
+                                    return crate::core::evaluate_statements(ctx, &func_env, body);
                                 }
                                 Value::AsyncClosure(data) => {
                                     return Ok(crate::js_async::handle_async_closure_call(
-                                        mc,
+                                        ctx,
                                         data,
                                         Some(&receiver_val),
                                         &evaluated_args,
@@ -838,7 +847,7 @@ pub fn handle_global_function<'gc>(
         "Function.prototype.toString" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                return handle_function_prototype_method(mc, &this_val, "toString", args, env);
+                return handle_function_prototype_method(ctx, &this_val, "toString", args, env);
             }
             return Err(raise_type_error!("Function.prototype.toString requires that 'this' be a Function").into());
         }
@@ -846,7 +855,7 @@ pub fn handle_global_function<'gc>(
         "Function.prototype.bind" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                return handle_function_prototype_method(mc, &this_val, "bind", args, env);
+                return handle_function_prototype_method(ctx, &this_val, "bind", args, env);
             }
             return Err(raise_type_error!("Function.prototype.bind called on non-function").into());
         }
@@ -857,10 +866,10 @@ pub fn handle_global_function<'gc>(
     }
 
     match func_name {
-        "console.error" => Ok(crate::js_console::handle_console_method(mc, "error", args, env)?),
-        "console.log" => Ok(crate::js_console::handle_console_method(mc, "log", args, env)?),
-        "String" => Ok(crate::js_string::string_constructor(mc, args, env)?),
-        "Array" => Ok(handle_array_constructor(mc, args, env, None)?),
+        "console.error" => Ok(crate::js_console::handle_console_method(ctx, "error", args, env)?),
+        "console.log" => Ok(crate::js_console::handle_console_method(ctx, "log", args, env)?),
+        "String" => Ok(crate::js_string::string_constructor(ctx, args, env)?),
+        "Array" => Ok(handle_array_constructor(ctx, args, env, None)?),
 
         name if name.starts_with("Array.prototype.") => {
             let method = name.trim_start_matches("Array.prototype.");
@@ -871,14 +880,14 @@ pub fn handle_global_function<'gc>(
                     Value::Undefined | Value::Null => {
                         return Err(raise_type_error!("Array.prototype method called on null or undefined").into());
                     }
-                    _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&this_val), env)? {
+                    _ => match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&this_val), env)? {
                         Value::Object(obj) => obj,
                         _ => {
                             return Err(raise_type_error!("Array.prototype method called on incompatible receiver").into());
                         }
                     },
                 };
-                return crate::js_array::handle_array_instance_method(mc, &receiver_obj, method, args, env);
+                return crate::js_array::handle_array_instance_method(ctx, &receiver_obj, method, args, env);
             }
             Err(raise_type_error!("Array.prototype method called without this").into())
         }
@@ -890,7 +899,7 @@ pub fn handle_global_function<'gc>(
                 if matches!(this_val, Value::Undefined | Value::Null) {
                     return Err(raise_type_error!("Number.prototype method called on null or undefined").into());
                 }
-                return crate::js_number::handle_number_prototype_method(mc, env, Some(&this_val), method, args);
+                return crate::js_number::handle_number_prototype_method(ctx, env, Some(&this_val), method, args);
             }
             Err(raise_type_error!("Number.prototype method called without this").into())
         }
@@ -906,7 +915,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return match crate::js_array::handle_array_iterator_next(mc, &obj, env) {
+                    return match crate::js_array::handle_array_iterator_next(ctx, &obj, env) {
                         Ok(v) => Ok(v),
                         Err(EvalError::Js(j)) => Err(EvalError::Js(j)),
                         Err(EvalError::Throw(val, line, column)) => {
@@ -925,7 +934,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_string::handle_string_iterator_next(mc, &obj);
+                    return crate::js_string::handle_string_iterator_next(ctx, &obj);
                 }
                 return Err(raise_type_error!("StringIterator.prototype.next called on non-object").into());
             }
@@ -936,7 +945,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return crate::js_regexp::handle_regexp_string_iterator_next(mc, &obj, env);
+                    return crate::js_regexp::handle_regexp_string_iterator_next(ctx, &obj, env);
                 }
                 return Err(raise_type_error!("RegExpStringIterator.prototype.next called on non-object").into());
             }
@@ -947,7 +956,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return Ok(crate::js_set::handle_set_iterator_next(mc, &obj, env)?);
+                    return Ok(crate::js_set::handle_set_iterator_next(ctx, &obj, env)?);
                 }
                 return Err(raise_type_error!("SetIterator.prototype.next called on non-object").into());
             }
@@ -958,7 +967,7 @@ pub fn handle_global_function<'gc>(
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
-                    return Ok(crate::js_map::handle_map_iterator_next(mc, &obj, env)?);
+                    return Ok(crate::js_map::handle_map_iterator_next(ctx, &obj, env)?);
                 }
                 return Err(raise_type_error!("MapIterator.prototype.next called on non-object").into());
             }
@@ -969,13 +978,13 @@ pub fn handle_global_function<'gc>(
             if func_name == "Error.prototype.toString" {
                 if let Some(this_rc) = crate::core::env_get(env, "this") {
                     let this_val = this_rc.borrow().clone();
-                    return crate::js_object::handle_error_to_string_method(mc, &this_val, args, env);
+                    return crate::js_object::handle_error_to_string_method(ctx, &this_val, args, env);
                 }
                 return Err(raise_type_error!("Error.prototype.toString called on non-object").into());
             }
             if func_name.starts_with("Object.") && !func_name.contains(".prototype.") {
                 let method = &func_name["Object.".len()..];
-                return crate::js_object::handle_object_method(mc, method, args, env);
+                return crate::js_object::handle_object_method(ctx, method, args, env);
             }
             Err(raise_eval_error!(format!("Global function {} not found", func_name)).into())
         }
@@ -983,7 +992,7 @@ pub fn handle_global_function<'gc>(
 }
 
 fn dynamic_import_function<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -992,16 +1001,16 @@ fn dynamic_import_function<'gc>(
         return Err(raise_type_error!("import() requires exactly one argument").into());
     }
     let module_specifier = args[0].clone();
-    let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
-    let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+    let promise = crate::core::new_gc_cell_ptr(ctx, crate::core::JSPromise::new());
+    let promise_obj = crate::js_promise::make_promise_js_object(ctx, promise, Some(*env))?;
 
-    crate::js_promise::queue_dynamic_import(mc, promise, module_specifier, *env);
+    crate::js_promise::queue_dynamic_import(ctx, promise, module_specifier, *env);
 
     Ok(Value::Object(promise_obj))
 }
 
 fn dynamic_import_defer_function<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1009,11 +1018,11 @@ fn dynamic_import_defer_function<'gc>(
         return Err(raise_type_error!("import.defer() requires exactly one argument").into());
     }
 
-    let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
-    let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+    let promise = crate::core::new_gc_cell_ptr(ctx, crate::core::JSPromise::new());
+    let promise_obj = crate::js_promise::make_promise_js_object(ctx, promise, Some(*env))?;
 
     let import_result = (|| -> Result<Value<'gc>, EvalError<'gc>> {
-        let prim = crate::core::to_primitive(mc, &args[0], "string", env)?;
+        let prim = crate::core::to_primitive(ctx, &args[0], "string", env)?;
         let module_name = match prim {
             Value::Symbol(_) => {
                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
@@ -1022,7 +1031,7 @@ fn dynamic_import_defer_function<'gc>(
         };
 
         if module_name == "<module source>" {
-            return Ok(crate::js_abstract_module_source::create_module_source_placeholder(mc, env)?);
+            return Ok(crate::js_abstract_module_source::create_module_source_placeholder(ctx, env)?);
         }
 
         let base_path = if let Some(cell) = crate::core::slot_get_chained(env, &InternalSlot::Filepath)
@@ -1033,19 +1042,19 @@ fn dynamic_import_defer_function<'gc>(
             None
         };
 
-        crate::js_module::load_module_deferred_namespace(mc, &module_name, base_path.as_deref(), Some(*env))
+        crate::js_module::load_module_deferred_namespace(ctx, &module_name, base_path.as_deref(), Some(*env))
     })();
 
     match import_result {
         Ok(module_value) => {
-            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+            crate::js_promise::resolve_promise(ctx, &promise, module_value, env);
         }
         Err(err) => {
             let reason = match err {
                 EvalError::Throw(val, _line, _column) => val,
-                EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
+                EvalError::Js(js_err) => crate::core::js_error_to_value(ctx, env, &js_err),
             };
-            crate::js_promise::reject_promise(mc, &promise, reason, env);
+            crate::js_promise::reject_promise(ctx, &promise, reason, env);
         }
     }
 
@@ -1053,7 +1062,7 @@ fn dynamic_import_defer_function<'gc>(
 }
 
 fn dynamic_import_source_function<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1061,14 +1070,14 @@ fn dynamic_import_source_function<'gc>(
         return Err(raise_type_error!("import.source() requires exactly one argument").into());
     }
 
-    let promise = crate::core::new_gc_cell_ptr(mc, crate::core::JSPromise::new());
-    let promise_obj = crate::js_promise::make_promise_js_object(mc, promise, Some(*env))?;
+    let promise = crate::core::new_gc_cell_ptr(ctx, crate::core::JSPromise::new());
+    let promise_obj = crate::js_promise::make_promise_js_object(ctx, promise, Some(*env))?;
 
     // Per spec (16.2.1.7.2 GetModuleSource), Source Text Module Records do not
     // support source phase imports — always reject with SyntaxError.
     // But first evaluate the specifier for observable side effects (ToString).
     let import_result = (|| -> Result<Value<'gc>, EvalError<'gc>> {
-        let prim = crate::core::to_primitive(mc, &args[0], "string", env)?;
+        let prim = crate::core::to_primitive(ctx, &args[0], "string", env)?;
         match prim {
             Value::Symbol(_) => {
                 return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
@@ -1084,19 +1093,19 @@ fn dynamic_import_source_function<'gc>(
 
     match import_result {
         Ok(module_value) => {
-            crate::js_promise::resolve_promise(mc, &promise, module_value, env);
+            crate::js_promise::resolve_promise(ctx, &promise, module_value, env);
         }
         Err(err) => {
             let reason = match err {
                 EvalError::Throw(val, _line, _column) => val,
-                EvalError::Js(js_err) => crate::core::js_error_to_value(mc, env, &js_err),
+                EvalError::Js(js_err) => crate::core::js_error_to_value(ctx, env, &js_err),
             };
-            crate::js_promise::reject_promise(mc, &promise, reason, env);
+            crate::js_promise::reject_promise(ctx, &promise, reason, env);
             // Mark this promise as "handled" so that the exit-logic does not
             // surface the rejection as a script error.  import.source() always
             // rejects for Source Text Module Records; callers who care will
             // attach a .catch() handler.
-            promise.borrow_mut(mc).handled = true;
+            promise.borrow_mut(ctx).handled = true;
         }
     }
 
@@ -1105,7 +1114,7 @@ fn dynamic_import_source_function<'gc>(
 
 #[allow(dead_code)]
 fn object_prototype_value_of<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1115,21 +1124,21 @@ fn object_prototype_value_of<'gc>(
     // object behavior are consistent.
     if let Some(this_rc) = crate::core::env_get(env, "this") {
         let this_val = this_rc.borrow().clone();
-        return crate::js_object::handle_value_of_method(mc, &this_val, args, env);
+        return crate::js_object::handle_value_of_method(ctx, &this_val, args, env);
     }
     Err(raise_eval_error!("Object.prototype.valueOf called without this").into())
 }
 
 #[allow(dead_code)]
 fn object_prototype_to_string<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Some(this_rc) = crate::core::env_get(env, "this") {
         let this_val = this_rc.borrow().clone();
         match this_val {
-            Value::Object(_) => return crate::js_object::handle_to_string_method(mc, &this_val, args, env),
+            Value::Object(_) => return crate::js_object::handle_to_string_method(ctx, &this_val, args, env),
             Value::String(_s) => {
                 return Ok(Value::String(utf8_to_utf16("[object String]")));
             }
@@ -1143,13 +1152,13 @@ fn object_prototype_to_string<'gc>(
                 return Ok(Value::String(utf8_to_utf16("[object BigInt]")));
             }
             // For null/undefined/symbol/others, delegate to handler directly
-            _ => return crate::js_object::handle_to_string_method(mc, &this_val, args, env),
+            _ => return crate::js_object::handle_to_string_method(ctx, &this_val, args, env),
         }
     }
     Err(raise_eval_error!("Object.prototype.toString called without this").into())
 }
 
-fn parse_int_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn parse_int_function<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate all arguments for side effects
 
     if args.is_empty() {
@@ -1159,7 +1168,7 @@ fn parse_int_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObj
     let input_val = args[0].clone();
     // ToString(string): call ToPrimitive(hint string) for objects
     let input_prim = match &input_val {
-        Value::Object(_) => crate::core::to_primitive(mc, &input_val, "string", env)?,
+        Value::Object(_) => crate::core::to_primitive(ctx, &input_val, "string", env)?,
         _ => input_val.clone(),
     };
     let input_str = match input_prim {
@@ -1187,7 +1196,7 @@ fn parse_int_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObj
 
     if args.len() > 1 {
         // ToInt32(radix): use proper ToNumber which handles objects via ToPrimitive
-        let r_num = crate::core::to_number_with_env(mc, env, &args[1])?;
+        let r_num = crate::core::to_number_with_env(ctx, env, &args[1])?;
 
         // ToInt32 logic inline
         let r_int = if !r_num.is_finite() || r_num == 0.0 {
@@ -1246,7 +1255,7 @@ fn parse_int_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObj
     Ok(Value::Number(sign * result))
 }
 
-fn parse_float_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn parse_float_function<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate all arguments for side effects
 
     if args.is_empty() {
@@ -1256,7 +1265,7 @@ fn parse_float_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSO
     let arg_val = args[0].clone();
     // ToString(string): call ToPrimitive(hint string) for objects
     let arg_prim = match &arg_val {
-        Value::Object(_) => crate::core::to_primitive(mc, &arg_val, "string", env)?,
+        Value::Object(_) => crate::core::to_primitive(ctx, &arg_val, "string", env)?,
         _ => arg_val.clone(),
     };
     let str_val = match arg_prim {
@@ -1350,19 +1359,19 @@ fn parse_float_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSO
     Ok(Value::Number(f64::NAN))
 }
 
-fn is_nan_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn is_nan_function<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let arg_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-    let num = crate::core::to_number_with_env(mc, env, &arg_val)?;
+    let num = crate::core::to_number_with_env(ctx, env, &arg_val)?;
     Ok(Value::Boolean(num.is_nan()))
 }
 
-fn is_finite_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn is_finite_function<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let arg_val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-    let num = crate::core::to_number_with_env(mc, env, &arg_val)?;
+    let num = crate::core::to_number_with_env(ctx, env, &arg_val)?;
     Ok(Value::Boolean(num.is_finite()))
 }
 
-fn function_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn function_constructor<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let sanitize_params_for_parse = |raw: &str| -> String {
         let chars: Vec<char> = raw.chars().collect();
         let mut out = String::with_capacity(raw.len());
@@ -1405,7 +1414,7 @@ fn function_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSO
         };
 
         let msg_val = Value::from(msg);
-        match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+        match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
             Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
             Ok(other) => Err(EvalError::Throw(other, None, None)),
             Err(_) => {
@@ -1426,7 +1435,7 @@ fn function_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSO
             Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
             Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
             _ => {
-                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, val, "string", env)?;
                 if matches!(prim, Value::Symbol(_)) {
                     return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                 }
@@ -1544,51 +1553,51 @@ fn function_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSO
             closure_data.enforce_strictness_inheritance = false;
             // Propagate "use strict" directive from the body to the closure
             closure_data.is_strict = body_is_strict;
-            let closure_val = Value::Closure(Gc::new(mc, closure_data));
+            let closure_val = Value::Closure(Gc::new(ctx, closure_data));
 
             // Create a function object wrapper so it has a proper `prototype` and property attributes
-            let func_obj = crate::core::new_js_object_data(mc);
+            let func_obj = crate::core::new_js_object_data(ctx);
             // Set __proto__ to Function.prototype from the selected realm
             if let Some(func_ctor_val) = crate::core::env_get(&global_env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                 && let Some(proto_val) = crate::core::object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(proto) = &*proto_val.borrow()
             {
-                func_obj.borrow_mut(mc).prototype = Some(*proto);
+                func_obj.borrow_mut(ctx).prototype = Some(*proto);
             }
 
-            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
+            func_obj.borrow_mut(ctx).set_closure(Some(new_gc_cell_ptr(ctx, closure_val)));
 
             // Record origin global so callers can trace which realm this function was created in
-            slot_set(mc, &func_obj, InternalSlot::OriginGlobal, &Value::Object(global_env));
+            slot_set(ctx, &func_obj, InternalSlot::OriginGlobal, &Value::Object(global_env));
 
             // Set name as anonymous for Function constructor-produced functions
-            object_set_key_value(mc, &func_obj, "name", &Value::from("anonymous"))?;
-            func_obj.borrow_mut(mc).set_non_writable("name");
-            func_obj.borrow_mut(mc).set_non_enumerable("name");
-            func_obj.borrow_mut(mc).set_configurable("name");
+            object_set_key_value(ctx, &func_obj, "name", &Value::from("anonymous"))?;
+            func_obj.borrow_mut(ctx).set_non_writable("name");
+            func_obj.borrow_mut(ctx).set_non_enumerable("name");
+            func_obj.borrow_mut(ctx).set_configurable("name");
 
             // Set length
-            let desc_len = crate::core::create_descriptor_object(mc, &Value::Number((params.len()) as f64), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "length", &desc_len)?;
+            let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number((params.len()) as f64), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &func_obj, "length", &desc_len)?;
 
             // Create prototype object and attach
-            let proto_obj = crate::core::new_js_object_data(mc);
+            let proto_obj = crate::core::new_js_object_data(ctx);
             if let Some(obj_val) = crate::core::env_get(&global_env, "Object")
                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
                 && let Some(obj_proto_val) = crate::core::object_get_key_value(obj_ctor, "prototype")
                 && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
             {
-                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+                proto_obj.borrow_mut(ctx).prototype = Some(*obj_proto);
                 log::warn!(
                     "function_constructor: Object.prototype ptr used for new function proto = {:p}",
                     Gc::as_ptr(*obj_proto)
                 );
             }
-            let desc_ctor = crate::core::create_descriptor_object(mc, &Value::Object(func_obj), true, false, true)?;
-            crate::js_object::define_property_internal(mc, &proto_obj, "constructor", &desc_ctor)?;
-            let desc_proto = crate::core::create_descriptor_object(mc, &Value::Object(proto_obj), true, false, false)?;
-            crate::js_object::define_property_internal(mc, &func_obj, "prototype", &desc_proto)?;
+            let desc_ctor = crate::core::create_descriptor_object(ctx, &Value::Object(func_obj), true, false, true)?;
+            crate::js_object::define_property_internal(ctx, &proto_obj, "constructor", &desc_ctor)?;
+            let desc_proto = crate::core::create_descriptor_object(ctx, &Value::Object(proto_obj), true, false, false)?;
+            crate::js_object::define_property_internal(ctx, &func_obj, "prototype", &desc_proto)?;
 
             Ok(Value::Object(func_obj))
         } else {
@@ -1600,7 +1609,7 @@ fn function_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSO
 }
 
 fn generator_function_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1644,7 +1653,7 @@ fn generator_function_constructor<'gc>(
             Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
             Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
             _ => {
-                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, val, "string", env)?;
                 if matches!(prim, Value::Symbol(_)) {
                     return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                 }
@@ -1724,14 +1733,14 @@ fn generator_function_constructor<'gc>(
     if let Some(Statement { kind, .. }) = stmts.first()
         && let StatementKind::Expr(expr) = &**kind
     {
-        return crate::core::evaluate_expr(mc, &global_env, expr);
+        return crate::core::evaluate_expr(ctx, &global_env, expr);
     }
 
     Err(raise_type_error!("Failed to parse generator function body").into())
 }
 
 fn async_function_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1775,7 +1784,7 @@ fn async_function_constructor<'gc>(
             Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
             Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
             _ => {
-                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, val, "string", env)?;
                 if matches!(prim, Value::Symbol(_)) {
                     return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                 }
@@ -1844,14 +1853,14 @@ fn async_function_constructor<'gc>(
     if let Some(Statement { kind, .. }) = stmts.first()
         && let StatementKind::Expr(expr) = &**kind
     {
-        return crate::core::evaluate_expr(mc, &global_env, expr);
+        return crate::core::evaluate_expr(ctx, &global_env, expr);
     }
 
     Err(raise_type_error!("Failed to parse async function body").into())
 }
 
 fn async_generator_function_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1895,7 +1904,7 @@ fn async_generator_function_constructor<'gc>(
             Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) => Ok(crate::core::value_to_string(val)),
             Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a string").into()),
             _ => {
-                let prim = crate::core::to_primitive(mc, val, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, val, "string", env)?;
                 if matches!(prim, Value::Symbol(_)) {
                     return Err(raise_type_error!("Cannot convert a Symbol value to a string").into());
                 }
@@ -1975,7 +1984,7 @@ fn async_generator_function_constructor<'gc>(
     if let Some(Statement { kind, .. }) = stmts.first()
         && let StatementKind::Expr(expr) = &**kind
     {
-        return crate::core::evaluate_expr(mc, &global_env, expr);
+        return crate::core::evaluate_expr(ctx, &global_env, expr);
     }
 
     Err(raise_type_error!("Failed to parse async generator function body").into())
@@ -2222,13 +2231,13 @@ fn uri_decode<'gc>(code_units: &[u16], reserved_set: &[u8]) -> Result<Value<'gc>
 
 /// Convert the first argument of a URI function to a Vec<u16> (ToString per spec).
 /// Uses ToPrimitive(string) for objects, which calls toString() before valueOf().
-fn uri_to_string<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
+fn uri_to_string<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Vec<u16>, EvalError<'gc>> {
     let arg_val = if args.is_empty() { &Value::Undefined } else { &args[0] };
     match arg_val {
         Value::String(s) => Ok(s.clone()),
         _ => {
             // ToPrimitive(value, "string") → then ToString
-            let prim = crate::core::to_primitive(mc, arg_val, "string", env)?;
+            let prim = crate::core::to_primitive(ctx, arg_val, "string", env)?;
             match &prim {
                 Value::String(s) => Ok(s.clone()),
                 _ => Ok(utf8_to_utf16(&crate::core::value_to_string(&prim))),
@@ -2237,13 +2246,13 @@ fn uri_to_string<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDa
     }
 }
 
-fn encode_uri_component<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
-    let code_units = uri_to_string(mc, args, env)?;
+fn encode_uri_component<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(ctx, args, env)?;
     uri_encode(&code_units, &URI_UNESCAPED)
 }
 
-fn decode_uri_component<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
-    let code_units = uri_to_string(mc, args, env)?;
+fn decode_uri_component<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(ctx, args, env)?;
     // decodeURIComponent: no reserved set — decode everything
     uri_decode(&code_units, &[])
 }
@@ -2260,11 +2269,11 @@ fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError
 }
 
 fn symbol_prototype_value_of<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let this_val = crate::js_class::evaluate_this(mc, env)?;
+    let this_val = crate::js_class::evaluate_this(ctx, env)?;
     match this_val {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
         Value::Object(obj) => {
@@ -2280,11 +2289,11 @@ fn symbol_prototype_value_of<'gc>(
 }
 
 fn symbol_prototype_to_string<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let this_val = crate::js_class::evaluate_this(mc, env)?;
+    let this_val = crate::js_class::evaluate_this(ctx, env)?;
     let sym = match this_val {
         Value::Symbol(s) => s,
         Value::Object(obj) => {
@@ -2307,7 +2316,7 @@ fn symbol_prototype_to_string<'gc>(
     Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", desc))))
 }
 
-fn symbol_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+fn symbol_constructor<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate all arguments for side effects
 
     let description = if args.is_empty() {
@@ -2321,7 +2330,7 @@ fn symbol_constructor<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>]) -> Result<V
         }
     };
 
-    let symbol_data = Gc::new(mc, SymbolData::new(description.as_deref()));
+    let symbol_data = Gc::new(ctx, SymbolData::new(description.as_deref()));
     Ok(Value::Symbol(symbol_data))
 }
 
@@ -2511,7 +2520,7 @@ fn walk_stmt(s: &Statement, has_super_call: &mut bool, has_super_prop: &mut bool
 }
 
 fn evaluate_new_expression<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -2520,7 +2529,7 @@ fn evaluate_new_expression<'gc>(
     Err(raise_eval_error!("Invalid new expression").into())
 }
 
-fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn evalute_eval_function<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // eval function - execute the code
     if args.is_empty() {
         return Ok(Value::Undefined);
@@ -2575,7 +2584,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+            match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
                 Ok(other) => return Err(EvalError::Throw(other, None, None)),
                 Err(_) => return Err(raise_syntax_error!(msg).into()),
@@ -2656,7 +2665,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+            match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => {
                     return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
@@ -2795,7 +2804,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+            match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => {
                     return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
@@ -2813,7 +2822,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
             } else {
                 return Err(raise_syntax_error!(msg).into());
             };
-            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+            match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => {
                     return Err(EvalError::Throw(Value::Object(obj), None, None));
                 }
@@ -2844,7 +2853,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+                match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => {
                         return Err(EvalError::Throw(Value::Object(obj), None, None));
                     }
@@ -2898,7 +2907,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
                 } else {
                     return Err(raise_syntax_error!(msg).into());
                 };
-                match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+                match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                     Ok(Value::Object(obj)) => {
                         return Err(EvalError::Throw(Value::Object(obj), None, None));
                     }
@@ -2920,7 +2929,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
         } else {
             return Err(raise_syntax_error!(msg).into());
         };
-        match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+        match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
             Ok(Value::Object(obj)) => return Err(EvalError::Throw(Value::Object(obj), None, None)),
             Ok(other) => return Err(EvalError::Throw(other, None, None)),
             Err(_) => return Err(raise_syntax_error!(msg).into()),
@@ -2983,15 +2992,15 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
         && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
     {
         log::trace!("DEBUG: indirect strict eval - creating fresh declarative environment");
-        let new_env = new_js_object_data(mc);
-        new_env.borrow_mut(mc).prototype = Some(*env);
+        let new_env = new_js_object_data(ctx);
+        new_env.borrow_mut(ctx).prototype = Some(*env);
         exec_env = new_env;
     } else if !is_indirect_eval {
         // Direct eval is handled via handle_eval_function in eval.rs,
         // not through this native_eval path.  No action needed here.
     }
 
-    match crate::core::evaluate_statements(mc, &exec_env, &stmts) {
+    match crate::core::evaluate_statements(ctx, &exec_env, &stmts) {
         Ok(v) => Ok(v),
         Err(err) => {
             // Convert parse/eval errors into a thrown JS Error object so that
@@ -3003,7 +3012,7 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
             } else {
                 return Err(err);
             };
-            match crate::js_class::evaluate_new(mc, env, &constructor_val, &[msg_val], None) {
+            match crate::js_class::evaluate_new(ctx, env, &constructor_val, &[msg_val], None) {
                 Ok(Value::Object(obj)) => Err(EvalError::Throw(Value::Object(obj), None, None)),
                 Ok(other) => Err(EvalError::Throw(other, None, None)),
                 Err(_) => Err(err),
@@ -3012,20 +3021,20 @@ fn evalute_eval_function<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JS
     }
 }
 
-fn encode_uri<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
-    let code_units = uri_to_string(mc, args, env)?;
+fn encode_uri<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(ctx, args, env)?;
     uri_encode(&code_units, &URI_UNESCAPED_WITH_RESERVED)
 }
 
-fn decode_uri<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
-    let code_units = uri_to_string(mc, args, env)?;
+fn decode_uri<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    let code_units = uri_to_string(ctx, args, env)?;
     // decodeURI: reserved chars + '#' are NOT decoded
     uri_decode(&code_units, &URI_RESERVED_PLUS_HASH)
 }
 
 #[allow(dead_code)]
 fn internal_resolve_promise<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3035,7 +3044,7 @@ fn internal_resolve_promise<'gc>(
 
     match &args[0] {
         Value::Promise(promise) => {
-            crate::js_promise::resolve_promise(_mc, promise, args[1].clone(), env);
+            crate::js_promise::resolve_promise(_ctx, promise, args[1].clone(), env);
             Ok(Value::Undefined)
         }
         _ => Err(raise_type_error!("First argument must be a promise").into()),
@@ -3044,7 +3053,7 @@ fn internal_resolve_promise<'gc>(
 
 #[allow(dead_code)]
 fn internal_reject_promise<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3054,7 +3063,7 @@ fn internal_reject_promise<'gc>(
 
     match &args[0] {
         Value::Promise(promise) => {
-            crate::js_promise::reject_promise(mc, promise, args[1].clone(), env);
+            crate::js_promise::reject_promise(ctx, promise, args[1].clone(), env);
             Ok(Value::Undefined)
         }
         _ => Err(raise_type_error!("First argument must be a promise").into()),
@@ -3063,35 +3072,35 @@ fn internal_reject_promise<'gc>(
 
 #[allow(dead_code)]
 fn internal_promise_allsettled_resolve<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for legacy allSettled - requires 3 args: (idx, value, shared_state)
     validate_internal_args(args, 3)?;
     // let numbers = validate_number_args(&args, 1)?;
-    // // crate::js_promise::__internal_promise_allsettled_resolve(mc, numbers[0], args[1].clone(), args[2].clone())?;
+    // // crate::js_promise::__internal_promise_allsettled_resolve(ctx, numbers[0], args[1].clone(), args[2].clone())?;
     // Ok(Value::Undefined)
     todo!()
 }
 
 #[allow(dead_code)]
 fn internal_promise_allsettled_reject<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Internal function for legacy allSettled - requires 3 args: (idx, reason, shared_state)
     validate_internal_args(args, 3)?;
     // let numbers = validate_number_args(&args, 1)?;
-    // crate::js_promise::__internal_promise_allsettled_reject(mc, numbers[0], args[1].clone(), args[2].clone())?;
+    // crate::js_promise::__internal_promise_allsettled_reject(ctx, numbers[0], args[1].clone(), args[2].clone())?;
     // Ok(Value::Undefined)
     todo!()
 }
 
 #[allow(dead_code)]
 fn internal_allsettled_state_record_fulfilled<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3104,14 +3113,14 @@ fn internal_allsettled_state_record_fulfilled<'gc>(
         numbers[1],
         args[2]
     );
-    // crate::js_promise::__internal_allsettled_state_record_fulfilled(mc, numbers[0], numbers[1], args[2].clone())?;
+    // crate::js_promise::__internal_allsettled_state_record_fulfilled(ctx, numbers[0], numbers[1], args[2].clone())?;
     // Ok(Value::Undefined)
     todo!()
 }
 
 #[allow(dead_code)]
 fn internal_allsettled_state_record_rejected<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3124,14 +3133,14 @@ fn internal_allsettled_state_record_rejected<'gc>(
         numbers[1],
         args[2]
     );
-    // crate::js_promise::__internal_allsettled_state_record_rejected(mc, numbers[0], numbers[1], args[2].clone())?;
+    // crate::js_promise::__internal_allsettled_state_record_rejected(ctx, numbers[0], numbers[1], args[2].clone())?;
     // Ok(Value::Undefined)
     todo!()
 }
 
 #[allow(dead_code)]
 fn internal_promise_any_resolve<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3139,7 +3148,7 @@ fn internal_promise_any_resolve<'gc>(
     validate_internal_args(args, 2)?;
     match &args[1] {
         Value::Promise(_result_promise) => {
-            // crate::js_promise::__internal_promise_any_resolve(mc, args[0].clone(), result_promise.clone());
+            // crate::js_promise::__internal_promise_any_resolve(ctx, args[0].clone(), result_promise.clone());
             // Ok(Value::Undefined)
             todo!()
         }
@@ -3149,7 +3158,7 @@ fn internal_promise_any_resolve<'gc>(
 
 #[allow(dead_code)]
 fn internal_promise_any_reject<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3161,7 +3170,7 @@ fn internal_promise_any_reject<'gc>(
 
 #[allow(dead_code)]
 fn internal_promise_race_resolve<'gc>(
-    _mc: &GcContext<'gc>,
+    _ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3169,7 +3178,7 @@ fn internal_promise_race_resolve<'gc>(
     validate_internal_args(args, 2)?;
     match &args[1] {
         Value::Promise(_result_promise) => {
-            // crate::js_promise::__internal_promise_race_resolve(mc, args[0].clone(), result_promise.clone());
+            // crate::js_promise::__internal_promise_race_resolve(ctx, args[0].clone(), result_promise.clone());
             // Ok(Value::Undefined)
             todo!()
         }
@@ -3178,7 +3187,7 @@ fn internal_promise_race_resolve<'gc>(
 }
 
 fn handle_object_has_own_property<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3186,7 +3195,7 @@ fn handle_object_has_own_property<'gc>(
     if args.len() != 1 {
         return Err(raise_eval_error!("hasOwnProperty requires one argument").into());
     }
-    let _ = args[0].to_property_key(mc, env)?;
+    let _ = args[0].to_property_key(ctx, env)?;
     let key_val = args[0].clone();
     if let Some(this_rc) = crate::core::env_get(env, "this") {
         let this_val = this_rc.borrow().clone();
@@ -3252,7 +3261,7 @@ fn handle_object_has_own_property<'gc>(
                             .map(|meta| get_own_property(&meta, key.as_str()).is_some())
                             .unwrap_or(false);
                         if get_own_property(&obj, key.as_str()).is_some() || is_export_name {
-                            let val = crate::core::get_property_with_accessors(mc, env, &obj, key.as_str())?;
+                            let val = crate::core::get_property_with_accessors(ctx, env, &obj, key.as_str())?;
                             if matches!(val, Value::Undefined) {
                                 return Err(raise_reference_error!("Cannot access binding before initialization").into());
                             }
@@ -3330,7 +3339,7 @@ fn handle_object_has_own_property<'gc>(
 }
 
 fn handle_object_property_is_enumerable<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3367,7 +3376,7 @@ fn handle_object_property_is_enumerable<'gc>(
                         .map(|meta| get_own_property(&meta, key.as_str()).is_some())
                         .unwrap_or(false);
                     if get_own_property(&obj, key.as_str()).is_some() || is_export_name {
-                        let val = crate::core::get_property_with_accessors(mc, env, &obj, key.as_str())?;
+                        let val = crate::core::get_property_with_accessors(ctx, env, &obj, key.as_str())?;
                         if matches!(val, Value::Undefined) {
                             return Err(raise_reference_error!("Cannot access binding before initialization").into());
                         }
@@ -3404,7 +3413,7 @@ fn handle_object_property_is_enumerable<'gc>(
 }
 
 fn handle_object_is_prototype_of<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3423,7 +3432,7 @@ fn handle_object_is_prototype_of<'gc>(
     let this_obj = match this_val {
         Value::Object(o) => o,
         Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
-        _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&this_val), env)? {
+        _ => match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&this_val), env)? {
             Value::Object(o) => o,
             _ => return Err(raise_type_error!("Cannot convert value to object").into()),
         },
@@ -3432,13 +3441,13 @@ fn handle_object_is_prototype_of<'gc>(
     // Helper: get the [[GetPrototypeOf]] result for the given value,
     // handling Proxy wrappers (Objects with __proxy__) and Value::Proxy.
     // Uses proxy_get_prototype_of which includes invariant checks (spec §10.5.1).
-    let get_prototype_of = |mc: &GcContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
+    let get_prototype_of = |ctx: &GcContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
         // Check for proxy wrapper Object
         if let Value::Object(obj) = v {
             if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
-                let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
+                let proto_val = crate::js_proxy::proxy_get_prototype_of(ctx, proxy)?;
                 return match proto_val {
                     Value::Object(p) => Ok(Some(p)),
                     Value::Null => Ok(None),
@@ -3448,7 +3457,7 @@ fn handle_object_is_prototype_of<'gc>(
             return Ok(obj.borrow().prototype);
         }
         if let Value::Proxy(proxy) = v {
-            let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
+            let proto_val = crate::js_proxy::proxy_get_prototype_of(ctx, proxy)?;
             return match proto_val {
                 Value::Object(p) => Ok(Some(p)),
                 Value::Null => Ok(None),
@@ -3458,19 +3467,19 @@ fn handle_object_is_prototype_of<'gc>(
         Ok(None)
     };
 
-    let mut current = get_prototype_of(mc, &target_val)?;
+    let mut current = get_prototype_of(ctx, &target_val)?;
 
     while let Some(proto) = current {
         if Gc::ptr_eq(proto, this_obj) {
             return Ok(Value::Boolean(true));
         }
-        current = get_prototype_of(mc, &Value::Object(proto))?;
+        current = get_prototype_of(ctx, &Value::Object(proto))?;
     }
 
     Ok(Value::Boolean(false))
 }
 
-fn ordinary_set_prototype_of<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, proto_obj: Option<JSObjectDataPtr<'gc>>) -> bool {
+fn ordinary_set_prototype_of<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, proto_obj: Option<JSObjectDataPtr<'gc>>) -> bool {
     // Immutable prototype exotic objects (e.g. Object.prototype) only allow
     // setting the prototype to the *same* value (SameValue check). Spec §9.4.7.1.
     if crate::core::slot_has(obj, &InternalSlot::ImmutablePrototype) {
@@ -3509,12 +3518,12 @@ fn ordinary_set_prototype_of<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc
         }
     }
 
-    obj.borrow_mut(mc).prototype = proto_obj;
+    obj.borrow_mut(ctx).prototype = proto_obj;
     true
 }
 
 fn handle_object_proto_get<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3524,7 +3533,7 @@ fn handle_object_proto_get<'gc>(
         Value::Undefined
     };
     if let Value::Proxy(proxy) = this_val {
-        let result = crate::js_proxy::proxy_get_prototype_of(mc, &proxy)?;
+        let result = crate::js_proxy::proxy_get_prototype_of(ctx, &proxy)?;
 
         return match result {
             Value::Object(_) | Value::Null => Ok(result),
@@ -3535,7 +3544,7 @@ fn handle_object_proto_get<'gc>(
     let this_obj = match this_val {
         Value::Object(o) => o,
         Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
-        _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&this_val), env)? {
+        _ => match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&this_val), env)? {
             Value::Object(o) => o,
             _ => return Err(raise_type_error!("Cannot convert value to object").into()),
         },
@@ -3544,7 +3553,7 @@ fn handle_object_proto_get<'gc>(
     if let Some(proxy_ptr) = crate::core::slot_get(&this_obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
     {
-        let result = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
+        let result = crate::js_proxy::proxy_get_prototype_of(ctx, proxy)?;
 
         return match result {
             Value::Object(_) | Value::Null => Ok(result),
@@ -3560,7 +3569,7 @@ fn handle_object_proto_get<'gc>(
 }
 
 fn handle_object_proto_set<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -3577,12 +3586,12 @@ fn handle_object_proto_set<'gc>(
             _ => return Ok(Value::Undefined),
         };
         let trap_result = crate::js_proxy::apply_proxy_trap(
-            mc,
+            ctx,
             &proxy,
             "setPrototypeOf",
             vec![(*proxy.target).clone(), proto_arg],
             || match &*proxy.target {
-                Value::Object(target_obj) => Ok(Value::Boolean(ordinary_set_prototype_of(mc, target_obj, proto_obj))),
+                Value::Object(target_obj) => Ok(Value::Boolean(ordinary_set_prototype_of(ctx, target_obj, proto_obj))),
                 _ => Ok(Value::Boolean(false)),
             },
         )?;
@@ -3595,7 +3604,7 @@ fn handle_object_proto_set<'gc>(
     let this_obj = match this_val {
         Value::Object(o) => o,
         Value::Undefined | Value::Null => return Err(raise_type_error!("Cannot convert undefined or null to object").into()),
-        _ => match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&this_val), env)? {
+        _ => match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&this_val), env)? {
             Value::Object(o) => o,
             _ => return Err(raise_type_error!("Cannot convert value to object").into()),
         },
@@ -3611,39 +3620,38 @@ fn handle_object_proto_set<'gc>(
     if let Some(proxy_ptr) = crate::core::slot_get(&this_obj, &InternalSlot::Proxy)
         && let Value::Proxy(proxy) = &*proxy_ptr.borrow()
     {
-        let trap_result =
-            crate::js_proxy::apply_proxy_trap(
-                mc,
-                proxy,
-                "setPrototypeOf",
-                vec![(*proxy.target).clone(), proto_arg],
-                || match &*proxy.target {
-                    Value::Object(target_obj) => Ok(Value::Boolean(ordinary_set_prototype_of(mc, target_obj, proto_obj))),
-                    _ => Ok(Value::Boolean(false)),
-                },
-            )?;
+        let trap_result = crate::js_proxy::apply_proxy_trap(
+            ctx,
+            proxy,
+            "setPrototypeOf",
+            vec![(*proxy.target).clone(), proto_arg],
+            || match &*proxy.target {
+                Value::Object(target_obj) => Ok(Value::Boolean(ordinary_set_prototype_of(ctx, target_obj, proto_obj))),
+                _ => Ok(Value::Boolean(false)),
+            },
+        )?;
         if !trap_result.to_truthy() {
             return Err(raise_type_error!("Cannot set prototype").into());
         }
         return Ok(Value::Undefined);
     }
 
-    if !ordinary_set_prototype_of(mc, &this_obj, proto_obj) {
+    if !ordinary_set_prototype_of(ctx, &this_obj, proto_obj) {
         return Err(raise_type_error!("Cannot set prototype").into());
     }
 
     Ok(Value::Undefined)
 }
 
-pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+pub fn initialize_function<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     log::debug!("initialize_function: starting initialization of Function constructor");
-    let func_ctor = new_js_object_data(mc);
-    slot_set(mc, &func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &func_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Function")));
+    let func_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &func_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &func_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Function")));
     // Stamp with OriginGlobal so evaluate_new can discover the constructor's realm
-    slot_set(mc, &func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
+    slot_set(ctx, &func_ctor, InternalSlot::OriginGlobal, &Value::Object(*env));
 
-    let func_proto = new_js_object_data(mc);
+    let func_proto = new_js_object_data(ctx);
 
     // Link Function.prototype to Object.prototype so function objects inherit object methods
     if let Some(obj_val) = crate::core::env_get(env, "Object")
@@ -3651,14 +3659,14 @@ pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         && let Some(obj_proto_val) = crate::core::object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
     {
-        func_proto.borrow_mut(mc).prototype = Some(*obj_proto);
+        func_proto.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
-    object_set_key_value(mc, &func_ctor, "prototype", &Value::Object(func_proto))?;
-    func_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    func_ctor.borrow_mut(mc).set_non_writable("prototype");
-    func_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &func_proto, "constructor", &Value::Object(func_ctor))?;
+    object_set_key_value(ctx, &func_ctor, "prototype", &Value::Object(func_proto))?;
+    func_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    func_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    func_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &func_proto, "constructor", &Value::Object(func_ctor))?;
 
     // Make Function.prototype itself callable (typeof Function.prototype === 'function') by
     // attaching an empty closure; engines typically expose Function.prototype as a function object.
@@ -3666,69 +3674,71 @@ pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         env: Some(*env),
         ..ClosureData::default()
     };
-    let proto_closure_val = Value::Closure(Gc::new(mc, proto_closure));
-    func_proto.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, proto_closure_val)));
+    let proto_closure_val = Value::Closure(Gc::new(ctx, proto_closure));
+    func_proto
+        .borrow_mut(ctx)
+        .set_closure(Some(new_gc_cell_ptr(ctx, proto_closure_val)));
     // Function.prototype is callable but not constructable; ensure it has no own "prototype" property.
     func_proto
-        .borrow_mut(mc)
+        .borrow_mut(ctx)
         .properties
         .shift_remove(&PropertyKey::String("prototype".to_string()));
     func_proto
-        .borrow_mut(mc)
+        .borrow_mut(ctx)
         .non_enumerable
         .remove(&PropertyKey::String("prototype".to_string()));
     func_proto
-        .borrow_mut(mc)
+        .borrow_mut(ctx)
         .non_writable
         .remove(&PropertyKey::String("prototype".to_string()));
     func_proto
-        .borrow_mut(mc)
+        .borrow_mut(ctx)
         .non_configurable
         .remove(&PropertyKey::String("prototype".to_string()));
 
     // Function.prototype.toString
     object_set_key_value(
-        mc,
+        ctx,
         &func_proto,
         "toString",
         &Value::Function("Function.prototype.toString".to_string()),
     )?;
-    func_proto.borrow_mut(mc).set_non_enumerable("toString");
+    func_proto.borrow_mut(ctx).set_non_enumerable("toString");
 
     // Function.prototype.bind
-    object_set_key_value(mc, &func_proto, "bind", &Value::Function("Function.prototype.bind".to_string()))?;
-    func_proto.borrow_mut(mc).set_non_enumerable("bind");
+    object_set_key_value(ctx, &func_proto, "bind", &Value::Function("Function.prototype.bind".to_string()))?;
+    func_proto.borrow_mut(ctx).set_non_enumerable("bind");
 
     // Function.prototype.call
     {
-        let call_obj = crate::core::new_js_object_data(mc);
+        let call_obj = crate::core::new_js_object_data(ctx);
         call_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Function.prototype.call".to_string()))));
-        call_obj.borrow_mut(mc).prototype = Some(func_proto);
-        let call_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("call")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &call_obj, "name", &call_name_desc)?;
-        let call_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &call_obj, "length", &call_len_desc)?;
-        slot_set(mc, &call_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
-        let call_desc = crate::core::create_descriptor_object(mc, &Value::Object(call_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &func_proto, "call", &call_desc)?;
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function("Function.prototype.call".to_string()))));
+        call_obj.borrow_mut(ctx).prototype = Some(func_proto);
+        let call_name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("call")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &call_obj, "name", &call_name_desc)?;
+        let call_len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &call_obj, "length", &call_len_desc)?;
+        slot_set(ctx, &call_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        let call_desc = crate::core::create_descriptor_object(ctx, &Value::Object(call_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &func_proto, "call", &call_desc)?;
     }
 
     // Function.prototype.apply
     {
-        let apply_obj = crate::core::new_js_object_data(mc);
+        let apply_obj = crate::core::new_js_object_data(ctx);
         apply_obj
-            .borrow_mut(mc)
-            .set_closure(Some(new_gc_cell_ptr(mc, Value::Function("Function.prototype.apply".to_string()))));
-        apply_obj.borrow_mut(mc).prototype = Some(func_proto);
-        let apply_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("apply")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &apply_obj, "name", &apply_name_desc)?;
-        let apply_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(2.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &apply_obj, "length", &apply_len_desc)?;
-        slot_set(mc, &apply_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
-        let apply_desc = crate::core::create_descriptor_object(mc, &Value::Object(apply_obj), true, false, true)?;
-        crate::js_object::define_property_internal(mc, &func_proto, "apply", &apply_desc)?;
+            .borrow_mut(ctx)
+            .set_closure(Some(new_gc_cell_ptr(ctx, Value::Function("Function.prototype.apply".to_string()))));
+        apply_obj.borrow_mut(ctx).prototype = Some(func_proto);
+        let apply_name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("apply")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &apply_obj, "name", &apply_name_desc)?;
+        let apply_len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(2.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &apply_obj, "length", &apply_len_desc)?;
+        slot_set(ctx, &apply_obj, InternalSlot::OriginGlobal, &Value::Object(*env));
+        let apply_desc = crate::core::create_descriptor_object(ctx, &Value::Object(apply_obj), true, false, true)?;
+        crate::js_object::define_property_internal(ctx, &func_proto, "apply", &apply_desc)?;
     }
 
     // Function.prototype[@@hasInstance]
@@ -3738,54 +3748,64 @@ pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         && let Value::Symbol(has_instance_sym) = &*has_instance_sym_val.borrow()
     {
         let has_instance_fn = Value::Function("Function.prototype.[Symbol.hasInstance]".to_string());
-        let desc = crate::core::create_descriptor_object(mc, &has_instance_fn, false, false, false)?;
-        crate::js_object::define_property_internal(mc, &func_proto, PropertyKey::Symbol(*has_instance_sym), &desc)?;
+        let desc = crate::core::create_descriptor_object(ctx, &has_instance_fn, false, false, false)?;
+        crate::js_object::define_property_internal(ctx, &func_proto, PropertyKey::Symbol(*has_instance_sym), &desc)?;
     }
 
-    func_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    func_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Define Function.prototype.length/name in spec order and attributes.
     // length: { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
-    let proto_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &func_proto, "length", &proto_len_desc)?;
+    let proto_len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &func_proto, "length", &proto_len_desc)?;
     // name: { [[Writable]]: false, [[Enumerable]]: false, [[Configurable]]: true }
-    let proto_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &func_proto, "name", &proto_name_desc)?;
+    let proto_name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &func_proto, "name", &proto_name_desc)?;
 
     // §10.2.4 Create %ThrowTypeError% intrinsic — a unique frozen function object per realm.
-    let throw_type_error = crate::core::new_js_object_data(mc);
-    throw_type_error.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
-        mc,
+    let throw_type_error = crate::core::new_js_object_data(ctx);
+    throw_type_error.borrow_mut(ctx).set_closure(Some(crate::core::new_gc_cell_ptr(
+        ctx,
         Value::Function("Function.prototype.restrictedThrow".to_string()),
     )));
     // Set [[Prototype]] to Function.prototype
-    throw_type_error.borrow_mut(mc).prototype = Some(func_proto);
+    throw_type_error.borrow_mut(ctx).prototype = Some(func_proto);
     // Stamp OriginGlobal so get_function_realm returns this realm's env
     // (critical for cross-realm ThrowTypeError to throw the correct realm's TypeError).
-    crate::core::slot_set(mc, &throw_type_error, crate::core::InternalSlot::OriginGlobal, &Value::Object(*env));
+    crate::core::slot_set(
+        ctx,
+        &throw_type_error,
+        crate::core::InternalSlot::OriginGlobal,
+        &Value::Object(*env),
+    );
     // length = 0: { writable: false, enumerable: false, configurable: false }
-    let tte_len_desc = crate::core::create_descriptor_object(mc, &Value::Number(0.0), false, false, false)?;
-    crate::js_object::define_property_internal(mc, &throw_type_error, "length", &tte_len_desc)?;
+    let tte_len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(0.0), false, false, false)?;
+    crate::js_object::define_property_internal(ctx, &throw_type_error, "length", &tte_len_desc)?;
     // name = "": { writable: false, enumerable: false, configurable: false }
-    let tte_name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("")), false, false, false)?;
-    crate::js_object::define_property_internal(mc, &throw_type_error, "name", &tte_name_desc)?;
+    let tte_name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("")), false, false, false)?;
+    crate::js_object::define_property_internal(ctx, &throw_type_error, "name", &tte_name_desc)?;
     // Make non-extensible
-    throw_type_error.borrow_mut(mc).prevent_extensions();
+    throw_type_error.borrow_mut(ctx).prevent_extensions();
     // Store on env for reuse (arguments.callee in strict mode, etc.)
-    crate::core::slot_set(mc, env, crate::core::InternalSlot::ThrowTypeError, &Value::Object(throw_type_error));
+    crate::core::slot_set(
+        ctx,
+        env,
+        crate::core::InternalSlot::ThrowTypeError,
+        &Value::Object(throw_type_error),
+    );
 
     // Define restricted 'caller' and 'arguments' accessors using %ThrowTypeError%
     let thrower_val = Value::Object(throw_type_error);
-    let restricted_desc = crate::core::new_js_object_data(mc);
-    object_set_key_value(mc, &restricted_desc, "get", &thrower_val)?;
-    object_set_key_value(mc, &restricted_desc, "set", &thrower_val)?;
-    object_set_key_value(mc, &restricted_desc, "configurable", &Value::Boolean(true))?;
-    crate::js_object::define_property_internal(mc, &func_proto, "caller", &restricted_desc)?;
-    crate::js_object::define_property_internal(mc, &func_proto, "arguments", &restricted_desc)?;
+    let restricted_desc = crate::core::new_js_object_data(ctx);
+    object_set_key_value(ctx, &restricted_desc, "get", &thrower_val)?;
+    object_set_key_value(ctx, &restricted_desc, "set", &thrower_val)?;
+    object_set_key_value(ctx, &restricted_desc, "configurable", &Value::Boolean(true))?;
+    crate::js_object::define_property_internal(ctx, &func_proto, "caller", &restricted_desc)?;
+    crate::js_object::define_property_internal(ctx, &func_proto, "arguments", &restricted_desc)?;
 
     // Define Function.length as non-writable to match spec so assignments to it
     // in strict mode throw a TypeError.
-    let desc_len = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
+    let desc_len = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
     if let Some(wrc) = crate::core::object_get_key_value(&desc_len, "writable") {
         log::debug!("initialize_function: desc_len writable raw = {:?}", wrc.borrow());
     } else {
@@ -3796,11 +3816,11 @@ pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         object_get_key_value(&func_ctor, "length").is_some(),
         &func_ctor
     );
-    crate::js_object::define_property_internal(mc, &func_ctor, "length", &desc_len)?;
+    crate::js_object::define_property_internal(ctx, &func_ctor, "length", &desc_len)?;
 
     // Define Function.name after length so built-in property order is length, then name.
-    let desc_name = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Function")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &func_ctor, "name", &desc_name)?;
+    let desc_name = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Function")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &func_ctor, "name", &desc_name)?;
 
     log::debug!(
         "Function ctor non_writable after define = {:?}",
@@ -3810,7 +3830,7 @@ pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
     // NOTE: explicit fallback for setting flags on `length` removed — rely on define_property_internal
     // to correctly apply non-writable/non-enumerable/non-configurable flags for the `length` property.
 
-    crate::core::env_set(mc, env, "Function", &Value::Object(func_ctor))?;
+    crate::core::env_set(ctx, env, "Function", &Value::Object(func_ctor))?;
 
     // Ensure any native constructors created earlier (e.g., Error, TypeError)
     // get Function.prototype as their internal prototype so `instanceof Function`
@@ -3844,20 +3864,20 @@ pub fn initialize_function<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>)
         if let Some(ctor_rc) = crate::core::object_get_key_value(env, name)
             && let Value::Object(ctor_obj) = &*ctor_rc.borrow()
         {
-            ctor_obj.borrow_mut(mc).prototype = Some(func_proto);
+            ctor_obj.borrow_mut(ctx).prototype = Some(func_proto);
         }
     }
 
     // Ensure Function constructor itself uses Function.prototype for its
     // internal prototype so that `Function.constructor === Function` and
     // Function instances see Function.prototype members.
-    func_ctor.borrow_mut(mc).prototype = Some(func_proto);
+    func_ctor.borrow_mut(ctx).prototype = Some(func_proto);
 
     Ok(())
 }
 
 pub fn handle_function_prototype_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     this_value: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -3871,14 +3891,14 @@ pub fn handle_function_prototype_method<'gc>(
             Value::Closure(cl) | Value::AsyncClosure(cl) => {
                 // Use property semantics when possible (to respect poisoned accessors),
                 // fallback to intrinsic closure shape.
-                if let Ok(Value::Object(obj)) = crate::js_class::handle_object_constructor(mc, std::slice::from_ref(target), env) {
+                if let Ok(Value::Object(obj)) = crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(target), env) {
                     if crate::core::get_own_property(&obj, "length").is_some() {
-                        let len_val = crate::core::get_property_with_accessors(mc, env, &obj, "length")?;
+                        let len_val = crate::core::get_property_with_accessors(ctx, env, &obj, "length")?;
                         if let Value::Number(n) = len_val {
                             target_length = n;
                         }
                     }
-                    let name_val = crate::core::get_property_with_accessors(mc, env, &obj, "name")?;
+                    let name_val = crate::core::get_property_with_accessors(ctx, env, &obj, "name")?;
                     if let Value::String(s) = name_val {
                         target_name = crate::unicode::utf16_to_utf8(&s);
                     }
@@ -3894,12 +3914,12 @@ pub fn handle_function_prototype_method<'gc>(
             }
             Value::Object(obj) => {
                 if crate::core::get_own_property(obj, "length").is_some() {
-                    let len_val = crate::core::get_property_with_accessors(mc, env, obj, "length")?;
+                    let len_val = crate::core::get_property_with_accessors(ctx, env, obj, "length")?;
                     if let Value::Number(n) = len_val {
                         target_length = n;
                     }
                 }
-                let name_val = crate::core::get_property_with_accessors(mc, env, obj, "name")?;
+                let name_val = crate::core::get_property_with_accessors(ctx, env, obj, "name")?;
                 if let Value::String(s) = name_val {
                     target_name = crate::unicode::utf16_to_utf8(&s);
                 }
@@ -3917,8 +3937,8 @@ pub fn handle_function_prototype_method<'gc>(
         let (target_name, raw_len) = get_target_name_and_length(target)?;
 
         let bound_name = format!("bound {}", target_name);
-        let name_desc = crate::core::create_descriptor_object(mc, &Value::from(&bound_name), false, false, true)?;
-        crate::js_object::define_property_internal(mc, bound_obj, "name", &name_desc)?;
+        let name_desc = crate::core::create_descriptor_object(ctx, &Value::from(&bound_name), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, bound_obj, "name", &name_desc)?;
 
         let target_len = if raw_len.is_infinite() {
             if raw_len.is_sign_positive() { f64::INFINITY } else { 0.0 }
@@ -3933,18 +3953,18 @@ pub fn handle_function_prototype_method<'gc>(
         } else {
             (target_len - bound_args_len as f64).max(0.0)
         };
-        let length_desc = crate::core::create_descriptor_object(mc, &Value::Number(bound_len), false, false, true)?;
-        crate::js_object::define_property_internal(mc, bound_obj, "length", &length_desc)?;
+        let length_desc = crate::core::create_descriptor_object(ctx, &Value::Number(bound_len), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, bound_obj, "length", &length_desc)?;
 
         Ok(())
     };
 
     let _make_bound_function_object = |callable: Value<'gc>| -> Result<Value<'gc>, EvalError<'gc>> {
-        let func_obj = crate::core::new_js_object_data(mc);
-        attach_function_prototype_if_present(mc, env, &func_obj);
+        let func_obj = crate::core::new_js_object_data(ctx);
+        attach_function_prototype_if_present(ctx, env, &func_obj);
         func_obj
-            .borrow_mut(mc)
-            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, callable)));
+            .borrow_mut(ctx)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(ctx, callable)));
         let callable_val = func_obj
             .borrow()
             .get_closure()
@@ -3956,15 +3976,15 @@ pub fn handle_function_prototype_method<'gc>(
 
     let make_bound_target_wrapper =
         |target: &Value<'gc>, bound_this: &Value<'gc>, bound_args: &[Value<'gc>]| -> Result<Value<'gc>, EvalError<'gc>> {
-            let func_obj = crate::core::new_js_object_data(mc);
-            attach_function_prototype_if_present(mc, env, &func_obj);
+            let func_obj = crate::core::new_js_object_data(ctx);
+            attach_function_prototype_if_present(ctx, env, &func_obj);
 
-            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundTarget, target);
-            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundThis, bound_this);
-            crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArgLen, &Value::Number(bound_args.len() as f64));
-            crate::core::slot_set(mc, &func_obj, InternalSlot::Callable, &Value::Boolean(true));
+            crate::core::slot_set(ctx, &func_obj, InternalSlot::BoundTarget, target);
+            crate::core::slot_set(ctx, &func_obj, InternalSlot::BoundThis, bound_this);
+            crate::core::slot_set(ctx, &func_obj, InternalSlot::BoundArgLen, &Value::Number(bound_args.len() as f64));
+            crate::core::slot_set(ctx, &func_obj, InternalSlot::Callable, &Value::Boolean(true));
             for (i, arg) in bound_args.iter().enumerate() {
-                crate::core::slot_set(mc, &func_obj, InternalSlot::BoundArg(i), arg);
+                crate::core::slot_set(ctx, &func_obj, InternalSlot::BoundArg(i), arg);
             }
 
             set_bound_metadata(&func_obj, target, bound_args.len())?;
@@ -3972,7 +3992,7 @@ pub fn handle_function_prototype_method<'gc>(
             let is_constructor_target = is_constructor_value(target);
 
             if is_constructor_target {
-                crate::core::slot_set(mc, &func_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+                crate::core::slot_set(ctx, &func_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
             }
 
             Ok(Value::Object(func_obj))
@@ -3997,7 +4017,7 @@ pub fn handle_function_prototype_method<'gc>(
                         Value::Object(_) => {
                             let forwarded = vec![value.clone()];
                             let call_env = crate::js_class::prepare_call_env_with_this(
-                                mc,
+                                ctx,
                                 Some(env),
                                 Some(&bound_target),
                                 None,
@@ -4007,7 +4027,7 @@ pub fn handle_function_prototype_method<'gc>(
                                 None,
                             )?;
                             let result = crate::js_function::handle_function_prototype_method(
-                                mc,
+                                ctx,
                                 &bound_target,
                                 "[Symbol.hasInstance]",
                                 &forwarded,
@@ -4016,12 +4036,12 @@ pub fn handle_function_prototype_method<'gc>(
                             return Ok(result);
                         }
                         Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) => {
-                            let target_obj = match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&bound_target), env)?
-                            {
-                                Value::Object(o) => o,
-                                _ => return Ok(Value::Boolean(false)),
-                            };
-                            let p = crate::core::get_property_with_accessors(mc, env, &target_obj, "prototype")?;
+                            let target_obj =
+                                match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&bound_target), env)? {
+                                    Value::Object(o) => o,
+                                    _ => return Ok(Value::Boolean(false)),
+                                };
+                            let p = crate::core::get_property_with_accessors(ctx, env, &target_obj, "prototype")?;
                             if let Value::Object(p_obj) = p {
                                 let mut cur = v_obj.borrow().prototype;
                                 while let Some(proto) = cur {
@@ -4045,13 +4065,13 @@ pub fn handle_function_prototype_method<'gc>(
 
             // Step 5: Let P be ? Get(F, "prototype").
             let p = match this_value {
-                Value::Object(obj) => crate::core::get_property_with_accessors(mc, env, obj, "prototype")?,
+                Value::Object(obj) => crate::core::get_property_with_accessors(ctx, env, obj, "prototype")?,
                 _ => {
-                    let this_obj = match crate::js_class::handle_object_constructor(mc, std::slice::from_ref(this_value), env)? {
+                    let this_obj = match crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(this_value), env)? {
                         Value::Object(o) => o,
                         _ => return Err(raise_type_error!("Function has non-object prototype in instanceof check").into()),
                     };
-                    crate::core::get_property_with_accessors(mc, env, &this_obj, "prototype")?
+                    crate::core::get_property_with_accessors(ctx, env, &this_obj, "prototype")?
                 }
             };
 
@@ -4067,12 +4087,12 @@ pub fn handle_function_prototype_method<'gc>(
 
             // Helper for [[GetPrototypeOf]] with Proxy support.
             // Uses proxy_get_prototype_of which includes invariant checks (spec §10.5.1).
-            let get_prototype_of = |mc: &GcContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
+            let get_prototype_of = |ctx: &GcContext<'gc>, v: &Value<'gc>| -> Result<Option<JSObjectDataPtr<'gc>>, EvalError<'gc>> {
                 if let Value::Object(obj) = v {
                     if let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
+                        let proto_val = crate::js_proxy::proxy_get_prototype_of(ctx, proxy)?;
                         return match proto_val {
                             Value::Object(p) => Ok(Some(p)),
                             Value::Null => Ok(None),
@@ -4090,7 +4110,7 @@ pub fn handle_function_prototype_method<'gc>(
                     return Ok(None);
                 }
                 if let Value::Proxy(proxy) = v {
-                    let proto_val = crate::js_proxy::proxy_get_prototype_of(mc, proxy)?;
+                    let proto_val = crate::js_proxy::proxy_get_prototype_of(ctx, proxy)?;
                     return match proto_val {
                         Value::Object(p) => Ok(Some(p)),
                         Value::Null => Ok(None),
@@ -4101,12 +4121,12 @@ pub fn handle_function_prototype_method<'gc>(
             };
 
             // Step 7: Walk prototype chain.
-            let mut current = get_prototype_of(mc, &value)?;
+            let mut current = get_prototype_of(ctx, &value)?;
             while let Some(proto) = current {
                 if Gc::ptr_eq(proto, p_obj) {
                     return Ok(Value::Boolean(true));
                 }
-                current = get_prototype_of(mc, &Value::Object(proto))?;
+                current = get_prototype_of(ctx, &Value::Object(proto))?;
             }
             Ok(Value::Boolean(false))
         }
@@ -4227,11 +4247,11 @@ pub fn handle_function_prototype_method<'gc>(
 }
 
 /// AnnexB B.2.1.1 — escape(string)
-fn annexb_escape<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn annexb_escape<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let s_val = if args.is_empty() {
-        crate::js_string::spec_to_string(mc, &Value::Undefined, env)?
+        crate::js_string::spec_to_string(ctx, &Value::Undefined, env)?
     } else {
-        crate::js_string::spec_to_string(mc, &args[0], env)?
+        crate::js_string::spec_to_string(ctx, &args[0], env)?
     };
     let s_str = crate::unicode::utf16_to_utf8(&s_val);
     let mut result = String::new();
@@ -4248,11 +4268,11 @@ fn annexb_escape<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDa
 }
 
 /// AnnexB B.2.1.2 — unescape(string)
-fn annexb_unescape<'gc>(mc: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+fn annexb_unescape<'gc>(ctx: &GcContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     let s_val = if args.is_empty() {
-        crate::js_string::spec_to_string(mc, &Value::Undefined, env)?
+        crate::js_string::spec_to_string(ctx, &Value::Undefined, env)?
     } else {
-        crate::js_string::spec_to_string(mc, &args[0], env)?
+        crate::js_string::spec_to_string(ctx, &args[0], env)?
     };
     let s_str = crate::unicode::utf16_to_utf8(&s_val);
     let bytes = s_str.as_bytes();

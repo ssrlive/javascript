@@ -18,18 +18,18 @@ fn normalize_map_key<'gc>(key: Value<'gc>) -> Value<'gc> {
 }
 
 /// Initialize Map constructor and prototype
-pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let map_ctor = new_js_object_data(mc);
-    slot_set(mc, &map_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &map_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Map")));
+pub fn initialize_map<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let map_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &map_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &map_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Map")));
 
     // Map.length = 0, Map.name = "Map" (non-enumerable, non-writable, configurable)
-    object_set_key_value(mc, &map_ctor, "length", &Value::Number(0.0))?;
-    map_ctor.borrow_mut(mc).set_non_enumerable("length");
-    map_ctor.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &map_ctor, "name", &Value::String(utf8_to_utf16("Map")))?;
-    map_ctor.borrow_mut(mc).set_non_enumerable("name");
-    map_ctor.borrow_mut(mc).set_non_writable("name");
+    object_set_key_value(ctx, &map_ctor, "length", &Value::Number(0.0))?;
+    map_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    map_ctor.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &map_ctor, "name", &Value::String(utf8_to_utf16("Map")))?;
+    map_ctor.borrow_mut(ctx).set_non_enumerable("name");
+    map_ctor.borrow_mut(ctx).set_non_writable("name");
 
     // Set Map's [[Prototype]] to Function.prototype
     if let Some(func_val) = object_get_key_value(env, "Function")
@@ -37,7 +37,7 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        map_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        map_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     // Get Object.prototype
@@ -51,16 +51,16 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         None
     };
 
-    let map_proto = new_js_object_data(mc);
+    let map_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        map_proto.borrow_mut(mc).prototype = Some(proto);
+        map_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &map_ctor, "prototype", &Value::Object(map_proto))?;
-    map_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    map_ctor.borrow_mut(mc).set_non_writable("prototype");
-    map_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &map_proto, "constructor", &Value::Object(map_ctor))?;
+    object_set_key_value(ctx, &map_ctor, "prototype", &Value::Object(map_proto))?;
+    map_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    map_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    map_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &map_proto, "constructor", &Value::Object(map_ctor))?;
 
     // Register instance methods
     let methods = vec![
@@ -78,11 +78,11 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
     ];
 
     for method in methods {
-        object_set_key_value(mc, &map_proto, method, &Value::Function(format!("Map.prototype.{}", method)))?;
-        map_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &map_proto, method, &Value::Function(format!("Map.prototype.{}", method)))?;
+        map_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    map_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    map_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Register size getter
     let size_getter = Value::Function("Map.prototype.size".to_string());
@@ -91,8 +91,8 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         getter: Some(Box::new(size_getter)),
         setter: None,
     };
-    object_set_key_value(mc, &map_proto, "size", &size_prop)?;
-    map_proto.borrow_mut(mc).set_non_enumerable("size");
+    object_set_key_value(ctx, &map_proto, "size", &size_prop)?;
+    map_proto.borrow_mut(ctx).set_non_enumerable("size");
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -105,22 +105,22 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
             let val = Value::Function("Map.prototype.entries".to_string());
             // Use a data descriptor: writable=true, enumerable=false, configurable=true
             let iter_desc = {
-                let desc_obj = new_js_object_data(mc);
-                object_set_key_value(mc, &desc_obj, "value", &val)?;
-                object_set_key_value(mc, &desc_obj, "writable", &Value::Boolean(true))?;
-                object_set_key_value(mc, &desc_obj, "enumerable", &Value::Boolean(false))?;
-                object_set_key_value(mc, &desc_obj, "configurable", &Value::Boolean(true))?;
+                let desc_obj = new_js_object_data(ctx);
+                object_set_key_value(ctx, &desc_obj, "value", &val)?;
+                object_set_key_value(ctx, &desc_obj, "writable", &Value::Boolean(true))?;
+                object_set_key_value(ctx, &desc_obj, "enumerable", &Value::Boolean(false))?;
+                object_set_key_value(ctx, &desc_obj, "configurable", &Value::Boolean(true))?;
                 desc_obj
             };
-            crate::js_object::define_property_internal(mc, &map_proto, crate::core::PropertyKey::Symbol(*s), &iter_desc)?;
+            crate::js_object::define_property_internal(ctx, &map_proto, crate::core::PropertyKey::Symbol(*s), &iter_desc)?;
         }
 
         // Symbol.toStringTag
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Map")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &map_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
+            let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Map")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &map_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
         }
 
         // Symbol.species on Map constructor (getter that returns `this`)
@@ -129,38 +129,38 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         {
             let species_getter = Value::Function("Map[Symbol.species]".to_string());
             // Create accessor descriptor: get=species_getter, set=undefined, enumerable=false, configurable=true
-            let species_desc_obj = new_js_object_data(mc);
-            object_set_key_value(mc, &species_desc_obj, "get", &species_getter)?;
-            object_set_key_value(mc, &species_desc_obj, "set", &Value::Undefined)?;
-            object_set_key_value(mc, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
-            object_set_key_value(mc, &species_desc_obj, "configurable", &Value::Boolean(true))?;
-            crate::js_object::define_property_internal(mc, &map_ctor, crate::core::PropertyKey::Symbol(*s), &species_desc_obj)?;
+            let species_desc_obj = new_js_object_data(ctx);
+            object_set_key_value(ctx, &species_desc_obj, "get", &species_getter)?;
+            object_set_key_value(ctx, &species_desc_obj, "set", &Value::Undefined)?;
+            object_set_key_value(ctx, &species_desc_obj, "enumerable", &Value::Boolean(false))?;
+            object_set_key_value(ctx, &species_desc_obj, "configurable", &Value::Boolean(true))?;
+            crate::js_object::define_property_internal(ctx, &map_ctor, crate::core::PropertyKey::Symbol(*s), &species_desc_obj)?;
         }
     }
 
-    env_set(mc, env, "Map", &Value::Object(map_ctor))?;
+    env_set(ctx, env, "Map", &Value::Object(map_ctor))?;
 
     // ---- Static method: Map.groupBy ----
-    object_set_key_value(mc, &map_ctor, "groupBy", &Value::Function("Map.groupBy".to_string()))?;
-    map_ctor.borrow_mut(mc).set_non_enumerable("groupBy");
+    object_set_key_value(ctx, &map_ctor, "groupBy", &Value::Function("Map.groupBy".to_string()))?;
+    map_ctor.borrow_mut(ctx).set_non_enumerable("groupBy");
 
     // --- %MapIteratorPrototype% ---
     // [[Prototype]] = %IteratorPrototype%
-    let map_iter_proto = new_js_object_data(mc);
+    let map_iter_proto = new_js_object_data(ctx);
     if let Some(iter_proto_val) = slot_get_chained(env, &InternalSlot::IteratorPrototype)
         && let Value::Object(iter_proto) = &*iter_proto_val.borrow()
     {
-        map_iter_proto.borrow_mut(mc).prototype = Some(*iter_proto);
+        map_iter_proto.borrow_mut(ctx).prototype = Some(*iter_proto);
     }
 
     // next method (non-enumerable)
     object_set_key_value(
-        mc,
+        ctx,
         &map_iter_proto,
         "next",
         &Value::Function("MapIterator.prototype.next".to_string()),
     )?;
-    map_iter_proto.borrow_mut(mc).set_non_enumerable("next");
+    map_iter_proto.borrow_mut(ctx).set_non_enumerable("next");
 
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
@@ -169,12 +169,12 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         if let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
-            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Map Iterator")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &map_iter_proto, crate::core::PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+            let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Map Iterator")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &map_iter_proto, crate::core::PropertyKey::Symbol(*tag_sym), &tag_desc)?;
         }
     }
 
-    slot_set(mc, env, InternalSlot::MapIteratorPrototype, &Value::Object(map_iter_proto));
+    slot_set(ctx, env, InternalSlot::MapIteratorPrototype, &Value::Object(map_iter_proto));
 
     Ok(())
 }
@@ -195,25 +195,25 @@ pub fn initialize_map<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
 ///    d. Call(adder, map, « k, v »).
 ///    e. On abrupt: IteratorClose.
 pub(crate) fn handle_map_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let map = new_gc_cell_ptr(mc, JSMap { entries: Vec::new() });
+    let map = new_gc_cell_ptr(ctx, JSMap { entries: Vec::new() });
 
     // Create a wrapper object for the Map
-    let map_obj = new_js_object_data(mc);
+    let map_obj = new_js_object_data(ctx);
     // Store the actual map data
-    slot_set(mc, &map_obj, InternalSlot::Map, &Value::Map(map));
+    slot_set(ctx, &map_obj, InternalSlot::Map, &Value::Map(map));
 
     // OrdinaryCreateFromConstructor(NewTarget, "%Map.prototype%")
     // If new_target is provided (Reflect.construct), use GetPrototypeFromConstructor
     let mut proto_set = false;
     if let Some(Value::Object(nt_obj)) = new_target
-        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "Map")?
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "Map")?
     {
-        map_obj.borrow_mut(mc).prototype = Some(proto);
+        map_obj.borrow_mut(ctx).prototype = Some(proto);
         proto_set = true;
     }
     // Default: Set prototype to Map.prototype from current realm
@@ -223,7 +223,7 @@ pub(crate) fn handle_map_constructor<'gc>(
         && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        map_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+        map_obj.borrow_mut(ctx).prototype = Some(*proto_obj);
     }
 
     // Step 3: If iterable is not present, or is undefined/null, return the empty map.
@@ -234,7 +234,7 @@ pub(crate) fn handle_map_constructor<'gc>(
 
     // Step 4-5: Get "set" method from the map object.
     // This must be done before iterating so a poisoned getter is triggered.
-    let set_fn = crate::core::get_property_with_accessors(mc, env, &map_obj, "set")?;
+    let set_fn = crate::core::get_property_with_accessors(ctx, env, &map_obj, "set")?;
     // Validate callable
     let set_is_callable = match &set_fn {
         Value::Object(obj) => {
@@ -250,57 +250,57 @@ pub(crate) fn handle_map_constructor<'gc>(
     }
 
     // Step 6: GetIterator. Get Symbol.iterator from iterable.
-    let iterator_result = get_iterator(mc, env, &iterable)?;
+    let iterator_result = get_iterator(ctx, env, &iterable)?;
     let (iter_obj, next_fn) = iterator_result;
 
     // Step 7: Iterate
     loop {
         // Call next
-        let next_result = call_iterator_next(mc, env, &iter_obj, &next_fn)?;
-        let done = get_iterator_done(mc, env, &next_result)?;
+        let next_result = call_iterator_next(ctx, env, &iter_obj, &next_fn)?;
+        let done = get_iterator_done(ctx, env, &next_result)?;
         if done {
             break;
         }
-        let item = match get_iterator_value(mc, env, &next_result) {
+        let item = match get_iterator_value(ctx, env, &next_result) {
             Ok(v) => v,
             Err(e) => {
-                let _ = close_iterator(mc, env, &iter_obj);
+                let _ = close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // 7a: If item is not an Object, throw TypeError and close iterator
         if !matches!(item, Value::Object(_)) {
-            let _ = close_iterator(mc, env, &iter_obj);
+            let _ = close_iterator(ctx, env, &iter_obj);
             return Err(raise_type_error!("Iterator value is not an entry object").into());
         }
 
         let item_obj = if let Value::Object(o) = &item { *o } else { unreachable!() };
 
         // 7b: Let k = Get(item, "0")
-        let k_result = crate::core::get_property_with_accessors(mc, env, &item_obj, "0");
+        let k_result = crate::core::get_property_with_accessors(ctx, env, &item_obj, "0");
         let k = match k_result {
             Ok(v) => v,
             Err(e) => {
-                let _ = close_iterator(mc, env, &iter_obj);
+                let _ = close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // 7c: Let v = Get(item, "1")
-        let v_result = crate::core::get_property_with_accessors(mc, env, &item_obj, "1");
+        let v_result = crate::core::get_property_with_accessors(ctx, env, &item_obj, "1");
         let v = match v_result {
             Ok(v) => v,
             Err(e) => {
-                let _ = close_iterator(mc, env, &iter_obj);
+                let _ = close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // 7d: Call(adder, map, [k, v])
-        let call_result = crate::core::evaluate_call_dispatch(mc, env, &set_fn, Some(&Value::Object(map_obj)), &[k, v]);
+        let call_result = crate::core::evaluate_call_dispatch(ctx, env, &set_fn, Some(&Value::Object(map_obj)), &[k, v]);
         if let Err(e) = call_result {
-            let _ = close_iterator(mc, env, &iter_obj);
+            let _ = close_iterator(ctx, env, &iter_obj);
             return Err(e);
         }
     }
@@ -310,7 +310,7 @@ pub(crate) fn handle_map_constructor<'gc>(
 
 /// §22.1.2.6  Map.groupBy ( items, callbackfn )
 pub(crate) fn handle_map_group_by<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -335,7 +335,7 @@ pub(crate) fn handle_map_group_by<'gc>(
     let iterable_obj = match &items_val {
         Value::Object(o) => *o,
         Value::String(_) => {
-            let str_obj = crate::js_class::handle_object_constructor(mc, std::slice::from_ref(&items_val), env)?;
+            let str_obj = crate::js_class::handle_object_constructor(ctx, std::slice::from_ref(&items_val), env)?;
             match str_obj {
                 Value::Object(o) => o,
                 _ => return Err(raise_type_error!("Map.groupBy: cannot iterate over items").into()),
@@ -344,34 +344,34 @@ pub(crate) fn handle_map_group_by<'gc>(
         _ => return Err(raise_type_error!("Map.groupBy: items is not iterable").into()),
     };
 
-    let method_val = get_property_with_accessors(mc, env, &iterable_obj, crate::core::PropertyKey::Symbol(iter_sym))?;
+    let method_val = get_property_with_accessors(ctx, env, &iterable_obj, crate::core::PropertyKey::Symbol(iter_sym))?;
     if matches!(method_val, Value::Undefined | Value::Null) || !is_callable_for_from_entries(&method_val) {
         return Err(raise_type_error!("Map.groupBy: items is not iterable").into());
     }
 
-    let iter_result = evaluate_call_dispatch(mc, env, &method_val, Some(&items_val), &[])?;
+    let iter_result = evaluate_call_dispatch(ctx, env, &method_val, Some(&items_val), &[])?;
     let iter_obj = match &iter_result {
         Value::Object(o) => *o,
         _ => return Err(raise_type_error!("Iterator result is not an object").into()),
     };
-    let next_method = get_property_with_accessors(mc, env, &iter_obj, "next")?;
+    let next_method = get_property_with_accessors(ctx, env, &iter_obj, "next")?;
 
     let mut k: usize = 0;
     loop {
-        let step = evaluate_call_dispatch(mc, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
+        let step = evaluate_call_dispatch(ctx, env, &next_method, Some(&Value::Object(iter_obj)), &[])?;
         let step_obj = match &step {
             Value::Object(o) => *o,
             _ => return Err(raise_type_error!("Iterator result is not an object").into()),
         };
-        let done_val = get_property_with_accessors(mc, env, &step_obj, "done")?;
+        let done_val = get_property_with_accessors(ctx, env, &step_obj, "done")?;
         if done_val.to_truthy() {
             break;
         }
-        let val = get_property_with_accessors(mc, env, &step_obj, "value")?;
+        let val = get_property_with_accessors(ctx, env, &step_obj, "value")?;
 
         // Call callback(value, k)
         let key_val = evaluate_call_dispatch(
-            mc,
+            ctx,
             env,
             &callback_val,
             Some(&Value::Undefined),
@@ -385,14 +385,14 @@ pub(crate) fn handle_map_group_by<'gc>(
         let group_arr = if let Some((_k, arr)) = groups.iter().find(|(existing_key, _)| same_value_zero(existing_key, &key_val)) {
             *arr
         } else {
-            let arr = create_array(mc, env)?;
+            let arr = create_array(ctx, env)?;
             groups.push((key_val.clone(), arr));
             arr
         };
 
-        let current_len = crate::js_array::get_array_length(mc, &group_arr).unwrap_or(0);
-        object_set_key_value(mc, &group_arr, current_len, &val)?;
-        set_array_length(mc, &group_arr, current_len + 1)?;
+        let current_len = crate::js_array::get_array_length(ctx, &group_arr).unwrap_or(0);
+        object_set_key_value(ctx, &group_arr, current_len, &val)?;
+        set_array_length(ctx, &group_arr, current_len + 1)?;
 
         k += 1;
     }
@@ -401,10 +401,10 @@ pub(crate) fn handle_map_group_by<'gc>(
     let map_data = JSMap {
         entries: groups.iter().map(|(k, arr)| Some((k.clone(), Value::Object(*arr)))).collect(),
     };
-    let map_gc = new_gc_cell_ptr(mc, map_data);
+    let map_gc = new_gc_cell_ptr(ctx, map_data);
 
-    let map_obj = new_js_object_data(mc);
-    slot_set(mc, &map_obj, InternalSlot::Map, &Value::Map(map_gc));
+    let map_obj = new_js_object_data(ctx);
+    slot_set(ctx, &map_obj, InternalSlot::Map, &Value::Map(map_gc));
 
     // Set prototype to Map.prototype
     if let Some(mc_val) = object_get_key_value(env, "Map")
@@ -412,7 +412,7 @@ pub(crate) fn handle_map_group_by<'gc>(
         && let Some(proto_val) = object_get_key_value(map_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        map_obj.borrow_mut(mc).prototype = Some(*proto);
+        map_obj.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     Ok(Value::Object(map_obj))
@@ -420,7 +420,7 @@ pub(crate) fn handle_map_group_by<'gc>(
 
 /// Handle Map instance method calls
 pub(crate) fn handle_map_instance_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     map: &GcPtr<'gc, JSMap<'gc>>,
     method: &str,
     args: &[Value<'gc>],
@@ -434,7 +434,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
 
             // Update existing entry in-place if key exists (preserves insertion order)
             let mut found = false;
-            for (k, v) in map.borrow_mut(mc).entries.iter_mut().flatten() {
+            for (k, v) in map.borrow_mut(ctx).entries.iter_mut().flatten() {
                 if same_value_zero(k, &key) {
                     *k = key.clone(); // normalize key (e.g. -0 → +0)
                     *v = value.clone();
@@ -443,7 +443,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
                 }
             }
             if !found {
-                map.borrow_mut(mc).entries.push(Some((key, value)));
+                map.borrow_mut(ctx).entries.push(Some((key, value)));
             }
 
             // Return the Map object itself (not the raw Map data)
@@ -474,7 +474,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
 
             // Tombstone deletion: set entry to None (preserves indices for iteration)
             let mut deleted = false;
-            for entry in map.borrow_mut(mc).entries.iter_mut() {
+            for entry in map.borrow_mut(ctx).entries.iter_mut() {
                 if let Some((k, _)) = entry
                     && same_value_zero(k, &key)
                 {
@@ -487,13 +487,13 @@ pub(crate) fn handle_map_instance_method<'gc>(
             Ok(Value::Boolean(deleted))
         }
         "clear" => {
-            map.borrow_mut(mc).entries.clear();
+            map.borrow_mut(ctx).entries.clear();
             Ok(Value::Undefined)
         }
         "size" => Ok(Value::Number(map.borrow().entries.iter().filter(|e| e.is_some()).count() as f64)),
-        "keys" => Ok(create_map_iterator(mc, env, *map, "keys")?),
-        "values" => Ok(create_map_iterator(mc, env, *map, "values")?),
-        "entries" => Ok(create_map_iterator(mc, env, *map, "entries")?),
+        "keys" => Ok(create_map_iterator(ctx, env, *map, "keys")?),
+        "values" => Ok(create_map_iterator(ctx, env, *map, "values")?),
+        "entries" => Ok(create_map_iterator(ctx, env, *map, "entries")?),
         "forEach" => {
             if args.is_empty() {
                 return Err(raise_type_error!("Map.prototype.forEach requires a callback function").into());
@@ -527,7 +527,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
                 let entry = map.borrow().entries[i].clone();
                 if let Some((k, v)) = entry {
                     let call_args = vec![v, k, this_obj.clone()];
-                    crate::core::evaluate_call_dispatch(mc, env, callback, this_arg.as_ref(), &call_args)?;
+                    crate::core::evaluate_call_dispatch(ctx, env, callback, this_arg.as_ref(), &call_args)?;
                 }
                 i += 1;
             }
@@ -545,7 +545,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
                 }
             }
             // Insert and return the default
-            map.borrow_mut(mc).entries.push(Some((key, default_value.clone())));
+            map.borrow_mut(ctx).entries.push(Some((key, default_value.clone())));
             Ok(default_value)
         }
         "getOrInsertComputed" => {
@@ -575,9 +575,9 @@ pub(crate) fn handle_map_instance_method<'gc>(
                 }
             }
             // Call callback(key) to compute the value
-            let computed = crate::core::evaluate_call_dispatch(mc, env, &callback, None, std::slice::from_ref(&key))?;
+            let computed = crate::core::evaluate_call_dispatch(ctx, env, &callback, None, std::slice::from_ref(&key))?;
             // Re-check: if callback caused insertion of same key, OVERWRITE with computed value
-            for entry in map.borrow_mut(mc).entries.iter_mut() {
+            for entry in map.borrow_mut(ctx).entries.iter_mut() {
                 if let Some((k, v)) = entry
                     && same_value_zero(k, &key)
                 {
@@ -585,7 +585,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
                     return Ok(computed);
                 }
             }
-            map.borrow_mut(mc).entries.push(Some((key, computed.clone())));
+            map.borrow_mut(ctx).entries.push(Some((key, computed.clone())));
             Ok(computed)
         }
         _ => Err(raise_type_error!(format!("Map.prototype.{} is not a function", method)).into()),
@@ -594,32 +594,32 @@ pub(crate) fn handle_map_instance_method<'gc>(
 
 /// Create a new Map Iterator
 pub(crate) fn create_map_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     map: GcPtr<'gc, JSMap<'gc>>,
     kind: &str,
 ) -> Result<Value<'gc>, JSError> {
-    let iterator = new_js_object_data(mc);
+    let iterator = new_js_object_data(ctx);
 
     // Set [[Prototype]] to %MapIteratorPrototype%
     if let Some(proto_val) = slot_get_chained(env, &InternalSlot::MapIteratorPrototype)
         && let Value::Object(proto) = &*proto_val.borrow()
     {
-        iterator.borrow_mut(mc).prototype = Some(*proto);
+        iterator.borrow_mut(ctx).prototype = Some(*proto);
     }
 
     // Store map
-    slot_set(mc, &iterator, InternalSlot::IteratorMap, &Value::Map(map));
+    slot_set(ctx, &iterator, InternalSlot::IteratorMap, &Value::Map(map));
     // Store index
-    slot_set(mc, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
+    slot_set(ctx, &iterator, InternalSlot::IteratorIndex, &Value::Number(0.0));
     // Store kind
-    slot_set(mc, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
+    slot_set(ctx, &iterator, InternalSlot::IteratorKind, &Value::String(utf8_to_utf16(kind)));
 
     Ok(Value::Object(iterator))
 }
 
 pub(crate) fn handle_map_iterator_next<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     iterator: &JSObjectDataPtr<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -629,9 +629,9 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
     // Step 8: If map is undefined, iterator is exhausted → return {value: undefined, done: true}
     if let Value::Undefined = &*map_val.borrow() {
-        let result_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
-        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        let result_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -668,10 +668,10 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
     if index >= entries.len() {
         // Per spec: set [[Map]] to undefined so iterator stays exhausted
-        slot_set(mc, iterator, InternalSlot::IteratorMap, &Value::Undefined);
-        let result_obj = new_js_object_data(mc);
-        object_set_key_value(mc, &result_obj, "value", &Value::Undefined)?;
-        object_set_key_value(mc, &result_obj, "done", &Value::Boolean(true))?;
+        slot_set(ctx, iterator, InternalSlot::IteratorMap, &Value::Undefined);
+        let result_obj = new_js_object_data(ctx);
+        object_set_key_value(ctx, &result_obj, "value", &Value::Undefined)?;
+        object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -680,10 +680,10 @@ pub(crate) fn handle_map_iterator_next<'gc>(
         "keys" => key.clone(),
         "values" => value.clone(),
         "entries" => {
-            let entry_array = create_array(mc, env)?;
-            object_set_key_value(mc, &entry_array, "0", &key.clone())?;
-            object_set_key_value(mc, &entry_array, "1", &value.clone())?;
-            set_array_length(mc, &entry_array, 2)?;
+            let entry_array = create_array(ctx, env)?;
+            object_set_key_value(ctx, &entry_array, "0", &key.clone())?;
+            object_set_key_value(ctx, &entry_array, "1", &value.clone())?;
+            set_array_length(ctx, &entry_array, 2)?;
             Value::Object(entry_array)
         }
         _ => return Err(raise_eval_error!("Unknown iterator kind")),
@@ -691,11 +691,11 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    slot_set(mc, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
+    slot_set(ctx, iterator, InternalSlot::IteratorIndex, &Value::Number(index as f64));
 
-    let result_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &result_obj, "value", &result_value)?;
-    object_set_key_value(mc, &result_obj, "done", &Value::Boolean(false))?;
+    let result_obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &result_obj, "value", &result_value)?;
+    object_set_key_value(ctx, &result_obj, "done", &Value::Boolean(false))?;
 
     Ok(Value::Object(result_obj))
 }
@@ -706,7 +706,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
 /// Get an iterator from an iterable object (GetIterator).
 pub(crate) fn get_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iterable: &Value<'gc>,
 ) -> Result<(JSObjectDataPtr<'gc>, Value<'gc>), EvalError<'gc>> {
@@ -725,7 +725,7 @@ pub(crate) fn get_iterator<'gc>(
             && let Some(val) = object_get_key_value(&obj, *iter_sym)
         {
             let resolved = match &*val.borrow() {
-                Value::Property { getter: Some(g), .. } => crate::core::call_accessor(mc, env, &obj, g)?,
+                Value::Property { getter: Some(g), .. } => crate::core::call_accessor(ctx, env, &obj, g)?,
                 Value::Property { value: Some(v), .. } => v.borrow().clone(),
                 other => other.clone(),
             };
@@ -743,7 +743,7 @@ pub(crate) fn get_iterator<'gc>(
         return Err(raise_type_error!("Value is not iterable (iterator method is undefined)").into());
     }
 
-    let iter_result = crate::core::evaluate_call_dispatch(mc, env, &iter_fn, Some(iterable), &[])?;
+    let iter_result = crate::core::evaluate_call_dispatch(ctx, env, &iter_fn, Some(iterable), &[])?;
 
     let iter_obj = match iter_result {
         Value::Object(o) => o,
@@ -751,25 +751,29 @@ pub(crate) fn get_iterator<'gc>(
     };
 
     // Get "next" from iterator
-    let next_fn = crate::core::get_property_with_accessors(mc, env, &iter_obj, "next")?;
+    let next_fn = crate::core::get_property_with_accessors(ctx, env, &iter_obj, "next")?;
 
     Ok((iter_obj, next_fn))
 }
 
 /// Call iterator.next()
 pub(crate) fn call_iterator_next<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
     next_fn: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    crate::core::evaluate_call_dispatch(mc, env, next_fn, Some(&Value::Object(*iter_obj)), &[])
+    crate::core::evaluate_call_dispatch(ctx, env, next_fn, Some(&Value::Object(*iter_obj)), &[])
 }
 
 /// Get "done" from iterator result
-pub(crate) fn get_iterator_done<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, result: &Value<'gc>) -> Result<bool, EvalError<'gc>> {
+pub(crate) fn get_iterator_done<'gc>(
+    ctx: &GcContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    result: &Value<'gc>,
+) -> Result<bool, EvalError<'gc>> {
     if let Value::Object(obj) = result {
-        let done_val = crate::core::get_property_with_accessors(mc, env, obj, "done")?;
+        let done_val = crate::core::get_property_with_accessors(ctx, env, obj, "done")?;
         Ok(done_val.to_truthy())
     } else {
         Err(raise_type_error!("Iterator result is not an object").into())
@@ -778,12 +782,12 @@ pub(crate) fn get_iterator_done<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<
 
 /// Get "value" from iterator result (accessor-aware)
 pub(crate) fn get_iterator_value<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     result: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Value::Object(obj) = result {
-        Ok(crate::core::get_property_with_accessors(mc, env, obj, "value")?)
+        Ok(crate::core::get_property_with_accessors(ctx, env, obj, "value")?)
     } else {
         Err(raise_type_error!("Iterator result is not an object").into())
     }
@@ -791,14 +795,14 @@ pub(crate) fn get_iterator_value<'gc>(
 
 /// Close an iterator (call iterator.return() if present)
 pub(crate) fn close_iterator<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     iter_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     if let Some(return_val) = object_get_key_value(iter_obj, "return") {
         let return_fn = return_val.borrow().clone();
         if !matches!(return_fn, Value::Undefined | Value::Null) {
-            let _ = crate::core::evaluate_call_dispatch(mc, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
+            let _ = crate::core::evaluate_call_dispatch(ctx, env, &return_fn, Some(&Value::Object(*iter_obj)), &[]);
         }
     }
     Ok(())

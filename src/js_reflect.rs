@@ -8,11 +8,11 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use crate::{JSError, core::EvalError};
 
 /// Initialize the Reflect object with all reflection methods
-pub fn initialize_reflect<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let reflect_obj = new_js_object_data(mc);
+pub fn initialize_reflect<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let reflect_obj = new_js_object_data(ctx);
 
     // Set [[Prototype]] to Object.prototype (spec §26.1)
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &reflect_obj, env, "Object");
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &reflect_obj, env, "Object");
 
     // Register all methods (writable: true, enumerable: false, configurable: true)
     let methods: &[(&str, &str)] = &[
@@ -31,8 +31,8 @@ pub fn initialize_reflect<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         ("setPrototypeOf", "Reflect.setPrototypeOf"),
     ];
     for &(name, func_name) in methods {
-        object_set_key_value(mc, &reflect_obj, name, &Value::Function(func_name.to_string()))?;
-        reflect_obj.borrow_mut(mc).set_non_enumerable(name);
+        object_set_key_value(ctx, &reflect_obj, name, &Value::Function(func_name.to_string()))?;
+        reflect_obj.borrow_mut(ctx).set_non_enumerable(name);
     }
 
     // Symbol.toStringTag = "Reflect" { writable: false, enumerable: false, configurable: true }
@@ -42,27 +42,27 @@ pub fn initialize_reflect<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
         let tag_desc = crate::core::create_descriptor_object(
-            mc,
+            ctx,
             &Value::String(utf8_to_utf16("Reflect")),
             false, // writable
             false, // enumerable
             true,  // configurable
         )?;
-        crate::js_object::define_property_internal(mc, &reflect_obj, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        crate::js_object::define_property_internal(ctx, &reflect_obj, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
     }
 
-    crate::core::env_set(mc, env, "Reflect", &Value::Object(reflect_obj))?;
+    crate::core::env_set(ctx, env, "Reflect", &Value::Object(reflect_obj))?;
     Ok(())
 }
 
-fn to_property_key<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+fn to_property_key<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, value: Value<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
     let key = match value {
         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
         Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
         Value::BigInt(b) => PropertyKey::String(b.to_string()),
         Value::Symbol(s) => PropertyKey::Symbol(s),
         Value::Object(_) => {
-            let prim = crate::core::to_primitive(mc, &value, "string", env)?;
+            let prim = crate::core::to_primitive(ctx, &value, "string", env)?;
             match prim {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
@@ -79,7 +79,7 @@ fn to_property_key<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, value: 
 /// OrdinaryGet with a receiver: walk the prototype chain starting from `obj`,
 /// and when an accessor getter is found, call it with `receiver` as `this`.
 fn reflect_get_with_receiver<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
@@ -137,7 +137,7 @@ fn reflect_get_with_receiver<'gc>(
                             Value::Object(o) => *o,
                             _ => cur_obj,
                         };
-                        crate::core::call_accessor(mc, env, &receiver_obj, &g)
+                        crate::core::call_accessor(ctx, env, &receiver_obj, &g)
                     } else if let Some(v) = value {
                         Ok(v.borrow().clone())
                     } else {
@@ -149,7 +149,7 @@ fn reflect_get_with_receiver<'gc>(
                         Value::Object(o) => *o,
                         _ => cur_obj,
                     };
-                    crate::core::call_accessor(mc, env, &receiver_obj, &Value::Getter(body, captured_env, home_opt))
+                    crate::core::call_accessor(ctx, env, &receiver_obj, &Value::Getter(body, captured_env, home_opt))
                 }
                 _ => Ok(val),
             };
@@ -161,7 +161,7 @@ fn reflect_get_with_receiver<'gc>(
             if let Some(proxy_cell) = slot_get(&p, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
-                let res = crate::js_proxy::proxy_get_property_with_receiver(mc, proxy, key, Some(receiver.clone()), None)?;
+                let res = crate::js_proxy::proxy_get_property_with_receiver(ctx, proxy, key, Some(receiver.clone()), None)?;
                 return Ok(res.unwrap_or(Value::Undefined));
             }
             if Gc::ptr_eq(p, cur_obj) {
@@ -179,7 +179,7 @@ fn reflect_get_with_receiver<'gc>(
 /// This is needed for Reflect.defineProperty where the attributes object may
 /// have accessor-defined properties like `enumerable` or `writable`.
 fn to_property_descriptor_with_accessors<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<PropertyDescriptor<'gc>, EvalError<'gc>> {
@@ -191,7 +191,7 @@ fn to_property_descriptor_with_accessors<'gc>(
                 .and_then(|p| crate::core::get_own_property(&p, name))
                 .is_some()
         {
-            let v = crate::core::get_property_with_accessors(mc, env, obj, name)?;
+            let v = crate::core::get_property_with_accessors(ctx, env, obj, name)?;
             Ok(Some(v.to_truthy()))
         } else {
             Ok(None)
@@ -206,7 +206,7 @@ fn to_property_descriptor_with_accessors<'gc>(
                 .and_then(|p| crate::core::get_own_property(&p, name))
                 .is_some()
         {
-            let v = crate::core::get_property_with_accessors(mc, env, obj, name)?;
+            let v = crate::core::get_property_with_accessors(ctx, env, obj, name)?;
             Ok(Some(v))
         } else {
             Ok(None)
@@ -235,7 +235,7 @@ fn to_property_descriptor_with_accessors<'gc>(
 /// If argumentsList is not an Object, throw TypeError.
 /// Get its "length" property (may throw), then iterate 0..len collecting elements.
 fn create_list_from_array_like<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_val: &Value<'gc>,
     context: &str,
@@ -248,7 +248,7 @@ fn create_list_from_array_like<'gc>(
     };
 
     // Step 3-4: Let len be ? LengthOfArrayLike(obj) — Get(obj, "length") then ToLength
-    let len_val = crate::core::get_property_with_accessors(mc, env, &obj, "length")?;
+    let len_val = crate::core::get_property_with_accessors(ctx, env, &obj, "length")?;
     let len = match &len_val {
         Value::Number(n) => {
             let n = *n;
@@ -274,7 +274,7 @@ fn create_list_from_array_like<'gc>(
             result.push(val_rc.borrow().clone());
         } else {
             // Try get via prototype chain / accessors
-            let v = crate::core::get_property_with_accessors(mc, env, &obj, i)?;
+            let v = crate::core::get_property_with_accessors(ctx, env, &obj, i)?;
             result.push(v);
         }
     }
@@ -283,7 +283,7 @@ fn create_list_from_array_like<'gc>(
 
 /// Handle Reflect object method calls
 pub fn handle_reflect_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -301,7 +301,7 @@ pub fn handle_reflect_method<'gc>(
             // Per spec, if argumentsList is not provided (undefined) or not an
             // object, throw TypeError.
             let arg_values = match &arguments_list {
-                Value::Object(_) => create_list_from_array_like(mc, env, &arguments_list, "Reflect.apply")?,
+                Value::Object(_) => create_list_from_array_like(ctx, env, &arguments_list, "Reflect.apply")?,
                 // Missing 3rd argument -> argumentsList is undefined -> TypeError
                 _ => {
                     return Err(raise_type_error!("CreateListFromArrayLike called on non-object").into());
@@ -314,7 +314,7 @@ pub fn handle_reflect_method<'gc>(
                 if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
                     && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                 {
-                    return crate::js_proxy::proxy_call(mc, proxy, &this_arg, &arg_values, env);
+                    return crate::js_proxy::proxy_call(ctx, proxy, &this_arg, &arg_values, env);
                 }
             }
 
@@ -323,7 +323,7 @@ pub fn handle_reflect_method<'gc>(
                 && let Value::String(name_utf16) = &*native_rc.borrow()
             {
                 let name = utf16_to_utf8(name_utf16);
-                return crate::js_function::handle_global_function(mc, &name, &arg_values, env);
+                return crate::js_function::handle_global_function(ctx, &name, &arg_values, env);
             }
 
             // If target is a closure (sync or async) or an object wrapping a closure, invoke appropriately
@@ -341,18 +341,18 @@ pub fn handle_reflect_method<'gc>(
                     });
 
                 // Delegate invocation to existing call dispatcher which handles sync/async/native functions
-                return crate::core::evaluate_call_dispatch(mc, env, &target, Some(&this_arg), &arg_values);
+                return crate::core::evaluate_call_dispatch(ctx, env, &target, Some(&this_arg), &arg_values);
             }
 
             match target {
-                Value::Function(func_name) => Ok(crate::js_function::handle_global_function(mc, &func_name, &arg_values, env)?),
+                Value::Function(func_name) => Ok(crate::js_function::handle_global_function(ctx, &func_name, &arg_values, env)?),
                 Value::Object(object) => {
                     // If this object wraps an internal closure (function-object), invoke it
                     if let Some(cl_rc) = object.borrow().get_closure() {
                         let cl_val = cl_rc.borrow().clone();
                         if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&cl_val) {
                             let func_env = prepare_function_call_env(
-                                mc,
+                                ctx,
                                 Some(&captured_env),
                                 Some(&this_arg),
                                 Some(&params),
@@ -360,7 +360,7 @@ pub fn handle_reflect_method<'gc>(
                                 None,
                                 Some(env),
                             )?;
-                            return crate::core::evaluate_statements(mc, &func_env, &body);
+                            return crate::core::evaluate_statements(ctx, &func_env, &body);
                         }
                     }
                     Err(raise_type_error!("Reflect.apply target is not callable").into())
@@ -455,7 +455,7 @@ pub fn handle_reflect_method<'gc>(
 
             // Step 4: Let args be ? CreateListFromArrayLike(argumentsList).
             let arg_values = match &arguments_list {
-                Value::Object(_) => create_list_from_array_like(mc, env, &arguments_list, "Reflect.construct")?,
+                Value::Object(_) => create_list_from_array_like(ctx, env, &arguments_list, "Reflect.construct")?,
                 _ => {
                     return Err(raise_type_error!("CreateListFromArrayLike called on non-object").into());
                 }
@@ -466,10 +466,10 @@ pub fn handle_reflect_method<'gc>(
                 && let Some(proxy_cell) = crate::core::slot_get(obj, &InternalSlot::Proxy)
                 && let Value::Proxy(proxy) = &*proxy_cell.borrow()
             {
-                return crate::js_proxy::proxy_construct(mc, proxy, &arg_values, &new_target, env);
+                return crate::js_proxy::proxy_construct(ctx, proxy, &arg_values, &new_target, env);
             }
 
-            crate::js_class::evaluate_new(mc, env, &target, &arg_values, Some(&new_target))
+            crate::js_class::evaluate_new(ctx, env, &target, &arg_values, Some(&new_target))
         }
         "defineProperty" => {
             // Spec 26.1.3 Reflect.defineProperty(target, propertyKey, attributes)
@@ -484,7 +484,7 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let prop_key = to_property_key(ctx, env, property_key)?;
                     // Step 3: Let desc be ? ToPropertyDescriptor(attributes).
                     // Must invoke getters on the attributes object (abrupt propagation).
                     let attr_obj = match &attributes {
@@ -494,9 +494,9 @@ pub fn handle_reflect_method<'gc>(
                         }
                     };
                     // ToPropertyDescriptor: read properties via accessors to detect abrupt completions
-                    let requested = to_property_descriptor_with_accessors(mc, env, &attr_obj)?;
+                    let requested = to_property_descriptor_with_accessors(ctx, env, &attr_obj)?;
                     if let PropertyKey::String(s) = &prop_key {
-                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                        crate::js_module::ensure_deferred_namespace_evaluated(ctx, env, &obj, Some(s.as_str()))?;
                     }
 
                     let is_module_namespace = {
@@ -504,7 +504,7 @@ pub fn handle_reflect_method<'gc>(
                         b.deferred_module_path.is_some() || b.deferred_cache_env.is_some() || (b.prototype.is_none() && !b.is_extensible())
                     };
                     if is_module_namespace {
-                        if crate::core::validate_descriptor_for_define(mc, &requested).is_err() {
+                        if crate::core::validate_descriptor_for_define(ctx, &requested).is_err() {
                             return Ok(Value::Boolean(false));
                         }
                         if requested.get.is_some() || requested.set.is_some() {
@@ -513,7 +513,7 @@ pub fn handle_reflect_method<'gc>(
 
                         match &prop_key {
                             PropertyKey::String(name) => {
-                                if crate::core::build_property_descriptor(mc, &obj, &prop_key).is_none() {
+                                if crate::core::build_property_descriptor(ctx, &obj, &prop_key).is_none() {
                                     return Ok(Value::Boolean(false));
                                 }
                                 if requested.configurable == Some(true)
@@ -523,8 +523,8 @@ pub fn handle_reflect_method<'gc>(
                                     return Ok(Value::Boolean(false));
                                 }
                                 if let Some(v) = requested.value {
-                                    let cur = crate::core::get_property_with_accessors(mc, env, &obj, name.as_str())?;
-                                    if !crate::core::values_equal(mc, &cur, &v) {
+                                    let cur = crate::core::get_property_with_accessors(ctx, env, &obj, name.as_str())?;
+                                    if !crate::core::values_equal(ctx, &cur, &v) {
                                         return Ok(Value::Boolean(false));
                                     }
                                 }
@@ -538,7 +538,7 @@ pub fn handle_reflect_method<'gc>(
                                     return Ok(Value::Boolean(false));
                                 }
                                 if let Some(v) = requested.value
-                                    && !crate::core::values_equal(mc, &v, &Value::String(utf8_to_utf16("Module")))
+                                    && !crate::core::values_equal(ctx, &v, &Value::String(utf8_to_utf16("Module")))
                                 {
                                     return Ok(Value::Boolean(false));
                                 }
@@ -550,11 +550,11 @@ pub fn handle_reflect_method<'gc>(
                         }
                     }
 
-                    if crate::core::validate_descriptor_for_define(mc, &requested).is_err() {
+                    if crate::core::validate_descriptor_for_define(ctx, &requested).is_err() {
                         return Ok(Value::Boolean(false));
                     }
 
-                    if crate::js_array::is_array(mc, &obj)
+                    if crate::js_array::is_array(ctx, &obj)
                         && let PropertyKey::String(s) = &prop_key
                         && s == "length"
                     {
@@ -563,11 +563,11 @@ pub fn handle_reflect_method<'gc>(
                         }
 
                         let to_number_with_hint = |value: &Value<'gc>| -> Result<f64, EvalError<'gc>> {
-                            let prim = crate::core::to_primitive(mc, value, "number", env)?;
+                            let prim = crate::core::to_primitive(ctx, value, "number", env)?;
                             crate::core::to_number(&prim)
                         };
 
-                        let old_len = get_array_length(mc, &obj).unwrap_or(0);
+                        let old_len = get_array_length(ctx, &obj).unwrap_or(0);
                         let to_uint32 = |num: f64| -> u32 {
                             if !num.is_finite() || num == 0.0 || num.is_nan() {
                                 return 0;
@@ -612,15 +612,15 @@ pub fn handle_reflect_method<'gc>(
                             if !length_writable && new_len != old_len {
                                 return Ok(Value::Boolean(false));
                             }
-                            if set_array_length(mc, &obj, new_len).is_err() {
+                            if set_array_length(ctx, &obj, new_len).is_err() {
                                 return Ok(Value::Boolean(false));
                             }
                         }
 
                         if requested.writable == Some(false) {
-                            obj.borrow_mut(mc).set_non_writable("length");
+                            obj.borrow_mut(ctx).set_non_writable("length");
                         } else if requested.writable == Some(true) {
-                            obj.borrow_mut(mc).set_writable("length");
+                            obj.borrow_mut(ctx).set_writable("length");
                         }
 
                         return Ok(Value::Boolean(true));
@@ -631,7 +631,7 @@ pub fn handle_reflect_method<'gc>(
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
                         let trap_result = crate::js_proxy::apply_proxy_trap(
-                            mc,
+                            ctx,
                             proxy,
                             "defineProperty",
                             vec![
@@ -647,13 +647,13 @@ pub fn handle_reflect_method<'gc>(
                                         && let Value::Proxy(inner_proxy) = &*inner_proxy_cell.borrow()
                                     {
                                         return Ok(Value::Boolean(crate::js_proxy::proxy_define_own_property(
-                                            mc,
+                                            ctx,
                                             inner_proxy,
                                             &prop_key,
                                             &attr_obj,
                                         )?));
                                     }
-                                    match crate::js_object::define_property_internal(mc, target_inner, &prop_key, &attr_obj) {
+                                    match crate::js_object::define_property_internal(ctx, target_inner, &prop_key, &attr_obj) {
                                         Ok(()) => Ok(Value::Boolean(true)),
                                         Err(_) => Ok(Value::Boolean(false)),
                                     }
@@ -754,17 +754,17 @@ pub fn handle_reflect_method<'gc>(
                             let idx = num_idx as usize;
                             let is_bigint_ta = crate::js_typedarray::is_bigint_typed_array(&ta.kind);
                             if is_bigint_ta {
-                                let n = crate::js_typedarray::to_bigint_i64(mc, env, &val)?;
-                                ta.set_bigint(mc, idx, n)?;
+                                let n = crate::js_typedarray::to_bigint_i64(ctx, env, &val)?;
+                                ta.set_bigint(ctx, idx, n)?;
                             } else {
-                                let n = crate::core::to_number_with_env(mc, env, &val)?;
-                                ta.set(mc, idx, n)?;
+                                let n = crate::core::to_number_with_env(ctx, env, &val)?;
+                                ta.set(ctx, idx, n)?;
                             }
                         }
                         return Ok(Value::Boolean(true));
                     }
 
-                    match crate::js_object::define_property_internal(mc, &obj, &prop_key, &attr_obj) {
+                    match crate::js_object::define_property_internal(ctx, &obj, &prop_key, &attr_obj) {
                         Ok(()) => Ok(Value::Boolean(true)),
                         Err(_e) => Ok(Value::Boolean(false)),
                     }
@@ -781,15 +781,15 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let prop_key = to_property_key(ctx, env, property_key)?;
                     // Check for proxy wrapper
                     if let Some(proxy_cell) = slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        return Ok(Value::Boolean(crate::js_proxy::proxy_delete_property(mc, proxy, &prop_key)?));
+                        return Ok(Value::Boolean(crate::js_proxy::proxy_delete_property(ctx, proxy, &prop_key)?));
                     }
                     if let PropertyKey::String(s) = &prop_key {
-                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                        crate::js_module::ensure_deferred_namespace_evaluated(ctx, env, &obj, Some(s.as_str()))?;
                     }
                     // Module namespace exotic [[Delete]] (§28.3.4):
                     // If P is an element of [[Exports]], return false.
@@ -803,7 +803,7 @@ pub fn handle_reflect_method<'gc>(
                     if obj.borrow().non_configurable.contains(&prop_key) {
                         return Ok(Value::Boolean(false));
                     }
-                    let _ = obj.borrow_mut(mc).properties.shift_remove(&prop_key);
+                    let _ = obj.borrow_mut(ctx).properties.shift_remove(&prop_key);
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.deleteProperty target must be an object").into()),
@@ -819,21 +819,21 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let prop_key = to_property_key(ctx, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
-                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                        crate::js_module::ensure_deferred_namespace_evaluated(ctx, env, &obj, Some(s.as_str()))?;
                     }
 
                     // If target is a proxy, delegate to proxy [[Get]] with the receiver
                     if let Some(proxy_cell) = slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        let res = crate::js_proxy::proxy_get_property_with_receiver(mc, proxy, &prop_key, Some(receiver.clone()), None)?;
+                        let res = crate::js_proxy::proxy_get_property_with_receiver(ctx, proxy, &prop_key, Some(receiver.clone()), None)?;
                         return Ok(res.unwrap_or(Value::Undefined));
                     }
 
                     // OrdinaryGet with receiver: walk prototype chain, call accessor getter with receiver as `this`
-                    reflect_get_with_receiver(mc, env, &obj, &prop_key, &receiver)
+                    reflect_get_with_receiver(ctx, env, &obj, &prop_key, &receiver)
                 }
                 _ => Err(raise_type_error!("Reflect.get target must be an object").into()),
             }
@@ -847,18 +847,18 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let prop_key = to_property_key(ctx, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
-                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                        crate::js_module::ensure_deferred_namespace_evaluated(ctx, env, &obj, Some(s.as_str()))?;
                     }
 
                     // If the target is a proxy wrapper, delegate to proxy GOPD trap
                     if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        match crate::js_proxy::proxy_get_own_property_descriptor(mc, proxy, &prop_key)? {
+                        match crate::js_proxy::proxy_get_own_property_descriptor(ctx, proxy, &prop_key)? {
                             Some(desc_obj) => {
-                                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                                crate::core::set_internal_prototype_from_constructor(ctx, &desc_obj, env, "Object")?;
                                 return Ok(Value::Object(desc_obj));
                             }
                             None => return Ok(Value::Undefined),
@@ -866,13 +866,13 @@ pub fn handle_reflect_method<'gc>(
                     }
 
                     if let Some(_value_rc) = object_get_key_value(&obj, &prop_key) {
-                        if let Some(mut pd) = crate::core::build_property_descriptor(mc, &obj, &prop_key) {
+                        if let Some(mut pd) = crate::core::build_property_descriptor(ctx, &obj, &prop_key) {
                             let is_deferred_namespace = obj.borrow().deferred_module_path.is_some();
                             let is_accessor_descriptor = pd.get.is_some() || pd.set.is_some();
                             let needs_hydration = (is_deferred_namespace || !is_accessor_descriptor)
                                 && (pd.value.is_none() || matches!(pd.value, Some(Value::Undefined)));
                             if needs_hydration && let PropertyKey::String(s) = &prop_key {
-                                let hydrated = crate::core::get_property_with_accessors(mc, env, &obj, s.as_str())?;
+                                let hydrated = crate::core::get_property_with_accessors(ctx, env, &obj, s.as_str())?;
                                 if !matches!(hydrated, Value::Undefined) {
                                     pd.value = Some(hydrated);
                                     pd.get = None;
@@ -887,7 +887,7 @@ pub fn handle_reflect_method<'gc>(
                                     };
                                     if let (Some(module_path), Some(cache_env)) = (module_path, cache_env)
                                         && let Ok(Value::Object(exports_obj)) =
-                                            crate::js_module::load_module(mc, module_path.as_str(), None, Some(cache_env))
+                                            crate::js_module::load_module(ctx, module_path.as_str(), None, Some(cache_env))
                                         && let Some(v) = object_get_key_value(&exports_obj, s)
                                     {
                                         pd.value = Some(v.borrow().clone());
@@ -899,8 +899,8 @@ pub fn handle_reflect_method<'gc>(
                                     }
                                 }
                             }
-                            let desc_obj = pd.to_object(mc)?;
-                            crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
+                            let desc_obj = pd.to_object(ctx)?;
+                            crate::core::set_internal_prototype_from_constructor(ctx, &desc_obj, env, "Object")?;
                             Ok(Value::Object(desc_obj))
                         } else {
                             Ok(Value::Undefined)
@@ -921,7 +921,7 @@ pub fn handle_reflect_method<'gc>(
                     if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        return crate::js_proxy::proxy_get_prototype_of(mc, proxy);
+                        return crate::js_proxy::proxy_get_prototype_of(ctx, proxy);
                     }
                     if let Some(proto_rc) = obj.borrow().prototype {
                         Ok(Value::Object(proto_rc))
@@ -945,12 +945,12 @@ pub fn handle_reflect_method<'gc>(
                     if let Some(proxy_cell) = slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        let prop_key = to_property_key(mc, env, property_key)?;
-                        return Ok(Value::Boolean(crate::js_proxy::proxy_has_property(mc, proxy, prop_key)?));
+                        let prop_key = to_property_key(ctx, env, property_key)?;
+                        return Ok(Value::Boolean(crate::js_proxy::proxy_has_property(ctx, proxy, prop_key)?));
                     }
-                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let prop_key = to_property_key(ctx, env, property_key)?;
                     if let PropertyKey::String(s) = &prop_key {
-                        crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, Some(s.as_str()))?;
+                        crate::js_module::ensure_deferred_namespace_evaluated(ctx, env, &obj, Some(s.as_str()))?;
                     }
 
                     // TypedArray [[HasProperty]]: intercept CanonicalNumericIndexString
@@ -974,7 +974,7 @@ pub fn handle_reflect_method<'gc>(
                         if let Some(proxy_cell) = slot_get(&proto, &InternalSlot::Proxy)
                             && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                         {
-                            return Ok(Value::Boolean(crate::js_proxy::proxy_has_property(mc, proxy, prop_key)?));
+                            return Ok(Value::Boolean(crate::js_proxy::proxy_has_property(ctx, proxy, prop_key)?));
                         }
                         if object_get_key_value(&proto, &prop_key).is_some() {
                             return Ok(Value::Boolean(true));
@@ -997,7 +997,7 @@ pub fn handle_reflect_method<'gc>(
                     if let Some(proxy_cell) = slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        return Ok(Value::Boolean(crate::js_proxy::proxy_is_extensible(mc, proxy)?));
+                        return Ok(Value::Boolean(crate::js_proxy::proxy_is_extensible(ctx, proxy)?));
                     }
                     Ok(Value::Boolean(obj.borrow().is_extensible()))
                 }
@@ -1010,7 +1010,7 @@ pub fn handle_reflect_method<'gc>(
             }
             match args[0] {
                 Value::Object(obj) => {
-                    crate::js_module::ensure_deferred_namespace_evaluated(mc, env, &obj, None)?;
+                    crate::js_module::ensure_deferred_namespace_evaluated(ctx, env, &obj, None)?;
 
                     // Check for proxy and call proxy_own_keys directly to preserve
                     // EvalError::Throw (avoids lossy EvalError→JSError roundtrip).
@@ -1018,7 +1018,7 @@ pub fn handle_reflect_method<'gc>(
                         crate::core::slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        crate::js_proxy::proxy_own_keys(mc, proxy)?
+                        crate::js_proxy::proxy_own_keys(ctx, proxy)?
                     } else {
                         crate::core::ordinary_own_property_keys(&obj)
                     };
@@ -1032,11 +1032,11 @@ pub fn handle_reflect_method<'gc>(
                         }
                     }
                     let keys_len = keys.len();
-                    let result_obj = crate::js_array::create_array(mc, env)?;
+                    let result_obj = crate::js_array::create_array(ctx, env)?;
                     for (i, key) in keys.into_iter().enumerate() {
-                        object_set_key_value(mc, &result_obj, i, &key)?;
+                        object_set_key_value(ctx, &result_obj, i, &key)?;
                     }
-                    set_array_length(mc, &result_obj, keys_len)?;
+                    set_array_length(ctx, &result_obj, keys_len)?;
                     Ok(Value::Object(result_obj))
                 }
                 _ => Err(raise_type_error!("Reflect.ownKeys target must be an object").into()),
@@ -1053,9 +1053,9 @@ pub fn handle_reflect_method<'gc>(
                     if let Some(proxy_cell) = slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        return Ok(Value::Boolean(crate::js_proxy::proxy_prevent_extensions(mc, proxy)?));
+                        return Ok(Value::Boolean(crate::js_proxy::proxy_prevent_extensions(ctx, proxy)?));
                     }
-                    obj.borrow_mut(mc).prevent_extensions();
+                    obj.borrow_mut(ctx).prevent_extensions();
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.preventExtensions target must be an object").into()),
@@ -1072,14 +1072,14 @@ pub fn handle_reflect_method<'gc>(
 
             match target {
                 Value::Object(obj) => {
-                    let prop_key = to_property_key(mc, env, property_key)?;
+                    let prop_key = to_property_key(ctx, env, property_key)?;
 
                     // Per spec: Reflect.set(target, P, V, Receiver) → target.[[Set]](P, V, Receiver)
                     // If target is a proxy, call its [[Set]] trap
                     if let Some(proxy_cell) = crate::core::slot_get(&obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        let ok = crate::js_proxy::proxy_set_property_with_receiver(mc, proxy, &prop_key, &value, Some(&receiver))?;
+                        let ok = crate::js_proxy::proxy_set_property_with_receiver(ctx, proxy, &prop_key, &value, Some(&receiver))?;
                         return Ok(Value::Boolean(ok));
                     }
 
@@ -1099,11 +1099,11 @@ pub fn handle_reflect_method<'gc>(
                             if crate::js_typedarray::is_valid_integer_index(ta, num_idx) {
                                 let idx = num_idx as usize;
                                 if crate::js_typedarray::is_bigint_typed_array(&ta.kind) {
-                                    let n = crate::js_typedarray::to_bigint_i64(mc, env, &value)?;
-                                    ta.set_bigint(mc, idx, n)?;
+                                    let n = crate::js_typedarray::to_bigint_i64(ctx, env, &value)?;
+                                    ta.set_bigint(ctx, idx, n)?;
                                 } else {
-                                    let n = crate::core::to_number_with_env(mc, env, &value)?;
-                                    ta.set(mc, idx, n)?;
+                                    let n = crate::core::to_number_with_env(ctx, env, &value)?;
+                                    ta.set(ctx, idx, n)?;
                                 }
                             }
                             return Ok(Value::Boolean(true));
@@ -1125,7 +1125,7 @@ pub fn handle_reflect_method<'gc>(
                     }
 
                     // Non-proxy target: OrdinarySet(target, P, V, Receiver)
-                    let ok = crate::js_proxy::ordinary_set(mc, &obj, &prop_key, &value, &receiver, env)?;
+                    let ok = crate::js_proxy::ordinary_set(ctx, &obj, &prop_key, &value, &receiver, env)?;
                     Ok(Value::Boolean(ok))
                 }
                 _ => Err(raise_type_error!("Reflect.set target must be an object").into()),
@@ -1144,17 +1144,17 @@ pub fn handle_reflect_method<'gc>(
                         Value::Null => None,
                         Value::Function(func_name) => {
                             // Functions are objects in JS; wrap in object shell
-                            let fn_obj = new_js_object_data(mc);
+                            let fn_obj = new_js_object_data(ctx);
                             if let Some(func_ctor_val) = object_get_key_value(env, "Function")
                                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
                                 && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                                 && let Value::Object(func_proto) = &*proto_val.borrow()
                             {
-                                fn_obj.borrow_mut(mc).prototype = Some(*func_proto);
+                                fn_obj.borrow_mut(ctx).prototype = Some(*func_proto);
                             }
                             fn_obj
-                                .borrow_mut(mc)
-                                .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function(func_name.clone()))));
+                                .borrow_mut(ctx)
+                                .set_closure(Some(crate::core::new_gc_cell_ptr(ctx, Value::Function(func_name.clone()))));
                             Some(fn_obj)
                         }
                         _ => return Err(raise_type_error!("Reflect.setPrototypeOf prototype must be an object or null").into()),
@@ -1164,7 +1164,7 @@ pub fn handle_reflect_method<'gc>(
                     if let Some(proxy_cell) = slot_get(obj, &InternalSlot::Proxy)
                         && let Value::Proxy(proxy) = &*proxy_cell.borrow()
                     {
-                        return Ok(Value::Boolean(crate::js_proxy::proxy_set_prototype_of(mc, proxy, &args[1])?));
+                        return Ok(Value::Boolean(crate::js_proxy::proxy_set_prototype_of(ctx, proxy, &args[1])?));
                     }
 
                     // OrdinarySetPrototypeOf (spec 10.1.2)
@@ -1216,7 +1216,7 @@ pub fn handle_reflect_method<'gc>(
                     }
 
                     // Step 9: Set the prototype
-                    obj.borrow_mut(mc).prototype = new_proto;
+                    obj.borrow_mut(ctx).prototype = new_proto;
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.setPrototypeOf target must be an object").into()),

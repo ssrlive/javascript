@@ -34,8 +34,8 @@ pub(crate) fn es_trim(s: &str) -> &str {
 }
 
 /// ToIntegerOrInfinity on a JS value, propagating errors for BigInt/Symbol/objects.
-fn to_integer_or_infinity<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
-    let n = to_number_with_env(mc, env, val)?;
+fn to_integer_or_infinity<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
+    let n = to_number_with_env(ctx, env, val)?;
     if n.is_nan() || n == 0.0 {
         Ok(0.0)
     } else if !n.is_finite() {
@@ -49,17 +49,17 @@ fn to_integer_or_infinity<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, 
 // Initialization
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn initialize_number_module<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let number_obj = make_number_object(mc, env)?;
-    env_set(mc, env, "Number", &Value::Object(number_obj))?;
+pub fn initialize_number_module<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let number_obj = make_number_object(ctx, env)?;
+    env_set(ctx, env, "Number", &Value::Object(number_obj))?;
     Ok(())
 }
 
 /// Create the Number object with all number constants and functions
-fn make_number_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let number_obj = new_js_object_data(mc);
-    slot_set(mc, &number_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &number_obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Number")));
+fn make_number_object<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let number_obj = new_js_object_data(ctx);
+    slot_set(ctx, &number_obj, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &number_obj, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Number")));
 
     // --- Constants (non-writable, non-enumerable, non-configurable) ---
     let constants: &[(&str, f64)] = &[
@@ -73,10 +73,10 @@ fn make_number_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         ("MIN_SAFE_INTEGER", -9007199254740991.0),
     ];
     for &(name, val) in constants {
-        object_set_key_value(mc, &number_obj, name, &Value::Number(val))?;
-        number_obj.borrow_mut(mc).set_non_enumerable(name);
-        number_obj.borrow_mut(mc).set_non_writable(name);
-        number_obj.borrow_mut(mc).set_non_configurable(name);
+        object_set_key_value(ctx, &number_obj, name, &Value::Number(val))?;
+        number_obj.borrow_mut(ctx).set_non_enumerable(name);
+        number_obj.borrow_mut(ctx).set_non_writable(name);
+        number_obj.borrow_mut(ctx).set_non_configurable(name);
     }
 
     // --- Static methods (non-enumerable) ---
@@ -90,19 +90,19 @@ fn make_number_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
         ("parseInt", "parseInt"),
     ];
     for &(name, tag) in statics {
-        object_set_key_value(mc, &number_obj, name, &Value::Function(tag.to_string()))?;
-        number_obj.borrow_mut(mc).set_non_enumerable(name);
+        object_set_key_value(ctx, &number_obj, name, &Value::Function(tag.to_string()))?;
+        number_obj.borrow_mut(ctx).set_non_enumerable(name);
     }
 
     // prototype descriptor: non-enumerable, non-writable, non-configurable
-    number_obj.borrow_mut(mc).set_non_enumerable("prototype");
-    number_obj.borrow_mut(mc).set_non_writable("prototype");
-    number_obj.borrow_mut(mc).set_non_configurable("prototype");
+    number_obj.borrow_mut(ctx).set_non_enumerable("prototype");
+    number_obj.borrow_mut(ctx).set_non_writable("prototype");
+    number_obj.borrow_mut(ctx).set_non_configurable("prototype");
 
     // Number.length = 1
-    object_set_key_value(mc, &number_obj, "length", &Value::Number(1.0))?;
-    number_obj.borrow_mut(mc).set_non_enumerable("length");
-    number_obj.borrow_mut(mc).set_non_writable("length");
+    object_set_key_value(ctx, &number_obj, "length", &Value::Number(1.0))?;
+    number_obj.borrow_mut(ctx).set_non_enumerable("length");
+    number_obj.borrow_mut(ctx).set_non_writable("length");
 
     // --- Object.prototype ---
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -116,29 +116,29 @@ fn make_number_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
     };
 
     // --- Number.prototype ---
-    let number_prototype = new_js_object_data(mc);
+    let number_prototype = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        number_prototype.borrow_mut(mc).prototype = Some(proto);
+        number_prototype.borrow_mut(ctx).prototype = Some(proto);
     }
     // Number.prototype is itself a Number object with [[NumberData]] = +0
-    slot_set(mc, &number_prototype, InternalSlot::PrimitiveValue, &Value::Number(0.0));
+    slot_set(ctx, &number_prototype, InternalSlot::PrimitiveValue, &Value::Number(0.0));
 
     let proto_methods = ["toString", "valueOf", "toLocaleString", "toExponential", "toFixed", "toPrecision"];
     for name in proto_methods {
-        object_set_key_value(mc, &number_prototype, name, &Value::Function(format!("Number.prototype.{name}")))?;
-        number_prototype.borrow_mut(mc).set_non_enumerable(name);
+        object_set_key_value(ctx, &number_prototype, name, &Value::Function(format!("Number.prototype.{name}")))?;
+        number_prototype.borrow_mut(ctx).set_non_enumerable(name);
     }
-    number_prototype.borrow_mut(mc).set_non_enumerable("constructor");
+    number_prototype.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Set prototype on Number constructor
-    object_set_key_value(mc, &number_obj, "prototype", &Value::Object(number_prototype))?;
+    object_set_key_value(ctx, &number_obj, "prototype", &Value::Object(number_prototype))?;
 
     // Ensure Number.prototype.constructor → Number
     if let Some(proto_val) = object_get_key_value(&number_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
-        object_set_key_value(mc, proto_obj, "constructor", &Value::Object(number_obj))?;
-        proto_obj.borrow_mut(mc).set_non_enumerable("constructor");
+        object_set_key_value(ctx, proto_obj, "constructor", &Value::Object(number_obj))?;
+        proto_obj.borrow_mut(ctx).set_non_enumerable("constructor");
     }
 
     Ok(number_obj)
@@ -149,7 +149,7 @@ fn make_number_object<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> R
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub(crate) fn number_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -173,7 +173,7 @@ pub(crate) fn number_constructor<'gc>(
         }
         Value::Object(obj) => {
             // ToNumeric: ToPrimitive(number hint), then if BigInt → ℝ, else ToNumber
-            let prim = crate::core::to_primitive(mc, &Value::Object(*obj), "number", env)?;
+            let prim = crate::core::to_primitive(ctx, &Value::Object(*obj), "number", env)?;
             match prim {
                 Value::Number(n) => Ok(Value::Number(n)),
                 Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
@@ -276,7 +276,7 @@ pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Re
 
 /// Core instance-method dispatch. `n` is the resolved thisNumberValue.
 fn handle_number_instance_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     n: f64,
     method: &str,
@@ -289,7 +289,7 @@ fn handle_number_instance_method<'gc>(
             if matches!(radix_arg, Value::Undefined) {
                 return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n)))));
             }
-            let radix_f = to_number_with_env(mc, env, radix_arg)?;
+            let radix_f = to_number_with_env(ctx, env, radix_arg)?;
             let radix = radix_f as i32;
             if !(2..=36).contains(&radix) {
                 return Err(raise_range_error!("toString() radix must be between 2 and 36").into());
@@ -315,7 +315,7 @@ fn handle_number_instance_method<'gc>(
             let f = if fd_undefined {
                 0.0
             } else {
-                to_integer_or_infinity(mc, env, fd_arg)?
+                to_integer_or_infinity(ctx, env, fd_arg)?
             };
 
             // Step 4-6: NaN / Infinity
@@ -341,7 +341,7 @@ fn handle_number_instance_method<'gc>(
         // ─── toFixed ────────────────────────────────────────────────
         "toFixed" => {
             let fd_arg = args.first().unwrap_or(&Value::Undefined);
-            let f = to_integer_or_infinity(mc, env, fd_arg)?;
+            let f = to_integer_or_infinity(ctx, env, fd_arg)?;
             if !(0.0..=100.0).contains(&f) {
                 return Err(raise_range_error!("toFixed() digits argument must be between 0 and 100").into());
             }
@@ -365,7 +365,7 @@ fn handle_number_instance_method<'gc>(
             if matches!(p_arg, Value::Undefined) {
                 return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n)))));
             }
-            let p = to_integer_or_infinity(mc, env, p_arg)?;
+            let p = to_integer_or_infinity(ctx, env, p_arg)?;
             if n.is_nan() {
                 return Ok(Value::String(utf8_to_utf16("NaN")));
             }
@@ -555,7 +555,7 @@ fn number_to_radix_string(n: f64, radix: u32) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn handle_number_prototype_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     this: Option<&Value<'gc>>,
     method: &str,
@@ -579,5 +579,5 @@ pub fn handle_number_prototype_method<'gc>(
             return Err(raise_type_error!("Number.prototype method requires that 'this' be a Number").into());
         }
     };
-    handle_number_instance_method(mc, env, n, method, args)
+    handle_number_instance_method(ctx, env, n, method, args)
 }

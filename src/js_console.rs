@@ -12,25 +12,25 @@ use crate::unicode::utf16_to_utf8;
 use std::collections::HashSet;
 
 /// Create the console object with logging functions
-pub fn initialize_console_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let console_obj = new_js_object_data(mc);
-    object_set_key_value(mc, &console_obj, "log", &Value::Function("console.log".to_string()))?;
+pub fn initialize_console_object<'gc>(ctx: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let console_obj = new_js_object_data(ctx);
+    object_set_key_value(ctx, &console_obj, "log", &Value::Function("console.log".to_string()))?;
     // Provide `console.error` as an alias to `console.log` for now
-    object_set_key_value(mc, &console_obj, "error", &Value::Function("console.error".to_string()))?;
+    object_set_key_value(ctx, &console_obj, "error", &Value::Function("console.error".to_string()))?;
     Ok(console_obj)
 }
 
 fn format_console_value<'gc>(
-    mc: &GcContext<'gc>, // added mc
+    ctx: &GcContext<'gc>, // added ctx
     val: &Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<String, JSError> {
     let mut seen = HashSet::new();
-    format_value_pretty(mc, val, env, 0, &mut seen, false)
+    format_value_pretty(ctx, val, env, 0, &mut seen, false)
 }
 
 fn format_value_pretty<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     val: &Value<'gc>,
     _env: &JSObjectDataPtr<'gc>,
     _depth: usize,
@@ -52,7 +52,7 @@ fn format_value_pretty<'gc>(
         Value::Null => Ok("null".to_string()),
         Value::Object(obj) => {
             if let Some(promise) = crate::js_promise::get_promise_from_js_object(obj) {
-                return format_promise(mc, &promise, _env, _depth, seen);
+                return format_promise(ctx, &promise, _env, _depth, seen);
             }
 
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
@@ -85,20 +85,20 @@ fn format_value_pretty<'gc>(
                     }
                     None => Ok("[object Date]".to_string()),
                 }
-            } else if crate::js_array::is_array(mc, obj) {
+            } else if crate::js_array::is_array(ctx, obj) {
                 if seen.contains(&Gc::as_ptr(*obj)) {
                     return Ok("[Circular]".to_string());
                 }
                 seen.insert(Gc::as_ptr(*obj));
 
-                let len = crate::js_array::get_array_length(mc, obj).unwrap_or(0);
+                let len = crate::js_array::get_array_length(ctx, obj).unwrap_or(0);
                 let mut s = String::from("[");
                 for i in 0..len {
                     if i > 0 {
                         s.push_str(", ");
                     }
                     if let Some(val_rc) = object_get_key_value(obj, i) {
-                        let val_str = format_value_pretty(mc, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
+                        let val_str = format_value_pretty(ctx, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
                         s.push_str(&val_str);
                     } else if i == len - 1 {
                         s.push(',');
@@ -209,7 +209,7 @@ fn format_value_pretty<'gc>(
                     }
 
                     s.push_str(": ");
-                    let val_str = format_value_pretty(mc, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
+                    let val_str = format_value_pretty(ctx, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
                     s.push_str(&val_str);
                 }
                 s.push('}');
@@ -267,7 +267,7 @@ fn format_value_pretty<'gc>(
             s.push(']');
             Ok(s)
         }
-        Value::Promise(p_rc) => format_promise(mc, p_rc, _env, _depth, seen),
+        Value::Promise(p_rc) => format_promise(ctx, p_rc, _env, _depth, seen),
         Value::Symbol(s) => Ok(format!("Symbol({})", s.description().unwrap_or(""))),
         // Value::Map(_) => Ok("[object Map]".to_string()),
         // Value::Set(_) => Ok("[object Set]".to_string()),
@@ -287,7 +287,7 @@ fn format_value_pretty<'gc>(
 
 // Helper to format a Promise (or an GcPtr<RefCell<JSPromise>>) in Node-like style.
 fn format_promise<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     p_rc: &GcPtr<'gc, JSPromise<'gc>>,
     _env: &JSObjectDataPtr<'gc>,
     depth: usize,
@@ -297,11 +297,11 @@ fn format_promise<'gc>(
     match &p.state {
         PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
         PromiseState::Fulfilled(val) => {
-            let inner = format_value_pretty(mc, val, _env, depth + 1, seen, false)?;
+            let inner = format_value_pretty(ctx, val, _env, depth + 1, seen, false)?;
             Ok(format!("Promise {{ {} }}", inner))
         }
         PromiseState::Rejected(val) => {
-            let inner = format_value_pretty(mc, val, _env, depth + 1, seen, false)?;
+            let inner = format_value_pretty(ctx, val, _env, depth + 1, seen, false)?;
             Ok(format!("Promise {{ <rejected> {} }}", inner))
         }
     }
@@ -309,7 +309,7 @@ fn format_promise<'gc>(
 
 /// Handle console object method calls
 pub fn handle_console_method<'gc>(
-    mc: &GcContext<'gc>, // added mc
+    ctx: &GcContext<'gc>, // added ctx
     method: &str,
     values: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -348,7 +348,7 @@ pub fn handle_console_method<'gc>(
                                         if arg_idx < values.len() {
                                             let val = &values[arg_idx];
                                             match next_char {
-                                                's' => output.push_str(&format_console_value(mc, val, env)?),
+                                                's' => output.push_str(&format_console_value(ctx, val, env)?),
                                                 'd' | 'i' => {
                                                     if let Value::Number(n) = val {
                                                         output.push_str(&format!("{:.0}", n));
@@ -364,7 +364,7 @@ pub fn handle_console_method<'gc>(
                                                     }
                                                 }
                                                 'o' | 'O' => {
-                                                    output.push_str(&format_console_value(mc, val, env)?);
+                                                    output.push_str(&format_console_value(ctx, val, env)?);
                                                 }
                                                 'c' => {
                                                     // Ignore CSS
@@ -396,7 +396,7 @@ pub fn handle_console_method<'gc>(
 
             if !formatted {
                 // Just print first arg
-                output.push_str(&format_console_value(mc, &values[0], env)?);
+                output.push_str(&format_console_value(ctx, &values[0], env)?);
                 arg_idx = 0;
             }
 
@@ -405,7 +405,7 @@ pub fn handle_console_method<'gc>(
                 if !output.is_empty() {
                     output.push(' ');
                 }
-                output.push_str(&format_console_value(mc, values_i, env)?);
+                output.push_str(&format_console_value(ctx, values_i, env)?);
             }
 
             println!("{}", output);
@@ -417,11 +417,11 @@ pub fn handle_console_method<'gc>(
 
 /// Print additional own non-index properties of an array object
 /// Not enabled by default; can be called from handle_console_method if desired
-fn _print_additional_info_for_array<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<(), crate::core::EvalError<'gc>> {
+fn _print_additional_info_for_array<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<(), crate::core::EvalError<'gc>> {
     // Collect and print own non-index properties.
     // Print common RegExp-related props in a stable order for readability.
 
-    let Some(len) = get_array_length(mc, obj) else {
+    let Some(len) = get_array_length(ctx, obj) else {
         return Ok(());
     };
 
@@ -445,7 +445,7 @@ fn _print_additional_info_for_array<'gc>(mc: &GcContext<'gc>, obj: &JSObjectData
                 Value::Undefined => print!("undefined"),
                 Value::Null => print!("null"),
                 Value::Object(inner_obj) => {
-                    if is_array(mc, inner_obj) {
+                    if is_array(ctx, inner_obj) {
                         print!("[Array]");
                     } else {
                         print!("[object Object]");
@@ -499,7 +499,7 @@ fn _print_additional_info_for_array<'gc>(mc: &GcContext<'gc>, obj: &JSObjectData
             Value::Undefined => print!("undefined"),
             Value::Null => print!("null"),
             Value::Object(inner_obj) => {
-                if is_array(mc, inner_obj) {
+                if is_array(ctx, inner_obj) {
                     print!("[Array]");
                 } else {
                     print!("[object Object]");

@@ -350,8 +350,8 @@ fn timezone_offset_ms(t: f64) -> f64 {
 // =========================================================================
 // ToNumber helper for Date method args
 // =========================================================================
-fn to_number_val<'gc>(mc: &GcContext<'gc>, v: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
-    let prim = crate::core::to_primitive(mc, v, "number", env)?;
+fn to_number_val<'gc>(ctx: &GcContext<'gc>, v: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<f64, EvalError<'gc>> {
+    let prim = crate::core::to_primitive(ctx, v, "number", env)?;
     crate::core::to_number(&prim)
 }
 
@@ -359,23 +359,23 @@ fn to_number_val<'gc>(mc: &GcContext<'gc>, v: &Value<'gc>, env: &JSObjectDataPtr
 // Initialize Date constructor
 // =========================================================================
 
-pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let date_ctor = new_js_object_data(mc);
-    slot_set(mc, &date_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
-    slot_set(mc, &date_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Date")));
+pub(crate) fn initialize_date<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let date_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &date_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+    slot_set(ctx, &date_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("Date")));
 
     // Set [[Prototype]] = Function.prototype
-    if let Err(e) = crate::core::set_internal_prototype_from_constructor(mc, &date_ctor, env, "Function") {
+    if let Err(e) = crate::core::set_internal_prototype_from_constructor(ctx, &date_ctor, env, "Function") {
         log::warn!("Failed to set Date constructor's internal prototype from Function: {e:?}");
     }
 
     // Date.length = 7 (non-writable, non-enumerable, configurable)
-    let len_desc = crate::core::create_descriptor_object(mc, &Value::Number(7.0), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &date_ctor, "length", &len_desc)?;
+    let len_desc = crate::core::create_descriptor_object(ctx, &Value::Number(7.0), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &date_ctor, "length", &len_desc)?;
 
     // Date.name = "Date"
-    let name_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("Date")), false, false, true)?;
-    crate::js_object::define_property_internal(mc, &date_ctor, "name", &name_desc)?;
+    let name_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("Date")), false, false, true)?;
+    crate::js_object::define_property_internal(ctx, &date_ctor, "name", &name_desc)?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -388,20 +388,20 @@ pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'g
         None
     };
 
-    let date_proto = new_js_object_data(mc);
+    let date_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        date_proto.borrow_mut(mc).prototype = Some(proto);
+        date_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
     // Date.prototype — non-writable, non-enumerable, non-configurable
-    object_set_key_value(mc, &date_ctor, "prototype", &Value::Object(date_proto))?;
-    date_ctor.borrow_mut(mc).set_non_writable("prototype");
-    date_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    date_ctor.borrow_mut(mc).set_non_configurable("prototype");
+    object_set_key_value(ctx, &date_ctor, "prototype", &Value::Object(date_proto))?;
+    date_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    date_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    date_ctor.borrow_mut(ctx).set_non_configurable("prototype");
 
     // Date.prototype.constructor — writable, non-enumerable, configurable
-    object_set_key_value(mc, &date_proto, "constructor", &Value::Object(date_ctor))?;
-    date_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    object_set_key_value(ctx, &date_proto, "constructor", &Value::Object(date_ctor))?;
+    date_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Instance methods with their spec'd lengths
     let methods: &[(&str, f64)] = &[
@@ -454,9 +454,9 @@ pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'g
     ];
 
     for (method, arity) in methods {
-        let fn_obj = new_js_object_data(mc);
-        fn_obj.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
-            mc,
+        let fn_obj = new_js_object_data(ctx);
+        fn_obj.borrow_mut(ctx).set_closure(Some(crate::core::new_gc_cell_ptr(
+            ctx,
             Value::Function(format!("Date.prototype.{method}")),
         )));
         // Set Function.prototype as [[Prototype]]
@@ -465,23 +465,23 @@ pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'g
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(fp) = &*fp_val.borrow()
         {
-            fn_obj.borrow_mut(mc).prototype = Some(*fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(*fp);
         }
         // name: non-writable, non-enumerable, configurable
-        let nm_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &nm_desc)?;
+        let nm_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(method)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &nm_desc)?;
         // length: non-writable, non-enumerable, configurable
-        let ln_desc = crate::core::create_descriptor_object(mc, &Value::Number(*arity), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &ln_desc)?;
+        let ln_desc = crate::core::create_descriptor_object(ctx, &Value::Number(*arity), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &ln_desc)?;
         // Store on prototype: writable, non-enumerable, configurable
-        object_set_key_value(mc, &date_proto, method.to_string(), &Value::Object(fn_obj))?;
-        date_proto.borrow_mut(mc).set_non_enumerable(*method);
+        object_set_key_value(ctx, &date_proto, method.to_string(), &Value::Object(fn_obj))?;
+        date_proto.borrow_mut(ctx).set_non_enumerable(*method);
     }
 
     // Annex B: Date.prototype.toGMTString === Date.prototype.toUTCString (same object)
     if let Some(utc_fn) = object_get_key_value(&date_proto, "toUTCString") {
-        object_set_key_value(mc, &date_proto, "toGMTString", &utc_fn.borrow())?;
-        date_proto.borrow_mut(mc).set_non_enumerable("toGMTString");
+        object_set_key_value(ctx, &date_proto, "toGMTString", &utc_fn.borrow())?;
+        date_proto.borrow_mut(ctx).set_non_enumerable("toGMTString");
     }
 
     // Symbol.toPrimitive — Date.prototype[@@toPrimitive](hint)
@@ -490,9 +490,9 @@ pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'g
         && let Some(tp_sym_val) = object_get_key_value(sym_obj, "toPrimitive")
         && let Value::Symbol(tp_sym) = &*tp_sym_val.borrow()
     {
-        let fn_obj = new_js_object_data(mc);
-        fn_obj.borrow_mut(mc).set_closure(Some(crate::core::new_gc_cell_ptr(
-            mc,
+        let fn_obj = new_js_object_data(ctx);
+        fn_obj.borrow_mut(ctx).set_closure(Some(crate::core::new_gc_cell_ptr(
+            ctx,
             Value::Function("Date.prototype.@@toPrimitive".to_string()),
         )));
         if let Some(func_val) = object_get_key_value(env, "Function")
@@ -500,45 +500,46 @@ pub(crate) fn initialize_date<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'g
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(fp) = &*fp_val.borrow()
         {
-            fn_obj.borrow_mut(mc).prototype = Some(*fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(*fp);
         }
-        let nm_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("[Symbol.toPrimitive]")), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &nm_desc)?;
-        let ln_desc = crate::core::create_descriptor_object(mc, &Value::Number(1.0), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &ln_desc)?;
+        let nm_desc =
+            crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("[Symbol.toPrimitive]")), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &nm_desc)?;
+        let ln_desc = crate::core::create_descriptor_object(ctx, &Value::Number(1.0), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &ln_desc)?;
         // non-writable, non-enumerable, configurable
-        object_set_key_value(mc, &date_proto, crate::core::PropertyKey::Symbol(*tp_sym), &Value::Object(fn_obj))?;
+        object_set_key_value(ctx, &date_proto, crate::core::PropertyKey::Symbol(*tp_sym), &Value::Object(fn_obj))?;
         date_proto
-            .borrow_mut(mc)
+            .borrow_mut(ctx)
             .set_non_writable(crate::core::PropertyKey::Symbol(*tp_sym));
         date_proto
-            .borrow_mut(mc)
+            .borrow_mut(ctx)
             .set_non_enumerable(crate::core::PropertyKey::Symbol(*tp_sym));
     }
 
     // Static methods
     let static_methods: &[(&str, f64)] = &[("now", 0.0), ("parse", 1.0), ("UTC", 7.0)];
     for (method, arity) in static_methods {
-        let fn_obj = new_js_object_data(mc);
+        let fn_obj = new_js_object_data(ctx);
         fn_obj
-            .borrow_mut(mc)
-            .set_closure(Some(crate::core::new_gc_cell_ptr(mc, Value::Function(format!("Date.{method}")))));
+            .borrow_mut(ctx)
+            .set_closure(Some(crate::core::new_gc_cell_ptr(ctx, Value::Function(format!("Date.{method}")))));
         if let Some(func_val) = object_get_key_value(env, "Function")
             && let Value::Object(func_ctor) = &*func_val.borrow()
             && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
             && let Value::Object(fp) = &*fp_val.borrow()
         {
-            fn_obj.borrow_mut(mc).prototype = Some(*fp);
+            fn_obj.borrow_mut(ctx).prototype = Some(*fp);
         }
-        let nm_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16(method)), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "name", &nm_desc)?;
-        let ln_desc = crate::core::create_descriptor_object(mc, &Value::Number(*arity), false, false, true)?;
-        crate::js_object::define_property_internal(mc, &fn_obj, "length", &ln_desc)?;
-        object_set_key_value(mc, &date_ctor, method.to_string(), &Value::Object(fn_obj))?;
-        date_ctor.borrow_mut(mc).set_non_enumerable(*method);
+        let nm_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16(method)), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "name", &nm_desc)?;
+        let ln_desc = crate::core::create_descriptor_object(ctx, &Value::Number(*arity), false, false, true)?;
+        crate::js_object::define_property_internal(ctx, &fn_obj, "length", &ln_desc)?;
+        object_set_key_value(ctx, &date_ctor, method.to_string(), &Value::Object(fn_obj))?;
+        date_ctor.borrow_mut(ctx).set_non_enumerable(*method);
     }
 
-    env_set(mc, env, "Date", &Value::Object(date_ctor))?;
+    env_set(ctx, env, "Date", &Value::Object(date_ctor))?;
     Ok(())
 }
 
@@ -567,8 +568,8 @@ fn this_time_value<'gc>(this: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
     Err(raise_type_error!("this is not a Date object").into())
 }
 
-fn set_time_stamp_value<'gc>(mc: &GcContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
-    slot_set(mc, date_obj, InternalSlot::Timestamp, &Value::Number(timestamp));
+fn set_time_stamp_value<'gc>(ctx: &GcContext<'gc>, date_obj: &JSObjectDataPtr<'gc>, timestamp: f64) -> Result<(), JSError> {
+    slot_set(ctx, date_obj, InternalSlot::Timestamp, &Value::Number(timestamp));
     Ok(())
 }
 
@@ -883,7 +884,7 @@ pub(crate) fn construct_date_from_components(components: &[f64]) -> f64 {
 // =========================================================================
 
 pub(crate) fn handle_date_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
@@ -912,7 +913,7 @@ pub(crate) fn handle_date_constructor<'gc>(
                     }
                 } else {
                     // ToPrimitive with no preferred type (uses "default" hint)
-                    let prim = crate::core::to_primitive(mc, arg_val, "default", env)?;
+                    let prim = crate::core::to_primitive(ctx, arg_val, "default", env)?;
                     match &prim {
                         Value::String(s) => {
                             let date_str = utf16_to_utf8(s);
@@ -929,26 +930,26 @@ pub(crate) fn handle_date_constructor<'gc>(
         // Each argument is coerced with ToNumber (which may throw)
         let mut components = Vec::new();
         for arg in args {
-            components.push(to_number_val(mc, arg, env)?);
+            components.push(to_number_val(ctx, arg, env)?);
         }
         construct_date_from_components(&components)
     };
 
     // Create a Date object with clipped timestamp
-    let date_obj = new_js_object_data(mc);
-    set_time_stamp_value(mc, &date_obj, timestamp)?;
+    let date_obj = new_js_object_data(ctx);
+    set_time_stamp_value(ctx, &date_obj, timestamp)?;
 
     // OrdinaryCreateFromConstructor: use new_target's prototype if provided
     let mut proto_set = false;
     if let Some(nt) = new_target
         && let Value::Object(nt_obj) = nt
-        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "Date")?
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "Date")?
     {
-        date_obj.borrow_mut(mc).prototype = Some(proto);
+        date_obj.borrow_mut(ctx).prototype = Some(proto);
         proto_set = true;
     }
     if !proto_set {
-        crate::core::set_internal_prototype_from_constructor(mc, &date_obj, env, "Date")?;
+        crate::core::set_internal_prototype_from_constructor(ctx, &date_obj, env, "Date")?;
     }
 
     Ok(Value::Object(date_obj))
@@ -959,7 +960,7 @@ pub(crate) fn handle_date_constructor<'gc>(
 // =========================================================================
 
 pub(crate) fn handle_date_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
@@ -1008,11 +1009,11 @@ pub(crate) fn handle_date_method<'gc>(
             &["valueOf", "toString"]
         };
         for method_name in methods {
-            let func_val = crate::core::get_property_with_accessors(mc, env, obj_ptr, *method_name)?;
+            let func_val = crate::core::get_property_with_accessors(ctx, env, obj_ptr, *method_name)?;
             if matches!(func_val, Value::Undefined | Value::Null) {
                 continue;
             }
-            let result = crate::js_promise::call_function_with_this(mc, &func_val, Some(obj), &[], env)?;
+            let result = crate::js_promise::call_function_with_this(ctx, &func_val, Some(obj), &[], env)?;
             if is_primitive(&result) {
                 return Ok(result);
             }
@@ -1031,33 +1032,33 @@ pub(crate) fn handle_date_method<'gc>(
             }
             // Box primitives to their object wrappers
             Value::Number(n) => {
-                let boxed = crate::core::new_js_object_data(mc);
-                slot_set(mc, &boxed, InternalSlot::PrimitiveValue, &Value::Number(*n));
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &boxed, env, "Number");
+                let boxed = crate::core::new_js_object_data(ctx);
+                slot_set(ctx, &boxed, InternalSlot::PrimitiveValue, &Value::Number(*n));
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &boxed, env, "Number");
                 Value::Object(boxed)
             }
             Value::String(s) => {
-                let boxed = crate::core::new_js_object_data(mc);
-                slot_set(mc, &boxed, InternalSlot::PrimitiveValue, &Value::String(s.clone()));
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &boxed, env, "String");
+                let boxed = crate::core::new_js_object_data(ctx);
+                slot_set(ctx, &boxed, InternalSlot::PrimitiveValue, &Value::String(s.clone()));
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &boxed, env, "String");
                 Value::Object(boxed)
             }
             Value::Boolean(b) => {
-                let boxed = crate::core::new_js_object_data(mc);
-                slot_set(mc, &boxed, InternalSlot::PrimitiveValue, &Value::Boolean(*b));
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &boxed, env, "Boolean");
+                let boxed = crate::core::new_js_object_data(ctx);
+                slot_set(ctx, &boxed, InternalSlot::PrimitiveValue, &Value::Boolean(*b));
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &boxed, env, "Boolean");
                 Value::Object(boxed)
             }
             Value::Symbol(_) => {
-                let boxed = crate::core::new_js_object_data(mc);
-                slot_set(mc, &boxed, InternalSlot::PrimitiveValue, obj);
-                let _ = crate::core::set_internal_prototype_from_constructor(mc, &boxed, env, "Symbol");
+                let boxed = crate::core::new_js_object_data(ctx);
+                slot_set(ctx, &boxed, InternalSlot::PrimitiveValue, obj);
+                let _ = crate::core::set_internal_prototype_from_constructor(ctx, &boxed, env, "Symbol");
                 Value::Object(boxed)
             }
             _ => obj.clone(),
         };
         // 2. Let tv be ? ToPrimitive(O, number).
-        let tv = crate::core::to_primitive(mc, &o, "number", env)?;
+        let tv = crate::core::to_primitive(ctx, &o, "number", env)?;
         // 3. If Type(tv) is Number and tv is not finite, return null.
         if let Value::Number(n) = &tv
             && !n.is_finite()
@@ -1066,11 +1067,11 @@ pub(crate) fn handle_date_method<'gc>(
         }
         // 4. Return ? Invoke(O, "toISOString").
         if let Value::Object(obj_ptr) = &o {
-            let to_iso = crate::core::get_property_with_accessors(mc, env, obj_ptr, "toISOString")?;
+            let to_iso = crate::core::get_property_with_accessors(ctx, env, obj_ptr, "toISOString")?;
             if matches!(to_iso, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("toISOString is not a function").into());
             }
-            return crate::js_promise::call_function_with_this(mc, &to_iso, Some(&o), &[], env);
+            return crate::js_promise::call_function_with_this(ctx, &to_iso, Some(&o), &[], env);
         }
         return Err(raise_type_error!("Date.prototype.toJSON called on non-object").into());
     }
@@ -1363,10 +1364,10 @@ pub(crate) fn handle_date_method<'gc>(
             let v = if args.is_empty() {
                 f64::NAN
             } else {
-                to_number_val(mc, &args[0], env)?
+                to_number_val(ctx, &args[0], env)?
             };
             let clipped = time_clip(v);
-            set_time_stamp_value(mc, obj_ptr, clipped)?;
+            set_time_stamp_value(ctx, obj_ptr, clipped)?;
             Ok(Value::Number(clipped))
         }
 
@@ -1375,21 +1376,21 @@ pub(crate) fn handle_date_method<'gc>(
             let ms = if args.is_empty() {
                 f64::NAN
             } else {
-                to_number_val(mc, &args[0], env)?
+                to_number_val(ctx, &args[0], env)?
             };
             if t.is_nan() {
                 return Ok(Value::Number(f64::NAN));
             }
             let c = decompose_local(t).unwrap();
             let new_t = time_clip(local_to_utc(c.year, c.month, c.date, c.hour, c.min, c.sec, ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCMilliseconds" => {
             let ms = if args.is_empty() {
                 f64::NAN
             } else {
-                to_number_val(mc, &args[0], env)?
+                to_number_val(ctx, &args[0], env)?
             };
             if t.is_nan() {
                 return Ok(Value::Number(f64::NAN));
@@ -1398,15 +1399,15 @@ pub(crate) fn handle_date_method<'gc>(
             let day = make_day(c.year, c.month, c.date);
             let time = make_time(c.hour, c.min, c.sec, ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
         // ===================== setSeconds / setUTCSeconds =====================
         "setSeconds" => {
-            let s = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let s = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let ms = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1417,13 +1418,13 @@ pub(crate) fn handle_date_method<'gc>(
             }
             let c = decompose_local(t).unwrap();
             let new_t = time_clip(local_to_utc(c.year, c.month, c.date, c.hour, c.min, s, ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCSeconds" => {
-            let s = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let s = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let ms = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1436,22 +1437,22 @@ pub(crate) fn handle_date_method<'gc>(
             let day = make_day(c.year, c.month, c.date);
             let time = make_time(c.hour, c.min, s, ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
         // ===================== setMinutes / setUTCMinutes =====================
         "setMinutes" => {
-            let m = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let m = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let s = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
                 decompose_local(t).unwrap().sec
             };
             let ms = if args.len() >= 3 {
-                to_number_val(mc, &args[2], env)?
+                to_number_val(ctx, &args[2], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1462,20 +1463,20 @@ pub(crate) fn handle_date_method<'gc>(
             }
             let c = decompose_local(t).unwrap();
             let new_t = time_clip(local_to_utc(c.year, c.month, c.date, c.hour, m, s, ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCMinutes" => {
-            let m = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let m = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let s = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
                 decompose_utc(t).unwrap().sec
             };
             let ms = if args.len() >= 3 {
-                to_number_val(mc, &args[2], env)?
+                to_number_val(ctx, &args[2], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1488,29 +1489,29 @@ pub(crate) fn handle_date_method<'gc>(
             let day = make_day(c.year, c.month, c.date);
             let time = make_time(c.hour, m, s, ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
         // ===================== setHours / setUTCHours =====================
         "setHours" => {
-            let h = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let h = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let m = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
                 decompose_local(t).unwrap().min
             };
             let s = if args.len() >= 3 {
-                to_number_val(mc, &args[2], env)?
+                to_number_val(ctx, &args[2], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
                 decompose_local(t).unwrap().sec
             };
             let ms = if args.len() >= 4 {
-                to_number_val(mc, &args[3], env)?
+                to_number_val(ctx, &args[3], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1521,27 +1522,27 @@ pub(crate) fn handle_date_method<'gc>(
             }
             let c = decompose_local(t).unwrap();
             let new_t = time_clip(local_to_utc(c.year, c.month, c.date, h, m, s, ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCHours" => {
-            let h = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let h = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let m = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
                 decompose_utc(t).unwrap().min
             };
             let s = if args.len() >= 3 {
-                to_number_val(mc, &args[2], env)?
+                to_number_val(ctx, &args[2], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
                 decompose_utc(t).unwrap().sec
             };
             let ms = if args.len() >= 4 {
-                to_number_val(mc, &args[3], env)?
+                to_number_val(ctx, &args[3], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1554,23 +1555,23 @@ pub(crate) fn handle_date_method<'gc>(
             let day = make_day(c.year, c.month, c.date);
             let time = make_time(h, m, s, ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
         // ===================== setDate / setUTCDate =====================
         "setDate" => {
-            let dt = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let dt = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             if t.is_nan() {
                 return Ok(Value::Number(f64::NAN));
             }
             let c = decompose_local(t).unwrap();
             let new_t = time_clip(local_to_utc(c.year, c.month, dt, c.hour, c.min, c.sec, c.ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCDate" => {
-            let dt = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let dt = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             if t.is_nan() {
                 return Ok(Value::Number(f64::NAN));
             }
@@ -1578,15 +1579,15 @@ pub(crate) fn handle_date_method<'gc>(
             let day = make_day(c.year, c.month, dt);
             let time = make_time(c.hour, c.min, c.sec, c.ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
         // ===================== setMonth / setUTCMonth =====================
         "setMonth" => {
-            let m = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let m = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let dt = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1597,13 +1598,13 @@ pub(crate) fn handle_date_method<'gc>(
             }
             let c = decompose_local(t).unwrap();
             let new_t = time_clip(local_to_utc(c.year, m, dt, c.hour, c.min, c.sec, c.ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCMonth" => {
-            let m = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let m = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             let dt = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else if t.is_nan() {
                 f64::NAN
             } else {
@@ -1616,13 +1617,13 @@ pub(crate) fn handle_date_method<'gc>(
             let day = make_day(c.year, m, dt);
             let time = make_time(c.hour, c.min, c.sec, c.ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
         // ===================== setFullYear / setUTCFullYear =====================
         "setFullYear" => {
-            let y = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let y = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             // Per spec §21.4.4.27: if t is NaN, set t to +0 (do NOT apply LocalTime)
             let c = if t.is_nan() {
                 decompose_utc(0.0).unwrap()
@@ -1630,38 +1631,38 @@ pub(crate) fn handle_date_method<'gc>(
                 decompose_local(t).unwrap()
             };
             let m = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else {
                 c.month
             };
             let dt = if args.len() >= 3 {
-                to_number_val(mc, &args[2], env)?
+                to_number_val(ctx, &args[2], env)?
             } else {
                 c.date
             };
             let new_t = time_clip(local_to_utc(y, m, dt, c.hour, c.min, c.sec, c.ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "setUTCFullYear" => {
-            let y = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let y = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             // Per spec: if t is NaN, let t be +0
             let base_t = if t.is_nan() { 0.0 } else { t };
             let c = decompose_utc(base_t).unwrap();
             let m = if args.len() >= 2 {
-                to_number_val(mc, &args[1], env)?
+                to_number_val(ctx, &args[1], env)?
             } else {
                 c.month
             };
             let dt = if args.len() >= 3 {
-                to_number_val(mc, &args[2], env)?
+                to_number_val(ctx, &args[2], env)?
             } else {
                 c.date
             };
             let day = make_day(y, m, dt);
             let time = make_time(c.hour, c.min, c.sec, c.ms);
             let new_t = time_clip(make_date(day, time));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
 
@@ -1676,10 +1677,10 @@ pub(crate) fn handle_date_method<'gc>(
         }
         "setYear" => {
             // B.2.4.2: setYear(year)
-            let y = to_number_val(mc, args.first().unwrap_or(&Value::Undefined), env)?;
+            let y = to_number_val(ctx, args.first().unwrap_or(&Value::Undefined), env)?;
             if y.is_nan() {
                 let new_t = f64::NAN;
-                set_time_stamp_value(mc, obj_ptr, new_t)?;
+                set_time_stamp_value(ctx, obj_ptr, new_t)?;
                 return Ok(Value::Number(new_t));
             }
             let yi = y.trunc();
@@ -1691,7 +1692,7 @@ pub(crate) fn handle_date_method<'gc>(
                 decompose_local(t).unwrap()
             };
             let new_t = time_clip(local_to_utc(yr, c.month, c.date, c.hour, c.min, c.sec, c.ms));
-            set_time_stamp_value(mc, obj_ptr, new_t)?;
+            set_time_stamp_value(ctx, obj_ptr, new_t)?;
             Ok(Value::Number(new_t))
         }
         "toGMTString" => {
@@ -1722,7 +1723,7 @@ pub(crate) fn handle_date_method<'gc>(
 // =========================================================================
 
 pub(crate) fn handle_date_static_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -1740,7 +1741,7 @@ pub(crate) fn handle_date_static_method<'gc>(
                 Value::String(s) => utf16_to_utf8(s),
                 Value::Undefined => "undefined".to_string(),
                 other => {
-                    let prim = crate::core::to_primitive(mc, other, "string", env)?;
+                    let prim = crate::core::to_primitive(ctx, other, "string", env)?;
                     crate::core::value_to_string(&prim)
                 }
             };
@@ -1755,16 +1756,16 @@ pub(crate) fn handle_date_static_method<'gc>(
             let y = if args.is_empty() {
                 f64::NAN
             } else {
-                to_number_val(mc, &args[0], env)?
+                to_number_val(ctx, &args[0], env)?
             };
             // Step 2: month (default 0 if 1 arg)
-            let m = if args.len() >= 2 { to_number_val(mc, &args[1], env)? } else { 0.0 };
+            let m = if args.len() >= 2 { to_number_val(ctx, &args[1], env)? } else { 0.0 };
             // Remaining optional args
-            let dt = if args.len() >= 3 { to_number_val(mc, &args[2], env)? } else { 1.0 };
-            let h = if args.len() >= 4 { to_number_val(mc, &args[3], env)? } else { 0.0 };
-            let min = if args.len() >= 5 { to_number_val(mc, &args[4], env)? } else { 0.0 };
-            let s = if args.len() >= 6 { to_number_val(mc, &args[5], env)? } else { 0.0 };
-            let ms = if args.len() >= 7 { to_number_val(mc, &args[6], env)? } else { 0.0 };
+            let dt = if args.len() >= 3 { to_number_val(ctx, &args[2], env)? } else { 1.0 };
+            let h = if args.len() >= 4 { to_number_val(ctx, &args[3], env)? } else { 0.0 };
+            let min = if args.len() >= 5 { to_number_val(ctx, &args[4], env)? } else { 0.0 };
+            let s = if args.len() >= 6 { to_number_val(ctx, &args[5], env)? } else { 0.0 };
+            let ms = if args.len() >= 7 { to_number_val(ctx, &args[6], env)? } else { 0.0 };
 
             if y.is_nan() || m.is_nan() || dt.is_nan() || h.is_nan() || min.is_nan() || s.is_nan() || ms.is_nan() {
                 return Ok(Value::Number(f64::NAN));

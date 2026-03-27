@@ -12,8 +12,8 @@ use crate::unicode::utf8_to_utf16;
 
 /// ToNumber coercion for a single Math argument (missing → NaN like `undefined`).
 #[inline]
-fn arg_to_number<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, args: &[Value<'gc>], idx: usize) -> Result<f64, EvalError<'gc>> {
-    to_number_with_env(mc, env, args.get(idx).unwrap_or(&Value::Undefined))
+fn arg_to_number<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, args: &[Value<'gc>], idx: usize) -> Result<f64, EvalError<'gc>> {
+    to_number_with_env(ctx, env, args.get(idx).unwrap_or(&Value::Undefined))
 }
 
 /// ToUint32 per spec (7.1.7).
@@ -63,9 +63,9 @@ fn js_pow(base: f64, exp: f64) -> f64 {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Create the Math object with all mathematical constants and functions
-pub fn initialize_math<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let math_obj = new_js_object_data(mc);
-    let _ = crate::core::set_internal_prototype_from_constructor(mc, &math_obj, env, "Object");
+pub fn initialize_math<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let math_obj = new_js_object_data(ctx);
+    let _ = crate::core::set_internal_prototype_from_constructor(ctx, &math_obj, env, "Object");
 
     // --- Constants (writable:false, enumerable:false, configurable:false) ---
     let constants: &[(&str, f64)] = &[
@@ -79,10 +79,10 @@ pub fn initialize_math<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> 
         ("SQRT2", std::f64::consts::SQRT_2),
     ];
     for &(name, val) in constants {
-        object_set_key_value(mc, &math_obj, name, &Value::Number(val))?;
-        math_obj.borrow_mut(mc).set_non_enumerable(name);
-        math_obj.borrow_mut(mc).set_non_configurable(name);
-        math_obj.borrow_mut(mc).set_non_writable(name);
+        object_set_key_value(ctx, &math_obj, name, &Value::Number(val))?;
+        math_obj.borrow_mut(ctx).set_non_enumerable(name);
+        math_obj.borrow_mut(ctx).set_non_configurable(name);
+        math_obj.borrow_mut(ctx).set_non_writable(name);
     }
 
     // --- Methods (non-enumerable) ---
@@ -126,8 +126,8 @@ pub fn initialize_math<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> 
         "sumPrecise",
     ];
     for name in methods {
-        object_set_key_value(mc, &math_obj, name, &Value::Function(format!("Math.{name}")))?;
-        math_obj.borrow_mut(mc).set_non_enumerable(name);
+        object_set_key_value(ctx, &math_obj, name, &Value::Function(format!("Math.{name}")))?;
+        math_obj.borrow_mut(ctx).set_non_enumerable(name);
     }
 
     // --- Symbol.toStringTag = "Math" { writable:false, enumerable:false, configurable:true } ---
@@ -137,16 +137,16 @@ pub fn initialize_math<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> 
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
         let tag_desc = crate::core::create_descriptor_object(
-            mc,
+            ctx,
             &Value::String(utf8_to_utf16("Math")),
             false, // writable
             false, // enumerable
             true,  // configurable
         )?;
-        crate::js_object::define_property_internal(mc, &math_obj, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
+        crate::js_object::define_property_internal(ctx, &math_obj, PropertyKey::Symbol(*tag_sym), &tag_desc)?;
     }
 
-    env_set(mc, env, "Math", &Value::Object(math_obj))?;
+    env_set(ctx, env, "Math", &Value::Object(math_obj))?;
     Ok(())
 }
 
@@ -156,7 +156,7 @@ pub fn initialize_math<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> 
 
 /// Handle Math object method calls — all arguments undergo ToNumber coercion.
 pub fn handle_math_call<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -164,115 +164,115 @@ pub fn handle_math_call<'gc>(
     match method {
         // --- 1-arg functions: f(ToNumber(arg0)) ---
         "floor" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.floor()))
         }
         "ceil" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.ceil()))
         }
         "round" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(js_round(n)))
         }
         "abs" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.abs()))
         }
         "sqrt" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.sqrt()))
         }
         "sin" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.sin()))
         }
         "cos" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.cos()))
         }
         "tan" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.tan()))
         }
         "asin" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.asin()))
         }
         "acos" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.acos()))
         }
         "atan" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.atan()))
         }
         "sinh" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.sinh()))
         }
         "cosh" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.cosh()))
         }
         "tanh" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.tanh()))
         }
         "asinh" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.asinh()))
         }
         "acosh" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.acosh()))
         }
         "atanh" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.atanh()))
         }
         "exp" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.exp()))
         }
         "expm1" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.exp_m1()))
         }
         "log" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.ln()))
         }
         "log10" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.log10()))
         }
         "log1p" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.ln_1p()))
         }
         "log2" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.log2()))
         }
         "fround" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number((n as f32) as f64))
         }
         "f16round" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(crate::js_typedarray::f16_to_f64(crate::js_typedarray::f64_to_f16(n))))
         }
         "trunc" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.trunc()))
         }
         "cbrt" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(n.cbrt()))
         }
         "sign" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             Ok(Value::Number(if n.is_nan() {
                 f64::NAN
             } else if n == 0.0 {
@@ -286,27 +286,27 @@ pub fn handle_math_call<'gc>(
 
         // --- 2-arg functions ---
         "pow" => {
-            let b = arg_to_number(mc, env, args, 0)?;
-            let e = arg_to_number(mc, env, args, 1)?;
+            let b = arg_to_number(ctx, env, args, 0)?;
+            let e = arg_to_number(ctx, env, args, 1)?;
             Ok(Value::Number(js_pow(b, e)))
         }
         "atan2" => {
-            let y = arg_to_number(mc, env, args, 0)?;
-            let x = arg_to_number(mc, env, args, 1)?;
+            let y = arg_to_number(ctx, env, args, 0)?;
+            let x = arg_to_number(ctx, env, args, 1)?;
             Ok(Value::Number(y.atan2(x)))
         }
 
         // --- clz32: ToUint32 then leading zeros ---
         "clz32" => {
-            let n = arg_to_number(mc, env, args, 0)?;
+            let n = arg_to_number(ctx, env, args, 0)?;
             let u = to_uint32(n);
             Ok(Value::Number(u.leading_zeros() as f64))
         }
 
         // --- imul: ToUint32 both, wrapping i32 multiply ---
         "imul" => {
-            let a = arg_to_number(mc, env, args, 0)?;
-            let b = arg_to_number(mc, env, args, 1)?;
+            let a = arg_to_number(ctx, env, args, 0)?;
+            let b = arg_to_number(ctx, env, args, 1)?;
             let result = (to_uint32(a) as i32).wrapping_mul(to_uint32(b) as i32);
             Ok(Value::Number(result as f64))
         }
@@ -318,7 +318,7 @@ pub fn handle_math_call<'gc>(
             }
             let mut coerced: Vec<f64> = Vec::with_capacity(args.len());
             for arg in args {
-                coerced.push(to_number_with_env(mc, env, arg)?);
+                coerced.push(to_number_with_env(ctx, env, arg)?);
             }
             let mut highest = f64::NEG_INFINITY;
             for n in &coerced {
@@ -343,7 +343,7 @@ pub fn handle_math_call<'gc>(
             }
             let mut coerced: Vec<f64> = Vec::with_capacity(args.len());
             for arg in args {
-                coerced.push(to_number_with_env(mc, env, arg)?);
+                coerced.push(to_number_with_env(ctx, env, arg)?);
             }
             let mut lowest = f64::INFINITY;
             for n in &coerced {
@@ -365,7 +365,7 @@ pub fn handle_math_call<'gc>(
         "hypot" => {
             let mut coerced: Vec<f64> = Vec::with_capacity(args.len());
             for arg in args {
-                coerced.push(to_number_with_env(mc, env, arg)?);
+                coerced.push(to_number_with_env(ctx, env, arg)?);
             }
             // Infinity takes priority over NaN
             for n in &coerced {
@@ -388,7 +388,7 @@ pub fn handle_math_call<'gc>(
         // --- sumPrecise: Shewchuk exact summation (§21.3.2.34) ---
         "sumPrecise" => {
             let iterable = args.first().cloned().unwrap_or(Value::Undefined);
-            let (iter_obj, next_fn) = crate::js_map::get_iterator(mc, env, &iterable)?;
+            let (iter_obj, next_fn) = crate::js_map::get_iterator(ctx, env, &iterable)?;
 
             let mut count = 0usize;
             let mut has_nan = false;
@@ -398,16 +398,16 @@ pub fn handle_math_call<'gc>(
             let mut values: Vec<f64> = Vec::new();
 
             loop {
-                let result = crate::core::evaluate_call_dispatch(mc, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
-                if crate::js_map::get_iterator_done(mc, env, &result)? {
+                let result = crate::core::evaluate_call_dispatch(ctx, env, &next_fn, Some(&Value::Object(iter_obj)), &[])?;
+                if crate::js_map::get_iterator_done(ctx, env, &result)? {
                     break;
                 }
-                let item = crate::js_map::get_iterator_value(mc, env, &result)?;
+                let item = crate::js_map::get_iterator_value(ctx, env, &result)?;
                 count += 1;
                 let n = match &item {
                     Value::Number(n) => *n,
                     _ => {
-                        let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                        let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
                         return Err(raise_type_error!("Math.sumPrecise requires all elements to be Numbers").into());
                     }
                 };

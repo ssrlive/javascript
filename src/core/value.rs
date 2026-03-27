@@ -81,19 +81,19 @@ pub enum WeakKey<'gc> {
 
 impl<'gc> WeakKey<'gc> {
     /// Check if this weak key is still alive and matches the given value.
-    pub fn matches(&self, mc: &crate::core::GcContext<'gc>, val: &Value<'gc>) -> bool {
+    pub fn matches(&self, ctx: &crate::core::GcContext<'gc>, val: &Value<'gc>) -> bool {
         match (self, val) {
-            (WeakKey::Object(weak), Value::Object(obj)) => weak.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *obj)),
-            (WeakKey::Symbol(weak), Value::Symbol(sym)) => weak.upgrade(mc).is_some_and(|p| Gc::ptr_eq(p, *sym)),
+            (WeakKey::Object(weak), Value::Object(obj)) => weak.upgrade(ctx).is_some_and(|p| Gc::ptr_eq(p, *obj)),
+            (WeakKey::Symbol(weak), Value::Symbol(sym)) => weak.upgrade(ctx).is_some_and(|p| Gc::ptr_eq(p, *sym)),
             _ => false,
         }
     }
 
     /// Check if this weak key is still alive.
-    pub fn is_alive(&self, mc: &crate::core::GcContext<'gc>) -> bool {
+    pub fn is_alive(&self, ctx: &crate::core::GcContext<'gc>) -> bool {
         match self {
-            WeakKey::Object(weak) => weak.upgrade(mc).is_some(),
-            WeakKey::Symbol(weak) => weak.upgrade(mc).is_some(),
+            WeakKey::Object(weak) => weak.upgrade(ctx).is_some(),
+            WeakKey::Symbol(weak) => weak.upgrade(ctx).is_some(),
         }
     }
 
@@ -303,8 +303,8 @@ pub type JSObjectDataPtr<'gc> = GcPtr<'gc, JSObjectData<'gc>>;
 // pub type JSObjectDataWeakPtr<'gc> = Gc<'gc, GcCell<JSObjectData<'gc>>>;
 
 #[inline]
-pub fn new_js_object_data<'gc>(mc: &GcContext<'gc>) -> JSObjectDataPtr<'gc> {
-    new_gc_cell_ptr(mc, JSObjectData::new())
+pub fn new_js_object_data<'gc>(ctx: &GcContext<'gc>) -> JSObjectDataPtr<'gc> {
+    new_gc_cell_ptr(ctx, JSObjectData::new())
 }
 
 #[derive(Clone, Default)]
@@ -916,7 +916,7 @@ impl<'gc> JSObjectData<'gc> {
         self.constants.contains(key)
     }
 
-    pub fn set_property(&mut self, mc: &GcContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
+    pub fn set_property(&mut self, ctx: &GcContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
         let pk = key.into();
         // Intercept internal-only key "__definition_env" to store it in an internal slot
         // instead of creating a visible own property.
@@ -934,7 +934,7 @@ impl<'gc> JSObjectData<'gc> {
                 );
             }
         }
-        let val_ptr = new_gc_cell_ptr(mc, val);
+        let val_ptr = new_gc_cell_ptr(ctx, val);
         self.insert(pk, val_ptr);
     }
 
@@ -978,11 +978,11 @@ impl<'gc> JSObjectData<'gc> {
         None
     }
 
-    pub fn set_line(&mut self, line: usize, mc: &GcContext<'gc>) -> Result<(), JSError> {
+    pub fn set_line(&mut self, line: usize, ctx: &GcContext<'gc>) -> Result<(), JSError> {
         let key = PropertyKey::Internal(InternalSlot::Line);
         self.properties
             .entry(key)
-            .or_insert_with(|| new_gc_cell_ptr(mc, Value::Number(line as f64)));
+            .or_insert_with(|| new_gc_cell_ptr(ctx, Value::Number(line as f64)));
         Ok(())
     }
 
@@ -996,11 +996,11 @@ impl<'gc> JSObjectData<'gc> {
         None
     }
 
-    pub fn set_column(&mut self, column: usize, mc: &GcContext<'gc>) -> Result<(), JSError> {
+    pub fn set_column(&mut self, column: usize, ctx: &GcContext<'gc>) -> Result<(), JSError> {
         let key = PropertyKey::Internal(InternalSlot::Column);
         self.properties
             .entry(key)
-            .or_insert_with(|| new_gc_cell_ptr(mc, Value::Number(column as f64)));
+            .or_insert_with(|| new_gc_cell_ptr(ctx, Value::Number(column as f64)));
         Ok(())
     }
 
@@ -1277,13 +1277,13 @@ impl<'gc> Value<'gc> {
         }
     }
 
-    pub fn to_property_key(&self, mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
+    pub fn to_property_key(&self, ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
         match self {
             Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
             Value::BigInt(b) => Ok(PropertyKey::String(b.to_string())),
             Value::Symbol(sd) => Ok(PropertyKey::Symbol(*sd)),
             Value::Object(_) => {
-                let prim = crate::core::to_primitive(mc, self, "string", env)?;
+                let prim = crate::core::to_primitive(ctx, self, "string", env)?;
                 match &prim {
                     Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
                     Value::Number(_) => Ok(PropertyKey::String(crate::core::value_to_string(&prim))),
@@ -1403,7 +1403,7 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
 // Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default').
 // This is a simplified implementation that supports user-defined `valueOf` / `toString`.
 pub fn to_primitive<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     val: &Value<'gc>,
     hint: &str,
     env: &JSObjectDataPtr<'gc>,
@@ -1437,14 +1437,14 @@ pub fn to_primitive<'gc>(
                     match val {
                         Value::Property { getter, value, .. } => {
                             if let Some(g) = getter {
-                                crate::core::eval::call_accessor(mc, env, obj, &g)?
+                                crate::core::eval::call_accessor(ctx, env, obj, &g)?
                             } else if let Some(v) = value {
                                 v.borrow().clone()
                             } else {
                                 Value::Undefined
                             }
                         }
-                        Value::Getter(..) => crate::core::eval::call_accessor(mc, env, obj, &val)?,
+                        Value::Getter(..) => crate::core::eval::call_accessor(ctx, env, obj, &val)?,
                         _ => val,
                     }
                 } else {
@@ -1457,9 +1457,9 @@ pub fn to_primitive<'gc>(
                     // Support closures or function objects
                     use std::slice::from_ref;
                     let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
-                        Value::Closure(cl) => call_closure(mc, &cl, Some(&Value::Object(*obj)), from_ref(&arg), env, None),
+                        Value::Closure(cl) => call_closure(ctx, &cl, Some(&Value::Object(*obj)), from_ref(&arg), env, None),
                         Value::Function(name) => evaluate_call_dispatch(
-                            mc,
+                            ctx,
                             env,
                             &Value::Function(name),
                             Some(&Value::Object(*obj)),
@@ -1469,10 +1469,10 @@ pub fn to_primitive<'gc>(
                             if let Some(cl_ptr) = func_obj.borrow().get_closure() {
                                 match &*cl_ptr.borrow() {
                                     Value::Closure(cl) => {
-                                        call_closure(mc, cl, Some(&Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
+                                        call_closure(ctx, cl, Some(&Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
                                     }
                                     Value::Function(name) => evaluate_call_dispatch(
-                                        mc,
+                                        ctx,
                                         env,
                                         &Value::Function(name.clone()),
                                         Some(&Value::Object(*obj)),
@@ -1506,7 +1506,7 @@ pub fn to_primitive<'gc>(
 
             if effective_hint == "string" {
                 if obj.borrow().get_home_object().is_some() && obj.borrow().get_closure().is_some() {
-                    let maybe_name = crate::core::get_property_with_accessors(mc, env, obj, "name").ok();
+                    let maybe_name = crate::core::get_property_with_accessors(ctx, env, obj, "name").ok();
                     if let Some(Value::String(name_u16)) = maybe_name {
                         let name = crate::unicode::utf16_to_utf8(&name_u16);
                         let mut chars = name.chars();
@@ -1523,7 +1523,7 @@ pub fn to_primitive<'gc>(
                 }
                 // toString -> valueOf
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
-                let to_s = call_to_string_strict(mc, env, obj)?;
+                let to_s = call_to_string_strict(ctx, env, obj)?;
                 log::debug!("DBG to_primitive: toString result = {:?}", to_s);
                 // Treat `Uninitialized` as a sentinel meaning "no callable toString" and
                 // therefore do not accept it as a primitive result. Only accept real
@@ -1532,7 +1532,7 @@ pub fn to_primitive<'gc>(
                     return Ok(to_s);
                 }
                 log::debug!("DBG to_primitive: trying valueOf for obj={:p}", Gc::as_ptr(*obj));
-                let val_of = call_value_of_strict(mc, env, obj)?;
+                let val_of = call_value_of_strict(ctx, env, obj)?;
                 log::debug!("DBG to_primitive: valueOf result = {:?}", val_of);
                 if !matches!(val_of, crate::core::Value::Uninitialized) && is_primitive(&val_of) {
                     return Ok(val_of);
@@ -1540,13 +1540,13 @@ pub fn to_primitive<'gc>(
             } else {
                 // number/default: valueOf -> toString
                 log::debug!("DBG to_primitive: trying valueOf for obj={:p}", Gc::as_ptr(*obj));
-                let val_of = call_value_of_strict(mc, env, obj)?;
+                let val_of = call_value_of_strict(ctx, env, obj)?;
                 log::debug!("DBG to_primitive: valueOf result = {:?}", val_of);
                 if !matches!(val_of, crate::core::Value::Uninitialized) && is_primitive(&val_of) {
                     return Ok(val_of);
                 }
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
-                let to_s = call_to_string_strict(mc, env, obj)?;
+                let to_s = call_to_string_strict(ctx, env, obj)?;
                 log::debug!("DBG to_primitive: toString result = {:?}", to_s);
                 // See comment above: do not treat `Uninitialized` as a primitive sentinel
                 // result from a non-callable `toString` property.
@@ -1564,7 +1564,7 @@ pub fn to_primitive<'gc>(
                     .unwrap_or(false);
 
             if is_callable_object {
-                let fn_str = crate::js_function::handle_function_prototype_method(mc, &Value::Object(*obj), "toString", &[], env)?;
+                let fn_str = crate::js_function::handle_function_prototype_method(ctx, &Value::Object(*obj), "toString", &[], env)?;
                 if is_primitive(&fn_str) {
                     return Ok(fn_str);
                 }
@@ -1578,11 +1578,11 @@ pub fn to_primitive<'gc>(
 
 // Helper to call toString without fallback
 fn call_to_string_strict<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_ptr: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let method_val = crate::core::get_property_with_accessors(mc, env, obj_ptr, "toString")?;
+    let method_val = crate::core::get_property_with_accessors(ctx, env, obj_ptr, "toString")?;
     if matches!(method_val, Value::Undefined | Value::Null) {
         return Ok(Value::Uninitialized);
     }
@@ -1601,7 +1601,7 @@ fn call_to_string_strict<'gc>(
         _ => false,
     };
     if is_callable {
-        evaluate_call_dispatch(mc, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
+        evaluate_call_dispatch(ctx, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
     } else {
         Ok(Value::Uninitialized)
     }
@@ -1611,11 +1611,11 @@ fn call_to_string_strict<'gc>(
 // Uses get_property_with_accessors to trigger getter descriptors (e.g. when
 // valueOf has been overridden via Object.defineProperty with a getter).
 fn call_value_of_strict<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     obj_ptr: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let method_val = crate::core::get_property_with_accessors(mc, env, obj_ptr, "valueOf")?;
+    let method_val = crate::core::get_property_with_accessors(ctx, env, obj_ptr, "valueOf")?;
     if matches!(method_val, Value::Undefined | Value::Null) {
         return Ok(Value::Uninitialized);
     }
@@ -1634,7 +1634,7 @@ fn call_value_of_strict<'gc>(
         _ => false,
     };
     if is_callable {
-        evaluate_call_dispatch(mc, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
+        evaluate_call_dispatch(ctx, env, &method_val, Some(&Value::Object(*obj_ptr)), &Vec::new())
     } else {
         Ok(Value::Uninitialized)
     }
@@ -1957,7 +1957,7 @@ pub fn value_to_sort_string<'gc>(val: &Value<'gc>) -> String {
     }
 }
 
-pub fn values_equal<'gc>(_mc: &GcContext<'gc>, v1: &Value<'gc>, v2: &Value<'gc>) -> bool {
+pub fn values_equal<'gc>(_ctx: &GcContext<'gc>, v1: &Value<'gc>, v2: &Value<'gc>) -> bool {
     match (v1, v2) {
         (Value::Number(n1), Value::Number(n2)) => {
             if n1.is_nan() && n2.is_nan() {
@@ -2155,7 +2155,7 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
 /// when the object is a proxy wrapper (stores `__proxy__`). Returns a
 /// Result because invoking proxy traps can trigger user code and therefore
 /// can fail with an exception.
-pub fn ordinary_own_property_keys_mc<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<PropertyKey<'gc>>, JSError> {
+pub fn ordinary_own_property_keys_mc<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<Vec<PropertyKey<'gc>>, JSError> {
     let obj_ptr = obj.as_ptr();
     let has_proxy = slot_has(obj, &InternalSlot::Proxy);
     log::trace!("ordinary_own_property_keys_mc: obj_ptr={:p} has_proxy={}", obj_ptr, has_proxy);
@@ -2169,7 +2169,7 @@ pub fn ordinary_own_property_keys_mc<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDat
             "ordinary_own_property_keys_mc: delegating to proxy_own_keys, proxy_ptr={:p}",
             Gc::as_ptr(*proxy)
         );
-        return crate::js_proxy::proxy_own_keys(mc, proxy).map_err(|e| e.into());
+        return crate::js_proxy::proxy_own_keys(ctx, proxy).map_err(|e| e.into());
     }
     Ok(ordinary_own_property_keys(obj))
 }
@@ -2186,7 +2186,7 @@ pub fn has_property_key<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<Property
 }
 
 pub fn object_set_key_value<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: impl Into<PropertyKey<'gc>>,
     val: &Value<'gc>,
@@ -2196,7 +2196,7 @@ pub fn object_set_key_value<'gc>(
     // Array exotic length assignment semantics for ordinary writes (e.g. `arr.length = ...`).
     // Keep descriptor object writes (`Value::Property`) on `length` untouched so
     // `Object.defineProperty` plumbing can store descriptor metadata directly.
-    if crate::js_array::is_array(mc, obj)
+    if crate::js_array::is_array(ctx, obj)
         && matches!(key, PropertyKey::String(ref s) if s == "length")
         && !matches!(val, Value::Property { .. })
     {
@@ -2225,7 +2225,7 @@ pub fn object_set_key_value<'gc>(
             Value::Object(o) => {
                 // Use ToPrimitive (supports Symbol.toPrimitive) per spec.
                 let call_env = o.borrow().definition_env.or(obj.borrow().definition_env).unwrap_or(*obj);
-                let prim = to_primitive(mc, val, "number", &call_env).map_err(JSError::from)?;
+                let prim = to_primitive(ctx, val, "number", &call_env).map_err(JSError::from)?;
                 crate::core::eval::to_number(&prim).map_err(|_| raise_type_error!("Cannot convert object to number"))?
             }
             _ => f64::NAN,
@@ -2241,7 +2241,7 @@ pub fn object_set_key_value<'gc>(
         }
 
         let new_len = number_len as usize;
-        object_set_length(mc, obj, new_len)?;
+        object_set_length(ctx, obj, new_len)?;
         return Ok(());
     }
 
@@ -2263,10 +2263,10 @@ pub fn object_set_key_value<'gc>(
         if *slot == InternalSlot::DefinitionEnv
             && let Value::Object(env_obj) = val
         {
-            obj.borrow_mut(mc).definition_env = Some(*env_obj);
+            obj.borrow_mut(ctx).definition_env = Some(*env_obj);
         }
-        let gc_val = new_gc_cell_ptr(mc, val.clone());
-        obj.borrow_mut(mc).properties.insert(key, gc_val);
+        let gc_val = new_gc_cell_ptr(ctx, val.clone());
+        obj.borrow_mut(ctx).properties.insert(key, gc_val);
         return Ok(());
     }
 
@@ -2451,7 +2451,7 @@ pub fn object_set_key_value<'gc>(
         && let Ok(idx_u64) = s.parse::<u64>()
         && idx_u64 < 2_u64.pow(32) - 1
         && idx_u64.to_string() == *s
-        && crate::js_array::is_array(mc, obj)
+        && crate::js_array::is_array(ctx, obj)
     {
         let idx = idx_u64 as usize;
         let current_len = object_get_length(obj).unwrap_or(0);
@@ -2460,11 +2460,11 @@ pub fn object_set_key_value<'gc>(
                 return Err(raise_type_error!("Cannot assign to read only property 'length'"));
             }
             // Set internal length to idx + 1
-            object_set_length(mc, obj, idx + 1)?;
+            object_set_length(ctx, obj, idx + 1)?;
         }
     }
 
-    let val_ptr = new_gc_cell_ptr(mc, val.clone());
+    let val_ptr = new_gc_cell_ptr(ctx, val.clone());
     if key_desc == "prototype" {
         log::debug!(
             "object_set_key_value: setting 'prototype' on obj={:p} value={:?}",
@@ -2472,7 +2472,7 @@ pub fn object_set_key_value<'gc>(
             val
         );
     }
-    obj.borrow_mut(mc).insert(key.clone(), val_ptr);
+    obj.borrow_mut(ctx).insert(key.clone(), val_ptr);
     Ok(())
 }
 
@@ -2516,7 +2516,7 @@ pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, 
     None
 }
 
-pub fn env_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
+pub fn env_set<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
     if (*env.borrow()).is_const(key) {
         log::trace!(
             "env_set: assignment to const detected: env_ptr={:p} key={} constants={:?} lexical_decls={:?} own_props={:?}",
@@ -2528,7 +2528,7 @@ pub fn env_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, 
         );
         return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
-    let val_ptr = new_gc_cell_ptr(mc, val.clone());
+    let val_ptr = new_gc_cell_ptr(ctx, val.clone());
     let pk = if let Some(slot) = str_to_internal_slot(key) {
         PropertyKey::Internal(slot)
     } else {
@@ -2541,12 +2541,12 @@ pub fn env_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, 
     // Check String key first (user-defined variables), then fall back to internal slot.
     let has_own_str = env.borrow().properties.contains_key(&str_pk);
     if has_own_str {
-        env.borrow_mut(mc).insert(str_pk, val_ptr);
+        env.borrow_mut(ctx).insert(str_pk, val_ptr);
         return Ok(());
     }
     let has_own = env.borrow().properties.contains_key(&pk);
     if has_own {
-        env.borrow_mut(mc).insert(pk, val_ptr);
+        env.borrow_mut(ctx).insert(pk, val_ptr);
         return Ok(());
     }
 
@@ -2559,19 +2559,19 @@ pub fn env_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, 
         // Check String key first, then Internal
         let found_str = c.borrow().properties.contains_key(&str_pk);
         if found_str {
-            c.borrow_mut(mc).insert(str_pk, val_ptr);
+            c.borrow_mut(ctx).insert(str_pk, val_ptr);
             return Ok(());
         }
         let found = c.borrow().properties.contains_key(&pk);
         if found {
-            c.borrow_mut(mc).insert(pk, val_ptr);
+            c.borrow_mut(ctx).insert(pk, val_ptr);
             return Ok(());
         }
         cur = c.borrow().prototype;
     }
 
     // Not found in the chain — create on the given env.
-    env.borrow_mut(mc).insert(pk, val_ptr);
+    env.borrow_mut(ctx).insert(pk, val_ptr);
     Ok(())
 }
 
@@ -2582,9 +2582,9 @@ pub fn env_set<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, 
 /// Store a value in an object's internal slot.  The key must start with `__`.
 #[inline]
 #[allow(dead_code)]
-pub fn set_internal_slot<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str, value: &Value<'gc>) {
+pub fn set_internal_slot<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, key: &str, value: &Value<'gc>) {
     let slot = str_to_internal_slot(key).unwrap_or_else(|| panic!("set_internal_slot: unknown key '{}'", key));
-    slot_set(mc, obj, slot, value);
+    slot_set(ctx, obj, slot, value);
 }
 
 /// Read an internal slot from an object (own only — no prototype chain walk).
@@ -2612,10 +2612,10 @@ pub fn has_internal_slot(obj: &JSObjectDataPtr, key: &str) -> bool {
 
 /// Store a value in an internal slot using a typed `InternalSlot` key.
 #[inline]
-pub fn slot_set<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: InternalSlot, value: &Value<'gc>) {
-    let gc_val = new_gc_cell_ptr(mc, value.clone());
+pub fn slot_set<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: InternalSlot, value: &Value<'gc>) {
+    let gc_val = new_gc_cell_ptr(ctx, value.clone());
     let key = PropertyKey::Internal(slot);
-    obj.borrow_mut(mc).properties.insert(key, gc_val);
+    obj.borrow_mut(ctx).properties.insert(key, gc_val);
 }
 
 /// Read an internal slot (own only) using a typed `InternalSlot` key.
@@ -2636,9 +2636,9 @@ pub fn slot_has(obj: &JSObjectDataPtr, slot: &InternalSlot) -> bool {
 /// Remove an internal slot using a typed `InternalSlot` key.
 #[inline]
 #[allow(dead_code)]
-pub fn slot_remove<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
+pub fn slot_remove<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, slot: &InternalSlot) -> Option<GcPtr<'gc, Value<'gc>>> {
     let key = PropertyKey::Internal(slot.clone());
-    obj.borrow_mut(mc).properties.shift_remove(&key)
+    obj.borrow_mut(ctx).properties.shift_remove(&key)
 }
 
 /// Walk prototype chain looking for an internal slot (typed key).
@@ -2676,8 +2676,8 @@ pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
     false
 }
 
-pub fn env_set_strictness<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
-    slot_set(mc, env, InternalSlot::IsStrict, &Value::Boolean(is_strict));
+pub fn env_set_strictness<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
+    slot_set(ctx, env, InternalSlot::IsStrict, &Value::Boolean(is_strict));
     Ok(())
 }
 
@@ -2700,7 +2700,7 @@ pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'
     }
 }
 
-pub fn env_set_recursive<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
+pub fn env_set_recursive<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: &Value<'gc>) -> Result<(), JSError> {
     let pk = if let Some(slot) = str_to_internal_slot(key) {
         PropertyKey::Internal(slot)
     } else {
@@ -2728,7 +2728,7 @@ pub fn env_set_recursive<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, k
                 }
                 return Ok(());
             }
-            return env_set(mc, &current, key, val);
+            return env_set(ctx, &current, key, val);
         }
         let parent_opt = current.borrow().prototype;
         if let Some(parent_rc) = parent_opt {
@@ -2747,7 +2747,7 @@ pub fn env_set_recursive<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, k
                 if env_get_strictness(env) {
                     return Err(crate::raise_reference_error!(format!("{key} is not defined")));
                 } else {
-                    return env_set(mc, &current, key, val);
+                    return env_set(ctx, &current, key, val);
                 }
             }
             current = parent_rc;
@@ -2759,7 +2759,7 @@ pub fn env_set_recursive<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>, k
                 return Err(crate::raise_reference_error!(format!("{key} is not defined")));
             } else {
                 // No explicit strictness marker: be permissive and create the global binding
-                return env_set(mc, &current, key, val);
+                return env_set(ctx, &current, key, val);
             }
         }
     }
@@ -2781,8 +2781,8 @@ pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
     None
 }
 
-pub fn object_set_length<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
-    if crate::js_array::is_array(mc, obj) && length > u32::MAX as usize {
+pub fn object_set_length<'gc>(ctx: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+    if crate::js_array::is_array(ctx, obj) && length > u32::MAX as usize {
         return Err(raise_range_error!("Invalid array length"));
     }
 
@@ -2815,14 +2815,14 @@ pub fn object_set_length<'gc>(mc: &GcContext<'gc>, obj: &JSObjectDataPtr<'gc>, l
             let key = PropertyKey::String(idx.to_string());
             if !obj.borrow().is_configurable(key.clone()) {
                 let fallback_len = idx.saturating_add(1);
-                let len_ptr = new_gc_cell_ptr(mc, Value::Number(fallback_len as f64));
-                obj.borrow_mut(mc).insert("length", len_ptr);
+                let len_ptr = new_gc_cell_ptr(ctx, Value::Number(fallback_len as f64));
+                obj.borrow_mut(ctx).insert("length", len_ptr);
                 return Err(raise_type_error!("Cannot delete non-configurable property"));
             }
-            let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
+            let _ = obj.borrow_mut(ctx).properties.shift_remove(&key);
         }
     }
-    let len_ptr = new_gc_cell_ptr(mc, Value::Number(length as f64));
-    obj.borrow_mut(mc).insert("length", len_ptr);
+    let len_ptr = new_gc_cell_ptr(ctx, Value::Number(length as f64));
+    obj.borrow_mut(ctx).insert("length", len_ptr);
     Ok(())
 }

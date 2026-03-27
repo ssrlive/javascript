@@ -10,24 +10,24 @@ use crate::{
 
 /// Handle WeakSet constructor calls (spec §24.4.1.1)
 pub(crate) fn handle_weakset_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
     new_target: Option<&Value<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let weakset = new_gc_cell_ptr(mc, JSWeakSet { values: Vec::new() });
+    let weakset = new_gc_cell_ptr(ctx, JSWeakSet { values: Vec::new() });
 
     // Create a wrapper object for the WeakSet
-    let weakset_obj = new_js_object_data(mc);
+    let weakset_obj = new_js_object_data(ctx);
     // Store the actual weakset data
-    slot_set(mc, &weakset_obj, InternalSlot::WeakSet, &Value::WeakSet(weakset));
+    slot_set(ctx, &weakset_obj, InternalSlot::WeakSet, &Value::WeakSet(weakset));
 
     // OrdinaryCreateFromConstructor(NewTarget, "%WeakSet.prototype%")
     let mut proto_set = false;
     if let Some(Value::Object(nt_obj)) = new_target
-        && let Some(proto) = crate::js_class::get_prototype_from_constructor(mc, nt_obj, env, "WeakSet")?
+        && let Some(proto) = crate::js_class::get_prototype_from_constructor(ctx, nt_obj, env, "WeakSet")?
     {
-        weakset_obj.borrow_mut(mc).prototype = Some(proto);
+        weakset_obj.borrow_mut(ctx).prototype = Some(proto);
         proto_set = true;
     }
     if !proto_set
@@ -36,7 +36,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
         && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        weakset_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+        weakset_obj.borrow_mut(ctx).prototype = Some(*proto_obj);
     }
 
     // Step 3: If iterable is not present, or is undefined/null, return.
@@ -46,7 +46,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     }
 
     // Step 4-5: Get "add" method from the set object and check IsCallable.
-    let add_fn = crate::core::get_property_with_accessors(mc, env, &weakset_obj, "add")?;
+    let add_fn = crate::core::get_property_with_accessors(ctx, env, &weakset_obj, "add")?;
     let add_is_callable = match &add_fn {
         Value::Object(obj) => {
             obj.borrow().get_closure().is_some()
@@ -61,27 +61,27 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     }
 
     // Step 6: GetIterator.
-    let (iter_obj, next_fn) = crate::js_map::get_iterator(mc, env, &iterable)?;
+    let (iter_obj, next_fn) = crate::js_map::get_iterator(ctx, env, &iterable)?;
 
     // Step 7: Iterate
     loop {
-        let next_result = crate::js_map::call_iterator_next(mc, env, &iter_obj, &next_fn)?;
-        let done = crate::js_map::get_iterator_done(mc, env, &next_result)?;
+        let next_result = crate::js_map::call_iterator_next(ctx, env, &iter_obj, &next_fn)?;
+        let done = crate::js_map::get_iterator_done(ctx, env, &next_result)?;
         if done {
             break;
         }
-        let item = match crate::js_map::get_iterator_value(mc, env, &next_result) {
+        let item = match crate::js_map::get_iterator_value(ctx, env, &next_result) {
             Ok(v) => v,
             Err(e) => {
-                let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+                let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
                 return Err(e);
             }
         };
 
         // Call(adder, set, [item])
-        let call_result = crate::core::evaluate_call_dispatch(mc, env, &add_fn, Some(&Value::Object(weakset_obj)), &[item]);
+        let call_result = crate::core::evaluate_call_dispatch(ctx, env, &add_fn, Some(&Value::Object(weakset_obj)), &[item]);
         if let Err(e) = call_result {
-            let _ = crate::js_map::close_iterator(mc, env, &iter_obj);
+            let _ = crate::js_map::close_iterator(ctx, env, &iter_obj);
             return Err(e);
         }
     }
@@ -90,23 +90,23 @@ pub(crate) fn handle_weakset_constructor<'gc>(
 }
 
 /// Initialize WeakSet constructor and prototype
-pub fn initialize_weakset<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let weakset_ctor = new_js_object_data(mc);
-    slot_set(mc, &weakset_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+pub fn initialize_weakset<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let weakset_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &weakset_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
     slot_set(
-        mc,
+        ctx,
         &weakset_ctor,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("WeakSet")),
     );
 
     // WeakSet.length = 0, WeakSet.name = "WeakSet" (non-enumerable, non-writable, configurable)
-    object_set_key_value(mc, &weakset_ctor, "length", &Value::Number(0.0))?;
-    weakset_ctor.borrow_mut(mc).set_non_enumerable("length");
-    weakset_ctor.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &weakset_ctor, "name", &Value::String(utf8_to_utf16("WeakSet")))?;
-    weakset_ctor.borrow_mut(mc).set_non_enumerable("name");
-    weakset_ctor.borrow_mut(mc).set_non_writable("name");
+    object_set_key_value(ctx, &weakset_ctor, "length", &Value::Number(0.0))?;
+    weakset_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    weakset_ctor.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &weakset_ctor, "name", &Value::String(utf8_to_utf16("WeakSet")))?;
+    weakset_ctor.borrow_mut(ctx).set_non_enumerable("name");
+    weakset_ctor.borrow_mut(ctx).set_non_writable("name");
 
     // Set WeakSet's [[Prototype]] to Function.prototype
     if let Some(func_val) = object_get_key_value(env, "Function")
@@ -114,7 +114,7 @@ pub fn initialize_weakset<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         && let Some(func_proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*func_proto_val.borrow()
     {
-        weakset_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+        weakset_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     // Get Object.prototype
@@ -128,27 +128,27 @@ pub fn initialize_weakset<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         None
     };
 
-    let weakset_proto = new_js_object_data(mc);
+    let weakset_proto = new_js_object_data(ctx);
     if let Some(proto) = object_proto {
-        weakset_proto.borrow_mut(mc).prototype = Some(proto);
+        weakset_proto.borrow_mut(ctx).prototype = Some(proto);
     }
 
-    object_set_key_value(mc, &weakset_ctor, "prototype", &Value::Object(weakset_proto))?;
-    weakset_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    weakset_ctor.borrow_mut(mc).set_non_writable("prototype");
-    weakset_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    object_set_key_value(mc, &weakset_proto, "constructor", &Value::Object(weakset_ctor))?;
+    object_set_key_value(ctx, &weakset_ctor, "prototype", &Value::Object(weakset_proto))?;
+    weakset_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    weakset_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    weakset_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    object_set_key_value(ctx, &weakset_proto, "constructor", &Value::Object(weakset_ctor))?;
 
     // Register instance methods
     let methods = vec!["add", "has", "delete", "toString"];
 
     for method in methods {
         let val = Value::Function(format!("WeakSet.prototype.{}", method));
-        object_set_key_value(mc, &weakset_proto, method, &val)?;
-        weakset_proto.borrow_mut(mc).set_non_enumerable(method);
+        object_set_key_value(ctx, &weakset_proto, method, &val)?;
+        weakset_proto.borrow_mut(ctx).set_non_enumerable(method);
     }
     // Mark constructor non-enumerable
-    weakset_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    weakset_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -158,20 +158,20 @@ pub fn initialize_weakset<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) 
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            let tag_desc = crate::core::create_descriptor_object(mc, &Value::String(utf8_to_utf16("WeakSet")), false, false, true)?;
-            crate::js_object::define_property_internal(mc, &weakset_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
+            let tag_desc = crate::core::create_descriptor_object(ctx, &Value::String(utf8_to_utf16("WeakSet")), false, false, true)?;
+            crate::js_object::define_property_internal(ctx, &weakset_proto, crate::core::PropertyKey::Symbol(*s), &tag_desc)?;
         }
     }
 
-    env_set(mc, env, "WeakSet", &Value::Object(weakset_ctor))?;
+    env_set(ctx, env, "WeakSet", &Value::Object(weakset_ctor))?;
     Ok(())
 }
 
 /// Check if WeakSet has a value
-fn weakset_has_value<'gc>(mc: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
+fn weakset_has_value<'gc>(ctx: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
     let weakset_ref = weakset.borrow();
     for v in &weakset_ref.values {
-        if v.matches(mc, key) {
+        if v.matches(ctx, key) {
             return true;
         }
     }
@@ -179,16 +179,16 @@ fn weakset_has_value<'gc>(mc: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSe
 }
 
 /// Delete a value from WeakSet
-fn weakset_delete_value<'gc>(mc: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
-    let mut weakset_mut = weakset.borrow_mut(mc);
+fn weakset_delete_value<'gc>(ctx: &GcContext<'gc>, weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>, key: &Value<'gc>) -> bool {
+    let mut weakset_mut = weakset.borrow_mut(ctx);
     let len_before = weakset_mut.values.len();
-    weakset_mut.values.retain(|v| !v.matches(mc, key));
+    weakset_mut.values.retain(|v| !v.matches(ctx, key));
     weakset_mut.values.len() < len_before
 }
 
 /// Handle WeakSet instance method calls
 pub(crate) fn handle_weakset_instance_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     method: &str,
     args: &[Value<'gc>],
@@ -205,10 +205,10 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
             };
 
             // Remove existing entry with same value
-            weakset.borrow_mut(mc).values.retain(|v| !v.matches(mc, &value));
+            weakset.borrow_mut(ctx).values.retain(|v| !v.matches(ctx, &value));
 
             // Add new entry
-            weakset.borrow_mut(mc).values.push(weak_key);
+            weakset.borrow_mut(ctx).values.push(weak_key);
 
             // Return this (the wrapper object)
             Ok(this_obj.clone())
@@ -220,7 +220,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
                 return Ok(Value::Boolean(false));
             }
 
-            Ok(Value::Boolean(weakset_has_value(mc, weakset, &value)))
+            Ok(Value::Boolean(weakset_has_value(ctx, weakset, &value)))
         }
         "delete" => {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
@@ -229,7 +229,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
                 return Ok(Value::Boolean(false));
             }
 
-            Ok(Value::Boolean(weakset_delete_value(mc, weakset, &value)))
+            Ok(Value::Boolean(weakset_delete_value(ctx, weakset, &value)))
         }
         "toString" => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
         _ => Err(raise_type_error!(format!("WeakSet.prototype.{} is not a function", method)).into()),
@@ -237,7 +237,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
 }
 
 /// Check if a JS object wraps an internal WeakSet
-pub fn is_weakset_object<'gc>(_mc: &GcContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
+pub fn is_weakset_object<'gc>(_ctx: &GcContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
     if let Some(val_rc) = slot_get_chained(obj, &InternalSlot::WeakSet) {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakSet(_))
     } else {

@@ -11,7 +11,7 @@ use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
 
 pub(crate) fn bigint_constructor<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -45,7 +45,7 @@ pub(crate) fn bigint_constructor<'gc>(
         Value::Symbol(_) => Err(raise_type_error!("Cannot convert a Symbol value to a BigInt").into()),
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
-            let prim = to_primitive(mc, &Value::Object(*obj), "number", env)?;
+            let prim = to_primitive(ctx, &Value::Object(*obj), "number", env)?;
             match prim {
                 Value::Number(n) => {
                     if !n.is_finite() || n.fract() != 0.0 {
@@ -133,7 +133,7 @@ pub fn handle_bigint_object_method<'gc>(this_val: &Value<'gc>, method: &str, arg
 
 /// Handle static methods on the BigInt constructor (asIntN, asUintN)
 pub fn handle_bigint_static_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
@@ -144,11 +144,11 @@ pub fn handle_bigint_static_method<'gc>(
 
     // Step 1: ToIndex(bits) — convert first arg
     let bits_raw = args.first().cloned().unwrap_or(Value::Undefined);
-    let bits = to_index(mc, &bits_raw, env)?;
+    let bits = to_index(ctx, &bits_raw, env)?;
 
     // Step 2: ToBigInt(bigint) — convert second arg
     let bigint_raw = args.get(1).cloned().unwrap_or(Value::Undefined);
-    let bi = to_bigint(mc, &bigint_raw, env)?;
+    let bi = to_bigint(ctx, &bigint_raw, env)?;
 
     // modulus = 2 ** bits
     let modulus = if bits == 0 { BigInt::from(1u8) } else { BigInt::from(1u8) << bits };
@@ -176,12 +176,12 @@ pub fn handle_bigint_static_method<'gc>(
 
 /// ToIndex helper: convert a Value to a non-negative integer index
 /// Per spec: ToIndex(value) → integer ∈ [0, 2^53-1] or throws RangeError/TypeError
-fn to_index<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
+fn to_index<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<usize, EvalError<'gc>> {
     if matches!(val, Value::Undefined) {
         return Ok(0);
     }
     let prim = if let Value::Object(_) = val {
-        to_primitive(mc, val, "number", env)?
+        to_primitive(ctx, val, "number", env)?
     } else {
         val.clone()
     };
@@ -201,9 +201,9 @@ fn to_index<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'g
 }
 
 /// ToBigInt helper: convert a Value to a BigInt
-fn to_bigint<'gc>(mc: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<BigInt, EvalError<'gc>> {
+fn to_bigint<'gc>(ctx: &GcContext<'gc>, val: &Value<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<BigInt, EvalError<'gc>> {
     let prim = if let Value::Object(_) = val {
-        to_primitive(mc, val, "number", env)?
+        to_primitive(ctx, val, "number", env)?
     } else {
         val.clone()
     };
@@ -358,81 +358,81 @@ pub fn compare_bigint_and_number(b: &BigInt, n: f64) -> Option<std::cmp::Orderin
     }
 }
 
-pub fn initialize_bigint<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let bigint_ctor = new_js_object_data(mc);
-    slot_set(mc, &bigint_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("BigInt")));
-    slot_set(mc, &bigint_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
+pub fn initialize_bigint<'gc>(ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let bigint_ctor = new_js_object_data(ctx);
+    slot_set(ctx, &bigint_ctor, InternalSlot::NativeCtor, &Value::String(utf8_to_utf16("BigInt")));
+    slot_set(ctx, &bigint_ctor, InternalSlot::IsConstructor, &Value::Boolean(true));
 
     // BigInt.length = 1, BigInt.name = "BigInt"
-    object_set_key_value(mc, &bigint_ctor, "length", &Value::Number(1.0))?;
-    bigint_ctor.borrow_mut(mc).set_non_enumerable("length");
-    bigint_ctor.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &bigint_ctor, "name", &Value::String(utf8_to_utf16("BigInt")))?;
-    bigint_ctor.borrow_mut(mc).set_non_enumerable("name");
-    bigint_ctor.borrow_mut(mc).set_non_writable("name");
+    object_set_key_value(ctx, &bigint_ctor, "length", &Value::Number(1.0))?;
+    bigint_ctor.borrow_mut(ctx).set_non_enumerable("length");
+    bigint_ctor.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &bigint_ctor, "name", &Value::String(utf8_to_utf16("BigInt")))?;
+    bigint_ctor.borrow_mut(ctx).set_non_enumerable("name");
+    bigint_ctor.borrow_mut(ctx).set_non_writable("name");
 
     // Add static methods
-    let as_int_n_fn = new_js_object_data(mc);
+    let as_int_n_fn = new_js_object_data(ctx);
     slot_set(
-        mc,
+        ctx,
         &as_int_n_fn,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("BigInt.asIntN")),
     );
-    slot_set(mc, &as_int_n_fn, InternalSlot::Callable, &Value::Boolean(true));
-    object_set_key_value(mc, &as_int_n_fn, "length", &Value::Number(2.0))?;
-    as_int_n_fn.borrow_mut(mc).set_non_enumerable("length");
-    as_int_n_fn.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &as_int_n_fn, "name", &Value::String(utf8_to_utf16("asIntN")))?;
-    as_int_n_fn.borrow_mut(mc).set_non_enumerable("name");
-    as_int_n_fn.borrow_mut(mc).set_non_writable("name");
-    object_set_key_value(mc, &bigint_ctor, "asIntN", &Value::Object(as_int_n_fn))?;
-    bigint_ctor.borrow_mut(mc).set_non_enumerable("asIntN");
+    slot_set(ctx, &as_int_n_fn, InternalSlot::Callable, &Value::Boolean(true));
+    object_set_key_value(ctx, &as_int_n_fn, "length", &Value::Number(2.0))?;
+    as_int_n_fn.borrow_mut(ctx).set_non_enumerable("length");
+    as_int_n_fn.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &as_int_n_fn, "name", &Value::String(utf8_to_utf16("asIntN")))?;
+    as_int_n_fn.borrow_mut(ctx).set_non_enumerable("name");
+    as_int_n_fn.borrow_mut(ctx).set_non_writable("name");
+    object_set_key_value(ctx, &bigint_ctor, "asIntN", &Value::Object(as_int_n_fn))?;
+    bigint_ctor.borrow_mut(ctx).set_non_enumerable("asIntN");
 
-    let as_uint_n_fn = new_js_object_data(mc);
+    let as_uint_n_fn = new_js_object_data(ctx);
     slot_set(
-        mc,
+        ctx,
         &as_uint_n_fn,
         InternalSlot::NativeCtor,
         &Value::String(utf8_to_utf16("BigInt.asUintN")),
     );
-    slot_set(mc, &as_uint_n_fn, InternalSlot::Callable, &Value::Boolean(true));
-    object_set_key_value(mc, &as_uint_n_fn, "length", &Value::Number(2.0))?;
-    as_uint_n_fn.borrow_mut(mc).set_non_enumerable("length");
-    as_uint_n_fn.borrow_mut(mc).set_non_writable("length");
-    object_set_key_value(mc, &as_uint_n_fn, "name", &Value::String(utf8_to_utf16("asUintN")))?;
-    as_uint_n_fn.borrow_mut(mc).set_non_enumerable("name");
-    as_uint_n_fn.borrow_mut(mc).set_non_writable("name");
-    object_set_key_value(mc, &bigint_ctor, "asUintN", &Value::Object(as_uint_n_fn))?;
-    bigint_ctor.borrow_mut(mc).set_non_enumerable("asUintN");
+    slot_set(ctx, &as_uint_n_fn, InternalSlot::Callable, &Value::Boolean(true));
+    object_set_key_value(ctx, &as_uint_n_fn, "length", &Value::Number(2.0))?;
+    as_uint_n_fn.borrow_mut(ctx).set_non_enumerable("length");
+    as_uint_n_fn.borrow_mut(ctx).set_non_writable("length");
+    object_set_key_value(ctx, &as_uint_n_fn, "name", &Value::String(utf8_to_utf16("asUintN")))?;
+    as_uint_n_fn.borrow_mut(ctx).set_non_enumerable("name");
+    as_uint_n_fn.borrow_mut(ctx).set_non_writable("name");
+    object_set_key_value(ctx, &bigint_ctor, "asUintN", &Value::Object(as_uint_n_fn))?;
+    bigint_ctor.borrow_mut(ctx).set_non_enumerable("asUintN");
     // Create prototype
-    let bigint_proto = new_js_object_data(mc);
+    let bigint_proto = new_js_object_data(ctx);
     // Set BigInt.prototype's prototype to Object.prototype if available
     if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
         && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*proto_val.borrow()
     {
-        bigint_proto.borrow_mut(mc).prototype = Some(*obj_proto);
+        bigint_proto.borrow_mut(ctx).prototype = Some(*obj_proto);
     }
 
     let to_string = Value::Function("BigInt.prototype.toString".to_string());
-    object_set_key_value(mc, &bigint_proto, "toString", &to_string)?;
+    object_set_key_value(ctx, &bigint_proto, "toString", &to_string)?;
     let value_of = Value::Function("BigInt.prototype.valueOf".to_string());
-    object_set_key_value(mc, &bigint_proto, "valueOf", &value_of)?;
+    object_set_key_value(ctx, &bigint_proto, "valueOf", &value_of)?;
 
     // Wire up
-    object_set_key_value(mc, &bigint_ctor, "prototype", &Value::Object(bigint_proto))?;
+    object_set_key_value(ctx, &bigint_ctor, "prototype", &Value::Object(bigint_proto))?;
     // BigInt.prototype is non-writable, non-enumerable, non-configurable
-    bigint_ctor.borrow_mut(mc).set_non_enumerable("prototype");
-    bigint_ctor.borrow_mut(mc).set_non_configurable("prototype");
-    bigint_ctor.borrow_mut(mc).set_non_writable("prototype");
-    object_set_key_value(mc, &bigint_proto, "constructor", &Value::Object(bigint_ctor))?;
+    bigint_ctor.borrow_mut(ctx).set_non_enumerable("prototype");
+    bigint_ctor.borrow_mut(ctx).set_non_configurable("prototype");
+    bigint_ctor.borrow_mut(ctx).set_non_writable("prototype");
+    object_set_key_value(ctx, &bigint_proto, "constructor", &Value::Object(bigint_ctor))?;
 
     // Mark prototype methods and constructor non-enumerable
-    bigint_proto.borrow_mut(mc).set_non_enumerable("toString");
-    bigint_proto.borrow_mut(mc).set_non_enumerable("valueOf");
-    bigint_proto.borrow_mut(mc).set_non_enumerable("constructor");
+    bigint_proto.borrow_mut(ctx).set_non_enumerable("toString");
+    bigint_proto.borrow_mut(ctx).set_non_enumerable("valueOf");
+    bigint_proto.borrow_mut(ctx).set_non_enumerable("constructor");
 
     // Set BigInt.prototype[@@toStringTag] = "BigInt"
     if let Some(sym_ctor_val) = object_get_key_value(env, "Symbol")
@@ -440,12 +440,12 @@ pub fn initialize_bigint<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
         && let Some(tag_sym_val) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
     {
-        object_set_key_value(mc, &bigint_proto, *tag_sym, &Value::String(utf8_to_utf16("BigInt")))?;
-        bigint_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
-        bigint_proto.borrow_mut(mc).set_non_writable(PropertyKey::Symbol(*tag_sym));
+        object_set_key_value(ctx, &bigint_proto, *tag_sym, &Value::String(utf8_to_utf16("BigInt")))?;
+        bigint_proto.borrow_mut(ctx).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
+        bigint_proto.borrow_mut(ctx).set_non_writable(PropertyKey::Symbol(*tag_sym));
     }
 
-    env_set(mc, env, "BigInt", &Value::Object(bigint_ctor))?;
+    env_set(ctx, env, "BigInt", &Value::Object(bigint_ctor))?;
 
     // Set BigInt.__proto__ and asIntN/asUintN.__proto__ to Function.prototype
     if let Some(func_val) = object_get_key_value(env, "Function")
@@ -453,9 +453,9 @@ pub fn initialize_bigint<'gc>(mc: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -
         && let Some(fp_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(func_proto) = &*fp_val.borrow()
     {
-        bigint_ctor.borrow_mut(mc).prototype = Some(*func_proto);
-        as_int_n_fn.borrow_mut(mc).prototype = Some(*func_proto);
-        as_uint_n_fn.borrow_mut(mc).prototype = Some(*func_proto);
+        bigint_ctor.borrow_mut(ctx).prototype = Some(*func_proto);
+        as_int_n_fn.borrow_mut(ctx).prototype = Some(*func_proto);
+        as_uint_n_fn.borrow_mut(ctx).prototype = Some(*func_proto);
     }
 
     Ok(())

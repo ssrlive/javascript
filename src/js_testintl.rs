@@ -6,10 +6,10 @@ use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 /// Create the testIntl object with testing functions
-pub fn make_testintl_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    let testintl_obj = new_js_object_data(mc);
+pub fn make_testintl_object<'gc>(ctx: &GcContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let testintl_obj = new_js_object_data(ctx);
     object_set_key_value(
-        mc,
+        ctx,
         &testintl_obj,
         &"testWithIntlConstructors".into(),
         Value::Function("testWithIntlConstructors".to_string()),
@@ -18,14 +18,14 @@ pub fn make_testintl_object<'gc>(mc: &GcContext<'gc>) -> Result<JSObjectDataPtr<
 }
 
 /// Create a mock Intl constructor that can be instantiated
-pub fn create_mock_intl_constructor<'gc>(mc: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn create_mock_intl_constructor<'gc>(ctx: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
     // Create a special constructor function that will be recognized by evaluate_new
     Ok(Value::Function("MockIntlConstructor".to_string()))
 }
 
 /// Create a mock Intl instance with resolvedOptions method
 pub fn create_mock_intl_instance<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     locale_arg: Option<String>,
     env: &crate::core::JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
@@ -54,7 +54,7 @@ pub fn create_mock_intl_instance<'gc>(
             }
         }
 
-        match crate::core::evaluate_expr(mc, &global_env, &call_expr) {
+        match crate::core::evaluate_expr(ctx, &global_env, &call_expr) {
             Ok(CoreValue::Boolean(true)) => {
                 // input is canonicalized and structurally valid — nothing to do
             }
@@ -81,10 +81,10 @@ pub fn create_mock_intl_instance<'gc>(
                 // calling it. If not present, skip calling and log for
                 // diagnostics rather than causing an evaluation error.
                 let helper_lookup =
-                    crate::core::evaluate_expr(mc, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
+                    crate::core::evaluate_expr(ctx, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
                 match helper_lookup {
                     Ok(crate::core::Value::Closure(_)) | Ok(crate::core::Value::AsyncClosure(_)) | Ok(crate::core::Value::Function(_)) => {
-                        match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
+                        match crate::core::evaluate_expr(ctx, &global_env, &canon_call) {
                             Ok(CoreValue::String(canon_utf16)) => {
                                 let canon = utf16_to_utf8(canon_utf16);
                                 log::debug!(
@@ -141,11 +141,11 @@ pub fn create_mock_intl_instance<'gc>(
         }
     }
 
-    let instance = new_js_object_data(mc);
+    let instance = new_js_object_data(ctx);
 
     // Add resolvedOptions method
-    let resolved_options = Value::Closure(Gc::new(mc, crate::core::ClosureData::new(&[], &[], &new_js_object_data(mc), None)));
-    object_set_key_value(mc, &instance, &"resolvedOptions".into(), &resolved_options)?;
+    let resolved_options = Value::Closure(Gc::new(ctx, crate::core::ClosureData::new(&[], &[], &new_js_object_data(ctx), None)));
+    object_set_key_value(ctx, &instance, &"resolvedOptions".into(), &resolved_options)?;
 
     // Store the locale that was passed to the constructor
     if let Some(locale) = locale_arg {
@@ -172,13 +172,13 @@ pub fn create_mock_intl_instance<'gc>(
 
         // Before calling the canonicalize helper, check whether it exists at
         // the global scope to avoid evaluation errors when it's missing.
-        let helper_lookup = crate::core::evaluate_expr(mc, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
+        let helper_lookup = crate::core::evaluate_expr(ctx, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
         match helper_lookup {
             Ok(crate::core::Value::Closure(_)) | Ok(crate::core::Value::AsyncClosure(_)) | Ok(crate::core::Value::Function(_)) => {
-                match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
+                match crate::core::evaluate_expr(ctx, &global_env, &canon_call) {
                     Ok(CoreValue::String(canon_utf16)) => {
                         let canonical = utf16_to_utf8(canon_utf16);
-                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&canonical)));
+                        slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&canonical)));
                     }
                     _ => {
                         // Fall back to canonicalizedTags if canonicalize returned
@@ -199,23 +199,23 @@ pub fn create_mock_intl_instance<'gc>(
                             }
                         }
 
-                        match crate::core::evaluate_expr(mc, &global_env, &lookup) {
-                            Ok(CoreValue::Object(arr_obj)) if crate::js_array::is_array(mc, &arr_obj) => {
+                        match crate::core::evaluate_expr(ctx, &global_env, &lookup) {
+                            Ok(CoreValue::Object(arr_obj)) if crate::js_array::is_array(ctx, &arr_obj) => {
                                 // Try to read [0]
                                 let first = Expr::Index(Box::new(lookup.clone()), Box::new(Expr::Number(0.0)));
-                                match crate::core::evaluate_expr(mc, &global_env, &first) {
+                                match crate::core::evaluate_expr(ctx, &global_env, &first) {
                                     Ok(CoreValue::String(first_utf16)) => {
                                         let first_str = utf16_to_utf8(first_utf16);
-                                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&first_str)));
+                                        slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&first_str)));
                                     }
                                     _ => {
-                                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
+                                        slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                                     }
                                 }
                             }
                             _ => {
                                 // Nothing helpful found; store the original locale
-                                slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
+                                slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                             }
                         }
                     }
@@ -255,23 +255,23 @@ pub fn create_mock_intl_instance<'gc>(
                     }
                 }
 
-                match crate::core::evaluate_expr(mc, &global_env, &lookup) {
-                    Ok(CoreValue::Object(arr_obj)) if crate::js_array::is_array(mc, &arr_obj) => {
+                match crate::core::evaluate_expr(ctx, &global_env, &lookup) {
+                    Ok(CoreValue::Object(arr_obj)) if crate::js_array::is_array(ctx, &arr_obj) => {
                         // Try to read [0]
                         let first = Expr::Index(Box::new(lookup.clone()), Box::new(Expr::Number(0.0)));
-                        match crate::core::evaluate_expr(mc, &global_env, &first) {
+                        match crate::core::evaluate_expr(ctx, &global_env, &first) {
                             Ok(CoreValue::String(first_utf16)) => {
                                 let first_str = utf16_to_utf8(first_utf16);
-                                slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&first_str)));
+                                slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&first_str)));
                             }
                             _ => {
-                                slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
+                                slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                             }
                         }
                     }
                     _ => {
                         // Nothing helpful found; store the original locale
-                        slot_set(mc, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
+                        slot_set(ctx, &instance, InternalSlot::Locale, &Value::String(utf8_to_utf16(&locale)));
                     }
                 }
             }
@@ -284,7 +284,7 @@ pub fn create_mock_intl_instance<'gc>(
 /// Handle resolvedOptions method on mock Intl instances
 pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Return an object with a locale property
-    let result = new_js_object_data(mc);
+    let result = new_js_object_data(ctx);
 
     // Get the stored locale, or default to "en-US"
     let locale = if let Some(locale_val) = slot_get(instance, &InternalSlot::Locale) {
@@ -296,13 +296,13 @@ pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSEr
         "en-US".to_string()
     };
 
-    object_set_key_value(mc, &result, &"locale".into(), &Value::String(utf8_to_utf16(&locale)))?;
+    object_set_key_value(ctx, &result, &"locale".into(), &Value::String(utf8_to_utf16(&locale)))?;
     Ok(Value::Object(result))
 }
 
 /// Handle testIntl object method calls
 pub fn handle_testintl_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr,
@@ -313,17 +313,17 @@ pub fn handle_testintl_method<'gc>(
                 return Err(raise_eval_error!("testWithIntlConstructors requires exactly 1 argument"));
             }
 
-            let callback = evaluate_expr(mc, env, &args[0])?;
+            let callback = evaluate_expr(ctx, env, &args[0])?;
             if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                 // Create a mock constructor
-                let mock_constructor = create_mock_intl_constructor(mc)?;
+                let mock_constructor = create_mock_intl_constructor(ctx)?;
 
                 // Call the callback with the mock constructor
                 let args_vals = vec![mock_constructor];
                 let func_env = crate::core::prepare_closure_call_env(&captured_env, Some(&params), &args_vals, Some(env))?;
 
                 // Execute the callback body
-                evaluate_statements(mc, &func_env, &body)?;
+                evaluate_statements(ctx, &func_env, &body)?;
                 Ok(Value::Undefined)
             } else {
                 Err(raise_eval_error!("testWithIntlConstructors requires a function as argument"))
@@ -335,7 +335,7 @@ pub fn handle_testintl_method<'gc>(
 
 /// Handle static methods exposed on the mock Intl constructor
 pub fn handle_mock_intl_static_method<'gc>(
-    mc: &GcContext<'gc>,
+    ctx: &GcContext<'gc>,
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr,
@@ -346,24 +346,24 @@ pub fn handle_mock_intl_static_method<'gc>(
             log::debug!("MockIntlConstructor.supportedLocalesOf called with {} args", args.len());
             if args.len() != 1 {
                 // Silently return an empty array when inputs aren't as expected
-                let arr = new_js_object_data(mc);
-                crate::js_array::set_array_length(mc, &arr, 0)?;
+                let arr = new_js_object_data(ctx);
+                crate::js_array::set_array_length(ctx, &arr, 0)?;
                 return Ok(Value::Object(arr));
             }
 
             // Evaluate the provided argument
-            let evaluated = evaluate_expr(mc, env, &args[0])?;
+            let evaluated = evaluate_expr(ctx, env, &args[0])?;
             log::debug!("supportedLocalesOf - evaluated arg = {:?}", evaluated);
 
             // Prepare result array
-            let result = new_js_object_data(mc);
+            let result = new_js_object_data(ctx);
             let mut idx = 0usize;
 
             if let Value::Object(arr_obj) = evaluated
-                && crate::js_array::is_array(mc, &arr_obj)
+                && crate::js_array::is_array(ctx, &arr_obj)
             {
                 // read length property
-                if let Some(len) = get_array_length(mc, &arr_obj) {
+                if let Some(len) = get_array_length(ctx, &arr_obj) {
                     for i in 0..len {
                         let key = i.to_string();
                         if let Some(elem_rc) = object_get_key_value(&arr_obj, &key.into())
@@ -385,7 +385,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                                 }
                             }
 
-                            let helper = evaluate_expr(mc, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
+                            let helper = evaluate_expr(ctx, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
                             match helper {
                                 Ok(crate::core::Value::Closure(_))
                                 | Ok(crate::core::Value::AsyncClosure(_))
@@ -394,7 +394,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                                         Box::new(Expr::Var("canonicalizeLanguageTag".to_string(), None, None)),
                                         vec![Expr::StringLit(arg_utf16.clone())],
                                     );
-                                    match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
+                                    match crate::core::evaluate_expr(ctx, &global_env, &canon_call) {
                                         Ok(Value::String(canon_utf16)) => {
                                             let canonical = utf16_to_utf8(canon_utf16);
                                             log::debug!("supportedLocalesOf - canonical='{}'", canonical);
@@ -403,9 +403,9 @@ pub fn handle_mock_intl_static_method<'gc>(
                                                 Box::new(Expr::Var("isCanonicalizedStructurallyValidLanguageTag".to_string(), None, None)),
                                                 vec![Expr::StringLit(utf8_to_utf16(&canonical))],
                                             );
-                                            if let Ok(Value::Boolean(true)) = crate::core::evaluate_expr(mc, env, &check_call) {
+                                            if let Ok(Value::Boolean(true)) = crate::core::evaluate_expr(ctx, env, &check_call) {
                                                 object_set_key_value(
-                                                    mc,
+                                                    ctx,
                                                     &result,
                                                     &idx.to_string().into(),
                                                     Value::String(utf8_to_utf16(&canonical)),
@@ -456,16 +456,16 @@ pub fn handle_mock_intl_static_method<'gc>(
                                         Box::new(Expr::Var("canonicalizedTags".to_string(), None, None)),
                                         Box::new(Expr::StringLit(arg_utf16.clone())),
                                     );
-                                    if let Ok(crate::core::Value::Object(arr_obj)) = crate::core::evaluate_expr(mc, &global_env, &lookup)
-                                        && crate::js_array::is_array(mc, &arr_obj)
+                                    if let Ok(crate::core::Value::Object(arr_obj)) = crate::core::evaluate_expr(ctx, &global_env, &lookup)
+                                        && crate::js_array::is_array(ctx, &arr_obj)
                                     {
                                         let first = Expr::Index(Box::new(lookup.clone()), Box::new(Expr::Number(0.0)));
                                         if let Ok(crate::core::Value::String(first_utf16)) =
-                                            crate::core::evaluate_expr(mc, &global_env, &first)
+                                            crate::core::evaluate_expr(ctx, &global_env, &first)
                                         {
                                             let canonical = utf16_to_utf8(first_utf16);
                                             object_set_key_value(
-                                                mc,
+                                                ctx,
                                                 &result,
                                                 &idx.to_string().into(),
                                                 Value::String(utf8_to_utf16(&canonical)),
@@ -480,7 +480,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                 }
             }
 
-            crate::js_array::set_array_length(mc, &result, idx)?;
+            crate::js_array::set_array_length(ctx, &result, idx)?;
             Ok(Value::Object(result))
         }
         _ => Err(raise_eval_error!(format!("MockIntlConstructor has no static method '{method}'"))),

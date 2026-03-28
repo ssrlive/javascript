@@ -344,6 +344,7 @@ impl<'gc> Compiler<'gc> {
     }
 
     fn compile_statement(&mut self, stmt: &Statement, is_last: bool) -> Result<(), JSError> {
+        self.chunk.record_line(stmt.line, stmt.column);
         match &*stmt.kind {
             StatementKind::Expr(expr) => {
                 // Detect 'use strict' directive at top-level or inside function

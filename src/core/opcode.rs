@@ -207,6 +207,8 @@ pub struct Chunk<'gc> {
     pub generator_function_ips: std::collections::HashSet<usize>,
     /// Function IPs that are method/getter/setter definitions and should not be constructible.
     pub method_function_ips: std::collections::HashSet<usize>,
+    /// Bytecode offset → source (line, column) mapping (sorted by offset).
+    pub line_map: Vec<(usize, usize, usize)>,
 }
 
 impl<'gc> Chunk<'gc> {
@@ -224,6 +226,7 @@ impl<'gc> Chunk<'gc> {
             call_callee_names: std::collections::HashMap::new(),
             generator_function_ips: std::collections::HashSet::new(),
             method_function_ips: std::collections::HashSet::new(),
+            line_map: Vec::new(),
         }
     }
 
@@ -243,5 +246,25 @@ impl<'gc> Chunk<'gc> {
     pub fn add_constant(&mut self, value: Value<'gc>) -> u16 {
         self.constants.push(value);
         (self.constants.len() - 1) as u16
+    }
+
+    /// Record a source line and column for the current bytecode offset.
+    pub fn record_line(&mut self, line: usize, column: usize) {
+        if line == 0 {
+            return;
+        }
+        let ip = self.code.len();
+        if self.line_map.last().map(|&(_, l, c)| (l, c)) != Some((line, column)) {
+            self.line_map.push((ip, line, column));
+        }
+    }
+
+    /// Look up the source line and column for a bytecode IP.
+    pub fn get_line_col_for_ip(&self, ip: usize) -> Option<(usize, usize)> {
+        match self.line_map.binary_search_by_key(&ip, |&(offset, _, _)| offset) {
+            Ok(idx) => Some((self.line_map[idx].1, self.line_map[idx].2)),
+            Err(0) => None,
+            Err(idx) => Some((self.line_map[idx - 1].1, self.line_map[idx - 1].2)),
+        }
     }
 }

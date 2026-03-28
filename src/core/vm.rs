@@ -534,6 +534,10 @@ pub struct VM<'gc> {
     generator_yield_value: Option<Value<'gc>>,
     // Set by Opcode::GeneratorParamInitDone during generator call-time preflight.
     generator_param_init_done: bool,
+    // Bytecode IP at which the most recent Throw opcode executed (for line-number reporting).
+    last_throw_ip: Option<usize>,
+    // IP of the opcode currently being executed.
+    current_opcode_ip: usize,
     // %GeneratorPrototype% intrinsic — shared prototype for generator .prototype objects
     generator_prototype: Value<'gc>,
     // %GeneratorFunction.prototype% — proto for generator functions themselves
@@ -657,6 +661,8 @@ impl<'gc> VM<'gc> {
             next_generator_id: 1,
             generator_yield_value: None,
             generator_param_init_done: false,
+            last_throw_ip: None,
+            current_opcode_ip: 0,
             generator_prototype: Value::Undefined,
             generator_function_prototype: Value::Undefined,
             async_generator_prototype: Value::Undefined,
@@ -9125,6 +9131,9 @@ impl<'gc> VM<'gc> {
         for ip in &eval_chunk.method_function_ips {
             self.chunk.method_function_ips.insert(ip + code_offset);
         }
+        for &(ip, line, col) in &eval_chunk.line_map {
+            self.chunk.line_map.push((ip + code_offset, line, col));
+        }
 
         (code_offset, const_offset)
     }
@@ -11424,10 +11433,6 @@ impl<'gc> VM<'gc> {
         self.script_path.as_deref().unwrap_or("<anonymous>")
     }
 
-    fn source_lines(&self) -> Option<Vec<&str>> {
-        self.script_source.as_ref().map(|source| source.split('\n').collect())
-    }
-
     fn current_named_frames(&self) -> Vec<(usize, String)> {
         self.frames
             .iter()
@@ -11439,107 +11444,15 @@ impl<'gc> VM<'gc> {
             .collect()
     }
 
-    fn find_function_declaration_line(lines: &[&str], function_name: &str) -> Option<usize> {
-        let patterns = [
-            format!("function {}(", function_name),
-            format!(".{} = function", function_name),
-            format!("{} = function", function_name),
-            format!("{}: function", function_name),
-        ];
-
-        lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| patterns.iter().any(|pattern| line.contains(pattern)))
-            .map(|(index, _)| index + 1)
+    /// Find the source line/column for the most recent throw, using the IP→line/col map.
+    fn infer_throw_site(&self) -> Option<(usize, usize)> {
+        let throw_ip = self.last_throw_ip?;
+        self.chunk.get_line_col_for_ip(throw_ip)
     }
 
-    fn find_line_and_column(lines: &[&str], needle: &str, start_line: usize, end_line: usize) -> Option<(usize, usize)> {
-        let start_index = start_line.saturating_sub(1);
-        let end_index = end_line.min(lines.len());
-        for (offset, line) in lines[start_index..end_index].iter().enumerate() {
-            if let Some(column) = line.find(needle) {
-                return Some((start_index + offset + 1, column + 1));
-            }
-        }
-        None
-    }
-
-    fn infer_throw_site(&self, current_function: Option<&str>) -> Option<(usize, usize)> {
-        let lines = self.source_lines()?;
-        if let Some(function_name) = current_function
-            && let Some(decl_line) = Self::find_function_declaration_line(&lines, function_name)
-            && let Some(found) = Self::find_line_and_column(&lines, "throw ", decl_line, lines.len())
-        {
-            return Some(found);
-        }
-        Self::find_line_and_column(&lines, "throw ", 1, lines.len())
-    }
-
-    fn infer_callsite(&self, function_name: &str, scope_function: Option<&str>) -> Option<(usize, usize)> {
-        let lines = self.source_lines()?;
-        let call_patterns = [format!("{}(", function_name), format!(".{}(", function_name)];
-
-        let (start_line, end_line) = if let Some(scope_name) = scope_function {
-            if let Some(decl_line) = Self::find_function_declaration_line(&lines, scope_name) {
-                (decl_line, lines.len())
-            } else {
-                (1, lines.len())
-            }
-        } else {
-            (1, lines.len())
-        };
-
-        for line_number in start_line..=end_line {
-            let line = lines.get(line_number.saturating_sub(1))?;
-            if line.contains(&format!("function {}(", function_name)) {
-                continue;
-            }
-            if let Some(column) = line.find(&call_patterns[1]) {
-                return Some((line_number, column + 2));
-            }
-            if let Some(column) = line.find(&call_patterns[0]) {
-                return Some((line_number, column + 1));
-            }
-        }
-
-        None
-    }
-
+    /// Find the source line/column for a call-site IP, using the IP→line/col map.
     fn infer_callsite_from_call_ip(&self, call_ip: usize) -> Option<(usize, usize)> {
-        let callee_name = self.chunk.call_callee_names.get(&call_ip)?;
-        let mut ips_for_name: Vec<usize> = self
-            .chunk
-            .call_callee_names
-            .iter()
-            .filter_map(|(ip, name)| if name == callee_name { Some(*ip) } else { None })
-            .collect();
-        ips_for_name.sort_unstable();
-        let ordinal = ips_for_name.iter().position(|ip| *ip == call_ip)?;
-
-        let lines = self.source_lines()?;
-        let call_patterns = [format!("{}(", callee_name), format!(".{}(", callee_name)];
-        let mut seen = 0usize;
-        for (idx, line) in lines.iter().enumerate() {
-            if line.contains(&format!("function {}(", callee_name)) {
-                continue;
-            }
-            if let Some(column) = line.find(&call_patterns[1]) {
-                if seen == ordinal {
-                    return Some((idx + 1, column + 2));
-                }
-                seen += 1;
-                continue;
-            }
-            if let Some(column) = line.find(&call_patterns[0]) {
-                if seen == ordinal {
-                    return Some((idx + 1, column + 1));
-                }
-                seen += 1;
-            }
-        }
-
-        None
+        self.chunk.get_line_col_for_ip(call_ip)
     }
 
     fn build_error_stack(&self, error_name: &str, message: &str) -> (Option<(usize, usize)>, Vec<String>) {
@@ -11547,7 +11460,7 @@ impl<'gc> VM<'gc> {
         let named_frames = self.current_named_frames();
 
         if named_frames.is_empty() {
-            if let Some((line, column)) = self.infer_throw_site(None) {
+            if let Some((line, column)) = self.infer_throw_site() {
                 lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
                 return (Some((line, column)), lines);
             }
@@ -11555,7 +11468,7 @@ impl<'gc> VM<'gc> {
         }
 
         let current_function = named_frames.last().map(|(_, name)| name.as_str());
-        let throw_site = self.infer_throw_site(current_function);
+        let throw_site = self.infer_throw_site();
         if let Some((line, column)) = throw_site {
             let function_name = current_function.unwrap_or("<anonymous>");
             lines.push(format!(
@@ -11569,12 +11482,9 @@ impl<'gc> VM<'gc> {
 
         for pair in named_frames.windows(2).rev() {
             let caller_name = &pair[0].1;
-            let callee_name = &pair[1].1;
             let callee_frame_idx = pair[1].0;
             let call_ip = self.frames[callee_frame_idx].return_ip.saturating_sub(2);
-            let call_site = self
-                .infer_callsite_from_call_ip(call_ip)
-                .or_else(|| self.infer_callsite(callee_name, Some(caller_name)));
+            let call_site = self.infer_callsite_from_call_ip(call_ip);
             if let Some((line, column)) = call_site {
                 lines.push(format!(
                     "    at {} ({}:{}:{})",
@@ -11586,12 +11496,9 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        if let Some((outer_idx, outermost_name)) = named_frames.first() {
+        if let Some((outer_idx, _outermost_name)) = named_frames.first() {
             let outer_call_ip = self.frames[*outer_idx].return_ip.saturating_sub(2);
-            if let Some((line, column)) = self
-                .infer_callsite_from_call_ip(outer_call_ip)
-                .or_else(|| self.infer_callsite(outermost_name, None))
-            {
+            if let Some((line, column)) = self.infer_callsite_from_call_ip(outer_call_ip) {
                 lines.push(format!("    at <anonymous> ({}:{}:{})", self.current_script_file(), line, column));
             }
         }
@@ -24405,6 +24312,10 @@ impl<'gc> VM<'gc> {
     /// Handle a thrown value: unwind to nearest try/catch or return error
     fn handle_throw(&mut self, ctx: &GcContext<'gc>, thrown: &Value<'gc>) -> Result<(), JSError> {
         self.pending_throw = None;
+        // Record the throw-site IP if not already set by a Throw opcode.
+        if self.last_throw_ip.is_none() {
+            self.last_throw_ip = Some(self.current_opcode_ip);
+        }
         if let Value::VmObject(map) = &thrown {
             self.annotate_error_object(ctx, map);
         }
@@ -25021,6 +24932,7 @@ impl<'gc> VM<'gc> {
                 continue;
             }
             // Fetch instruction
+            self.current_opcode_ip = self.ip;
             let instruction_byte = self.read_byte();
             let instruction = Opcode::try_from(instruction_byte)?;
 
@@ -25140,6 +25052,11 @@ impl<'gc> VM<'gc> {
             }
             if frame.is_method {
                 self.this_stack.pop();
+            }
+            // Pop any try frames that belonged to the returning function.
+            let current_depth = self.frames.len();
+            while self.try_stack.last().is_some_and(|tf| tf.frame_depth > current_depth) {
+                self.try_stack.pop();
             }
             self.stack.truncate(frame.bp - 1);
             self.ip = frame.return_ip;
@@ -28377,6 +28294,8 @@ impl<'gc> VM<'gc> {
     // Opcode::Throw
     fn run_opcode_throw(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let thrown = self.stack.pop().unwrap_or(Value::Undefined);
+        // Record the throw-site IP for accurate line-number reporting.
+        self.last_throw_ip = Some(self.current_opcode_ip);
         // diagnostic logging
         log::warn!("Throw opcode value={}", self.vm_to_string(ctx, &thrown));
         if let Value::VmObject(obj) = &thrown {

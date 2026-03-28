@@ -72,17 +72,20 @@ pub enum Opcode {
     CallSpread = 66,
     NewCallSpread = 67,
     ObjectSpread = 68,
-    GetUpvalue = 69,        // operand: u8 upvalue index — read captured variable
-    SetUpvalue = 70,        // operand: u8 upvalue index — write captured variable
-    MakeClosure = 71,       // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
-    ArrayHole = 72,         // push an empty/hole slot onto TOS array (sparse array support)
-    DefineGlobalConst = 73, // define an immutable global binding
-    GetNewTarget = 74,      // push current new.target value onto stack
-    Yield = 75,             // suspend generator: pop yielded value, save state, return {value, done: false}
-    SetComputedGetter = 76, // pop val, pop computed key, peek obj; store val under __get_<key>
-    SetComputedSetter = 77, // pop val, pop computed key, peek obj; store val under __set_<key>
-    InitProperty = 78,      // object literal own data property initialization by constant key
-    InitIndex = 79,         // object literal own data property initialization by computed key
+    GetUpvalue = 69,             // operand: u8 upvalue index — read captured variable
+    SetUpvalue = 70,             // operand: u8 upvalue index — write captured variable
+    MakeClosure = 71,            // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
+    ArrayHole = 72,              // push an empty/hole slot onto TOS array (sparse array support)
+    DefineGlobalConst = 73,      // define an immutable global binding
+    GetNewTarget = 74,           // push current new.target value onto stack
+    Yield = 75,                  // suspend generator: pop yielded value, save state, return {value, done: false}
+    SetComputedGetter = 76,      // pop val, pop computed key, peek obj; store val under __get_<key>
+    SetComputedSetter = 77,      // pop val, pop computed key, peek obj; store val under __set_<key>
+    InitProperty = 78,           // object literal own data property initialization by constant key
+    InitIndex = 79,              // object literal own data property initialization by computed key
+    GeneratorParamInitDone = 80, // internal marker: generator parameter initialization completed
+    ToPropertyKey = 81,          // coerce top-of-stack value using ToPropertyKey semantics
+    ObjectSpreadExcluding = 82,  // like ObjectSpread but pops an excluded keys array first
 }
 
 impl TryFrom<u8> for Opcode {
@@ -170,6 +173,9 @@ impl TryFrom<u8> for Opcode {
             77 => Opcode::SetComputedSetter,
             78 => Opcode::InitProperty,
             79 => Opcode::InitIndex,
+            80 => Opcode::GeneratorParamInitDone,
+            81 => Opcode::ToPropertyKey,
+            82 => Opcode::ObjectSpreadExcluding,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -183,6 +189,8 @@ pub struct Chunk<'gc> {
     pub constants: Vec<Value<'gc>>,
     /// Map from function IP to function name (for .name property)
     pub fn_names: std::collections::HashMap<usize, String>,
+    /// Map from function IP to observable Function.length value.
+    pub fn_lengths: std::collections::HashMap<usize, usize>,
     /// Function IPs that correspond to class constructors.
     pub class_constructor_ips: std::collections::HashSet<usize>,
     /// Recorded strictness flag for functions by their starting IP
@@ -197,6 +205,8 @@ pub struct Chunk<'gc> {
     pub call_callee_names: std::collections::HashMap<usize, String>,
     /// Function IPs that correspond to generator functions.
     pub generator_function_ips: std::collections::HashSet<usize>,
+    /// Function IPs that are method/getter/setter definitions and should not be constructible.
+    pub method_function_ips: std::collections::HashSet<usize>,
 }
 
 impl<'gc> Chunk<'gc> {
@@ -205,6 +215,7 @@ impl<'gc> Chunk<'gc> {
             code: Vec::new(),
             constants: Vec::new(),
             fn_names: std::collections::HashMap::new(),
+            fn_lengths: std::collections::HashMap::new(),
             class_constructor_ips: std::collections::HashSet::new(),
             fn_strictness: std::collections::HashMap::new(),
             async_function_ips: std::collections::HashSet::new(),
@@ -212,6 +223,7 @@ impl<'gc> Chunk<'gc> {
             fn_local_names: std::collections::HashMap::new(),
             call_callee_names: std::collections::HashMap::new(),
             generator_function_ips: std::collections::HashSet::new(),
+            method_function_ips: std::collections::HashSet::new(),
         }
     }
 

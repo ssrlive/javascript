@@ -139,6 +139,7 @@ jobs:
             14)
               TITLE='"language/expressions/object"'
               FOCUS='language/expressions/object'
+              USE_VM='true'
               ;;
             15)
               TITLE='"language/expressions/property-accessors" - "language/expressions/yield"'
@@ -264,9 +265,6 @@ jobs:
           RUN_ARGS=(--limit 10000 --focus "$FOCUS")
           if [ -n "$TIMEOUT" ]; then
             RUN_ARGS+=(--timeout "$TIMEOUT")
-          fi
-          if [ -n "$USE_VM" ]; then
-            RUN_ARGS+=(--use-vm)
           fi
           if [ -n "$USE_VM" ]; then
             node ci/runner.js "${RUN_ARGS[@]}"

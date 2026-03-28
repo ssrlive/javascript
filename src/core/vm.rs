@@ -1084,6 +1084,12 @@ impl<'gc> VM<'gc> {
                     return self.is_constructor_value(&target);
                 }
                 if b.contains_key("__native_id__") || b.contains_key("__fn_body__") {
+                    // Async functions and async generators are not constructors
+                    if matches!(b.get("__async_dynamic_function__"), Some(Value::Boolean(true)))
+                        || matches!(b.get("__async_dynamic_generator_function__"), Some(Value::Boolean(true)))
+                    {
+                        return false;
+                    }
                     return true;
                 }
                 if b.get("__host_fn__").is_some() {
@@ -4225,6 +4231,10 @@ impl<'gc> VM<'gc> {
                         let saved_try_depth = self.try_stack.len();
                         let next_fn = self.read_named_property(ctx, &iter_obj, "next");
                         if self.try_stack.len() < saved_try_depth {
+                            return Value::Undefined;
+                        }
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
                             return Value::Undefined;
                         }
                         let mut out = Vec::new();
@@ -23343,6 +23353,25 @@ impl<'gc> VM<'gc> {
                                 } else {
                                     Err(crate::raise_type_error!("Target is not a constructor"))
                                 }
+                            } else if b.contains_key("__fn_body__") {
+                                // Dynamic function created via `new Function(...)`.
+                                let proto = b.get("prototype").cloned();
+                                drop(b);
+                                let new_obj = new_gc_cell_ptr(ctx, IndexMap::new());
+                                if let Some(p) = &proto
+                                    && matches!(
+                                        p,
+                                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                                    )
+                                {
+                                    new_obj.borrow_mut(ctx).insert("__proto__".to_string(), p.clone());
+                                }
+                                let this_val = Value::VmObject(new_obj);
+                                let call_result = self.vm_call_function_value(ctx, target, &this_val, args)?;
+                                match call_result {
+                                    Value::VmObject(_) | Value::VmArray(_) => Ok(call_result),
+                                    _ => Ok(this_val),
+                                }
                             } else {
                                 Err(crate::raise_type_error!("Target is not a constructor"))
                             };
@@ -30075,6 +30104,38 @@ impl<'gc> VM<'gc> {
                                     let thrown = self.vm_value_from_error(ctx, &err);
                                     self.handle_throw(ctx, &thrown)?;
                                 }
+                                return Ok(OpcodeAction::Continue);
+                            }
+                        }
+                    } else if borrow.contains_key("__fn_body__") {
+                        // Dynamic function created via `new Function(...)` — constructible.
+                        let proto = borrow.get("prototype").cloned();
+                        drop(borrow);
+                        let args: Vec<Value<'gc>> = (0..arg_count)
+                            .map(|_| self.stack.pop().expect("VM Stack underflow"))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        self.stack.pop(); // pop constructor
+                        let new_obj = new_gc_cell_ptr(ctx, IndexMap::new());
+                        if let Some(p) = &proto
+                            && matches!(
+                                p,
+                                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                            )
+                        {
+                            new_obj.borrow_mut(ctx).insert("__proto__".to_string(), p.clone());
+                        }
+                        let this_val = Value::VmObject(new_obj);
+                        match self.vm_call_function_value(ctx, &callee, &this_val, &args) {
+                            Ok(result) => match result {
+                                Value::VmObject(_) | Value::VmArray(_) => self.stack.push(result),
+                                _ => self.stack.push(this_val),
+                            },
+                            Err(err) => {
+                                let thrown = self.vm_value_from_error(ctx, &err);
+                                self.handle_throw(ctx, &thrown)?;
                                 return Ok(OpcodeAction::Continue);
                             }
                         }

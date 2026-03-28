@@ -267,6 +267,7 @@ jobs:
             RUN_ARGS+=(--timeout "$TIMEOUT")
           fi
           if [ -n "$USE_VM" ]; then
+            RUN_ARGS+=(--use-vm)
             node ci/runner.js "${RUN_ARGS[@]}"
           else
             touch test262-results.log

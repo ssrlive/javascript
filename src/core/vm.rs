@@ -491,6 +491,22 @@ struct GeneratorState<'gc> {
     paused_at_yield: bool,
 }
 
+#[derive(Clone)]
+struct AsyncFunctionState<'gc> {
+    /// Instruction pointer immediately after the Await opcode.
+    ip: usize,
+    /// Suspended call frame metadata.
+    frame: CallFrame<'gc>,
+    /// Saved local variables (snapshot of the stack from bp..).
+    locals: Vec<Value<'gc>>,
+    /// Try stack at the point of suspension.
+    try_stack: Vec<TryFrame>,
+    /// The `this` binding at the point of suspension.
+    this_val: Value<'gc>,
+    /// Promise returned to the original caller.
+    promise: Value<'gc>,
+}
+
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     pub(crate) chunk: Chunk<'gc>,
@@ -528,13 +544,20 @@ pub struct VM<'gc> {
     microtask_queue: Vec<Microtask<'gc>>,
     // Suspendable generator states, keyed by unique generator ID
     generator_states: HashMap<usize, GeneratorState<'gc>>,
+    // Suspended async-function states, keyed by unique ID.
+    async_function_states: HashMap<usize, AsyncFunctionState<'gc>>,
     // Weak handles to generator objects; used to GC abandoned suspended states.
     generator_objects: HashMap<usize, VmObjectWeakHandle<'gc>>,
     next_generator_id: usize,
+    next_async_function_id: usize,
     // Set by Opcode::Yield to signal generator suspension
     generator_yield_value: Option<Value<'gc>>,
     // Set by Opcode::GeneratorParamInitDone during generator call-time preflight.
     generator_param_init_done: bool,
+    // Set by Opcode::Await when an async function suspends.
+    pending_async_suspend: Option<usize>,
+    // Promise corresponding to the currently executing async function.
+    active_async_promises: Vec<Value<'gc>>,
     // Bytecode IP at which the most recent Throw opcode executed (for line-number reporting).
     last_throw_ip: Option<usize>,
     // IP of the opcode currently being executed.
@@ -658,10 +681,14 @@ impl<'gc> VM<'gc> {
             cleared_timers: std::collections::HashSet::new(),
             microtask_queue: Vec::new(),
             generator_states: HashMap::new(),
+            async_function_states: HashMap::new(),
             generator_objects: HashMap::new(),
             next_generator_id: 1,
+            next_async_function_id: 1,
             generator_yield_value: None,
             generator_param_init_done: false,
+            pending_async_suspend: None,
+            active_async_promises: Vec::new(),
             last_throw_ip: None,
             current_opcode_ip: 0,
             generator_prototype: Value::Undefined,
@@ -1157,85 +1184,219 @@ impl<'gc> VM<'gc> {
                         let callback = if rejected { on_rejected } else { on_fulfilled };
                         let child = child.unwrap_or(Value::Undefined);
 
-                        let is_callable = |v: &Value<'gc>| -> bool {
-                            matches!(v, Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..))
-                                || matches!(v, Value::VmObject(m) if m.borrow().contains_key("__host_fn__"))
-                        };
-
                         let (cb_result, cb_rejected) = if let Some(ref cb) = callback
-                            && is_callable(cb)
+                            && self.is_value_callable(cb)
                         {
-                            match cb {
-                                Value::VmFunction(ip, _) => {
-                                    let saved = std::mem::take(&mut self.try_stack);
-                                    let out = self.call_vm_function_result(ctx, *ip, std::slice::from_ref(value), None, &[]);
-                                    self.try_stack = saved;
-                                    match out {
-                                        Ok(v) => (v, false),
-                                        Err(e) => (self.vm_value_from_error(ctx, &e), true),
-                                    }
-                                }
-                                Value::VmClosure(ip, _, upv) => {
-                                    let uv = (**upv).to_vec();
-                                    let saved = std::mem::take(&mut self.try_stack);
-                                    let out = self.call_vm_function_result(ctx, *ip, std::slice::from_ref(value), None, &uv);
-                                    self.try_stack = saved;
-                                    match out {
-                                        Ok(v) => (v, false),
-                                        Err(e) => (self.vm_value_from_error(ctx, &e), true),
-                                    }
-                                }
-                                Value::VmNativeFunction(native_id) => {
-                                    (self.call_builtin(ctx, *native_id, std::slice::from_ref(value)), false)
-                                }
-                                _ => (value.clone(), rejected),
+                            let saved = std::mem::take(&mut self.try_stack);
+                            let out = self.vm_call_function_value(ctx, cb, &Value::Undefined, std::slice::from_ref(value));
+                            self.try_stack = saved;
+                            let leaked_throw = self.pending_throw.take();
+                            match (out, leaked_throw) {
+                                (_, Some(thrown)) => (thrown, true),
+                                (Ok(v), None) => (v, false),
+                                (Err(e), None) => (self.vm_value_from_error(ctx, &e), true),
                             }
                         } else {
                             // No matching callback — propagate value/rejection
                             (value.clone(), rejected)
                         };
 
-                        // Assimilate inner promise if callback returned one
-                        let (final_val, final_rej) = if let Value::VmObject(inner) = &cb_result {
-                            let b = inner.borrow();
-                            let is_promise =
-                                matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
-                            if is_promise {
-                                let inner_has_value = b.contains_key("__promise_value__");
-                                let inner_rej = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
-                                let inner_val = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
-                                drop(b);
-                                if inner_has_value {
-                                    (inner_val, inner_rej)
-                                } else {
-                                    // Inner promise is also pending — link child to it
-                                    if let Value::VmObject(inner_obj) = &cb_result {
-                                        let mut ib = inner_obj.borrow_mut(ctx);
-                                        let mut link_entry = IndexMap::new();
-                                        // No callbacks, just forward to child
-                                        link_entry.insert("child".to_string(), child.clone());
-                                        let link_val = Value::VmObject(new_gc_cell_ptr(ctx, link_entry));
-                                        if let Some(Value::VmArray(q)) = ib.get("__then_queue__").cloned() {
-                                            q.borrow_mut(ctx).push(link_val);
-                                        } else {
-                                            let q = VmArrayData::new(vec![link_val]);
-                                            ib.insert("__then_queue__".to_string(), Value::VmArray(new_gc_cell_ptr(ctx, q)));
-                                        }
-                                    }
-                                    continue; // don't settle child yet
-                                }
-                            } else {
-                                (cb_result.clone(), cb_rejected)
-                            }
+                        if cb_rejected {
+                            self.settle_promise(ctx, &child, &cb_result, true);
                         } else {
-                            (cb_result, cb_rejected)
-                        };
-
-                        self.settle_promise(ctx, &child, &final_val, final_rej);
+                            self.resolve_promise_value(ctx, &child, &cb_result);
+                        }
                     }
                 }
             }
         }
+    }
+
+    fn promise_has_settled_value(&self, promise: &Value<'gc>) -> bool {
+        matches!(promise, Value::VmObject(obj) if obj.borrow().contains_key("__promise_value__"))
+    }
+
+    fn resolve_promise_value(&mut self, ctx: &GcContext<'gc>, promise: &Value<'gc>, value: &Value<'gc>) {
+        if let Value::VmObject(inner_obj) = value {
+            let (is_promise, has_value, rejected, settled) = {
+                let borrow = inner_obj.borrow();
+                (
+                    matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise"),
+                    borrow.contains_key("__promise_value__"),
+                    matches!(borrow.get("__promise_rejected__"), Some(Value::Boolean(true))),
+                    borrow.get("__promise_value__").cloned().unwrap_or(Value::Undefined),
+                )
+            };
+
+            if is_promise {
+                if has_value {
+                    self.settle_promise(ctx, promise, &settled, rejected);
+                } else {
+                    let mut link_entry = IndexMap::new();
+                    link_entry.insert("child".to_string(), promise.clone());
+                    let link_value = Value::VmObject(new_gc_cell_ptr(ctx, link_entry));
+                    let mut borrow = inner_obj.borrow_mut(ctx);
+                    if let Some(Value::VmArray(queue)) = borrow.get("__then_queue__").cloned() {
+                        queue.borrow_mut(ctx).push(link_value);
+                    } else {
+                        borrow.insert(
+                            "__then_queue__".to_string(),
+                            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![link_value]))),
+                        );
+                    }
+                }
+                return;
+            }
+
+            let then_val = self.read_named_property(ctx, value, "then");
+            if let Some(thrown) = self.pending_throw.take() {
+                if !self.promise_has_settled_value(promise) {
+                    self.settle_promise(ctx, promise, &thrown, true);
+                }
+                return;
+            }
+
+            if self.is_value_callable(&then_val) {
+                let mut resolve_map = IndexMap::new();
+                resolve_map.insert("__host_fn__".to_string(), Value::from("promise.__resolve"));
+                resolve_map.insert("__host_this__".to_string(), promise.clone());
+                let resolve = Value::VmObject(new_gc_cell_ptr(ctx, resolve_map));
+
+                let mut reject_map = IndexMap::new();
+                reject_map.insert("__host_fn__".to_string(), Value::from("promise.__reject"));
+                reject_map.insert("__host_this__".to_string(), promise.clone());
+                let reject = Value::VmObject(new_gc_cell_ptr(ctx, reject_map));
+
+                let saved_try_stack = std::mem::take(&mut self.try_stack);
+                let call_result = self.vm_call_function_value(ctx, &then_val, value, &[resolve, reject]);
+                self.try_stack = saved_try_stack;
+
+                if let Err(err) = call_result {
+                    let reject_value = self.vm_value_from_error(ctx, &err);
+                    if !self.promise_has_settled_value(promise) {
+                        self.settle_promise(ctx, promise, &reject_value, true);
+                    }
+                }
+
+                if let Some(thrown) = self.pending_throw.take()
+                    && !self.promise_has_settled_value(promise)
+                {
+                    self.settle_promise(ctx, promise, &thrown, true);
+                }
+                return;
+            }
+        }
+
+        self.settle_promise(ctx, promise, value, false);
+    }
+
+    fn invoke_async_function(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ip: usize,
+        arity: u8,
+        args: &[Value<'gc>],
+        upvalues: &[VmUpvalueCell<'gc>],
+        this_arg: &Value<'gc>,
+    ) -> Value<'gc> {
+        let mut stack_args = args.to_vec();
+        let target_arity = arity as usize;
+        let mut saved_args: Option<Vec<Value<'gc>>> = None;
+        if stack_args.len() < target_arity {
+            stack_args.resize(target_arity, Value::Undefined);
+        } else if stack_args.len() > target_arity {
+            saved_args = Some(stack_args.clone());
+            stack_args.truncate(target_arity);
+        }
+
+        let promise = self.make_pending_promise(ctx);
+        self.active_async_promises.push(promise.clone());
+        self.this_stack.push(this_arg.clone());
+        let saved_try_stack = std::mem::take(&mut self.try_stack);
+        let result = self.call_vm_function_result(ctx, ip, &stack_args, saved_args, upvalues);
+        let suspended = self.pending_async_suspend.take();
+        self.try_stack = saved_try_stack;
+        self.this_stack.pop();
+        self.active_async_promises.pop();
+
+        if suspended.is_none() {
+            match result {
+                Ok(value) => self.resolve_promise_value(ctx, &promise, &value),
+                Err(err) => {
+                    let reject_value = self.vm_value_from_error(ctx, &err);
+                    self.settle_promise(ctx, &promise, &reject_value, true);
+                }
+            }
+        }
+
+        promise
+    }
+
+    fn resume_async_function(&mut self, ctx: &GcContext<'gc>, state_id: usize, resume_value: &Value<'gc>, rejected: bool) {
+        let Some(state) = self.async_function_states.remove(&state_id) else {
+            return;
+        };
+
+        let saved_ip = self.ip;
+        let saved_stack_len = self.stack.len();
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_try_stack = std::mem::take(&mut self.try_stack);
+        let saved_this_stack_len = self.this_stack.len();
+        let saved_pending_async_suspend = self.pending_async_suspend.take();
+
+        self.ip = state.ip;
+
+        self.stack.push(Value::Undefined);
+        let bp = self.stack.len();
+        for local in &state.locals {
+            self.stack.push(local.clone());
+        }
+
+        let mut frame = state.frame.clone();
+        frame.bp = bp;
+        frame.return_ip = 0;
+        self.frames.push(frame);
+        self.try_stack = state
+            .try_stack
+            .into_iter()
+            .map(|try_frame| TryFrame {
+                catch_ip: try_frame.catch_ip,
+                stack_depth: bp + try_frame.stack_depth,
+                frame_depth: 1 + try_frame.frame_depth,
+                catch_binding: try_frame.catch_binding,
+            })
+            .collect();
+        self.this_stack.push(state.this_val.clone());
+        self.active_async_promises.push(state.promise.clone());
+
+        if rejected {
+            self.pending_throw = Some(resume_value.clone());
+        } else {
+            self.stack.push(resume_value.clone());
+        }
+
+        let min_depth = self.frames.len();
+        let result = self.run_inner(ctx, min_depth);
+        let suspended = self.pending_async_suspend.take();
+
+        self.active_async_promises.pop();
+        self.this_stack.truncate(saved_this_stack_len);
+
+        if suspended.is_none() {
+            match result {
+                Ok(value) => self.resolve_promise_value(ctx, &state.promise, &value),
+                Err(err) => {
+                    let reject_value = self.vm_value_from_error(ctx, &err);
+                    self.settle_promise(ctx, &state.promise, &reject_value, true);
+                }
+            }
+        }
+
+        self.stack.truncate(saved_stack_len);
+        self.frames = saved_frames;
+        self.try_stack = saved_try_stack;
+        self.ip = saved_ip;
+        self.pending_async_suspend = saved_pending_async_suspend;
     }
 
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
@@ -7121,44 +7282,11 @@ impl<'gc> VM<'gc> {
                                 let reject_cb = Value::VmObject(new_gc_cell_ptr(ctx, reject_map));
 
                                 let this_arg = item.clone();
-                                let invoke_then_error = match then_val {
-                                    Value::VmFunction(ip, _) => {
-                                        self.this_stack.push(this_arg.clone());
-                                        let saved_try_stack = std::mem::take(&mut self.try_stack);
-                                        let result =
-                                            self.call_vm_function_result(ctx, ip, &[resolve.clone(), reject_cb.clone()], None, &[]);
-                                        self.try_stack = saved_try_stack;
-                                        self.this_stack.pop();
-                                        result.err()
-                                    }
-                                    Value::VmClosure(ip, _, upv) => {
-                                        let uv = (**upv).to_vec();
-                                        self.this_stack.push(this_arg.clone());
-                                        let saved_try_stack = std::mem::take(&mut self.try_stack);
-                                        let result =
-                                            self.call_vm_function_result(ctx, ip, &[resolve.clone(), reject_cb.clone()], None, &uv);
-                                        self.try_stack = saved_try_stack;
-                                        self.this_stack.pop();
-                                        result.err()
-                                    }
-                                    Value::VmNativeFunction(native_id) => {
-                                        let _ = self.call_method_builtin(ctx, native_id, &this_arg, &[resolve.clone(), reject_cb.clone()]);
-                                        None
-                                    }
-                                    Value::VmObject(map) => {
-                                        let borrow = map.borrow();
-                                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
-                                            let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
-                                            drop(borrow);
-                                            let _ =
-                                                self.call_host_fn(ctx, &host_name, Some(&this_arg), &[resolve.clone(), reject_cb.clone()]);
-                                            None
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    _ => None,
-                                };
+                                let saved_try_stack = std::mem::take(&mut self.try_stack);
+                                let invoke_then_error = self
+                                    .vm_call_function_value(ctx, &then_val, &this_arg, &[resolve.clone(), reject_cb.clone()])
+                                    .err();
+                                self.try_stack = saved_try_stack;
 
                                 if let Some(err) = invoke_then_error
                                     && let Value::VmObject(p) = &temp_promise
@@ -7260,14 +7388,35 @@ impl<'gc> VM<'gc> {
             "promise.__resolve" => {
                 if let Some(receiver @ Value::VmObject(_)) = receiver {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
-                    self.settle_promise(ctx, receiver, &val, false);
+                    if !self.promise_has_settled_value(receiver) {
+                        self.resolve_promise_value(ctx, receiver, &val);
+                    }
                 }
                 Value::Undefined
             }
             "promise.__reject" => {
                 if let Some(receiver @ Value::VmObject(_)) = receiver {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
-                    self.settle_promise(ctx, receiver, &val, true);
+                    if !self.promise_has_settled_value(receiver) {
+                        self.settle_promise(ctx, receiver, &val, true);
+                    }
+                }
+                Value::Undefined
+            }
+            "async.resume.fulfill" | "async.resume.reject" => {
+                let state_id = receiver
+                    .and_then(|recv| match recv {
+                        Value::VmObject(obj) => obj.borrow().get("__async_suspend_id__").cloned(),
+                        _ => None,
+                    })
+                    .and_then(|value| match value {
+                        Value::Number(id) => Some(id as usize),
+                        _ => None,
+                    });
+
+                if let Some(state_id) = state_id {
+                    let resume_value = args.first().cloned().unwrap_or(Value::Undefined);
+                    self.resume_async_function(ctx, state_id, &resume_value, name == "async.resume.reject");
                 }
                 Value::Undefined
             }
@@ -7361,41 +7510,11 @@ impl<'gc> VM<'gc> {
                     let reject = Value::VmObject(new_gc_cell_ptr(ctx, reject_map));
 
                     let this_arg = current.clone();
-                    let invoke_then_error = match then_val {
-                        Value::VmFunction(ip, _) => {
-                            self.this_stack.push(this_arg.clone());
-                            let saved_try_stack = std::mem::take(&mut self.try_stack);
-                            let result = self.call_vm_function_result(ctx, ip, &[resolve.clone(), reject.clone()], None, &[]);
-                            self.try_stack = saved_try_stack;
-                            self.this_stack.pop();
-                            result.err()
-                        }
-                        Value::VmClosure(ip, _, upv) => {
-                            let uv = (**upv).to_vec();
-                            self.this_stack.push(this_arg.clone());
-                            let saved_try_stack = std::mem::take(&mut self.try_stack);
-                            let result = self.call_vm_function_result(ctx, ip, &[resolve.clone(), reject.clone()], None, &uv);
-                            self.try_stack = saved_try_stack;
-                            self.this_stack.pop();
-                            result.err()
-                        }
-                        Value::VmNativeFunction(native_id) => {
-                            let _ = self.call_method_builtin(ctx, native_id, &this_arg, &[resolve.clone(), reject.clone()]);
-                            None
-                        }
-                        Value::VmObject(map) => {
-                            let borrow = map.borrow();
-                            if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
-                                let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
-                                drop(borrow);
-                                let _ = self.call_host_fn(ctx, &host_name, Some(&this_arg), &[resolve.clone(), reject.clone()]);
-                                None
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
+                    let saved_try_stack = std::mem::take(&mut self.try_stack);
+                    let invoke_then_error = self
+                        .vm_call_function_value(ctx, &then_val, &this_arg, &[resolve.clone(), reject.clone()])
+                        .err();
+                    self.try_stack = saved_try_stack;
 
                     if let Some(err) = invoke_then_error
                         && let Value::VmObject(p) = &temp_promise
@@ -7496,17 +7615,10 @@ impl<'gc> VM<'gc> {
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
             }
             "promise.finally" => {
-                if let Some(cb) = args.first() {
-                    match cb {
-                        Value::VmFunction(ip, _) => {
-                            let _ = self.call_vm_function_result(ctx, *ip, &[], None, &[]);
-                        }
-                        Value::VmClosure(ip, _, upv) => {
-                            let uv = (**upv).to_vec();
-                            let _ = self.call_vm_function_result(ctx, *ip, &[], None, &uv);
-                        }
-                        _ => {}
-                    }
+                if let Some(cb) = args.first()
+                    && self.is_value_callable(cb)
+                {
+                    let _ = self.vm_call_function_value(ctx, cb, &Value::Undefined, &[]);
                 }
                 receiver.unwrap_or(&Value::Undefined).clone()
             }
@@ -11328,6 +11440,9 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, JSError> {
         match func {
             Value::VmFunction(ip, arity) => {
+                if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
+                    return Ok(self.invoke_async_function(ctx, *ip, *arity, args, &[], this_arg));
+                }
                 if self.chunk.generator_function_ips.contains(ip) {
                     return self.create_generator_object(ctx, *ip, *arity, args, &[], this_arg, self.chunk.async_function_ips.contains(ip));
                 }
@@ -11348,6 +11463,10 @@ impl<'gc> VM<'gc> {
                 out
             }
             Value::VmClosure(ip, arity, upv) => {
+                if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
+                    let uv = (**upv).to_vec();
+                    return Ok(self.invoke_async_function(ctx, *ip, *arity, args, &uv, this_arg));
+                }
                 if self.chunk.generator_function_ips.contains(ip) {
                     let uv = (**upv).to_vec();
                     return self.create_generator_object(ctx, *ip, *arity, args, &uv, this_arg, self.chunk.async_function_ips.contains(ip));
@@ -11374,9 +11493,11 @@ impl<'gc> VM<'gc> {
             Value::VmObject(map) => {
                 let borrow = map.borrow();
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                    let host_this = borrow.get("__host_this__").cloned();
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     drop(borrow);
-                    Ok(self.call_host_fn(ctx, &host_name, Some(this_arg), args))
+                    let receiver = host_this.as_ref().unwrap_or(this_arg);
+                    Ok(self.call_host_fn(ctx, &host_name, Some(receiver), args))
                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
                     let bound_this = borrow.get("__bound_this__").cloned().unwrap_or(Value::Undefined);
                     let mut final_args: Vec<Value<'gc>> = match borrow.get("__bound_args__") {
@@ -12239,27 +12360,26 @@ impl<'gc> VM<'gc> {
                 promise_obj
             }
             BUILTIN_PROMISE_RESOLVE => {
-                let mut map = IndexMap::new();
-                map.insert("__type__".to_string(), Value::from("Promise"));
-                map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
                 if let Some(v @ Value::VmObject(obj)) = args.first() {
                     let b = obj.borrow();
                     let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
                     if is_promise {
                         return v.clone();
                     }
-                    map.insert("__promise_value__".to_string(), v.clone());
-                } else {
-                    // Promise.resolve() or Promise.resolve(undefined) → settled with undefined
-                    let val = args.first().cloned().unwrap_or(Value::Undefined);
-                    map.insert("__promise_value__".to_string(), val);
                 }
+
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::from("Promise"));
+                map.insert("then".to_string(), Value::VmNativeFunction(BUILTIN_PROMISE_THEN));
                 if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
                     && let Some(proto) = promise_ctor.borrow().get("prototype").cloned()
                 {
                     map.insert("__proto__".to_string(), proto);
                 }
-                Value::VmObject(new_gc_cell_ptr(ctx, map))
+                let promise_obj = Value::VmObject(new_gc_cell_ptr(ctx, map));
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.resolve_promise_value(ctx, &promise_obj, &value);
+                promise_obj
             }
             BUILTIN_PROMISE_ALL => {
                 let mut settled_values: Vec<Value<'gc>> = Vec::new();
@@ -20440,20 +20560,14 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(ctx, &items);
                 }
                 BUILTIN_MAP_FOREACH => {
-                    if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
+                    if let Some(callback) = args.first()
+                        && self.is_value_callable(callback)
+                    {
                         let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
                         let map_ref = receiver.clone();
+                        let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                         for (k, v) in &entries {
-                            if *arity >= 3 {
-                                let _ = self.call_vm_function_result(ctx, *ip, &[v.clone(), k.clone(), map_ref.clone()], None, &__cb_uv);
-                            } else {
-                                let _ = self.call_vm_function_result(ctx, *ip, &[v.clone(), k.clone()], None, &__cb_uv);
-                            }
+                            let _ = self.vm_call_function_value(ctx, callback, &this_arg, &[v.clone(), k.clone(), map_ref.clone()]);
                         }
                     }
                     return Value::Undefined;
@@ -20521,22 +20635,14 @@ impl<'gc> VM<'gc> {
                     return self.make_iterator(ctx, &items);
                 }
                 BUILTIN_SET_FOREACH => {
-                    if let Some(Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
+                    if let Some(callback) = args.first()
+                        && self.is_value_callable(callback)
+                    {
                         let vals: Vec<Value<'gc>> = s.borrow().values.clone();
                         let set_ref = receiver.clone();
+                        let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                         for v in &vals {
-                            if *arity >= 3 {
-                                self.call_vm_function_result(ctx, *ip, &[v.clone(), v.clone(), set_ref.clone()], None, &__cb_uv)
-                                    .unwrap_or(Value::Undefined);
-                            } else {
-                                self.call_vm_function_result(ctx, *ip, &[v.clone(), v.clone()], None, &__cb_uv)
-                                    .unwrap_or(Value::Undefined);
-                            }
+                            let _ = self.vm_call_function_value(ctx, callback, &this_arg, &[v.clone(), v.clone(), set_ref.clone()]);
                         }
                     }
                     return Value::Undefined;
@@ -25397,69 +25503,29 @@ impl<'gc> VM<'gc> {
 
     /// Execute a single .then microtask — mirrors the synchronous .then logic.
     fn run_then_microtask(&mut self, ctx: &GcContext<'gc>, task: Microtask<'gc>) {
-        let is_callable = |v: &Value<'gc>| -> bool {
-            match v {
-                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) => true,
-                Value::VmObject(map) => {
-                    let b = map.borrow();
-                    b.contains_key("__host_fn__") || b.contains_key("__bound_target__")
-                }
-                _ => false,
-            }
-        };
-
         let mut propagated_rejected = task.rejected;
         let mut callback_result = task.value.clone();
 
         if let Some(ref cb) = task.callback
-            && is_callable(cb)
+            && self.is_value_callable(cb)
         {
-            match cb {
-                Value::VmFunction(ip, _) => {
-                    let saved = std::mem::take(&mut self.try_stack);
-                    let out = self.call_vm_function_result(ctx, *ip, std::slice::from_ref(&task.value), None, &[]);
-                    self.try_stack = saved;
-                    match out {
-                        Ok(v) => {
-                            callback_result = v;
-                            propagated_rejected = false;
-                        }
-                        Err(e) => {
-                            callback_result = self.vm_value_from_error(ctx, &e);
-                            propagated_rejected = true;
-                        }
-                    }
+            let saved = std::mem::take(&mut self.try_stack);
+            let out = self.vm_call_function_value(ctx, cb, &Value::Undefined, std::slice::from_ref(&task.value));
+            self.try_stack = saved;
+            let leaked_throw = self.pending_throw.take();
+            match (out, leaked_throw) {
+                (_, Some(thrown)) => {
+                    callback_result = thrown;
+                    propagated_rejected = true;
                 }
-                Value::VmClosure(ip, _, upv) => {
-                    let uv = (**upv).to_vec();
-                    let saved = std::mem::take(&mut self.try_stack);
-                    let out = self.call_vm_function_result(ctx, *ip, std::slice::from_ref(&task.value), None, &uv);
-                    self.try_stack = saved;
-                    match out {
-                        Ok(v) => {
-                            callback_result = v;
-                            propagated_rejected = false;
-                        }
-                        Err(e) => {
-                            callback_result = self.vm_value_from_error(ctx, &e);
-                            propagated_rejected = true;
-                        }
-                    }
-                }
-                Value::VmNativeFunction(native_id) => {
-                    callback_result = self.call_builtin(ctx, *native_id, std::slice::from_ref(&task.value));
+                (Ok(v), None) => {
+                    callback_result = v;
                     propagated_rejected = false;
                 }
-                Value::VmObject(map) => {
-                    let borrow = map.borrow();
-                    if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
-                        let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
-                        drop(borrow);
-                        callback_result = self.call_host_fn(ctx, &host_name, None, std::slice::from_ref(&task.value));
-                        propagated_rejected = false;
-                    }
+                (Err(e), None) => {
+                    callback_result = self.vm_value_from_error(ctx, &e);
+                    propagated_rejected = true;
                 }
-                _ => {}
             }
         }
 
@@ -25562,6 +25628,7 @@ impl<'gc> VM<'gc> {
                 Opcode::Return => self.run_opcode_return(ctx, min_depth)?,
                 Opcode::Yield => self.run_opcode_yield(ctx)?,
                 Opcode::GeneratorParamInitDone => self.run_opcode_generator_param_init_done(ctx)?,
+                Opcode::Await => self.run_opcode_await(ctx)?,
                 Opcode::GetLocal => self.run_opcode_get_local(ctx)?,
                 Opcode::SetLocal => self.run_opcode_set_local(ctx)?,
                 Opcode::Call => self.run_opcode_call(ctx)?,
@@ -25715,20 +25782,79 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Exit(Value::Undefined))
     }
 
+    // Opcode::Await
+    fn run_opcode_await(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let awaited = self.stack.pop().unwrap_or(Value::Undefined);
+        let current_frame = self.frames.last().cloned();
+        let is_suspendable_async = current_frame.as_ref().is_some_and(|frame| {
+            self.chunk.async_function_ips.contains(&frame.func_ip) && !self.chunk.generator_function_ips.contains(&frame.func_ip)
+        });
+
+        if !is_suspendable_async || self.active_async_promises.is_empty() {
+            let awaited_value = self.call_host_fn(ctx, "promise.await", None, std::slice::from_ref(&awaited));
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+            } else {
+                self.stack.push(awaited_value);
+            }
+            return Ok(OpcodeAction::Continue);
+        }
+
+        let frame = current_frame.expect("async await requires an active frame");
+        let promise = self.call_builtin(ctx, BUILTIN_PROMISE_RESOLVE, std::slice::from_ref(&awaited));
+        let outer_promise = self.active_async_promises.last().cloned().unwrap_or(Value::Undefined);
+        let state_id = self.next_async_function_id;
+        self.next_async_function_id += 1;
+        let frame_depth = self.frames.len();
+
+        let locals = self.stack[frame.bp..].to_vec();
+        let this_val = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
+        let try_stack = self
+            .try_stack
+            .iter()
+            .filter(|try_frame| try_frame.frame_depth >= frame_depth && try_frame.stack_depth >= frame.bp)
+            .map(|try_frame| TryFrame {
+                catch_ip: try_frame.catch_ip,
+                stack_depth: try_frame.stack_depth - frame.bp,
+                frame_depth: try_frame.frame_depth - frame_depth,
+                catch_binding: try_frame.catch_binding.clone(),
+            })
+            .collect();
+        self.async_function_states.insert(
+            state_id,
+            AsyncFunctionState {
+                ip: self.ip,
+                frame,
+                locals,
+                try_stack,
+                this_val,
+                promise: outer_promise,
+            },
+        );
+
+        let mut token = IndexMap::new();
+        token.insert("__async_suspend_id__".to_string(), Value::Number(state_id as f64));
+        let token_value = Value::VmObject(new_gc_cell_ptr(ctx, token));
+        let on_fulfilled = Self::make_bound_host_fn(ctx, "async.resume.fulfill", &token_value);
+        let on_rejected = Self::make_bound_host_fn(ctx, "async.resume.reject", &token_value);
+        let _ = self.call_method_builtin(ctx, BUILTIN_PROMISE_THEN, &promise, &[on_fulfilled, on_rejected]);
+        self.pending_async_suspend = Some(state_id);
+        Ok(OpcodeAction::Exit(Value::Undefined))
+    }
+
     // Opcode::GetLocal
     fn run_opcode_get_local(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let index = self.read_byte() as usize;
-        if self.frames.is_empty()
-            && let Some(local_names) = self.chunk.fn_local_names.get(&0)
-            && let Some(name) = local_names.get(index)
-            && let Some(v) = self.globals.get(name).cloned()
-        {
-            self.stack.push(v);
-            return Ok(OpcodeAction::Continue);
-        }
         let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
         if bp + index >= self.stack.len() {
             if self.frames.is_empty() {
+                if let Some(local_names) = self.chunk.fn_local_names.get(&0)
+                    && let Some(name) = local_names.get(index)
+                    && let Some(v) = self.globals.get(name).cloned()
+                {
+                    self.stack.push(v);
+                    return Ok(OpcodeAction::Continue);
+                }
                 self.stack.push(Value::Undefined);
                 return Ok(OpcodeAction::Continue);
             }
@@ -25807,22 +25933,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    let saved_try_stack = std::mem::take(&mut self.try_stack);
-                    if is_method {
-                        self.this_stack.push(receiver);
-                    }
-                    let result = self.call_vm_function_result(ctx, target_ip, &args_vec, None, &[]);
-                    if is_method {
-                        self.this_stack.pop();
-                    }
-                    self.try_stack = saved_try_stack;
-                    let promise = match result {
-                        Ok(value) => self.call_builtin(ctx, BUILTIN_PROMISE_RESOLVE, std::slice::from_ref(&value)),
-                        Err(err) => {
-                            let reject_val = self.vm_value_from_error(ctx, &err);
-                            self.call_host_fn(ctx, "promise.reject", None, std::slice::from_ref(&reject_val))
-                        }
-                    };
+                    let promise = self.invoke_async_function(ctx, target_ip, arity, &args_vec, &[], &receiver);
                     self.stack.push(promise);
                     return Ok(OpcodeAction::Continue);
                 }
@@ -25974,22 +26085,7 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
-                    let saved_try_stack = std::mem::take(&mut self.try_stack);
-                    if is_method {
-                        self.this_stack.push(receiver);
-                    }
-                    let result = self.call_vm_function_result(ctx, target_ip, &args_vec, None, upvals);
-                    if is_method {
-                        self.this_stack.pop();
-                    }
-                    self.try_stack = saved_try_stack;
-                    let promise = match result {
-                        Ok(value) => self.call_builtin(ctx, BUILTIN_PROMISE_RESOLVE, std::slice::from_ref(&value)),
-                        Err(err) => {
-                            let reject_val = self.vm_value_from_error(ctx, &err);
-                            self.call_host_fn(ctx, "promise.reject", None, std::slice::from_ref(&reject_val))
-                        }
-                    };
+                    let promise = self.invoke_async_function(ctx, target_ip, arity, &args_vec, upvals, &receiver);
                     self.stack.push(promise);
                     return Ok(OpcodeAction::Continue);
                 }

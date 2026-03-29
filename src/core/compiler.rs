@@ -13,8 +13,10 @@ pub struct Compiler<'gc> {
     locals: Vec<String>,
     const_locals: std::collections::HashSet<String>, // locals that are const-like (class name bindings, const decls)
     parent_const_locals: std::collections::HashSet<String>, // direct parent function's const locals
-    scope_depth: i32,                                // 0 = top-level (global), > 0 = inside function
-    current_strict: bool,                            // whether surrounding context is strict mode
+    top_level_block_aliases: Vec<std::collections::HashMap<String, (String, bool)>>, // strict top-level block lexical names -> hidden globals for nested closures
+    function_depth: u32,  // true function nesting depth; ignores temporary top-level local modes
+    scope_depth: i32,     // 0 = top-level (global), > 0 = inside function
+    current_strict: bool, // whether surrounding context is strict mode
     loop_stack: Vec<LoopContext>,
     pending_label: Option<String>,                        // label to attach to the next loop
     forin_counter: u32,                                   // unique ID for for-in synthetic variables
@@ -85,6 +87,8 @@ impl<'gc> Compiler<'gc> {
             locals: Vec::new(),
             const_locals: std::collections::HashSet::new(),
             parent_const_locals: std::collections::HashSet::new(),
+            top_level_block_aliases: Vec::new(),
+            function_depth: 0,
             scope_depth: 0,
             current_strict: false,
             loop_stack: Vec::new(),
@@ -349,6 +353,70 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    fn lookup_top_level_block_alias(&self, name: &str) -> Option<(String, bool)> {
+        for scope in self.top_level_block_aliases.iter().rev() {
+            if let Some((alias, is_const_like)) = scope.get(name) {
+                return Some((alias.clone(), *is_const_like));
+            }
+        }
+        None
+    }
+
+    fn emit_define_global_binding(&mut self, name: &str, const_like: bool) {
+        let define_opcode = if const_like {
+            Opcode::DefineGlobalConst
+        } else {
+            Opcode::DefineGlobal
+        };
+
+        let name_u16 = crate::unicode::utf8_to_utf16(name);
+        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+        if let Some((alias, alias_const_like)) = self.lookup_top_level_block_alias(name) {
+            self.chunk.write_opcode(Opcode::Dup);
+            self.chunk.write_opcode(define_opcode);
+            self.chunk.write_u16(name_idx);
+
+            let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
+            let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
+            self.chunk.write_opcode(if alias_const_like {
+                Opcode::DefineGlobalConst
+            } else {
+                Opcode::DefineGlobal
+            });
+            self.chunk.write_u16(alias_idx);
+        } else {
+            self.chunk.write_opcode(define_opcode);
+            self.chunk.write_u16(name_idx);
+        }
+    }
+
+    fn emit_set_global_binding(&mut self, name: &str) {
+        if let Some((alias, is_const_like)) = self.lookup_top_level_block_alias(name) {
+            if is_const_like {
+                self.emit_const_assign_error(name);
+                return;
+            }
+
+            if self.function_depth == 0 {
+                self.chunk.write_opcode(Opcode::Dup);
+                let name_u16 = crate::unicode::utf8_to_utf16(name);
+                let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                self.chunk.write_opcode(Opcode::SetGlobal);
+                self.chunk.write_u16(name_idx);
+            }
+
+            let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
+            let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
+            self.chunk.write_opcode(Opcode::SetGlobal);
+            self.chunk.write_u16(alias_idx);
+        } else {
+            let name_u16 = crate::unicode::utf8_to_utf16(name);
+            let name_idx = self.chunk.add_constant(Value::String(name_u16));
+            self.chunk.write_opcode(Opcode::SetGlobal);
+            self.chunk.write_u16(name_idx);
+        }
+    }
+
     fn compile_statement(&mut self, stmt: &Statement, is_last: bool) -> Result<(), JSError> {
         self.chunk.record_line(stmt.line, stmt.column);
         match &*stmt.kind {
@@ -393,10 +461,7 @@ impl<'gc> Compiler<'gc> {
                         // let is block-scoped: always create a new local slot
                         self.locals.push(name.clone());
                     } else {
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DefineGlobal);
-                        self.chunk.write_u16(name_idx);
+                        self.emit_define_global_binding(name, false);
                     }
                 }
                 if is_last {
@@ -453,10 +518,7 @@ impl<'gc> Compiler<'gc> {
                         self.locals.push(name.clone());
                         self.const_locals.insert(name.clone());
                     } else {
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DefineGlobalConst);
-                        self.chunk.write_u16(name_idx);
+                        self.emit_define_global_binding(name, true);
                     }
                 }
                 if is_last {
@@ -480,10 +542,7 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::SetUpvalue);
                     self.chunk.write_byte(upvalue_idx);
                 } else {
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::SetGlobal);
-                    self.chunk.write_u16(name_idx);
+                    self.emit_set_global_binding(name);
                 }
                 if !is_last {
                     self.chunk.write_opcode(Opcode::Pop);
@@ -494,25 +553,39 @@ impl<'gc> Compiler<'gc> {
                 // Collect function names declared in this block (for strict-mode block scoping)
                 let mut block_fn_names: Vec<String> = Vec::new();
                 let mut block_lexical_names: Vec<String> = Vec::new();
+                let mut block_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
                 if self.scope_depth == 0 && self.current_strict {
                     for s in statements.iter() {
                         match &*s.kind {
                             StatementKind::FunctionDeclaration(name, ..) => {
                                 block_fn_names.push(name.clone());
+                                let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                self.forin_counter = self.forin_counter.saturating_add(1);
+                                block_aliases.insert(name.clone(), (alias, false));
                             }
                             StatementKind::Let(decls) => {
                                 for (name, _) in decls {
                                     block_lexical_names.push(name.clone());
+                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                    self.forin_counter = self.forin_counter.saturating_add(1);
+                                    block_aliases.insert(name.clone(), (alias, false));
                                 }
                             }
                             StatementKind::Const(decls) => {
                                 for (name, _) in decls {
                                     block_lexical_names.push(name.clone());
+                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                    self.forin_counter = self.forin_counter.saturating_add(1);
+                                    block_aliases.insert(name.clone(), (alias, true));
                                 }
                             }
                             _ => {}
                         }
                     }
+                }
+                let pushed_block_aliases = !block_aliases.is_empty();
+                if pushed_block_aliases {
+                    self.top_level_block_aliases.push(block_aliases);
                 }
                 // Hoist function declarations to the top of the block
                 for s in statements.iter() {
@@ -546,6 +619,9 @@ impl<'gc> Compiler<'gc> {
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
                     self.chunk.write_opcode(Opcode::DeleteGlobal);
                     self.chunk.write_u16(name_idx);
+                }
+                if pushed_block_aliases {
+                    self.top_level_block_aliases.pop();
                 }
             }
             StatementKind::If(if_stmt) => {
@@ -1328,10 +1404,7 @@ impl<'gc> Compiler<'gc> {
                 if *is_gen && !*is_async {
                     let func_ip = self.compile_generator_function_body(Some(name.as_str()), params, body)?;
                     self.chunk.fn_names.insert(func_ip, name.clone());
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_u16(name_idx);
+                    self.emit_define_global_binding(name, false);
                     return Ok(());
                 }
 
@@ -1340,10 +1413,7 @@ impl<'gc> Compiler<'gc> {
                     if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone())) {
                         self.chunk.fn_names.insert(func_ip, name.clone());
                     }
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_u16(name_idx);
+                    self.emit_define_global_binding(name, false);
                     return Ok(());
                 }
 
@@ -1366,6 +1436,7 @@ impl<'gc> Compiler<'gc> {
                 let old_upvalues = std::mem::take(&mut self.upvalues);
                 let old_const_locals = std::mem::take(&mut self.const_locals);
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
+                let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
                 self.parent_locals = old_locals.clone();
                 self.parent_upvalues = old_upvalues.clone();
@@ -1378,6 +1449,7 @@ impl<'gc> Compiler<'gc> {
 
                 self.current_strict = fn_is_strict;
                 self.allow_super_call = if self.allow_super_in_arrow_iife { old_allow_super } else { false };
+                self.function_depth = old_function_depth.saturating_add(1);
                 self.scope_depth = 1;
                 let mut non_rest_count = 0u8;
                 let mut fn_has_rest = false;
@@ -1438,6 +1510,7 @@ impl<'gc> Compiler<'gc> {
                 self.upvalues = old_upvalues;
                 self.const_locals = old_const_locals;
                 self.parent_const_locals = old_parent_const_locals;
+                self.function_depth = old_function_depth;
 
                 // Push the function value (closure if captures needed)
                 let arity = if fn_has_rest { non_rest_count } else { params.len() as u8 };
@@ -1461,10 +1534,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.fn_names.insert(func_ip, name.clone());
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
 
-                let name_u16 = crate::unicode::utf8_to_utf16(name);
-                let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                self.chunk.write_opcode(Opcode::DefineGlobal);
-                self.chunk.write_u16(name_idx);
+                self.emit_define_global_binding(name, false);
             }
             StatementKind::ForOf(decl_kind, var_name, iterable_expr, body)
             | StatementKind::ForAwaitOf(decl_kind, var_name, iterable_expr, body) => {
@@ -1482,10 +1552,25 @@ impl<'gc> Compiler<'gc> {
                         decl_kind,
                         Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
                     );
-                if forced_local {
-                    self.scope_depth = 1;
+                let forced_local_base = if forced_local {
+                    Some(format!("__forof_scope_base_{}__", self.forin_counter))
+                } else {
+                    None
+                };
+                if forced_local_base.is_some() {
+                    self.forin_counter = self.forin_counter.saturating_add(1);
                 }
                 let saved_locals = self.locals.len();
+                if forced_local {
+                    self.scope_depth = 1;
+                    let base_pos = self.locals.len() as u8;
+                    self.locals.push(forced_local_base.clone().unwrap());
+                    let undef = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef);
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(base_pos);
+                }
 
                 // TDZ: For const/let, declare the loop variable as Uninitialized BEFORE evaluating the iterable
                 let is_tdz = self.scope_depth > 0
@@ -1493,11 +1578,16 @@ impl<'gc> Compiler<'gc> {
                         decl_kind,
                         Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
                     );
-                if is_tdz && !self.locals.iter().any(|l| l == var_name) {
+                if is_tdz && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
+                    let var_pos = self.locals.len() as u8;
+                    self.locals.push(var_name.clone());
                     let uninit = self.chunk.add_constant(Value::Uninitialized);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(uninit);
-                    self.locals.push(var_name.clone());
+                    if forced_local {
+                        self.chunk.write_opcode(Opcode::SetLocal);
+                        self.chunk.write_byte(var_pos);
+                    }
                 }
 
                 let is_for_await = matches!(*stmt.kind, StatementKind::ForAwaitOf(..));
@@ -1509,7 +1599,12 @@ impl<'gc> Compiler<'gc> {
                 ))?;
                 // Store iterable as __forofArr__
                 if self.scope_depth > 0 {
+                    let arr_pos = self.locals.len() as u8;
                     self.locals.push("__forofArr__".to_string());
+                    if forced_local {
+                        self.chunk.write_opcode(Opcode::SetLocal);
+                        self.chunk.write_byte(arr_pos);
+                    }
                 } else {
                     let n = crate::unicode::utf8_to_utf16("__forofArr__");
                     let ni = self.chunk.add_constant(Value::String(n));
@@ -1521,7 +1616,12 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(zero_idx);
                 if self.scope_depth > 0 {
+                    let idx_pos = self.locals.len() as u8;
                     self.locals.push("__forofIdx__".to_string());
+                    if forced_local {
+                        self.chunk.write_opcode(Opcode::SetLocal);
+                        self.chunk.write_byte(idx_pos);
+                    }
                 } else {
                     let n = crate::unicode::utf8_to_utf16("__forofIdx__");
                     let ni = self.chunk.add_constant(Value::String(n));
@@ -1530,7 +1630,7 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 // Pre-allocate loop variable slot if it's a new local
-                if self.scope_depth > 0 && !self.locals.iter().any(|l| l == var_name) {
+                if self.scope_depth > 0 && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
                     let undef = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(undef);
@@ -1555,14 +1655,23 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::LessThan);
                 let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
 
+                // Snapshot-based for-await lowering erases the async iterator.next()
+                // await step. Reintroduce one microtask hop per iteration so body
+                // execution still interleaves like real for-await-of.
+                if is_for_await {
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Await);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+
                 // var_name = arr[idx]
                 self.emit_helper_get("__forofArr__");
                 self.emit_helper_get("__forofIdx__");
                 self.chunk.write_opcode(Opcode::GetIndex);
                 if is_for_await {
-                    self.emit_helper_get("__await__");
-                    self.chunk.write_opcode(Opcode::Swap);
-                    self.emit_call_opcode(1, 0);
+                    self.chunk.write_opcode(Opcode::Await);
                 }
                 if self.scope_depth > 0 {
                     let pos = self.locals.iter().rposition(|l| l == var_name).unwrap();
@@ -2174,6 +2283,11 @@ impl<'gc> Compiler<'gc> {
                 } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
                     self.chunk.write_opcode(Opcode::GetUpvalue);
                     self.chunk.write_byte(upvalue_idx);
+                } else if let Some((alias, _)) = self.lookup_top_level_block_alias(name) {
+                    let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
+                    let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(alias_idx);
                 } else {
                     let name_u16 = crate::unicode::utf8_to_utf16(name);
                     let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -2522,7 +2636,8 @@ impl<'gc> Compiler<'gc> {
                     if name != "arguments" || self.scope_depth == 0 {
                         // If the name is the current class expression name, it's always defined.
                         let is_class_expr_name = self.current_class_expr_names.last().is_some_and(|n| n == name);
-                        let is_local = is_class_expr_name || self.locals.iter().rposition(|l| l == name).is_some();
+                        let has_block_alias = self.lookup_top_level_block_alias(name).is_some();
+                        let is_local = is_class_expr_name || has_block_alias || self.locals.iter().rposition(|l| l == name).is_some();
                         let is_upvalue = !is_local
                             && (self.parent_locals.iter().rposition(|l| l == name).is_some()
                                 || self.parent_upvalues.iter().any(|u| u.name.as_str() == name));
@@ -2841,10 +2956,7 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::SetUpvalue);
                         self.chunk.write_byte(upvalue_idx);
                     } else {
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::SetGlobal);
-                        self.chunk.write_u16(name_idx);
+                        self.emit_set_global_binding(name);
                     }
                 }
                 Expr::Property(obj, key) => {
@@ -2900,6 +3012,7 @@ impl<'gc> Compiler<'gc> {
                 let old_upvalues = std::mem::take(&mut self.upvalues);
                 let old_const_locals = std::mem::take(&mut self.const_locals);
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
+                let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
                 self.parent_locals = old_locals.clone();
                 self.parent_upvalues = old_upvalues.clone();
@@ -2912,6 +3025,7 @@ impl<'gc> Compiler<'gc> {
 
                 self.current_strict = fn_is_strict;
                 self.allow_super_call = false;
+                self.function_depth = old_function_depth.saturating_add(1);
                 self.scope_depth = 1;
                 let mut arrow_non_rest = 0u8;
                 let mut arrow_has_rest = false;
@@ -3033,6 +3147,7 @@ impl<'gc> Compiler<'gc> {
                 self.upvalues = old_upvalues;
                 self.const_locals = old_const_locals;
                 self.parent_const_locals = old_parent_const_locals;
+                self.function_depth = old_function_depth;
 
                 let arrow_arity = if arrow_has_rest { arrow_non_rest } else { params.len() as u8 };
                 let func_val = Value::VmFunction(func_ip, arrow_arity);
@@ -3069,12 +3184,11 @@ impl<'gc> Compiler<'gc> {
             Expr::AsyncGeneratorFunction(name, params, body) => {
                 self.compile_async_generator_function_body(name.as_deref(), params, body)?;
             }
-            // VM await lowering: pass awaited value through __await__ helper so
-            // settled Promises unwrap and rejected Promises throw into catch.
+            // VM await lowering uses a dedicated opcode so async functions can
+            // suspend and resume on the microtask queue.
             Expr::Await(inner) => {
-                self.emit_helper_get("__await__");
                 self.compile_expr(inner)?;
-                self.emit_call_opcode(1, 0);
+                self.chunk.write_opcode(Opcode::Await);
             }
             Expr::Yield(inner_opt) => {
                 if let Some(items_name) = self.async_generator_items_stack.last().cloned() {
@@ -3908,10 +4022,7 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::SetUpvalue);
                     self.chunk.write_byte(upvalue_idx);
                 } else {
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::SetGlobal);
-                    self.chunk.write_u16(name_idx);
+                    self.emit_set_global_binding(name);
                 }
             }
             Expr::Property(obj, key) => {
@@ -4451,6 +4562,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
+        let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
@@ -4458,6 +4570,7 @@ impl<'gc> Compiler<'gc> {
 
         self.allow_super_call = false;
 
+        self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
 
         // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
@@ -4529,6 +4642,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.parent_const_locals = old_parent_const_locals;
+        self.function_depth = old_function_depth;
 
         // restore strict context inherited from outer scope
         self.current_strict = old_ctx;
@@ -4785,6 +4899,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
+        let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
@@ -4796,6 +4911,7 @@ impl<'gc> Compiler<'gc> {
         }
 
         self.allow_super_call = false;
+        self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
 
         let mut non_rest_count = 0u8;
@@ -4872,6 +4988,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.parent_const_locals = old_parent_const_locals;
+        self.function_depth = old_function_depth;
         self.current_strict = old_ctx;
         self.allow_super_call = old_allow_super;
 
@@ -4910,6 +5027,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
+        let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
@@ -4921,6 +5039,7 @@ impl<'gc> Compiler<'gc> {
         }
 
         self.allow_super_call = false;
+        self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
 
         let mut non_rest_count = 0u8;
@@ -4996,6 +5115,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.parent_const_locals = old_parent_const_locals;
+        self.function_depth = old_function_depth;
         self.current_strict = old_ctx;
         self.allow_super_call = old_allow_super;
 
@@ -5676,6 +5796,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
+        let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
@@ -5688,6 +5809,7 @@ impl<'gc> Compiler<'gc> {
 
         self.current_strict = ctor_is_strict;
         self.allow_super_call = true;
+        self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
         let mut ctor_non_rest = 0u8;
         for p in &ctor_params {
@@ -5735,6 +5857,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.parent_const_locals = old_parent_const_locals;
+        self.function_depth = old_function_depth;
 
         // Register constructor name
         if !name.is_empty() {

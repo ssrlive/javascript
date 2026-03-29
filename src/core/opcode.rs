@@ -92,6 +92,7 @@ pub enum Opcode {
     ValidateProtoValue = 86,       // validate TOS is object or null (for class extends prototype check); throws TypeError if not
     GetSuperPropertyComputed = 87, // computed super property: pop key from stack, look up on super prototype
     ThrowTypeError = 88,           // pop message string from stack, construct TypeError, handle_throw
+    Await = 89,                    // async suspension point: pop awaited value and resume in a microtask
 }
 
 impl TryFrom<u8> for Opcode {
@@ -188,6 +189,7 @@ impl TryFrom<u8> for Opcode {
             86 => Opcode::ValidateProtoValue,
             87 => Opcode::GetSuperPropertyComputed,
             88 => Opcode::ThrowTypeError,
+            89 => Opcode::Await,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -195,7 +197,7 @@ impl TryFrom<u8> for Opcode {
 }
 
 /// Bytecode chunk (stores instruction array and constant pool)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Chunk<'gc> {
     pub code: Vec<u8>,
     pub constants: Vec<Value<'gc>>,
@@ -227,22 +229,7 @@ pub struct Chunk<'gc> {
 
 impl<'gc> Chunk<'gc> {
     pub fn new() -> Self {
-        Self {
-            code: Vec::new(),
-            constants: Vec::new(),
-            fn_names: std::collections::HashMap::new(),
-            fn_lengths: std::collections::HashMap::new(),
-            class_constructor_ips: std::collections::HashSet::new(),
-            derived_constructor_ips: std::collections::HashSet::new(),
-            fn_strictness: std::collections::HashMap::new(),
-            async_function_ips: std::collections::HashSet::new(),
-            arrow_function_ips: std::collections::HashSet::new(),
-            fn_local_names: std::collections::HashMap::new(),
-            call_callee_names: std::collections::HashMap::new(),
-            generator_function_ips: std::collections::HashSet::new(),
-            method_function_ips: std::collections::HashSet::new(),
-            line_map: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn write_byte(&mut self, byte: u8) {

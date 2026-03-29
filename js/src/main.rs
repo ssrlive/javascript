@@ -17,10 +17,6 @@ struct Cli {
     /// Execute as an ES module (enables import/export handling)
     #[arg(long, default_value_t = false)]
     module: bool,
-
-    /// Run using the new experimental Bytecode VM
-    #[arg(long, default_value_t = false)]
-    use_vm: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {

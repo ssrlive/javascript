@@ -16,9 +16,12 @@ fn test_async_n_throw_async_tests_regression() {
             let path = std::path::Path::new("js-scripts/async_n_throw_async_tests_regression.js");
             let script = read_script_file(path).expect("failed to read regression script");
 
-            // Append extraction of the exposed global summary as a JSON string so evaluate_script_with_vm
-            // returns it as the final result for easy assertion.
-            let wrapped = format!("{}\nJSON.stringify(globalThis.__async_regression_summary);", script);
+            // Execute the script, await its exposed top-level completion promise,
+            // then extract the exposed summary as the final async result.
+            let wrapped = format!(
+                "(async function() {{\n{}\nawait globalThis.__async_regression_done;\nreturn JSON.stringify(globalThis.__async_regression_summary);\n}})()",
+                script
+            );
 
             match evaluate_script_with_vm(&wrapped, false, Some(path)) {
                 Ok(result) => {
@@ -59,7 +62,10 @@ fn test_var_scope_await_regression() {
             let path = std::path::Path::new("js-scripts/var_scope_await_regression.js");
             let script = read_script_file(path).expect("failed to read script");
 
-            let wrapped = format!("{}\nJSON.stringify(globalThis.__var_scope_result);", script);
+            let wrapped = format!(
+                "(async function() {{\n{}\nawait globalThis.__var_scope_done;\nreturn JSON.stringify(globalThis.__var_scope_result);\n}})()",
+                script
+            );
             match evaluate_script_with_vm(&wrapped, false, Some(path)) {
                 Ok(result) => {
                     let _ = tx.send(Ok(result));

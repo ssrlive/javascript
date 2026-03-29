@@ -276,6 +276,6 @@ async function runRegressionTest() {
 
 }
 
-(async function () {
+globalThis.__async_regression_done = (async function () {
   await runRegressionTest();
 })();

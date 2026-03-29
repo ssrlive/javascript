@@ -9,4 +9,4 @@ async function run() {
   globalThis.__var_scope_result = typeof a;
 }
 
-(async function () { await run(); return true; })();
+globalThis.__var_scope_done = (async function () { await run(); return true; })();

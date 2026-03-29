@@ -15,7 +15,6 @@ let LIMIT = 100;
 let FAIL_ON_FAILURE = false;
 let CAP_MULTIPLIER = 5;
 let JOBS = Number(process.env.TEST262_JOBS || 8);
-let USE_VM = false;
 // FOCUS_LIST: array of focus tokens. Accepts multiple `--focus` flags and comma-separated tokens.
 let FOCUS_LIST = [];
 let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
@@ -38,12 +37,11 @@ for (let i=0;i<argv.length;i++){
   else if (a === '--fail-on-failure') { FAIL_ON_FAILURE = true; }
   else if (a === '--cap-multiplier') { CAP_MULTIPLIER = Number(argv[++i]); }
   else if (a === '--jobs') { JOBS = Number(argv[++i]); }
-  else if (a === '--use-vm') { USE_VM = true; }
   else if (a === '--focus') { const val = argv[++i]; FOCUS_LIST.push(...String(val).split(',').map(s=>s.trim()).filter(Boolean)); }
   else if (a === '--timeout') { TIMEOUT_SECS = Number(argv[++i]); }
   else if (a === '--keep-tmp') { KEEP_TMP = true; }
   else if (a === '--help') {
-    console.log('Usage: node ci/runner.js [--keep-tmp] [--use-vm] [--jobs N] --limit N --focus name[,name2] (multiple --focus allowed)');
+    console.log('Usage: node ci/runner.js [--keep-tmp] [--jobs N] --limit N --focus name[,name2] (multiple --focus allowed)');
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
     process.exit(0);
   }
@@ -89,7 +87,6 @@ function cleanupComposedArtifacts(tmpPath){
 console.log(`Running Test262 tests (node runner)`);
 console.log(`Composed temporary files are deleted by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
 console.log(`Execution jobs: ${JOBS}`);
-console.log(`Use VM mode: ${USE_VM}`);
 
 function runCommandAsync(cmd, args, options = {}) {
   return new Promise((resolve) => {
@@ -319,7 +316,6 @@ function detectFeature(feat){
     }
 
     const runArgs = [];
-    if (USE_VM) runArgs.push('--use-vm');
     if (probeIsModule) runArgs.push('--module');
     runArgs.push(probeFile);
     const probeTimeoutMs = Math.max(5000, Number(TIMEOUT_SECS || 0) * 1000);
@@ -384,14 +380,12 @@ async function runAll(){
       let res;
       if (BIN) {
         const binArgs = [];
-        if (USE_VM) binArgs.push('--use-vm');
         if (isModule) binArgs.push('--module');
         binArgs.push(tmpPath);
         res = await runCommandAsync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
       } else {
         const cargoArgs = ['run', '--all-features', '--package', 'js', '--'];
         if (isModule) cargoArgs.push('--module');
-        if (USE_VM) cargoArgs.push('--use-vm');
         cargoArgs.push(tmpPath);
         res = await runCommandAsync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
       }
@@ -526,7 +520,7 @@ async function runAll(){
 
     // Detect tests that require $262.agent (multi-threaded worker support)
     const needsAgent = /\$262\.agent\b/.test(testSrc);
-    if (USE_VM && needsAgent) {
+    if (needsAgent) {
       skip++;
       log(`SKIP (agent unsupported in vm mode) ${f}`);
       continue;

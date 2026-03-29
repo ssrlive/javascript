@@ -1,5 +1,5 @@
 // VM Smoke Test: exercises all features the bytecode VM currently supports
-// Run with: cargo run -p js -- --use-vm js-scripts/vm_smoke_test.js
+// Run with: cargo run -p js -- js-scripts/vm_smoke_test.js
 
 function assert(cond, msg) {
   if (!cond) {

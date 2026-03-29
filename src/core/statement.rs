@@ -187,6 +187,8 @@ pub enum Expr {
     SuperCall(Vec<Expr>),
     SuperMethod(String, Vec<Expr>),
     SuperProperty(String),
+    SuperComputedProperty(Box<Expr>),
+    SuperComputedMethod(Box<Expr>, Vec<Expr>),
     Super,
     Object(Vec<(Expr, Expr, bool, bool)>),
     Getter(Box<Expr>),

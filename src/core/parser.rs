@@ -4022,6 +4022,58 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 } else {
                     Expr::SuperProperty(prop)
                 }
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                // super[expr] — computed super property access
+                *index += 1;
+                let key_expr = parse_assignment(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
+                *index += 1;
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                    // super[expr](args) — computed super method call
+                    *index += 1;
+                    let mut args = Vec::new();
+                    if *index < tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
+                        loop {
+                            let arg = parse_assignment(tokens, index)?;
+                            args.push(arg);
+                            if *index >= tokens.len() {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[*index].token, Token::Comma) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1;
+                            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                                *index += 1;
+                            }
+                            if *index >= tokens.len() {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                break;
+                            }
+                        }
+                    }
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                    }
+                    *index += 1;
+                    if args.len() == 1
+                        && let Expr::Comma(_, _) = &args[0]
+                    {
+                        let first = args.remove(0);
+                        let new_args = flatten_commas(first);
+                        args.extend(new_args);
+                    }
+                    Expr::SuperComputedMethod(Box::new(key_expr), args)
+                } else {
+                    Expr::SuperComputedProperty(Box::new(key_expr))
+                }
             } else {
                 Expr::Super
             }

@@ -72,20 +72,26 @@ pub enum Opcode {
     CallSpread = 66,
     NewCallSpread = 67,
     ObjectSpread = 68,
-    GetUpvalue = 69,             // operand: u8 upvalue index — read captured variable
-    SetUpvalue = 70,             // operand: u8 upvalue index — write captured variable
-    MakeClosure = 71,            // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
-    ArrayHole = 72,              // push an empty/hole slot onto TOS array (sparse array support)
-    DefineGlobalConst = 73,      // define an immutable global binding
-    GetNewTarget = 74,           // push current new.target value onto stack
-    Yield = 75,                  // suspend generator: pop yielded value, save state, return {value, done: false}
-    SetComputedGetter = 76,      // pop val, pop computed key, peek obj; store val under __get_<key>
-    SetComputedSetter = 77,      // pop val, pop computed key, peek obj; store val under __set_<key>
-    InitProperty = 78,           // object literal own data property initialization by constant key
-    InitIndex = 79,              // object literal own data property initialization by computed key
-    GeneratorParamInitDone = 80, // internal marker: generator parameter initialization completed
-    ToPropertyKey = 81,          // coerce top-of-stack value using ToPropertyKey semantics
-    ObjectSpreadExcluding = 82,  // like ObjectSpread but pops an excluded keys array first
+    GetUpvalue = 69,               // operand: u8 upvalue index — read captured variable
+    SetUpvalue = 70,               // operand: u8 upvalue index — write captured variable
+    MakeClosure = 71,              // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
+    ArrayHole = 72,                // push an empty/hole slot onto TOS array (sparse array support)
+    DefineGlobalConst = 73,        // define an immutable global binding
+    GetNewTarget = 74,             // push current new.target value onto stack
+    Yield = 75,                    // suspend generator: pop yielded value, save state, return {value, done: false}
+    SetComputedGetter = 76,        // pop val, pop computed key, peek obj; store val under __get_<key>
+    SetComputedSetter = 77,        // pop val, pop computed key, peek obj; store val under __set_<key>
+    InitProperty = 78,             // object literal own data property initialization by constant key
+    InitIndex = 79,                // object literal own data property initialization by computed key
+    GeneratorParamInitDone = 80,   // internal marker: generator parameter initialization completed
+    ToPropertyKey = 81,            // coerce top-of-stack value using ToPropertyKey semantics
+    ObjectSpreadExcluding = 82,    // like ObjectSpread but pops an excluded keys array first
+    ValidateClassHeritage = 83,    // validate that TOS is null or a valid constructible value with valid .prototype
+    GetThisSuper = 84,             // like GetThis but bypasses TDZ check (used as receiver for super() calls)
+    ClearThisTdz = 85,             // clear this_tdz on the enclosing constructor frame (after super() returns)
+    ValidateProtoValue = 86,       // validate TOS is object or null (for class extends prototype check); throws TypeError if not
+    GetSuperPropertyComputed = 87, // computed super property: pop key from stack, look up on super prototype
+    ThrowTypeError = 88,           // pop message string from stack, construct TypeError, handle_throw
 }
 
 impl TryFrom<u8> for Opcode {
@@ -176,6 +182,12 @@ impl TryFrom<u8> for Opcode {
             80 => Opcode::GeneratorParamInitDone,
             81 => Opcode::ToPropertyKey,
             82 => Opcode::ObjectSpreadExcluding,
+            83 => Opcode::ValidateClassHeritage,
+            84 => Opcode::GetThisSuper,
+            85 => Opcode::ClearThisTdz,
+            86 => Opcode::ValidateProtoValue,
+            87 => Opcode::GetSuperPropertyComputed,
+            88 => Opcode::ThrowTypeError,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -193,6 +205,8 @@ pub struct Chunk<'gc> {
     pub fn_lengths: std::collections::HashMap<usize, usize>,
     /// Function IPs that correspond to class constructors.
     pub class_constructor_ips: std::collections::HashSet<usize>,
+    /// Function IPs that are constructors of derived (extends) classes.
+    pub derived_constructor_ips: std::collections::HashSet<usize>,
     /// Recorded strictness flag for functions by their starting IP
     pub fn_strictness: std::collections::HashMap<usize, bool>,
     /// Function IPs that correspond to async functions and should return Promise values.
@@ -219,6 +233,7 @@ impl<'gc> Chunk<'gc> {
             fn_names: std::collections::HashMap::new(),
             fn_lengths: std::collections::HashMap::new(),
             class_constructor_ips: std::collections::HashSet::new(),
+            derived_constructor_ips: std::collections::HashSet::new(),
             fn_strictness: std::collections::HashMap::new(),
             async_function_ips: std::collections::HashSet::new(),
             arrow_function_ips: std::collections::HashSet::new(),

@@ -1447,6 +1447,15 @@ impl<'gc> VM<'gc> {
                     realm_global.borrow_mut(ctx).insert("Function".to_string(), realm_function);
                 }
 
+                self.install_realm_hidden_intrinsics(ctx, &realm_global_val, "__async_function_ctor", "__async_function_prototype", None);
+                self.install_realm_hidden_intrinsics(
+                    ctx,
+                    &realm_global_val,
+                    "__async_generator_function_ctor",
+                    "__async_generator_function_prototype",
+                    Some("__async_generator_prototype"),
+                );
+
                 let mut eval_map = IndexMap::new();
                 eval_map.insert("__host_fn__".to_string(), Value::from("__realm_eval__"));
                 eval_map.insert("__host_this__".to_string(), realm_global_val.clone());
@@ -1512,6 +1521,7 @@ impl<'gc> VM<'gc> {
                 match evaluated {
                     Ok(v) => {
                         self.mark_value_origin_global(ctx, &v, &realm_global);
+                        self.adopt_origin_global_function_intrinsics(ctx, &v, &realm_global, Some(&src));
                         v
                     }
                     Err(err) => {
@@ -13895,15 +13905,18 @@ impl<'gc> VM<'gc> {
                                     let tail_lower = tail.to_ascii_lowercase();
                                     let mut needs_async_gen_own_prototype = false;
                                     if tail_lower.contains("async function*") {
+                                        map.insert("__async_dynamic_generator_function__".to_string(), Value::Boolean(true));
                                         if let Some(proto) = self.globals.get("__async_generator_function_prototype").cloned() {
                                             map.insert("__proto__".to_string(), proto);
                                             needs_async_gen_own_prototype = true;
                                         }
                                     } else if tail_lower.contains("async function") {
+                                        map.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
                                         if let Some(proto) = self.globals.get("__async_function_prototype").cloned() {
                                             map.insert("__proto__".to_string(), proto);
                                         }
                                     } else if tail_lower.contains("function*") {
+                                        map.insert("__dynamic_generator_function__".to_string(), Value::Boolean(true));
                                         if !matches!(self.generator_function_prototype, Value::Undefined) {
                                             map.insert("__proto__".to_string(), self.generator_function_prototype.clone());
                                         }
@@ -24161,113 +24174,27 @@ impl<'gc> VM<'gc> {
                     }
                     _ => result,
                 };
-                let mut wrapped = wrapped;
                 if id == BUILTIN_CTOR_FUNCTION
                     && let Some(origin_global) = ctor_origin_global
                 {
                     self.mark_value_origin_global(ctx, &wrapped, &origin_global);
                 }
-                if is_async_ctor
-                    && let Some(async_proto) = self.globals.get("__async_function_prototype").cloned()
-                    && let Value::VmObject(obj) = &mut wrapped
-                {
-                    let mut b = obj.borrow_mut(ctx);
-                    b.insert("__proto__".to_string(), async_proto);
-                    b.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
-                }
-                if is_async_gen_ctor && let Value::VmObject(fn_obj) = &mut wrapped {
-                    let async_gen_fn_proto = match ctor_prototype.clone() {
-                        Value::VmObject(proto_obj) => Value::VmObject(proto_obj),
-                        _ => self
-                            .globals
-                            .get("__async_generator_function_prototype")
-                            .cloned()
-                            .unwrap_or(Value::Undefined),
-                    };
-                    let async_gen_proto = match &async_gen_fn_proto {
-                        Value::VmObject(proto_obj) => proto_obj
-                            .borrow()
-                            .get("prototype")
-                            .cloned()
-                            .or_else(|| self.globals.get("__async_generator_prototype").cloned())
-                            .unwrap_or(Value::Undefined),
-                        _ => self.globals.get("__async_generator_prototype").cloned().unwrap_or(Value::Undefined),
-                    };
-
-                    let mut fn_b = fn_obj.borrow_mut(ctx);
-                    fn_b.insert("__proto__".to_string(), async_gen_fn_proto);
-                    fn_b.insert("__async_dynamic_generator_function__".to_string(), Value::Boolean(true));
-
-                    let mut fn_proto = IndexMap::new();
-                    fn_proto.insert("__proto__".to_string(), async_gen_proto);
-                    let ctor_for_proto = Value::VmObject(*fn_obj);
-                    fn_proto.insert("constructor".to_string(), ctor_for_proto);
-                    fn_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
-                    fn_b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                    fn_b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-                    fn_b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
-                }
-
-                if (is_async_ctor || is_async_gen_ctor)
-                    && let Value::VmObject(obj) = &mut wrapped
-                {
+                if is_async_ctor || is_async_gen_ctor {
                     let proto_source = new_target.unwrap_or(target);
                     let proto_candidate = self.read_named_property(ctx, proto_source, "prototype");
                     if let Some(thrown) = self.pending_throw.take() {
                         return Err(self.vm_error_to_js_error(ctx, &thrown));
                     }
-                    let mut fallback_proto = if is_async_gen_ctor {
-                        self.globals
-                            .get("__async_generator_function_prototype")
-                            .cloned()
-                            .unwrap_or(Value::Undefined)
-                    } else {
-                        self.globals.get("__async_function_prototype").cloned().unwrap_or(Value::Undefined)
-                    };
-
-                    // Cross-realm fallback: newTarget from emulated realms carries
-                    // `__origin_global`; derive that realm's intrinsic async ctor
-                    // prototype via its eval helper.
                     let origin_global = self.read_named_property(ctx, proto_source, "__origin_global");
-                    if self.pending_throw.is_none()
-                        && let Value::VmObject(_) = origin_global
-                    {
-                        let eval_fn = self.read_named_property(ctx, &origin_global, "eval");
-                        if self.pending_throw.is_none() && self.is_value_callable(&eval_fn) {
-                            let src = if is_async_gen_ctor {
-                                "(0, async function* () {})"
-                            } else {
-                                "(0, async function() {})"
-                            };
-                            if let Ok(realm_fn) = self.vm_call_function_value(ctx, &eval_fn, &origin_global, &[Value::from(src)]) {
-                                let ctor = self.read_named_property(ctx, &realm_fn, "constructor");
-                                if self.pending_throw.is_none() {
-                                    let realm_proto = self.read_named_property(ctx, &ctor, "prototype");
-                                    if self.pending_throw.is_none()
-                                        && matches!(
-                                            realm_proto,
-                                            Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
-                                        )
-                                    {
-                                        fallback_proto = realm_proto;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let resolved_proto = match proto_candidate {
-                        Value::VmObject(obj) => {
-                            if obj.borrow().contains_key("__vm_symbol__") {
-                                fallback_proto
-                            } else {
-                                Value::VmObject(obj)
-                            }
-                        }
-                        Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => proto_candidate,
-                        _ => fallback_proto,
-                    };
-                    obj.borrow_mut(ctx).insert("__proto__".to_string(), resolved_proto);
+                    self.finalize_dynamic_async_constructor_result(
+                        ctx,
+                        &wrapped,
+                        Some(&ctor_prototype),
+                        is_async_ctor,
+                        is_async_gen_ctor,
+                        proto_candidate,
+                        Some(origin_global),
+                    );
                 }
                 Ok(wrapped)
             }
@@ -24563,6 +24490,321 @@ impl<'gc> VM<'gc> {
                 map.borrow_mut(ctx).insert("__origin_global".to_string(), origin_global.clone());
             }
             _ => {}
+        }
+    }
+
+    fn clone_global_object(&self, ctx: &GcContext<'gc>, name: &str) -> Option<Value<'gc>> {
+        self.globals.get(name).and_then(|value| match value {
+            Value::VmObject(obj) => Some(Value::VmObject(new_gc_cell_ptr(ctx, obj.borrow().clone()))),
+            _ => None,
+        })
+    }
+
+    fn install_realm_hidden_intrinsics(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        origin_global: &Value<'gc>,
+        ctor_name: &str,
+        fn_proto_name: &str,
+        own_proto_name: Option<&str>,
+    ) {
+        let Value::VmObject(realm_global) = origin_global else {
+            return;
+        };
+        let Some(realm_ctor) = self.clone_global_object(ctx, ctor_name) else {
+            return;
+        };
+        let Some(realm_fn_proto) = self.clone_global_object(ctx, fn_proto_name) else {
+            return;
+        };
+        let realm_own_proto = own_proto_name.and_then(|name| self.clone_global_object(ctx, name));
+
+        if let Value::VmObject(ctor_obj) = &realm_ctor {
+            let mut borrow = ctor_obj.borrow_mut(ctx);
+            borrow.insert("prototype".to_string(), realm_fn_proto.clone());
+            borrow.insert("__origin_global".to_string(), origin_global.clone());
+        }
+        if let Value::VmObject(fn_proto_obj) = &realm_fn_proto {
+            let mut borrow = fn_proto_obj.borrow_mut(ctx);
+            borrow.insert("constructor".to_string(), realm_ctor.clone());
+            if let Some(own_proto) = realm_own_proto.as_ref() {
+                borrow.insert("prototype".to_string(), own_proto.clone());
+            }
+            borrow.insert("__origin_global".to_string(), origin_global.clone());
+        }
+        if let Some(Value::VmObject(own_proto_obj)) = realm_own_proto.as_ref() {
+            let mut borrow = own_proto_obj.borrow_mut(ctx);
+            borrow.insert("constructor".to_string(), realm_fn_proto.clone());
+            borrow.insert("__origin_global".to_string(), origin_global.clone());
+        }
+
+        let mut realm_borrow = realm_global.borrow_mut(ctx);
+        realm_borrow.insert(ctor_name.to_string(), realm_ctor);
+        realm_borrow.insert(fn_proto_name.to_string(), realm_fn_proto);
+        if let Some(own_proto_name) = own_proto_name
+            && let Some(own_proto) = realm_own_proto
+        {
+            realm_borrow.insert(own_proto_name.to_string(), own_proto);
+        }
+    }
+
+    fn value_props_get(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>, name: &str) -> Option<Value<'gc>> {
+        match value {
+            Value::VmObject(map) => map.borrow().get(name).cloned(),
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                self.get_fn_props(ctx, *ip, *arity).borrow().get(name).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn mutate_value_props<F>(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>, mutate: F) -> bool
+    where
+        F: FnOnce(&mut IndexMap<String, Value<'gc>>),
+    {
+        match value {
+            Value::VmObject(map) => {
+                let mut borrow = map.borrow_mut(ctx);
+                mutate(&mut borrow);
+                true
+            }
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                let props = self.get_fn_props(ctx, *ip, *arity);
+                let mut borrow = props.borrow_mut(ctx);
+                mutate(&mut borrow);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn set_function_realm_intrinsic(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        fn_proto: Value<'gc>,
+        flag_name: &str,
+        own_proto: Option<Value<'gc>>,
+    ) -> bool {
+        if !self.mutate_value_props(ctx, value, |props| {
+            props.insert("__proto__".to_string(), fn_proto);
+            props.insert(flag_name.to_string(), Value::Boolean(true));
+        }) {
+            return false;
+        }
+
+        if let Some(own_proto) = own_proto {
+            self.ensure_function_prototype_object(ctx, value, own_proto);
+        }
+
+        true
+    }
+
+    fn ensure_function_prototype_object(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>, own_proto: Value<'gc>) {
+        if let Some(Value::VmObject(fn_proto_obj)) = self.value_props_get(ctx, value, "prototype") {
+            let mut proto_borrow = fn_proto_obj.borrow_mut(ctx);
+            proto_borrow.insert("__proto__".to_string(), own_proto);
+            proto_borrow.insert("constructor".to_string(), value.clone());
+            proto_borrow.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            return;
+        }
+
+        let mut fn_proto = IndexMap::new();
+        fn_proto.insert("__proto__".to_string(), own_proto);
+        fn_proto.insert("constructor".to_string(), value.clone());
+        fn_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        let fn_proto_value = Value::VmObject(new_gc_cell_ptr(ctx, fn_proto));
+        let _ = self.mutate_value_props(ctx, value, |props| {
+            props.insert("prototype".to_string(), fn_proto_value.clone());
+            props.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            props.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        });
+    }
+
+    fn async_constructor_probe_source(&self, is_async_gen_ctor: bool) -> &'static str {
+        if is_async_gen_ctor {
+            "(0, async function* () {})"
+        } else {
+            "(0, async function() {})"
+        }
+    }
+
+    fn default_async_constructor_proto(&self, is_async_gen_ctor: bool) -> Value<'gc> {
+        if is_async_gen_ctor {
+            self.globals
+                .get("__async_generator_function_prototype")
+                .cloned()
+                .unwrap_or(Value::Undefined)
+        } else {
+            self.globals.get("__async_function_prototype").cloned().unwrap_or(Value::Undefined)
+        }
+    }
+
+    fn async_generator_constructor_protos(&self, ctor_prototype: Option<&Value<'gc>>) -> (Value<'gc>, Value<'gc>) {
+        let async_gen_fn_proto = match ctor_prototype.cloned().unwrap_or(Value::Undefined) {
+            Value::VmObject(proto_obj) => Value::VmObject(proto_obj),
+            _ => self
+                .globals
+                .get("__async_generator_function_prototype")
+                .cloned()
+                .unwrap_or(Value::Undefined),
+        };
+        let async_gen_proto = match &async_gen_fn_proto {
+            Value::VmObject(proto_obj) => proto_obj
+                .borrow()
+                .get("prototype")
+                .cloned()
+                .or_else(|| self.globals.get("__async_generator_prototype").cloned())
+                .unwrap_or(Value::Undefined),
+            _ => self.globals.get("__async_generator_prototype").cloned().unwrap_or(Value::Undefined),
+        };
+        (async_gen_fn_proto, async_gen_proto)
+    }
+
+    fn resolve_async_constructor_fallback_proto(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        is_async_gen_ctor: bool,
+        origin_global: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let mut fallback_proto = self.default_async_constructor_proto(is_async_gen_ctor);
+        let Some(Value::VmObject(_)) = origin_global else {
+            return fallback_proto;
+        };
+        let origin_global = origin_global.cloned().unwrap_or(Value::Undefined);
+
+        let eval_fn = self.read_named_property(ctx, &origin_global, "eval");
+        if self.pending_throw.is_none() && self.is_value_callable(&eval_fn) {
+            let src = self.async_constructor_probe_source(is_async_gen_ctor);
+            if let Ok(realm_fn) = self.vm_call_function_value(ctx, &eval_fn, &origin_global, &[Value::from(src)]) {
+                let ctor = self.read_named_property(ctx, &realm_fn, "constructor");
+                if self.pending_throw.is_none() {
+                    let realm_proto = self.read_named_property(ctx, &ctor, "prototype");
+                    if self.pending_throw.is_none()
+                        && matches!(
+                            realm_proto,
+                            Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
+                        )
+                    {
+                        fallback_proto = realm_proto;
+                    }
+                }
+            }
+        }
+
+        fallback_proto
+    }
+
+    fn resolve_dynamic_constructor_proto(&self, proto_candidate: Value<'gc>, fallback_proto: Value<'gc>) -> Value<'gc> {
+        match proto_candidate {
+            Value::VmObject(obj) => {
+                if obj.borrow().contains_key("__vm_symbol__") {
+                    fallback_proto
+                } else {
+                    Value::VmObject(obj)
+                }
+            }
+            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => proto_candidate,
+            _ => fallback_proto,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_dynamic_async_constructor_result(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        wrapped: &Value<'gc>,
+        ctor_prototype: Option<&Value<'gc>>,
+        is_async_ctor: bool,
+        is_async_gen_ctor: bool,
+        proto_candidate: Value<'gc>,
+        origin_global: Option<Value<'gc>>,
+    ) {
+        if is_async_ctor {
+            let async_proto = self.default_async_constructor_proto(false);
+            self.set_function_realm_intrinsic(ctx, wrapped, async_proto, "__async_dynamic_function__", None);
+        }
+        if is_async_gen_ctor {
+            let (async_gen_fn_proto, async_gen_proto) = self.async_generator_constructor_protos(ctor_prototype);
+            self.set_function_realm_intrinsic(
+                ctx,
+                wrapped,
+                async_gen_fn_proto,
+                "__async_dynamic_generator_function__",
+                Some(async_gen_proto),
+            );
+        }
+
+        let fallback_proto = self.resolve_async_constructor_fallback_proto(ctx, is_async_gen_ctor, origin_global.as_ref());
+        let resolved_proto = self.resolve_dynamic_constructor_proto(proto_candidate, fallback_proto);
+        self.mutate_value_props(ctx, wrapped, |props| {
+            props.insert("__proto__".to_string(), resolved_proto);
+        });
+    }
+
+    fn realm_hidden_intrinsic(&self, origin_global: &Value<'gc>, name: &str) -> Option<Value<'gc>> {
+        match origin_global {
+            Value::VmObject(obj) => obj.borrow().get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    fn adopt_origin_global_function_intrinsics(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        origin_global: &Value<'gc>,
+        source_hint: Option<&str>,
+    ) {
+        let source_lower = source_hint.map(str::to_ascii_lowercase);
+        if source_lower.as_ref().is_some_and(|source| source.contains("async function*")) {
+            if let Some(realm_async_gen_fn_proto) = self.realm_hidden_intrinsic(origin_global, "__async_generator_function_prototype") {
+                let realm_async_gen_proto = self.realm_hidden_intrinsic(origin_global, "__async_generator_prototype");
+                self.set_function_realm_intrinsic(
+                    ctx,
+                    value,
+                    realm_async_gen_fn_proto,
+                    "__async_dynamic_generator_function__",
+                    realm_async_gen_proto,
+                );
+            }
+            return;
+        }
+
+        if source_lower.as_ref().is_some_and(|source| source.contains("async function")) {
+            if let Some(realm_async_fn_proto) = self.realm_hidden_intrinsic(origin_global, "__async_function_prototype") {
+                self.set_function_realm_intrinsic(ctx, value, realm_async_fn_proto, "__async_dynamic_function__", None);
+            }
+            return;
+        }
+
+        let current_proto = self.value_props_get(ctx, value, "__proto__");
+        let Some(current_proto) = current_proto else {
+            return;
+        };
+
+        if let (Some(current_async_fn_proto), Some(realm_async_fn_proto)) = (
+            self.globals.get("__async_function_prototype").cloned(),
+            self.realm_hidden_intrinsic(origin_global, "__async_function_prototype"),
+        ) && self.values_same(&current_proto, &current_async_fn_proto)
+        {
+            self.set_function_realm_intrinsic(ctx, value, realm_async_fn_proto, "__async_dynamic_function__", None);
+            return;
+        }
+
+        if let (Some(current_async_gen_fn_proto), Some(realm_async_gen_fn_proto)) = (
+            self.globals.get("__async_generator_function_prototype").cloned(),
+            self.realm_hidden_intrinsic(origin_global, "__async_generator_function_prototype"),
+        ) && self.values_same(&current_proto, &current_async_gen_fn_proto)
+        {
+            let realm_async_gen_proto = self.realm_hidden_intrinsic(origin_global, "__async_generator_prototype");
+            self.set_function_realm_intrinsic(
+                ctx,
+                value,
+                realm_async_gen_fn_proto,
+                "__async_dynamic_generator_function__",
+                realm_async_gen_proto,
+            );
         }
     }
 
@@ -31193,7 +31435,7 @@ impl<'gc> VM<'gc> {
                         };
                         // For constructors like Number/String/Boolean,
                         // wrap the primitive result in an object
-                        let mut wrapped = match id {
+                        let wrapped = match id {
                             BUILTIN_CTOR_NUMBER => {
                                 let mut m = IndexMap::new();
                                 m.insert("__type__".to_string(), Value::from("Number"));
@@ -31229,96 +31471,16 @@ impl<'gc> VM<'gc> {
                         {
                             self.mark_value_origin_global(ctx, &wrapped, &origin_global);
                         }
-                        if is_async_ctor
-                            && let Some(async_proto) = self.globals.get("__async_function_prototype").cloned()
-                            && let Value::VmObject(obj) = &mut wrapped
-                        {
-                            let mut b = obj.borrow_mut(ctx);
-                            b.insert("__proto__".to_string(), async_proto);
-                            b.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
-                        }
-                        if is_async_gen_ctor && let Value::VmObject(fn_obj) = &mut wrapped {
-                            let async_gen_fn_proto = match ctor_prototype.clone() {
-                                Some(Value::VmObject(proto_obj)) => Value::VmObject(proto_obj),
-                                _ => self
-                                    .globals
-                                    .get("__async_generator_function_prototype")
-                                    .cloned()
-                                    .unwrap_or(Value::Undefined),
-                            };
-                            let async_gen_proto = match &async_gen_fn_proto {
-                                Value::VmObject(proto_obj) => proto_obj
-                                    .borrow()
-                                    .get("prototype")
-                                    .cloned()
-                                    .or_else(|| self.globals.get("__async_generator_prototype").cloned())
-                                    .unwrap_or(Value::Undefined),
-                                _ => self.globals.get("__async_generator_prototype").cloned().unwrap_or(Value::Undefined),
-                            };
-
-                            let mut fn_b = fn_obj.borrow_mut(ctx);
-                            fn_b.insert("__proto__".to_string(), async_gen_fn_proto);
-                            fn_b.insert("__async_dynamic_generator_function__".to_string(), Value::Boolean(true));
-
-                            let mut fn_proto = IndexMap::new();
-                            fn_proto.insert("__proto__".to_string(), async_gen_proto);
-                            let ctor_for_proto = Value::VmObject(*fn_obj);
-                            fn_proto.insert("constructor".to_string(), ctor_for_proto);
-                            fn_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
-                            fn_b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                            fn_b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-                            fn_b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
-                        }
-                        if (is_async_ctor || is_async_gen_ctor)
-                            && let Value::VmObject(obj) = &mut wrapped
-                        {
-                            let proto_candidate = ctor_prototype.clone().unwrap_or(Value::Undefined);
-                            let mut fallback_proto = if is_async_gen_ctor {
-                                self.globals
-                                    .get("__async_generator_function_prototype")
-                                    .cloned()
-                                    .unwrap_or(Value::Undefined)
-                            } else {
-                                self.globals.get("__async_function_prototype").cloned().unwrap_or(Value::Undefined)
-                            };
-
-                            if let Some(origin_global) = ctor_origin_global.clone() {
-                                let eval_fn = self.read_named_property(ctx, &origin_global, "eval");
-                                if self.pending_throw.is_none() && self.is_value_callable(&eval_fn) {
-                                    let src = if is_async_gen_ctor {
-                                        "(0, async function* () {})"
-                                    } else {
-                                        "(0, async function() {})"
-                                    };
-                                    if let Ok(realm_fn) = self.vm_call_function_value(ctx, &eval_fn, &origin_global, &[Value::from(src)]) {
-                                        let ctor = self.read_named_property(ctx, &realm_fn, "constructor");
-                                        if self.pending_throw.is_none() {
-                                            let realm_proto = self.read_named_property(ctx, &ctor, "prototype");
-                                            if self.pending_throw.is_none()
-                                                && matches!(
-                                                    realm_proto,
-                                                    Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)
-                                                )
-                                            {
-                                                fallback_proto = realm_proto;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            let resolved_proto = match proto_candidate {
-                                Value::VmObject(proto_obj) => {
-                                    if proto_obj.borrow().contains_key("__vm_symbol__") {
-                                        fallback_proto
-                                    } else {
-                                        Value::VmObject(proto_obj)
-                                    }
-                                }
-                                Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => proto_candidate,
-                                _ => fallback_proto,
-                            };
-                            obj.borrow_mut(ctx).insert("__proto__".to_string(), resolved_proto);
+                        if is_async_ctor || is_async_gen_ctor {
+                            self.finalize_dynamic_async_constructor_result(
+                                ctx,
+                                &wrapped,
+                                ctor_prototype.as_ref(),
+                                is_async_ctor,
+                                is_async_gen_ctor,
+                                ctor_prototype.clone().unwrap_or(Value::Undefined),
+                                ctor_origin_global.clone(),
+                            );
                         }
                         if let Value::VmObject(obj) = &wrapped {
                             let has_proto = obj.borrow().contains_key("__proto__");

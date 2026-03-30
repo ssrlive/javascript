@@ -1,4 +1,4 @@
-use crate::core::{Collect, Gc, GcCell, GcContext, GcPtr, GcTrace, GcWeak, new_gc_cell_ptr};
+use crate::core::{Collect, FunctionID, Gc, GcCell, GcContext, GcPtr, GcTrace, GcWeak, new_gc_cell_ptr};
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
@@ -1019,7 +1019,7 @@ pub enum Value<'gc> {
     VmClosure(usize, u8, crate::core::VmUpvalueCells<'gc>),
     VmArray(crate::core::VmArrayHandle<'gc>),
     VmObject(crate::core::VmObjectHandle<'gc>),
-    VmNativeFunction(u8),
+    VmNativeFunction(FunctionID),
     VmMap(crate::core::VmMapHandle<'gc>),
     VmSet(crate::core::VmSetHandle<'gc>),
     Closure(Gc<'gc, ClosureData<'gc>>),

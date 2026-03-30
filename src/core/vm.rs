@@ -34,270 +34,286 @@ fn vm_next_os_file_id() -> u64 {
     current
 }
 
+pub type FunctionID = usize;
+
+#[inline]
+fn get_function_id<'gc>(obj: VmObjectHandle<'gc>) -> Option<FunctionID> {
+    obj.borrow().get("__native_id__").and_then(|v| match v {
+        Value::Number(n) => Some(*n as FunctionID),
+        _ => None,
+    })
+}
+
+#[inline]
+#[allow(dead_code)]
+fn set_function_id<'gc>(ctx: &GcContext<'gc>, obj: VmObjectHandle<'gc>, id: FunctionID) {
+    obj.borrow_mut(ctx).insert("__native_id__".to_string(), Value::Number(id as f64));
+}
+
 // Builtin function IDs
-const BUILTIN_CONSOLE_LOG: u8 = 0;
-const BUILTIN_CONSOLE_WARN: u8 = 1;
-const BUILTIN_CONSOLE_ERROR: u8 = 2;
-const BUILTIN_MATH_FLOOR: u8 = 3;
-const BUILTIN_MATH_CEIL: u8 = 4;
-const BUILTIN_MATH_ROUND: u8 = 5;
-const BUILTIN_MATH_ABS: u8 = 6;
-const BUILTIN_MATH_SQRT: u8 = 7;
-const BUILTIN_MATH_MAX: u8 = 8;
-const BUILTIN_MATH_MIN: u8 = 9;
-const BUILTIN_ISNAN: u8 = 10;
-const BUILTIN_PARSEINT: u8 = 11;
-const BUILTIN_PARSEFLOAT: u8 = 12;
-const BUILTIN_ARRAY_PUSH: u8 = 13;
-const BUILTIN_ARRAY_POP: u8 = 14;
-const BUILTIN_ARRAY_JOIN: u8 = 15;
-const BUILTIN_ARRAY_INDEXOF: u8 = 16;
-const BUILTIN_ARRAY_SLICE: u8 = 17;
-const BUILTIN_ARRAY_CONCAT: u8 = 18;
-const BUILTIN_ARRAY_MAP: u8 = 19;
-const BUILTIN_ARRAY_FILTER: u8 = 20;
-const BUILTIN_ARRAY_FOREACH: u8 = 21;
-const BUILTIN_ARRAY_ISARRAY: u8 = 22;
+const BUILTIN_CONSOLE_LOG: FunctionID = 0;
+const BUILTIN_CONSOLE_WARN: FunctionID = 1;
+const BUILTIN_CONSOLE_ERROR: FunctionID = 2;
+const BUILTIN_MATH_FLOOR: FunctionID = 3;
+const BUILTIN_MATH_CEIL: FunctionID = 4;
+const BUILTIN_MATH_ROUND: FunctionID = 5;
+const BUILTIN_MATH_ABS: FunctionID = 6;
+const BUILTIN_MATH_SQRT: FunctionID = 7;
+const BUILTIN_MATH_MAX: FunctionID = 8;
+const BUILTIN_MATH_MIN: FunctionID = 9;
+const BUILTIN_ISNAN: FunctionID = 10;
+const BUILTIN_PARSEINT: FunctionID = 11;
+const BUILTIN_PARSEFLOAT: FunctionID = 12;
+const BUILTIN_ARRAY_PUSH: FunctionID = 13;
+const BUILTIN_ARRAY_POP: FunctionID = 14;
+const BUILTIN_ARRAY_JOIN: FunctionID = 15;
+const BUILTIN_ARRAY_INDEXOF: FunctionID = 16;
+const BUILTIN_ARRAY_SLICE: FunctionID = 17;
+const BUILTIN_ARRAY_CONCAT: FunctionID = 18;
+const BUILTIN_ARRAY_MAP: FunctionID = 19;
+const BUILTIN_ARRAY_FILTER: FunctionID = 20;
+const BUILTIN_ARRAY_FOREACH: FunctionID = 21;
+const BUILTIN_ARRAY_ISARRAY: FunctionID = 22;
 
 // Suspendable generator builtins
-const BUILTIN_GEN_NEXT: u8 = 23;
-const BUILTIN_GEN_THROW: u8 = 24;
-const BUILTIN_GEN_RETURN: u8 = 25;
+const BUILTIN_GEN_NEXT: FunctionID = 23;
+const BUILTIN_GEN_THROW: FunctionID = 24;
+const BUILTIN_GEN_RETURN: FunctionID = 25;
 
-const BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE: u8 = 26;
-const BUILTIN_ABSTRACT_MODULE_SOURCE_TOSTRINGTAG_GET: u8 = 27;
+const BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE: FunctionID = 26;
+const BUILTIN_ABSTRACT_MODULE_SOURCE_TOSTRINGTAG_GET: FunctionID = 27;
 
-const BUILTIN_STRING_SPLIT: u8 = 30;
-const BUILTIN_STRING_INDEXOF: u8 = 31;
-const BUILTIN_STRING_SLICE: u8 = 32;
-const BUILTIN_STRING_TOUPPERCASE: u8 = 33;
-const BUILTIN_STRING_TOLOWERCASE: u8 = 34;
-const BUILTIN_STRING_TRIM: u8 = 35;
-const BUILTIN_STRING_CHARAT: u8 = 36;
-const BUILTIN_STRING_INCLUDES: u8 = 37;
-const BUILTIN_STRING_REPLACE: u8 = 38;
-const BUILTIN_STRING_STARTSWITH: u8 = 39;
-const BUILTIN_STRING_ENDSWITH: u8 = 40;
-const BUILTIN_STRING_SUBSTRING: u8 = 41;
-const BUILTIN_STRING_PADSTART: u8 = 42;
-const BUILTIN_STRING_PADEND: u8 = 43;
-const BUILTIN_STRING_REPEAT: u8 = 44;
-const BUILTIN_STRING_CHARCODEAT: u8 = 45;
-const BUILTIN_STRING_FROMCHARCODE: u8 = 46;
-const BUILTIN_STRING_TRIMSTART: u8 = 47;
-const BUILTIN_STRING_TRIMEND: u8 = 48;
-const BUILTIN_STRING_LASTINDEXOF: u8 = 49;
-const BUILTIN_JSON_STRINGIFY: u8 = 50;
-const BUILTIN_JSON_PARSE: u8 = 51;
-const BUILTIN_ARRAY_REDUCE: u8 = 52;
-const BUILTIN_BIGINT_ASUINTN: u8 = 53;
-const BUILTIN_BIGINT_ASINTN: u8 = 54;
+const BUILTIN_STRING_SPLIT: FunctionID = 30;
+const BUILTIN_STRING_INDEXOF: FunctionID = 31;
+const BUILTIN_STRING_SLICE: FunctionID = 32;
+const BUILTIN_STRING_TOUPPERCASE: FunctionID = 33;
+const BUILTIN_STRING_TOLOWERCASE: FunctionID = 34;
+const BUILTIN_STRING_TRIM: FunctionID = 35;
+const BUILTIN_STRING_CHARAT: FunctionID = 36;
+const BUILTIN_STRING_INCLUDES: FunctionID = 37;
+const BUILTIN_STRING_REPLACE: FunctionID = 38;
+const BUILTIN_STRING_STARTSWITH: FunctionID = 39;
+const BUILTIN_STRING_ENDSWITH: FunctionID = 40;
+const BUILTIN_STRING_SUBSTRING: FunctionID = 41;
+const BUILTIN_STRING_PADSTART: FunctionID = 42;
+const BUILTIN_STRING_PADEND: FunctionID = 43;
+const BUILTIN_STRING_REPEAT: FunctionID = 44;
+const BUILTIN_STRING_CHARCODEAT: FunctionID = 45;
+const BUILTIN_STRING_FROMCHARCODE: FunctionID = 46;
+const BUILTIN_STRING_TRIMSTART: FunctionID = 47;
+const BUILTIN_STRING_TRIMEND: FunctionID = 48;
+const BUILTIN_STRING_LASTINDEXOF: FunctionID = 49;
+const BUILTIN_JSON_STRINGIFY: FunctionID = 50;
+const BUILTIN_JSON_PARSE: FunctionID = 51;
+const BUILTIN_ARRAY_REDUCE: FunctionID = 52;
+const BUILTIN_BIGINT_ASUINTN: FunctionID = 53;
+const BUILTIN_BIGINT_ASINTN: FunctionID = 54;
 // Constructor sentinels (for typeof -> "function" and instanceof checks)
-const BUILTIN_CTOR_ERROR: u8 = 60;
-const BUILTIN_CTOR_TYPEERROR: u8 = 61;
-const BUILTIN_CTOR_SYNTAXERROR: u8 = 62;
-const BUILTIN_CTOR_RANGEERROR: u8 = 63;
-const BUILTIN_CTOR_REFERENCEERROR: u8 = 64;
-const BUILTIN_CTOR_DATE: u8 = 65;
-const BUILTIN_CTOR_FUNCTION: u8 = 66;
-const BUILTIN_CTOR_NUMBER: u8 = 67;
-const BUILTIN_CTOR_STRING: u8 = 68;
-const BUILTIN_CTOR_BOOLEAN: u8 = 69;
-const BUILTIN_CTOR_OBJECT: u8 = 70;
-const BUILTIN_EVAL: u8 = 71;
-const BUILTIN_NEW_FUNCTION: u8 = 72;
+const BUILTIN_CTOR_ERROR: FunctionID = 60;
+const BUILTIN_CTOR_TYPEERROR: FunctionID = 61;
+const BUILTIN_CTOR_SYNTAXERROR: FunctionID = 62;
+const BUILTIN_CTOR_RANGEERROR: FunctionID = 63;
+const BUILTIN_CTOR_REFERENCEERROR: FunctionID = 64;
+const BUILTIN_CTOR_DATE: FunctionID = 65;
+const BUILTIN_CTOR_FUNCTION: FunctionID = 66;
+const BUILTIN_CTOR_NUMBER: FunctionID = 67;
+const BUILTIN_CTOR_STRING: FunctionID = 68;
+const BUILTIN_CTOR_BOOLEAN: FunctionID = 69;
+const BUILTIN_CTOR_OBJECT: FunctionID = 70;
+const BUILTIN_EVAL: FunctionID = 71;
+const BUILTIN_NEW_FUNCTION: FunctionID = 72;
 // Number static methods
-const BUILTIN_NUMBER_ISNAN: u8 = 73;
-const BUILTIN_NUMBER_ISFINITE: u8 = 74;
-const BUILTIN_NUMBER_ISINTEGER: u8 = 75;
-const BUILTIN_NUMBER_ISSAFEINTEGER: u8 = 76;
+const BUILTIN_NUMBER_ISNAN: FunctionID = 73;
+const BUILTIN_NUMBER_ISFINITE: FunctionID = 74;
+const BUILTIN_NUMBER_ISINTEGER: FunctionID = 75;
+const BUILTIN_NUMBER_ISSAFEINTEGER: FunctionID = 76;
 // Number instance methods
-const BUILTIN_NUM_TOFIXED: u8 = 77;
-const BUILTIN_NUM_TOEXPONENTIAL: u8 = 78;
-const BUILTIN_NUM_TOPRECISION: u8 = 79;
-const BUILTIN_NUM_TOSTRING: u8 = 80;
-const BUILTIN_NUM_VALUEOF: u8 = 81;
+const BUILTIN_NUM_TOFIXED: FunctionID = 77;
+const BUILTIN_NUM_TOEXPONENTIAL: FunctionID = 78;
+const BUILTIN_NUM_TOPRECISION: FunctionID = 79;
+const BUILTIN_NUM_TOSTRING: FunctionID = 80;
+const BUILTIN_NUM_VALUEOF: FunctionID = 81;
 // Map methods
-const BUILTIN_MAP_SET: u8 = 82;
-const BUILTIN_MAP_GET: u8 = 83;
-const BUILTIN_MAP_HAS: u8 = 84;
-const BUILTIN_MAP_DELETE: u8 = 85;
-const BUILTIN_MAP_KEYS: u8 = 86;
-const BUILTIN_MAP_VALUES: u8 = 87;
-const BUILTIN_MAP_ENTRIES: u8 = 88;
-const BUILTIN_MAP_FOREACH: u8 = 89;
-const BUILTIN_MAP_CLEAR: u8 = 90;
+const BUILTIN_MAP_SET: FunctionID = 82;
+const BUILTIN_MAP_GET: FunctionID = 83;
+const BUILTIN_MAP_HAS: FunctionID = 84;
+const BUILTIN_MAP_DELETE: FunctionID = 85;
+const BUILTIN_MAP_KEYS: FunctionID = 86;
+const BUILTIN_MAP_VALUES: FunctionID = 87;
+const BUILTIN_MAP_ENTRIES: FunctionID = 88;
+const BUILTIN_MAP_FOREACH: FunctionID = 89;
+const BUILTIN_MAP_CLEAR: FunctionID = 90;
 // Set methods
-const BUILTIN_SET_ADD: u8 = 91;
-const BUILTIN_SET_HAS: u8 = 92;
-const BUILTIN_SET_DELETE: u8 = 93;
-// const BUILTIN_SET_KEYS: u8 = 94;
-const BUILTIN_SET_VALUES: u8 = 95;
-const BUILTIN_SET_ENTRIES: u8 = 96;
-const BUILTIN_SET_FOREACH: u8 = 97;
-const BUILTIN_SET_CLEAR: u8 = 98;
+const BUILTIN_SET_ADD: FunctionID = 91;
+const BUILTIN_SET_HAS: FunctionID = 92;
+const BUILTIN_SET_DELETE: FunctionID = 93;
+// const BUILTIN_SET_KEYS: FunctionID = 94;
+const BUILTIN_SET_VALUES: FunctionID = 95;
+const BUILTIN_SET_ENTRIES: FunctionID = 96;
+const BUILTIN_SET_FOREACH: FunctionID = 97;
+const BUILTIN_SET_CLEAR: FunctionID = 98;
 // Constructor sentinels
-const BUILTIN_CTOR_MAP: u8 = 99;
-const BUILTIN_CTOR_SET: u8 = 100;
-const BUILTIN_ITERATOR_NEXT: u8 = 101;
-const BUILTIN_OBJECT_KEYS: u8 = 102;
-const BUILTIN_OBJECT_VALUES: u8 = 103;
-const BUILTIN_OBJECT_ENTRIES: u8 = 104;
-const BUILTIN_OBJECT_ASSIGN: u8 = 105;
-const BUILTIN_OBJECT_FREEZE: u8 = 106;
-const BUILTIN_OBJECT_HASOWN: u8 = 107;
-const BUILTIN_OBJECT_CREATE: u8 = 108;
-const BUILTIN_OBJECT_GETPROTOTYPEOF: u8 = 109;
-const BUILTIN_OBJECT_DEFINEPROPS: u8 = 110;
-const BUILTIN_OBJECT_PREVENTEXT: u8 = 111;
-const BUILTIN_OBJECT_GROUPBY: u8 = 112;
-const BUILTIN_OBJECT_DEFINEPROP: u8 = 113;
-const BUILTIN_OBJ_HASOWNPROPERTY: u8 = 114;
-const BUILTIN_FN_CALL: u8 = 115;
-const BUILTIN_FN_BIND: u8 = 116;
-const BUILTIN_OBJECT_GETOWNPROPDESC: u8 = 117;
-const BUILTIN_OBJECT_SETPROTOTYPEOF: u8 = 118;
-const BUILTIN_FN_APPLY: u8 = 119;
-const BUILTIN_OBJECT_GETOWNPROPERTYNAMES: u8 = 120;
-const BUILTIN_ARRAY_ITERATOR: u8 = 121;
-const BUILTIN_CTOR_WEAKMAP: u8 = 122;
-const BUILTIN_CTOR_WEAKSET: u8 = 123;
-const BUILTIN_CTOR_WEAKREF: u8 = 124;
-const BUILTIN_WEAKREF_DEREF: u8 = 125;
-const BUILTIN_SYMBOL: u8 = 126;
-const BUILTIN_SYMBOL_FOR: u8 = 127;
-const BUILTIN_SYMBOL_KEYFOR: u8 = 128;
-const BUILTIN_OBJ_TOSTRING: u8 = 129;
-const BUILTIN_CTOR_FR: u8 = 130;
-const BUILTIN_FR_REGISTER: u8 = 131;
-const BUILTIN_FR_UNREGISTER: u8 = 132;
-const BUILTIN_BIGINT: u8 = 133;
-const BUILTIN_CTOR_ARRAY: u8 = 134;
-const BUILTIN_ARRAY_OF: u8 = 135;
-const BUILTIN_ARRAY_FROM: u8 = 136;
-const BUILTIN_ARRAY_SHIFT: u8 = 137;
-const BUILTIN_ARRAY_UNSHIFT: u8 = 138;
-const BUILTIN_ARRAY_SPLICE: u8 = 139;
-const BUILTIN_ARRAY_REVERSE: u8 = 140;
-const BUILTIN_ARRAY_SORT: u8 = 141;
-const BUILTIN_ARRAY_FIND: u8 = 142;
-const BUILTIN_ARRAY_FINDINDEX: u8 = 143;
-const BUILTIN_ARRAY_INCLUDES: u8 = 144;
-const BUILTIN_ARRAY_FLAT: u8 = 145;
-const BUILTIN_ARRAY_FLATMAP: u8 = 146;
-const BUILTIN_ARRAY_AT: u8 = 147;
-const BUILTIN_ARRAY_EVERY: u8 = 148;
-const BUILTIN_ARRAY_SOME: u8 = 149;
-const BUILTIN_ARRAY_FILL: u8 = 150;
-const BUILTIN_ARRAY_LASTINDEXOF: u8 = 151;
-const BUILTIN_ARRAY_FINDLAST: u8 = 152;
-const BUILTIN_ARRAY_FINDLASTINDEX: u8 = 153;
-const BUILTIN_ARRAY_REDUCERIGHT: u8 = 154;
-const BUILTIN_MATH_SIN: u8 = 155;
-const BUILTIN_MATH_COS: u8 = 156;
-const BUILTIN_MATH_TAN: u8 = 157;
-const BUILTIN_MATH_ASIN: u8 = 158;
-const BUILTIN_MATH_ACOS: u8 = 159;
-const BUILTIN_MATH_ATAN: u8 = 160;
-const BUILTIN_MATH_ATAN2: u8 = 161;
-const BUILTIN_MATH_SINH: u8 = 162;
-const BUILTIN_MATH_COSH: u8 = 163;
-const BUILTIN_MATH_TANH: u8 = 164;
-const BUILTIN_MATH_ASINH: u8 = 165;
-const BUILTIN_MATH_ACOSH: u8 = 166;
-const BUILTIN_MATH_ATANH: u8 = 167;
-const BUILTIN_MATH_EXP: u8 = 168;
-const BUILTIN_MATH_EXPM1: u8 = 169;
-const BUILTIN_MATH_LOG: u8 = 170;
-const BUILTIN_MATH_LOG10: u8 = 171;
-const BUILTIN_MATH_LOG1P: u8 = 172;
-const BUILTIN_MATH_LOG2: u8 = 173;
-const BUILTIN_MATH_FROUND: u8 = 174;
-const BUILTIN_MATH_TRUNC: u8 = 175;
-const BUILTIN_MATH_CBRT: u8 = 176;
-const BUILTIN_MATH_HYPOT: u8 = 177;
-const BUILTIN_MATH_SIGN: u8 = 178;
-const BUILTIN_MATH_POW: u8 = 179;
-const BUILTIN_MATH_RANDOM: u8 = 180;
-const BUILTIN_MATH_CLZ32: u8 = 181;
-const BUILTIN_MATH_IMUL: u8 = 182;
-const BUILTIN_CTOR_REGEXP: u8 = 183;
-const BUILTIN_REGEX_EXEC: u8 = 184;
-const BUILTIN_REGEX_TEST: u8 = 185;
-const BUILTIN_STRING_MATCH: u8 = 186;
-const BUILTIN_STRING_REPLACEALL: u8 = 187;
-const BUILTIN_STRING_SEARCH: u8 = 188;
-const BUILTIN_STRING_TOSTRING: u8 = 28;
-const BUILTIN_STRING_VALUEOF: u8 = 29;
+const BUILTIN_CTOR_MAP: FunctionID = 99;
+const BUILTIN_CTOR_SET: FunctionID = 100;
+const BUILTIN_ITERATOR_NEXT: FunctionID = 101;
+const BUILTIN_OBJECT_KEYS: FunctionID = 102;
+const BUILTIN_OBJECT_VALUES: FunctionID = 103;
+const BUILTIN_OBJECT_ENTRIES: FunctionID = 104;
+const BUILTIN_OBJECT_ASSIGN: FunctionID = 105;
+const BUILTIN_OBJECT_FREEZE: FunctionID = 106;
+const BUILTIN_OBJECT_HASOWN: FunctionID = 107;
+const BUILTIN_OBJECT_CREATE: FunctionID = 108;
+const BUILTIN_OBJECT_GETPROTOTYPEOF: FunctionID = 109;
+const BUILTIN_OBJECT_DEFINEPROPS: FunctionID = 110;
+const BUILTIN_OBJECT_PREVENTEXT: FunctionID = 111;
+const BUILTIN_OBJECT_GROUPBY: FunctionID = 112;
+const BUILTIN_OBJECT_DEFINEPROP: FunctionID = 113;
+const BUILTIN_OBJ_HASOWNPROPERTY: FunctionID = 114;
+const BUILTIN_FN_CALL: FunctionID = 115;
+const BUILTIN_FN_BIND: FunctionID = 116;
+const BUILTIN_OBJECT_GETOWNPROPDESC: FunctionID = 117;
+const BUILTIN_OBJECT_SETPROTOTYPEOF: FunctionID = 118;
+const BUILTIN_FN_APPLY: FunctionID = 119;
+const BUILTIN_OBJECT_GETOWNPROPERTYNAMES: FunctionID = 120;
+const BUILTIN_ARRAY_ITERATOR: FunctionID = 121;
+const BUILTIN_CTOR_WEAKMAP: FunctionID = 122;
+const BUILTIN_CTOR_WEAKSET: FunctionID = 123;
+const BUILTIN_CTOR_WEAKREF: FunctionID = 124;
+const BUILTIN_WEAKREF_DEREF: FunctionID = 125;
+const BUILTIN_SYMBOL: FunctionID = 126;
+const BUILTIN_SYMBOL_FOR: FunctionID = 127;
+const BUILTIN_SYMBOL_KEYFOR: FunctionID = 128;
+const BUILTIN_OBJ_TOSTRING: FunctionID = 129;
+const BUILTIN_CTOR_FR: FunctionID = 130;
+const BUILTIN_FR_REGISTER: FunctionID = 131;
+const BUILTIN_FR_UNREGISTER: FunctionID = 132;
+const BUILTIN_BIGINT: FunctionID = 133;
+const BUILTIN_CTOR_ARRAY: FunctionID = 134;
+const BUILTIN_ARRAY_OF: FunctionID = 135;
+const BUILTIN_ARRAY_FROM: FunctionID = 136;
+const BUILTIN_ARRAY_SHIFT: FunctionID = 137;
+const BUILTIN_ARRAY_UNSHIFT: FunctionID = 138;
+const BUILTIN_ARRAY_SPLICE: FunctionID = 139;
+const BUILTIN_ARRAY_REVERSE: FunctionID = 140;
+const BUILTIN_ARRAY_SORT: FunctionID = 141;
+const BUILTIN_ARRAY_FIND: FunctionID = 142;
+const BUILTIN_ARRAY_FINDINDEX: FunctionID = 143;
+const BUILTIN_ARRAY_INCLUDES: FunctionID = 144;
+const BUILTIN_ARRAY_FLAT: FunctionID = 145;
+const BUILTIN_ARRAY_FLATMAP: FunctionID = 146;
+const BUILTIN_ARRAY_AT: FunctionID = 147;
+const BUILTIN_ARRAY_EVERY: FunctionID = 148;
+const BUILTIN_ARRAY_SOME: FunctionID = 149;
+const BUILTIN_ARRAY_FILL: FunctionID = 150;
+const BUILTIN_ARRAY_LASTINDEXOF: FunctionID = 151;
+const BUILTIN_ARRAY_FINDLAST: FunctionID = 152;
+const BUILTIN_ARRAY_FINDLASTINDEX: FunctionID = 153;
+const BUILTIN_ARRAY_REDUCERIGHT: FunctionID = 154;
+const BUILTIN_MATH_SIN: FunctionID = 155;
+const BUILTIN_MATH_COS: FunctionID = 156;
+const BUILTIN_MATH_TAN: FunctionID = 157;
+const BUILTIN_MATH_ASIN: FunctionID = 158;
+const BUILTIN_MATH_ACOS: FunctionID = 159;
+const BUILTIN_MATH_ATAN: FunctionID = 160;
+const BUILTIN_MATH_ATAN2: FunctionID = 161;
+const BUILTIN_MATH_SINH: FunctionID = 162;
+const BUILTIN_MATH_COSH: FunctionID = 163;
+const BUILTIN_MATH_TANH: FunctionID = 164;
+const BUILTIN_MATH_ASINH: FunctionID = 165;
+const BUILTIN_MATH_ACOSH: FunctionID = 166;
+const BUILTIN_MATH_ATANH: FunctionID = 167;
+const BUILTIN_MATH_EXP: FunctionID = 168;
+const BUILTIN_MATH_EXPM1: FunctionID = 169;
+const BUILTIN_MATH_LOG: FunctionID = 170;
+const BUILTIN_MATH_LOG10: FunctionID = 171;
+const BUILTIN_MATH_LOG1P: FunctionID = 172;
+const BUILTIN_MATH_LOG2: FunctionID = 173;
+const BUILTIN_MATH_FROUND: FunctionID = 174;
+const BUILTIN_MATH_TRUNC: FunctionID = 175;
+const BUILTIN_MATH_CBRT: FunctionID = 176;
+const BUILTIN_MATH_HYPOT: FunctionID = 177;
+const BUILTIN_MATH_SIGN: FunctionID = 178;
+const BUILTIN_MATH_POW: FunctionID = 179;
+const BUILTIN_MATH_RANDOM: FunctionID = 180;
+const BUILTIN_MATH_CLZ32: FunctionID = 181;
+const BUILTIN_MATH_IMUL: FunctionID = 182;
+const BUILTIN_CTOR_REGEXP: FunctionID = 183;
+const BUILTIN_REGEX_EXEC: FunctionID = 184;
+const BUILTIN_REGEX_TEST: FunctionID = 185;
+const BUILTIN_STRING_MATCH: FunctionID = 186;
+const BUILTIN_STRING_REPLACEALL: FunctionID = 187;
+const BUILTIN_STRING_SEARCH: FunctionID = 188;
+const BUILTIN_STRING_TOSTRING: FunctionID = 28;
+const BUILTIN_STRING_VALUEOF: FunctionID = 29;
 
 // Date methods
-const BUILTIN_DATE_NOW: u8 = 189;
-const BUILTIN_DATE_GETTIME: u8 = 190;
-const BUILTIN_DATE_TOSTRING: u8 = 191;
-const BUILTIN_DATE_TOLOCALEDATESTRING: u8 = 192;
-const BUILTIN_DATE_GETFULLYEAR: u8 = 193;
-const BUILTIN_DATE_GETMONTH: u8 = 194;
-const BUILTIN_DATE_GETDATE: u8 = 195;
-const BUILTIN_DATE_GETDAY: u8 = 196;
-const BUILTIN_DATE_GETHOURS: u8 = 197;
-const BUILTIN_DATE_GETMINUTES: u8 = 198;
-const BUILTIN_DATE_GETSECONDS: u8 = 199;
-const BUILTIN_DATE_GETMILLISECONDS: u8 = 200;
-const BUILTIN_DATE_VALUEOF: u8 = 201;
-const BUILTIN_DATE_SETFULLYEAR: u8 = 202;
-const BUILTIN_DATE_SETMONTH: u8 = 203;
-const BUILTIN_DATE_SETDATE: u8 = 204;
-const BUILTIN_DATE_SETHOURS: u8 = 205;
-const BUILTIN_DATE_SETMINUTES: u8 = 206;
-const BUILTIN_DATE_TOLOCALETIMESTRING: u8 = 207;
-const BUILTIN_DATE_TOLOCALESTRING: u8 = 208;
-const BUILTIN_DATE_TOISOSTRING: u8 = 209;
-const BUILTIN_DATE_GETUTCFULLYEAR: u8 = 210;
-const BUILTIN_DATE_GETUTCMONTH: u8 = 211;
-const BUILTIN_DATE_GETUTCDATE: u8 = 212;
-const BUILTIN_DATE_GETUTCHOURS: u8 = 213;
-const BUILTIN_DATE_GETUTCMINUTES: u8 = 214;
-const BUILTIN_DATE_GETUTCSECONDS: u8 = 215;
-const BUILTIN_DATE_GETTIMEZONEOFFSET: u8 = 216;
-const BUILTIN_DATE_PARSE: u8 = 217;
-const BUILTIN_DATE_SETTIME: u8 = 218;
-const BUILTIN_DATE_TODATESTRING: u8 = 219;
-const BUILTIN_SETTIMEOUT: u8 = 220;
-const BUILTIN_CLEARTIMEOUT: u8 = 221;
-const BUILTIN_SETINTERVAL: u8 = 222;
-const BUILTIN_CLEARINTERVAL: u8 = 223;
-const BUILTIN_CTOR_ARRAYBUFFER: u8 = 224;
-const BUILTIN_CTOR_DATAVIEW: u8 = 225;
-const BUILTIN_CTOR_INT8ARRAY: u8 = 226;
-const BUILTIN_CTOR_UINT8ARRAY: u8 = 227;
-const BUILTIN_ARRAYBUFFER_RESIZE: u8 = 228;
-const BUILTIN_CTOR_UINT8CLAMPEDARRAY: u8 = 229;
-const BUILTIN_CTOR_INT16ARRAY: u8 = 230;
-const BUILTIN_CTOR_UINT16ARRAY: u8 = 231;
-const BUILTIN_CTOR_INT32ARRAY: u8 = 232;
-const BUILTIN_CTOR_UINT32ARRAY: u8 = 233;
-const BUILTIN_CTOR_FLOAT32ARRAY: u8 = 234;
-const BUILTIN_CTOR_FLOAT64ARRAY: u8 = 235;
-const BUILTIN_CTOR_PROMISE: u8 = 236;
-const BUILTIN_PROMISE_RESOLVE: u8 = 237;
-const BUILTIN_PROMISE_ALL: u8 = 238;
-const BUILTIN_PROMISE_THEN: u8 = 239;
-const BUILTIN_PROMISE_NOOP: u8 = 240;
-const BUILTIN_CTOR_PROXY: u8 = 241;
-const BUILTIN_CTOR_SHAREDARRAYBUFFER: u8 = 242;
-const BUILTIN_ATOMICS_ISLOCKFREE: u8 = 243;
-const BUILTIN_ATOMICS_LOAD: u8 = 244;
-const BUILTIN_ATOMICS_STORE: u8 = 245;
-const BUILTIN_ATOMICS_COMPAREEXCHANGE: u8 = 246;
-const BUILTIN_ATOMICS_ADD: u8 = 247;
-const BUILTIN_ATOMICS_EXCHANGE: u8 = 248;
-const BUILTIN_ATOMICS_WAIT: u8 = 249;
-const BUILTIN_ATOMICS_NOTIFY: u8 = 250;
-const BUILTIN_ATOMICS_WAITASYNC: u8 = 251;
-const BUILTIN_ASYNCGEN_NEXT: u8 = 252;
-const BUILTIN_ASYNCGEN_THROW: u8 = 253;
-const BUILTIN_ASYNCGEN_RETURN: u8 = 254;
-const BUILTIN_REFLECT_APPLY: u8 = 255;
+const BUILTIN_DATE_NOW: FunctionID = 189;
+const BUILTIN_DATE_GETTIME: FunctionID = 190;
+const BUILTIN_DATE_TOSTRING: FunctionID = 191;
+const BUILTIN_DATE_TOLOCALEDATESTRING: FunctionID = 192;
+const BUILTIN_DATE_GETFULLYEAR: FunctionID = 193;
+const BUILTIN_DATE_GETMONTH: FunctionID = 194;
+const BUILTIN_DATE_GETDATE: FunctionID = 195;
+const BUILTIN_DATE_GETDAY: FunctionID = 196;
+const BUILTIN_DATE_GETHOURS: FunctionID = 197;
+const BUILTIN_DATE_GETMINUTES: FunctionID = 198;
+const BUILTIN_DATE_GETSECONDS: FunctionID = 199;
+const BUILTIN_DATE_GETMILLISECONDS: FunctionID = 200;
+const BUILTIN_DATE_VALUEOF: FunctionID = 201;
+const BUILTIN_DATE_SETFULLYEAR: FunctionID = 202;
+const BUILTIN_DATE_SETMONTH: FunctionID = 203;
+const BUILTIN_DATE_SETDATE: FunctionID = 204;
+const BUILTIN_DATE_SETHOURS: FunctionID = 205;
+const BUILTIN_DATE_SETMINUTES: FunctionID = 206;
+const BUILTIN_DATE_TOLOCALETIMESTRING: FunctionID = 207;
+const BUILTIN_DATE_TOLOCALESTRING: FunctionID = 208;
+const BUILTIN_DATE_TOISOSTRING: FunctionID = 209;
+const BUILTIN_DATE_GETUTCFULLYEAR: FunctionID = 210;
+const BUILTIN_DATE_GETUTCMONTH: FunctionID = 211;
+const BUILTIN_DATE_GETUTCDATE: FunctionID = 212;
+const BUILTIN_DATE_GETUTCHOURS: FunctionID = 213;
+const BUILTIN_DATE_GETUTCMINUTES: FunctionID = 214;
+const BUILTIN_DATE_GETUTCSECONDS: FunctionID = 215;
+const BUILTIN_DATE_GETTIMEZONEOFFSET: FunctionID = 216;
+const BUILTIN_DATE_PARSE: FunctionID = 217;
+const BUILTIN_DATE_SETTIME: FunctionID = 218;
+const BUILTIN_DATE_TODATESTRING: FunctionID = 219;
+const BUILTIN_SETTIMEOUT: FunctionID = 220;
+const BUILTIN_CLEARTIMEOUT: FunctionID = 221;
+const BUILTIN_SETINTERVAL: FunctionID = 222;
+const BUILTIN_CLEARINTERVAL: FunctionID = 223;
+const BUILTIN_CTOR_ARRAYBUFFER: FunctionID = 224;
+const BUILTIN_CTOR_DATAVIEW: FunctionID = 225;
+const BUILTIN_CTOR_INT8ARRAY: FunctionID = 226;
+const BUILTIN_CTOR_UINT8ARRAY: FunctionID = 227;
+const BUILTIN_ARRAYBUFFER_RESIZE: FunctionID = 228;
+const BUILTIN_CTOR_UINT8CLAMPEDARRAY: FunctionID = 229;
+const BUILTIN_CTOR_INT16ARRAY: FunctionID = 230;
+const BUILTIN_CTOR_UINT16ARRAY: FunctionID = 231;
+const BUILTIN_CTOR_INT32ARRAY: FunctionID = 232;
+const BUILTIN_CTOR_UINT32ARRAY: FunctionID = 233;
+const BUILTIN_CTOR_FLOAT32ARRAY: FunctionID = 234;
+const BUILTIN_CTOR_FLOAT64ARRAY: FunctionID = 235;
+const BUILTIN_CTOR_PROMISE: FunctionID = 236;
+const BUILTIN_PROMISE_RESOLVE: FunctionID = 237;
+const BUILTIN_PROMISE_ALL: FunctionID = 238;
+const BUILTIN_PROMISE_THEN: FunctionID = 239;
+const BUILTIN_PROMISE_NOOP: FunctionID = 240;
+const BUILTIN_CTOR_PROXY: FunctionID = 241;
+const BUILTIN_CTOR_SHAREDARRAYBUFFER: FunctionID = 242;
+const BUILTIN_ATOMICS_ISLOCKFREE: FunctionID = 243;
+const BUILTIN_ATOMICS_LOAD: FunctionID = 244;
+const BUILTIN_ATOMICS_STORE: FunctionID = 245;
+const BUILTIN_ATOMICS_COMPAREEXCHANGE: FunctionID = 246;
+const BUILTIN_ATOMICS_ADD: FunctionID = 247;
+const BUILTIN_ATOMICS_EXCHANGE: FunctionID = 248;
+const BUILTIN_ATOMICS_WAIT: FunctionID = 249;
+const BUILTIN_ATOMICS_NOTIFY: FunctionID = 250;
+const BUILTIN_ATOMICS_WAITASYNC: FunctionID = 251;
+const BUILTIN_ASYNCGEN_NEXT: FunctionID = 252;
+const BUILTIN_ASYNCGEN_THROW: FunctionID = 253;
+const BUILTIN_ASYNCGEN_RETURN: FunctionID = 254;
+const BUILTIN_REFLECT_APPLY: FunctionID = 255;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -523,7 +539,7 @@ pub struct VM<'gc> {
     // Property storage for VmFunction values, keyed by function IP
     fn_props: HashMap<usize, VmObjectHandle<'gc>>,
     // Property storage for VmNativeFunction values, keyed by builtin id
-    native_fn_props: HashMap<u8, VmObjectHandle<'gc>>,
+    native_fn_props: HashMap<FunctionID, VmObjectHandle<'gc>>,
     // Method home objects keyed by function IP, used to resolve `super` correctly.
     fn_home_objects: HashMap<usize, Value<'gc>>,
     // Global this object — top-level `this` refers to this; SetProperty on it writes to globals
@@ -1074,13 +1090,13 @@ impl<'gc> VM<'gc> {
         Value::VmArray(arr)
     }
 
-    fn init_native_ctor_header(map: &mut IndexMap<String, Value<'gc>>, native_id: u8, name: &str, length: f64) {
+    fn init_native_ctor_header(map: &mut IndexMap<String, Value<'gc>>, native_id: FunctionID, name: &str, length: f64) {
         map.insert("__native_id__".to_string(), Value::Number(native_id as f64));
         Self::insert_property_with_attributes(map, "length", &Value::Number(length), false, false, true);
         Self::insert_property_with_attributes(map, "name", &Value::from(name), false, false, true);
     }
 
-    fn native_function_name(id: u8) -> &'static str {
+    fn native_function_name(id: FunctionID) -> &'static str {
         match id {
             BUILTIN_CTOR_PROMISE => "Promise",
             BUILTIN_PROMISE_RESOLVE => "resolve",
@@ -1142,7 +1158,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn native_function_length(id: u8) -> f64 {
+    fn native_function_length(id: FunctionID) -> f64 {
         match id {
             BUILTIN_CTOR_PROMISE => 1.0,
             BUILTIN_PROMISE_RESOLVE => 1.0,
@@ -1904,7 +1920,7 @@ impl<'gc> VM<'gc> {
                             | BUILTIN_CTOR_FLOAT32ARRAY
                             | BUILTIN_CTOR_FLOAT64ARRAY
                     )) || matches!(ctor, Value::VmObject(o)
-                            if o.borrow().get("__native_id__").and_then(|v| match v { Value::Number(n) => Some(*n as u8), _ => None })
+                            if get_function_id(*o)
                                 .map(|id| matches!(
                                     id,
                                     BUILTIN_CTOR_DATAVIEW
@@ -6391,9 +6407,7 @@ impl<'gc> VM<'gc> {
                 }
                 let target_is_function_ctor = match &target {
                     Value::VmNativeFunction(id) => *id == BUILTIN_CTOR_FUNCTION,
-                    Value::VmObject(map) => {
-                        matches!(map.borrow().get("__native_id__"), Some(Value::Number(n)) if *n as u8 == BUILTIN_CTOR_FUNCTION)
-                    }
+                    Value::VmObject(map) => get_function_id(*map) == Some(BUILTIN_CTOR_FUNCTION),
                     _ => false,
                 };
 
@@ -9213,7 +9227,7 @@ impl<'gc> VM<'gc> {
         props_rc
     }
 
-    fn get_native_fn_props(&mut self, ctx: &GcContext<'gc>, id: u8) -> VmObjectHandle<'gc> {
+    fn get_native_fn_props(&mut self, ctx: &GcContext<'gc>, id: FunctionID) -> VmObjectHandle<'gc> {
         if let Some(existing) = self.native_fn_props.get(&id) {
             return *existing;
         }
@@ -11377,7 +11391,7 @@ impl<'gc> VM<'gc> {
 
         // Error constructor family — each with __native_id__ and prototype
         {
-            let error_types: &[(&str, u8)] = &[
+            let error_types: &[(&str, FunctionID)] = &[
                 ("Error", BUILTIN_CTOR_ERROR),
                 ("TypeError", BUILTIN_CTOR_TYPEERROR),
                 ("SyntaxError", BUILTIN_CTOR_SYNTAXERROR),
@@ -12713,7 +12727,7 @@ impl<'gc> VM<'gc> {
                 _ => None,
             })
             .unwrap_or_else(|| "@@sym:4".to_string());
-        let make_async_gen_method = |id: u8, name: &str, length: f64| {
+        let make_async_gen_method = |id: FunctionID, name: &str, length: f64| {
             let mut m = IndexMap::new();
             m.insert("__native_id__".to_string(), Value::Number(id as f64));
             m.insert("name".to_string(), Value::from(name));
@@ -12976,7 +12990,7 @@ impl<'gc> VM<'gc> {
         None
     }
 
-    fn error_type_name_from_builtin(id: u8) -> Option<&'static str> {
+    fn error_type_name_from_builtin(id: FunctionID) -> Option<&'static str> {
         match id {
             BUILTIN_CTOR_ERROR => Some("Error"),
             BUILTIN_CTOR_TYPEERROR => Some("TypeError"),
@@ -12987,7 +13001,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn error_type_name_from_constructor(&mut self, ctx: &GcContext<'gc>, ctor: &Value<'gc>, fallback_id: u8) -> String {
+    fn error_type_name_from_constructor(&mut self, ctx: &GcContext<'gc>, ctor: &Value<'gc>, fallback_id: FunctionID) -> String {
         let ctor_name = self.read_named_property(ctx, ctor, "name");
         if self.pending_throw.is_none() {
             let name = value_to_string(&ctor_name);
@@ -13135,6 +13149,7 @@ impl<'gc> VM<'gc> {
             }
             Value::Function(name) => Ok(self.call_named_host_function_with_this(ctx, name, Some(this_arg), args)),
             Value::VmObject(map) => {
+                let function_id = get_function_id(*map);
                 let borrow = map.borrow();
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_this = borrow.get("__host_this__").cloned();
@@ -13216,8 +13231,7 @@ impl<'gc> VM<'gc> {
                         return self.call_proxy_trap(ctx, &handler, &trap_fn, &[target, this_arg.clone(), arg_array]);
                     }
                     self.vm_call_function_value(ctx, &target, this_arg, args)
-                } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
-                    let native_id = *native_id as u8;
+                } else if let Some(native_id) = function_id {
                     drop(borrow);
                     if native_id == BUILTIN_CTOR_PROXY {
                         let err = self.make_type_error_object(ctx, "Constructor Proxy requires 'new'");
@@ -13889,8 +13903,8 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         Value::VmObject(obj) => {
-                            if let Some(Value::Number(native_id)) = obj.borrow().get("__native_id__") {
-                                vm.call_builtin(ctx, *native_id as u8, &arg_vals)
+                            if let Some(native_id) = get_function_id(obj) {
+                                vm.call_builtin(ctx, native_id, &arg_vals)
                             } else {
                                 return Err(crate::make_js_error!(crate::JSErrorKind::TypeError {
                                     message: "is not a function".to_string()
@@ -13955,7 +13969,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Execute a native/built-in function
-    fn call_builtin(&mut self, ctx: &GcContext<'gc>, id: u8, args: &[Value<'gc>]) -> Value<'gc> {
+    fn call_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, args: &[Value<'gc>]) -> Value<'gc> {
         match id {
             BUILTIN_SETTIMEOUT | BUILTIN_SETINTERVAL => {
                 let callback = args.first().cloned().unwrap_or(Value::Undefined);
@@ -18320,7 +18334,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Execute a method call (receiver.method(args))
-    fn call_method_builtin(&mut self, ctx: &GcContext<'gc>, id: u8, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+    fn call_method_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
         match id {
             BUILTIN_SYMBOL => {
                 self.throw_type_error(ctx, "Symbol is not a constructor");
@@ -26621,11 +26635,10 @@ impl<'gc> VM<'gc> {
                     return self.construct_value(ctx, &bound_target, &final_args, Some(&forwarded_new_target));
                 }
                 let (id, is_async_ctor, is_async_gen_ctor, ctor_origin_global) = {
-                    let b = map.borrow();
-                    let id = match b.get("__native_id__") {
-                        Some(Value::Number(native_id)) => *native_id as u8,
+                    let id = match get_function_id(map) {
+                        Some(native_id) => native_id,
                         _ => {
-                            return if let Some(Value::String(host_name_u16)) = b.get("__host_fn__") {
+                            return if let Some(Value::String(host_name_u16)) = map.borrow().get("__host_fn__") {
                                 let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                                 if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(ctx, args, new_target)
@@ -26640,7 +26653,7 @@ impl<'gc> VM<'gc> {
                                         arr.borrow_mut(ctx)
                                             .props
                                             .insert("__typedarray_name__".to_string(), Value::from(ta_name));
-                                        if let Some(proto) = b.get("prototype").cloned() {
+                                        if let Some(proto) = map.borrow().get("prototype").cloned() {
                                             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                                         }
                                     }
@@ -26648,10 +26661,9 @@ impl<'gc> VM<'gc> {
                                 } else {
                                     Err(crate::raise_type_error!("Target is not a constructor"))
                                 }
-                            } else if b.contains_key("__fn_body__") {
+                            } else if map.borrow().contains_key("__fn_body__") {
                                 // Dynamic function created via `new Function(...)`.
-                                let proto = b.get("prototype").cloned();
-                                drop(b);
+                                let proto = map.borrow().get("prototype").cloned();
                                 let new_obj = new_gc_cell_ptr(ctx, IndexMap::new());
                                 if let Some(p) = &proto
                                     && matches!(
@@ -26672,9 +26684,12 @@ impl<'gc> VM<'gc> {
                             };
                         }
                     };
-                    let is_async_ctor = matches!(b.get("__async_function_constructor__"), Some(Value::Boolean(true)));
-                    let is_async_gen_ctor = matches!(b.get("__async_generator_function_constructor__"), Some(Value::Boolean(true)));
-                    let ctor_origin_global = b.get("__origin_global").cloned();
+                    let is_async_ctor = matches!(map.borrow().get("__async_function_constructor__"), Some(Value::Boolean(true)));
+                    let is_async_gen_ctor = matches!(
+                        map.borrow().get("__async_generator_function_constructor__"),
+                        Some(Value::Boolean(true))
+                    );
+                    let ctor_origin_global = map.borrow().get("__origin_global").cloned();
                     (id, is_async_ctor, is_async_gen_ctor, ctor_origin_global)
                 };
 
@@ -29432,6 +29447,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmObject(ref map) => {
+                let function_id = get_function_id(*map);
                 // Check if it's a Function wrapper (VmObject with __fn_body__ or __native_id__)
                 let borrow = map.borrow();
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
@@ -29527,8 +29543,7 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &thrown)?;
                         return Ok(OpcodeAction::Continue);
                     }
-                } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
-                    let id = *native_id as u8;
+                } else if let Some(id) = function_id {
                     // Proxy must be called with 'new'
                     if id == BUILTIN_CTOR_PROXY {
                         drop(borrow);
@@ -30858,9 +30873,9 @@ impl<'gc> VM<'gc> {
             _ => {
                 // Fallback: just call with args already on stack
                 if let Value::VmObject(ref map) = callee {
+                    let function_id = get_function_id(*map);
                     let borrow = map.borrow();
-                    if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
-                        let id = *native_id as u8;
+                    if let Some(id) = function_id {
                         drop(borrow);
                         let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                         self.stack.pop(); // pop callee
@@ -33714,9 +33729,8 @@ impl<'gc> VM<'gc> {
                     _ => "",
                 },
                 Value::VmObject(map) => {
-                    let borrow = map.borrow();
-                    if let Some(Value::Number(n)) = borrow.get("__native_id__") {
-                        match *n as u8 {
+                    if let Some(function_id) = get_function_id(*map) {
+                        match function_id {
                             BUILTIN_CTOR_DATE => "Date",
                             BUILTIN_CTOR_FUNCTION => "Function",
                             BUILTIN_CTOR_NUMBER => "Number",
@@ -34406,6 +34420,7 @@ impl<'gc> VM<'gc> {
             _ => {
                 // Check for VmObject with __proxy_target__, __native_id__ etc.
                 if let Value::VmObject(ref map) = callee {
+                    let function_id = get_function_id(*map);
                     let borrow = map.borrow();
                     if borrow.contains_key("__proxy_target__") || borrow.contains_key("__bound_target__") {
                         drop(borrow);
@@ -34428,8 +34443,7 @@ impl<'gc> VM<'gc> {
                                 return Ok(OpcodeAction::Continue);
                             }
                         }
-                    } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
-                        let id = *native_id as u8;
+                    } else if let Some(id) = function_id {
                         let is_async_ctor = matches!(borrow.get("__async_function_constructor__"), Some(Value::Boolean(true)));
                         let is_async_gen_ctor =
                             matches!(borrow.get("__async_generator_function_constructor__"), Some(Value::Boolean(true)));

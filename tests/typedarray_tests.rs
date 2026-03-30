@@ -1,77 +1,8 @@
 use javascript::*;
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 #[ctor::ctor]
 fn __init_test_logger() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
-}
-
-#[test]
-fn test_jsarraybuffer_creation_and_access() {
-    // Test creating a new ArrayBuffer
-    let mut buffer = JSArrayBuffer {
-        data: Arc::new(Mutex::new(vec![0; 16])),
-        ..JSArrayBuffer::default()
-    };
-
-    assert_eq!(buffer.data.lock().unwrap().len(), 16);
-    assert!(!buffer.detached);
-
-    // Test data access and modification
-    buffer.data.lock().unwrap()[0] = 42;
-    buffer.data.lock().unwrap()[15] = 255;
-    assert_eq!(buffer.data.lock().unwrap()[0], 42);
-    assert_eq!(buffer.data.lock().unwrap()[15], 255);
-
-    // Test detachment
-    buffer.detached = true;
-    assert!(buffer.detached);
-}
-
-#[test]
-fn test_arraybuffer_detachment() {
-    // Create an ArrayBuffer
-    let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: Arc::new(Mutex::new(vec![1, 2, 3, 4])),
-        ..JSArrayBuffer::default()
-    }));
-
-    assert!(!buffer.borrow().detached);
-    assert_eq!(buffer.borrow().data.lock().unwrap().len(), 4);
-
-    // Detach the buffer
-    buffer.borrow_mut().detached = true;
-
-    assert!(buffer.borrow().detached);
-    // Note: In a real implementation, detached buffers might clear their data
-    // For this test, we just check the flag
-}
-
-#[test]
-fn test_typedarray_kind_properties() {
-    // Test that all TypedArray kinds are properly defined
-    let all_kinds = vec![
-        TypedArrayKind::Int8,
-        TypedArrayKind::Uint8,
-        TypedArrayKind::Uint8Clamped,
-        TypedArrayKind::Int16,
-        TypedArrayKind::Uint16,
-        TypedArrayKind::Int32,
-        TypedArrayKind::Uint32,
-        TypedArrayKind::Float32,
-        TypedArrayKind::Float64,
-        TypedArrayKind::BigInt64,
-        TypedArrayKind::BigUint64,
-    ];
-
-    assert_eq!(all_kinds.len(), 11);
-
-    // Test Debug formatting
-    assert_eq!(format!("{:?}", TypedArrayKind::Int8), "Int8");
-    assert_eq!(format!("{:?}", TypedArrayKind::Float64), "Float64");
-    assert_eq!(format!("{:?}", TypedArrayKind::BigInt64), "BigInt64");
 }
 
 #[test]

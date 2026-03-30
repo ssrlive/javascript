@@ -30,7 +30,6 @@ mod parser;
 pub use parser::*;
 
 pub mod js_error;
-pub use js_error::*;
 
 pub mod opcode;
 pub use opcode::*;
@@ -148,7 +147,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             if run_as_module && let Some(injected_path) = extract_injected_module_filepath(script_str) {
                 p_str = injected_path;
             }
-            // slot_set(ctx, &root.global_env, InternalSlot::Filepath, &Value::String(utf8_to_utf16(&p_str)));
+
             Some(std::path::PathBuf::from(p_str))
         } else {
             None

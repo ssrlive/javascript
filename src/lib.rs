@@ -13,13 +13,8 @@ pub(crate) mod repl;
 pub(crate) mod unicode;
 
 pub use crate::core::{Token, TokenData};
-pub use core::{
-    JSArrayBuffer, JSDataView, JSObjectData, JSTypedArray, TypedArrayKind, new_js_object_data, parse_object_destructuring_pattern,
-    parse_simple_expression, parse_statement, parse_statements, read_script_file,
-};
-pub use core::{
-    PropertyKey, Value, env_set, evaluate_script_with_vm, format_js_number, object_get_key_value, object_set_key_value, tokenize,
-};
+pub use core::{PropertyKey, Value, evaluate_script_with_vm, format_js_number, tokenize};
+pub use core::{parse_object_destructuring_pattern, parse_simple_expression, parse_statement, parse_statements, read_script_file};
 pub use error::{JSError, JSErrorKind};
 // pub use js_promise::set_short_timer_threshold_ms;
 // pub use js_promise::set_wait_for_active_handles;

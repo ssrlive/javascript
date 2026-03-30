@@ -2,7 +2,7 @@ use crate::core::{Collect, Gc, GcCell, GcContext, GcPtr, GcTrace, GcWeak, new_gc
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
-    core::{ClassDefinition, DestructuringElement, EvalError, Expr, PropertyKey, Statement, VarDeclKind, is_error},
+    core::{ClassDefinition, DestructuringElement, Expr, PropertyKey, Statement, VarDeclKind, is_error},
     raise_type_error,
 };
 use indexmap::IndexMap;
@@ -1073,30 +1073,15 @@ impl<'gc> Value<'gc> {
         }
     }
     pub fn normalize_slot(&self) -> Value<'gc> {
-        match self {
-            Value::Property { value: Some(v), .. } => v.borrow().clone(),
-            Value::Property { value: None, .. } => Value::Undefined,
-            other => other.clone(),
-        }
-    }
-    pub fn to_property_key(&self, ctx: &GcContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<PropertyKey<'gc>, EvalError<'gc>> {
-        match self {
-            Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
-            Value::BigInt(b) => Ok(PropertyKey::String(b.to_string())),
-            Value::Symbol(sd) => Ok(PropertyKey::Symbol(*sd)),
-            Value::Object(_) => {
-                let prim = crate::core::to_primitive(ctx, self, "string", env)?;
-                match &prim {
-                    Value::String(s) => Ok(PropertyKey::String(utf16_to_utf8(s))),
-                    Value::Number(_) => Ok(PropertyKey::String(crate::core::value_to_string(&prim))),
-                    Value::Symbol(sd) => Ok(PropertyKey::Symbol(*sd)),
-                    other => Ok(PropertyKey::String(crate::core::value_to_string(other))),
-                }
-            }
-            other => Ok(PropertyKey::String(crate::core::value_to_string(other))),
-        }
+        // match self {
+        //     Value::Property { value: Some(v), .. } => v.borrow().clone(),
+        //     Value::Property { value: None, .. } => Value::Undefined,
+        //     other => other.clone(),
+        // }
+        todo!()
     }
 }
+
 impl From<f64> for Value<'_> {
     fn from(n: f64) -> Self {
         Value::Number(n)
@@ -1193,14 +1178,7 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
         }
     }
 }
-pub fn to_primitive<'gc>(
-    _ctx: &GcContext<'gc>,
-    _val: &Value<'gc>,
-    _hint: &str,
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    todo!()
-}
+
 thread_local! {
     static VTOS_DEPTH : std::cell::Cell < usize > = const { std::cell::Cell::new(0) };
 }

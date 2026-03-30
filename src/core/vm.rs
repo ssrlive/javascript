@@ -1961,7 +1961,7 @@ impl<'gc> VM<'gc> {
                                 || borrow.contains_key("__buffer__")
                                 || borrow.contains_key("__typedarray_name__")
                                 || borrow.contains_key("__typedarray_buffer__")
-                                || view_proto_ptrs.iter().any(|p| std::ptr::eq(&*o as *const _, &**p as *const _))
+                                || view_proto_ptrs.iter().any(|p| Gc::ptr_eq(o, *p))
                             {
                                 found = true;
                                 break;
@@ -5410,7 +5410,7 @@ impl<'gc> VM<'gc> {
                         && matches!(type_name.as_str(), "Boolean" | "Number" | "String")
                         && let Some(Value::VmObject(ctor)) = self.globals.get(&type_name).cloned()
                         && let Some(Value::VmObject(expected_proto)) = ctor.borrow().get("prototype").cloned()
-                        && std::ptr::eq(&**proto_rc, &*expected_proto)
+                        && Gc::ptr_eq(*proto_rc, expected_proto)
                     {
                         return Value::Boolean(true);
                     }

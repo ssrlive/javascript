@@ -139,17 +139,9 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     let mut arena = JsArenaVm::new(|ctx| VM::new(Chunk::new(), ctx));
 
     arena.mutate_root(|ctx, vm| {
-        // initialize_global_constructors(ctx, &root.global_env)?;
-
         if !crate::js_agent::is_agent_thread() {
             crate::js_agent::reset_agent_state();
         }
-
-        // env_set(ctx, &root.global_env, "globalThis", &Value::Object(root.global_env))?;
-        // root.global_env.borrow_mut(ctx).set_non_enumerable("globalThis");
-        // object_set_key_value(ctx, &root.global_env, "this", &Value::Object(root.global_env))?;
-
-        // crate::js_promise::reset_global_state();
 
         let script_path_buf = if let Some(p) = script_path_buf.as_ref() {
             let mut p_str = p.to_string_lossy().to_string();
@@ -161,15 +153,6 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         } else {
             None
         };
-
-        // if kind == ProgramKind::Script {
-        //     slot_set(
-        //         ctx,
-        //         &root.global_env,
-        //         InternalSlot::SuppressDynamicImportResult,
-        //         &Value::Boolean(true),
-        //     );
-        // }
 
         let compiler = Compiler::new();
         let chunk = compiler.compile(&statements)?;

@@ -3787,6 +3787,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         loop {
                             let arg = parse_assignment(tokens, index)?;
                             args.push(arg);
+                            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                                *index += 1;
+                            }
                             if *index >= tokens.len() {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -5137,6 +5140,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         loop {
                             let arg = parse_assignment(tokens, index)?;
                             args.push(arg);
+                            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                                *index += 1;
+                            }
                             if *index >= tokens.len() {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -5187,6 +5193,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             loop {
                                 let arg = parse_assignment(tokens, index)?;
                                 args.push(arg);
+                                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                                    *index += 1;
+                                }
                                 if *index >= tokens.len() {
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
@@ -5228,6 +5237,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     loop {
                         let arg = parse_assignment(tokens, index)?;
                         args.push(arg);
+                        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                            *index += 1;
+                        }
                         if *index >= tokens.len() {
                             return Err(raise_parse_error_at!(tokens.get(*index)));
                         }

@@ -230,6 +230,7 @@ jobs:
             35)
               TITLE='"built-ins/Promise" - "built-ins/Reflect"'
               FOCUS='built-ins/Promise,built-ins/Proxy,built-ins/Reflect'
+              RUN_TESTS='true'
               ;;
             36)
               TITLE='"built-ins/RegExp" - "built-ins/ShadowRealm"'

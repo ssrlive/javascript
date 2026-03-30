@@ -6808,7 +6808,11 @@ impl<'gc> VM<'gc> {
                 }
 
                 let target = match input {
-                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) => input,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                        if !Self::is_symbol_value(&input) =>
+                    {
+                        input
+                    }
                     _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&input)),
                 };
 
@@ -6863,6 +6867,24 @@ impl<'gc> VM<'gc> {
                 let a = args.first().cloned().unwrap_or(Value::Undefined);
                 let b = args.get(1).cloned().unwrap_or(Value::Undefined);
                 Value::Boolean(self.values_same(&a, &b))
+            }
+
+            "object.isExtensible" => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                // ES2015+ §20.1.2.13: if argument is not an object, return false
+                if !matches!(
+                    target,
+                    Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)
+                        | Value::Object(_)
+                ) || Self::is_symbol_value(&target)
+                {
+                    return Value::Boolean(false);
+                }
+                self.call_host_fn(ctx, "reflect.isExtensible", None, std::slice::from_ref(&target))
             }
             "object.seal" => {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
@@ -11993,7 +12015,7 @@ impl<'gc> VM<'gc> {
         object_map.insert("preventExtensions".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_PREVENTEXT));
         object_map.insert(
             "isExtensible".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "reflect.isExtensible", "isExtensible", 1.0, false),
+            Self::make_host_fn_with_name_len(ctx, "object.isExtensible", "isExtensible", 1.0, false),
         );
         object_map.insert(
             "seal".to_string(),
@@ -12586,6 +12608,7 @@ impl<'gc> VM<'gc> {
         function_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
         function_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
         function_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        function_map.insert("__origin_global".to_string(), Value::VmObject(self.global_this));
         let function_val = Value::VmObject(new_gc_cell_ptr(ctx, function_map));
         if let Value::VmObject(function_obj) = &function_val {
             function_obj
@@ -17185,7 +17208,9 @@ impl<'gc> VM<'gc> {
                                             // Check data<->accessor type change
                                             let desc_is_accessor = desc.contains_key("get") || desc.contains_key("set");
                                             let target_is_accessor = tdb.contains_key("get") || tdb.contains_key("set");
-                                            if desc_is_accessor != target_is_accessor && (desc_is_accessor || target_is_accessor) {
+                                            // A generic descriptor (no get/set, no value/writable) never changes the type
+                                            let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
+                                            if (desc_is_accessor || desc_is_data) && desc_is_accessor != target_is_accessor {
                                                 self.throw_type_error(ctx, "'defineProperty' on proxy: trap returned truish for redefining non-configurable property between accessor and data");
                                                 return Value::Undefined;
                                             }
@@ -21518,70 +21543,82 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(new_gc_cell_ptr(ctx, result));
                 }
                 BUILTIN_ARRAY_MAP => {
-                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
-                        let borrow = arr.borrow();
-                        let elements = borrow.elements.clone();
-                        let holes: std::collections::HashSet<usize> = borrow
-                            .props
-                            .keys()
-                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
-                            .collect();
-                        drop(borrow);
-                        let mut result_data = VmArrayData::new(Vec::new());
-                        for (i, elem) in elements.iter().enumerate() {
-                            if holes.contains(&i) {
-                                result_data.elements.push(Value::Undefined);
-                                result_data.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
-                            } else {
-                                let r = self
-                                    .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
-                                    .unwrap_or(Value::Undefined);
-                                result_data.elements.push(r);
-                            }
-                        }
-                        return Value::VmArray(new_gc_cell_ptr(ctx, result_data));
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
                     }
-                    return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new())));
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let (logical_len, present_indices) = {
+                        let borrow = arr.borrow();
+                        (
+                            self.vm_array_logical_length_u64(&borrow).min(usize::MAX as u64) as usize,
+                            self.vm_array_present_indices(&borrow),
+                        )
+                    };
+                    let result = match self.create_vm_sparse_array(ctx, logical_len) {
+                        Value::VmArray(result_arr) => result_arr,
+                        _ => unreachable!(),
+                    };
+                    let receiver_value = Value::VmArray(*arr);
+                    for idx in present_indices {
+                        let key = idx.to_string();
+                        let elem = self.read_named_property(ctx, &receiver_value, &key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let mapped = match self.vm_call_function_value(
+                            ctx,
+                            &callback,
+                            &this_arg,
+                            &[elem, Value::Number(idx as f64), receiver_value.clone()],
+                        ) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        };
+                        self.vm_array_store_index(ctx, &result, idx, mapped);
+                    }
+                    return Value::VmArray(result);
                 }
                 BUILTIN_ARRAY_FILTER => {
-                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
-                        let borrow = arr.borrow();
-                        let elements = borrow.elements.clone();
-                        let holes: std::collections::HashSet<usize> = borrow
-                            .props
-                            .keys()
-                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
-                            .collect();
-                        drop(borrow);
-                        let mut result = Vec::new();
-                        for (i, elem) in elements.iter().enumerate() {
-                            if holes.contains(&i) {
-                                continue;
-                            }
-                            let r = match self.call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    return Value::Undefined;
-                                }
-                            };
-                            if r.to_truthy() {
-                                result.push(elem.clone());
-                            }
-                        }
-                        return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
                     }
-                    return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new())));
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let present_indices = {
+                        let borrow = arr.borrow();
+                        self.vm_array_present_indices(&borrow)
+                    };
+                    let receiver_value = Value::VmArray(*arr);
+                    let mut result = Vec::new();
+                    for idx in present_indices {
+                        let key = idx.to_string();
+                        let elem = self.read_named_property(ctx, &receiver_value, &key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let keep = match self.vm_call_function_value(
+                            ctx,
+                            &callback,
+                            &this_arg,
+                            &[elem.clone(), Value::Number(idx as f64), receiver_value.clone()],
+                        ) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        };
+                        if keep.to_truthy() {
+                            result.push(elem);
+                        }
+                    }
+                    return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
                 }
                 BUILTIN_ARRAY_ITERATOR => {
                     let is_typed_array = arr.borrow().props.contains_key("__typedarray_name__");
@@ -21656,25 +21693,31 @@ impl<'gc> VM<'gc> {
                     return Value::VmObject(new_gc_cell_ptr(ctx, obj));
                 }
                 BUILTIN_ARRAY_FOREACH => {
-                    if let Some(Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
+                    }
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let present_indices = {
                         let borrow = arr.borrow();
-                        let elements = borrow.elements.clone();
-                        let holes: std::collections::HashSet<usize> = borrow
-                            .props
-                            .keys()
-                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
-                            .collect();
-                        drop(borrow);
-                        for (i, elem) in elements.iter().enumerate() {
-                            if holes.contains(&i) {
-                                continue;
-                            }
-                            let _ = self.call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv);
+                        self.vm_array_present_indices(&borrow)
+                    };
+                    let receiver_value = Value::VmArray(*arr);
+                    for idx in present_indices {
+                        let key = idx.to_string();
+                        let elem = self.read_named_property(ctx, &receiver_value, &key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if let Err(err) = self.vm_call_function_value(
+                            ctx,
+                            &callback,
+                            &this_arg,
+                            &[elem, Value::Number(idx as f64), receiver_value.clone()],
+                        ) {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
                         }
                     }
                     return Value::Undefined;
@@ -21977,52 +22020,78 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 BUILTIN_ARRAY_EVERY => {
-                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
-                        let elements = arr.borrow().elements.clone();
-                        for (i, elem) in elements.iter().enumerate() {
-                            let result = self
-                                .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
-                                .unwrap_or(Value::Undefined);
-                            if !result.to_truthy() {
-                                return Value::Boolean(false);
-                            }
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
+                    }
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let receiver_value = Value::VmArray(*arr);
+                    let borrow = arr.borrow();
+                    let elements = borrow.elements.clone();
+                    let holes: std::collections::HashSet<usize> = borrow
+                        .props
+                        .keys()
+                        .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
+                        .collect();
+                    drop(borrow);
+                    for (i, elem) in elements.iter().enumerate() {
+                        if holes.contains(&i) {
+                            continue;
                         }
-                        return Value::Boolean(true);
+                        let result = match self.vm_call_function_value(
+                            ctx,
+                            &callback,
+                            &this_arg,
+                            &[elem.clone(), Value::Number(i as f64), receiver_value.clone()],
+                        ) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        };
+                        if !result.to_truthy() {
+                            return Value::Boolean(false);
+                        }
                     }
                     return Value::Boolean(true);
                 }
                 BUILTIN_ARRAY_SOME => {
-                    if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = args.first() {
-                        let __cb_uv = if let Some(Value::VmClosure(_, _, u)) = args.first() {
-                            (**u).to_vec()
-                        } else {
-                            Vec::new()
-                        };
-                        let borrow = arr.borrow();
-                        let elements = borrow.elements.clone();
-                        let holes: std::collections::HashSet<usize> = borrow
-                            .props
-                            .keys()
-                            .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
-                            .collect();
-                        drop(borrow);
-                        for (i, elem) in elements.iter().enumerate() {
-                            if holes.contains(&i) {
-                                continue;
-                            }
-                            let result = self
-                                .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
-                                .unwrap_or(Value::Undefined);
-                            if result.to_truthy() {
-                                return Value::Boolean(true);
-                            }
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
+                    }
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let receiver_value = Value::VmArray(*arr);
+                    let borrow = arr.borrow();
+                    let elements = borrow.elements.clone();
+                    let holes: std::collections::HashSet<usize> = borrow
+                        .props
+                        .keys()
+                        .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
+                        .collect();
+                    drop(borrow);
+                    for (i, elem) in elements.iter().enumerate() {
+                        if holes.contains(&i) {
+                            continue;
                         }
-                        return Value::Boolean(false);
+                        let result = match self.vm_call_function_value(
+                            ctx,
+                            &callback,
+                            &this_arg,
+                            &[elem.clone(), Value::Number(i as f64), receiver_value.clone()],
+                        ) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        };
+                        if result.to_truthy() {
+                            return Value::Boolean(true);
+                        }
                     }
                     return Value::Boolean(false);
                 }
@@ -22063,23 +22132,43 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_LASTINDEXOF => {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
-                    let elements = arr.borrow().elements.clone();
+                    let receiver_value = Value::VmArray(*arr);
+                    let present_indices = {
+                        let borrow = arr.borrow();
+                        self.vm_array_present_indices(&borrow)
+                    };
+                    let logical_len = {
+                        let borrow = arr.borrow();
+                        self.vm_array_logical_length_u64(&borrow) as i64
+                    };
                     let start_from = args
                         .get(1)
                         .map(|v| match v {
                             Value::Number(n) => {
                                 let s = *n as i64;
-                                if s < 0 {
-                                    (elements.len() as i64 + s).max(0) as usize
+                                if logical_len <= 0 {
+                                    -1
+                                } else if s < 0 {
+                                    (logical_len + s).max(0)
                                 } else {
-                                    s.min(elements.len() as i64 - 1) as usize
+                                    s.min(logical_len - 1)
                                 }
                             }
-                            _ => elements.len() - 1,
+                            _ => logical_len - 1,
                         })
-                        .unwrap_or(elements.len().saturating_sub(1));
-                    for i in (0..=start_from).rev() {
-                        if self.strict_equal(&elements[i], &target) {
+                        .unwrap_or(logical_len - 1);
+                    if start_from < 0 {
+                        return Value::Number(-1.0);
+                    }
+                    for i in present_indices.into_iter().rev() {
+                        if i as i64 > start_from {
+                            continue;
+                        }
+                        let value = self.read_named_property(ctx, &receiver_value, &i.to_string());
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if self.strict_equal(&value, &target) {
                             return Value::Number(i as f64);
                         }
                     }
@@ -26744,6 +26833,38 @@ impl<'gc> VM<'gc> {
                         proto_candidate,
                         Some(origin_global),
                     );
+
+                    if is_async_gen_ctor {
+                        if let Some(async_gen_fn_proto) =
+                            self.get_prototype_from_constructor_with_intrinsic(ctx, proto_source, "AsyncGeneratorFunction")?
+                        {
+                            self.mutate_value_props(ctx, &wrapped, |props| {
+                                props.insert("__proto__".to_string(), async_gen_fn_proto);
+                            });
+                        }
+
+                        let ctor_fn_proto = self.read_named_property(ctx, target, "prototype");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            return Err(self.vm_error_to_js_error(ctx, &thrown));
+                        }
+                        let ctor_async_gen_proto = self.read_named_property(ctx, &ctor_fn_proto, "prototype");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            return Err(self.vm_error_to_js_error(ctx, &thrown));
+                        }
+
+                        if matches!(
+                            ctor_async_gen_proto,
+                            Value::VmObject(_)
+                                | Value::VmArray(_)
+                                | Value::VmFunction(..)
+                                | Value::VmClosure(..)
+                                | Value::VmNativeFunction(_)
+                                | Value::Object(_)
+                        ) && !Self::is_symbol_value(&ctor_async_gen_proto)
+                        {
+                            self.ensure_function_prototype_object(ctx, &wrapped, ctor_async_gen_proto);
+                        }
+                    }
                 }
                 Ok(wrapped)
             }
@@ -26852,7 +26973,24 @@ impl<'gc> VM<'gc> {
                     drop(borrow);
                     return self.constructor_origin_global(ctx, &target);
                 }
-                borrow.get("__origin_global").cloned()
+                if let Some(origin) = borrow.get("__origin_global").cloned() {
+                    return Some(origin);
+                }
+
+                // Fallback for constructor-like instances: follow __proto__.constructor.
+                let proto = borrow.get("__proto__").cloned();
+                drop(borrow);
+                if let Some(proto) = proto {
+                    let proto_ctor = self.read_named_property(ctx, &proto, "constructor");
+                    if self.pending_throw.is_none() {
+                        if let Some(origin) = self.constructor_origin_global(ctx, &proto_ctor) {
+                            return Some(origin);
+                        }
+                    } else {
+                        self.pending_throw = None;
+                    }
+                }
+                None
             }
             _ => None,
         }
@@ -26864,12 +27002,59 @@ impl<'gc> VM<'gc> {
         constructor: &Value<'gc>,
         intrinsic_ctor_name: &str,
     ) -> Option<Value<'gc>> {
-        if let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, constructor)
+        if let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, constructor) {
+            if let Some(Value::VmObject(object_ctor)) = origin_global.borrow().get(intrinsic_ctor_name).cloned()
+                && let Some(default_proto) = object_ctor.borrow().get("prototype").cloned()
+            {
+                return Some(default_proto);
+            }
+
+            if intrinsic_ctor_name == "AsyncGeneratorFunction" {
+                let eval_fn = self.read_named_property(ctx, &Value::VmObject(origin_global), "eval");
+                if self.pending_throw.is_none()
+                    && self.is_value_callable(&eval_fn)
+                    && let Ok(realm_fn) = self.vm_call_function_value(
+                        ctx,
+                        &eval_fn,
+                        &Value::VmObject(origin_global),
+                        &[Value::from("(0, async function* () {})")],
+                    )
+                {
+                    let ctor = self.read_named_property(ctx, &realm_fn, "constructor");
+                    if self.pending_throw.is_none() {
+                        let proto = self.read_named_property(ctx, &ctor, "prototype");
+                        if self.pending_throw.is_none()
+                            && matches!(
+                                proto,
+                                Value::VmObject(_)
+                                    | Value::VmArray(_)
+                                    | Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                                    | Value::Object(_)
+                            )
+                            && !Self::is_symbol_value(&proto)
+                        {
+                            return Some(proto);
+                        }
+                    }
+                }
+                self.pending_throw = None;
+            }
+        }
+
+        // Some constructor-like objects may not carry __origin_global directly
+        // (e.g. cross-realm newTarget instances). Try constructor.constructor.
+        let ctor_fn = self.read_named_property(ctx, constructor, "constructor");
+        if self.pending_throw.is_none()
+            && !self.values_same(&ctor_fn, constructor)
+            && let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, &ctor_fn)
             && let Some(Value::VmObject(object_ctor)) = origin_global.borrow().get(intrinsic_ctor_name).cloned()
             && let Some(default_proto) = object_ctor.borrow().get("prototype").cloned()
         {
             return Some(default_proto);
         }
+        self.pending_throw = None;
 
         if let Some(Value::VmObject(object_ctor)) = self.globals.get(intrinsic_ctor_name) {
             return object_ctor.borrow().get("prototype").cloned();
@@ -26897,16 +27082,22 @@ impl<'gc> VM<'gc> {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }
 
-        Ok(match proto {
+        let is_object_prototype = matches!(
+            proto,
             Value::VmObject(_)
-            | Value::VmArray(_)
-            | Value::VmMap(_)
-            | Value::VmSet(_)
-            | Value::Object(_)
-            | Value::VmFunction(..)
-            | Value::VmClosure(..)
-            | Value::VmNativeFunction(_) => Some(proto),
-            _ => self.default_intrinsic_prototype_for_constructor(ctx, constructor, intrinsic_ctor_name),
+                | Value::VmArray(_)
+                | Value::VmMap(_)
+                | Value::VmSet(_)
+                | Value::Object(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+        ) && !Self::is_symbol_value(&proto);
+
+        Ok(if is_object_prototype {
+            Some(proto)
+        } else {
+            self.default_intrinsic_prototype_for_constructor(ctx, constructor, intrinsic_ctor_name)
         })
     }
 
@@ -27627,6 +27818,60 @@ impl<'gc> VM<'gc> {
             }
         }
         len.min(max_safe_len)
+    }
+
+    fn vm_array_present_indices(&self, arr: &VmArrayData<'gc>) -> Vec<usize> {
+        let logical_len = self.vm_array_logical_length_u64(arr).min(usize::MAX as u64) as usize;
+        let parse_array_index = |key: &str| -> Option<usize> {
+            let idx = key.parse::<u64>().ok()?;
+            if idx >= u32::MAX as u64 || idx >= logical_len as u64 {
+                return None;
+            }
+            if idx.to_string() != key {
+                return None;
+            }
+            usize::try_from(idx).ok()
+        };
+
+        let mut indices = std::collections::BTreeSet::new();
+        for idx in 0..arr.elements.len().min(logical_len) {
+            if !arr.props.contains_key(&format!("__deleted_{}", idx)) {
+                indices.insert(idx);
+            }
+        }
+        for prop_key in arr.props.keys() {
+            let idx_opt = parse_array_index(prop_key)
+                .or_else(|| prop_key.strip_prefix("__get_").and_then(parse_array_index))
+                .or_else(|| prop_key.strip_prefix("__set_").and_then(parse_array_index));
+            if let Some(idx) = idx_opt {
+                indices.insert(idx);
+            }
+        }
+        indices.into_iter().collect()
+    }
+
+    fn vm_array_store_index(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>, idx: usize, value: Value<'gc>) {
+        let mut borrow = arr.borrow_mut(ctx);
+        if idx <= borrow.elements.len() + 1024 && idx < 1_000_000 {
+            while borrow.elements.len() <= idx {
+                let hole_idx = borrow.elements.len();
+                borrow.elements.push(Value::Undefined);
+                borrow.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
+            }
+            borrow.elements[idx] = value;
+            borrow.props.shift_remove(&format!("__deleted_{}", idx));
+        } else {
+            borrow.props.insert(idx.to_string(), value);
+        }
+        let old_len = borrow
+            .props
+            .get("__array_length__")
+            .and_then(|v| if let Value::Number(n) = v { Some(*n as u64) } else { None })
+            .unwrap_or(borrow.elements.len() as u64);
+        let new_len = (idx as u64).saturating_add(1);
+        if new_len > old_len {
+            borrow.props.insert("__array_length__".to_string(), Value::Number(new_len as f64));
+        }
     }
 
     fn array_like_length_u64(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>) -> Option<u64> {
@@ -29308,6 +29553,7 @@ impl<'gc> VM<'gc> {
                     }
                     let is_async_ctor = matches!(borrow.get("__async_function_constructor__"), Some(Value::Boolean(true)));
                     let is_async_gen_ctor = matches!(borrow.get("__async_generator_function_constructor__"), Some(Value::Boolean(true)));
+                    let ctor_for_realm = self.stack.get(callee_idx).cloned().unwrap_or(Value::Undefined);
                     drop(borrow);
                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                     self.stack.pop(); // pop callee
@@ -29345,24 +29591,55 @@ impl<'gc> VM<'gc> {
                         b.insert("__proto__".to_string(), async_proto);
                         b.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
                     }
-                    if is_async_gen_ctor
-                        && let Some(async_gen_fn_proto) = self.globals.get("__async_generator_function_prototype").cloned()
-                        && let Some(async_gen_proto) = self.globals.get("__async_generator_prototype").cloned()
-                        && let Value::VmObject(fn_obj) = &mut result
-                    {
+                    if is_async_gen_ctor && let Value::VmObject(fn_obj) = &mut result {
+                        // Dynamic AsyncGeneratorFunction must use:
+                        // - F.[[Prototype]] from GetPrototypeFromConstructor(newTarget, %AsyncGeneratorFunction.prototype%)
+                        // - F.prototype.[[Prototype]] from constructor realm %AsyncGenerator.prototype%
+                        let proto_source = if let Some(new_target) = self.new_target_stack.last().cloned()
+                            && !matches!(new_target, Value::Undefined)
+                        {
+                            new_target
+                        } else {
+                            ctor_for_realm.clone()
+                        };
+                        if let Ok(Some(fn_proto)) =
+                            self.get_prototype_from_constructor_with_intrinsic(ctx, &proto_source, "AsyncGeneratorFunction")
+                        {
+                            fn_obj.borrow_mut(ctx).insert("__proto__".to_string(), fn_proto);
+                        }
+
+                        let mut async_gen_proto_from_ctor_realm: Option<Value<'gc>> = None;
+                        let ctor_fn_proto = self.read_named_property(ctx, &ctor_for_realm, "prototype");
+                        if self.pending_throw.is_none() {
+                            let ctor_gen_proto = self.read_named_property(ctx, &ctor_fn_proto, "prototype");
+                            if self.pending_throw.is_none()
+                                && matches!(
+                                    ctor_gen_proto,
+                                    Value::VmObject(_)
+                                        | Value::VmArray(_)
+                                        | Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Object(_)
+                                )
+                                && !Self::is_symbol_value(&ctor_gen_proto)
+                            {
+                                async_gen_proto_from_ctor_realm = Some(ctor_gen_proto);
+                            }
+                        }
+                        if async_gen_proto_from_ctor_realm.is_none()
+                            && let Some(async_gen_proto) = self.globals.get("__async_generator_prototype").cloned()
+                        {
+                            async_gen_proto_from_ctor_realm = Some(async_gen_proto);
+                        }
+
                         let mut fn_b = fn_obj.borrow_mut(ctx);
-                        fn_b.insert("__proto__".to_string(), async_gen_fn_proto);
                         fn_b.insert("__async_dynamic_generator_function__".to_string(), Value::Boolean(true));
 
                         let mut fn_proto = IndexMap::new();
-                        fn_proto.insert("__proto__".to_string(), async_gen_proto);
-                        let ctor_for_proto = self
-                            .globals
-                            .get("__async_generator_function_ctor")
-                            .cloned()
-                            .unwrap_or(Value::Undefined);
-                        fn_proto.insert("constructor".to_string(), ctor_for_proto);
-                        fn_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+                        if let Some(async_gen_proto) = async_gen_proto_from_ctor_realm {
+                            fn_proto.insert("__proto__".to_string(), async_gen_proto);
+                        }
                         fn_b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
                         fn_b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
                         fn_b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));

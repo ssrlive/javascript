@@ -1,4 +1,5 @@
-use crate::core::{Collect, FunctionID, Gc, GcPtr, GcTrace};
+use crate::core::{Collect, Gc, GcPtr, GcTrace};
+use crate::core::{FunctionID, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
@@ -82,12 +83,12 @@ pub enum Value<'gc> {
     Null,
     Function(String),
     VmFunction(usize, u8),
-    VmClosure(usize, u8, crate::core::VmUpvalueCells<'gc>),
-    VmArray(crate::core::VmArrayHandle<'gc>),
-    VmObject(crate::core::VmObjectHandle<'gc>),
+    VmClosure(usize, u8, VmUpvalueCells<'gc>),
+    VmArray(VmArrayHandle<'gc>),
+    VmObject(VmObjectHandle<'gc>),
     VmNativeFunction(FunctionID),
-    VmMap(crate::core::VmMapHandle<'gc>),
-    VmSet(crate::core::VmSetHandle<'gc>),
+    VmMap(VmMapHandle<'gc>),
+    VmSet(VmSetHandle<'gc>),
     /// Internal property representation stored in an object's `properties` map.
     /// Contains either a concrete `value` or accessor `getter`/`setter` functions.
     /// Note: a `Value::Property` is not the same as a JS descriptor object
@@ -100,10 +101,8 @@ pub enum Value<'gc> {
     Symbol(Gc<'gc, SymbolData>),
     Uninitialized,
 }
+
 impl<'gc> Value<'gc> {
-    pub fn is_null_or_undefined(&self) -> bool {
-        matches!(self, Value::Null | Value::Undefined)
-    }
     pub fn to_truthy(&self) -> bool {
         match self {
             Value::Boolean(b) => *b,

@@ -30,7 +30,7 @@ indexmap = "2.13.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-regress = { version = "0.11.0", features = ["utf16"] }
+regress = { version = "0.11.1", features = ["utf16"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 thiserror = "2.0.18"
 unicode-normalization = "0.1.25"
@@ -45,15 +45,12 @@ windows-sys = { version = "0.61.2", optional = true, features = [
     "Win32_Foundation",
 ] }
 
-# [patch.crates-io]
-# regress = { path = "regress-patched" }
-
 [dev-dependencies]
 clap = { version = "4.6.0", features = ["derive", "cargo"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
-ctor = "0.6.3"
-env_logger = { version = "0.11.9" }
-rustyline = "17.0.2"
+ctor = "0.8.0"
+env_logger = { version = "0.11.10" }
+rustyline = "18.0.0"
 
 [[bench]]
 name = "promise_benchmarks"

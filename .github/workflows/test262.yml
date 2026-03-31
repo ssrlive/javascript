@@ -181,6 +181,7 @@ jobs:
             24)
               TITLE='"language/statements/class/dstr"'
               FOCUS='language/statements/class/dstr'
+              RUN_TESTS='true'
               ;;
             25)
               TITLE='"language/statements/class/elements"'

@@ -587,6 +587,15 @@ pub struct VM<'gc> {
     async_generator_prototype: Value<'gc>,
     // %AsyncGeneratorFunction.prototype% — proto for async generator functions
     async_generator_function_prototype: Value<'gc>,
+    // True while the VM is executing a class field initializer (for eval restrictions)
+    in_field_init: bool,
+    // Home object for eval VM — enables super.property resolution in direct eval
+    eval_home_object: Option<Value<'gc>>,
+    // Runtime brand counter for unique class brands per class evaluation
+    runtime_brand_counter: usize,
+    // Per-closure fn_props for class constructors evaluated multiple times (factory pattern).
+    // Keyed by the raw Gc pointer of the closure's upvalue vector (stable in mark-sweep GC).
+    closure_fn_props: HashMap<usize, VmObjectHandle<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -712,6 +721,10 @@ impl<'gc> VM<'gc> {
             generator_function_prototype: Value::Undefined,
             async_generator_prototype: Value::Undefined,
             async_generator_function_prototype: Value::Undefined,
+            in_field_init: false,
+            eval_home_object: None,
+            runtime_brand_counter: 0,
+            closure_fn_props: HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -8848,6 +8861,32 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Get the per-closure fn_props overlay for a VmClosure, if one exists.
+    fn get_closure_overlay(&self, val: &Value<'gc>) -> Option<VmObjectHandle<'gc>> {
+        if let Value::VmClosure(_, _, uv) = val {
+            let gc_key = Gc::as_ptr(*uv) as usize;
+            self.closure_fn_props.get(&gc_key).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Get fn_props for a Value, checking per-closure override first for VmClosure.
+    fn get_fn_props_for_value(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Option<VmObjectHandle<'gc>> {
+        match val {
+            Value::VmClosure(ip, arity, uv) => {
+                let gc_key = Gc::as_ptr(*uv) as usize;
+                if let Some(&handle) = self.closure_fn_props.get(&gc_key) {
+                    Some(handle)
+                } else {
+                    Some(self.get_fn_props(ctx, *ip, *arity))
+                }
+            }
+            Value::VmFunction(ip, arity) => Some(self.get_fn_props(ctx, *ip, *arity)),
+            _ => None,
+        }
+    }
+
     /// Get or create the property map for a VmFunction (keyed by IP).
     /// Auto-creates a `prototype` object with `constructor` back-reference on first access.
     fn get_fn_props(&mut self, ctx: &GcContext<'gc>, ip: usize, arity: u8) -> VmObjectHandle<'gc> {
@@ -8990,7 +9029,18 @@ impl<'gc> VM<'gc> {
         val: &Value<'gc>,
         receiver: Option<&Value<'gc>>,
     ) -> Result<Value<'gc>, JSError> {
-        if let Some(result) = self.try_proxy_set(ctx, obj, key, val, receiver)? {
+        // Runtime brand check for private field writes
+        if key.contains(super::PRIVATE_KEY_PREFIX) && !self.check_private_brand(ctx, obj, key) {
+            let err = self.make_type_error_object(ctx, "Cannot access private member from an object whose class did not declare it");
+            self.handle_throw(ctx, &err)?;
+            return Ok(val.clone());
+        }
+        // Private field access bypasses proxy traps entirely (spec: PrivateFieldSet).
+        // Private fields live on the exact object (including proxies) — no unwrapping.
+        // Auxiliary keys (__get_, __set_, __readonly_) also bypass when they contain a private key.
+        if !key.contains(super::PRIVATE_KEY_PREFIX)
+            && let Some(result) = self.try_proxy_set(ctx, obj, key, val, receiver)?
+        {
             if matches!(result, Value::Boolean(false)) {
                 if self.current_execution_is_strict() {
                     let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
@@ -8999,7 +9049,7 @@ impl<'gc> VM<'gc> {
                 return Ok(val.clone());
             }
             return Ok(result);
-        }
+        } // end private-key guard
 
         let setter_receiver = receiver.cloned().unwrap_or_else(|| obj.clone());
 
@@ -9142,6 +9192,13 @@ impl<'gc> VM<'gc> {
                 let has_own_setter = borrow.get(&setter_key_clone).is_some();
                 drop(borrow);
                 if !has_own_setter && let Some(result) = self.try_proxy_set(ctx, proto_val, key, val, Some(&setter_receiver))? {
+                    if matches!(result, Value::Boolean(false)) {
+                        if self.current_execution_is_strict() {
+                            let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                            self.handle_throw(ctx, &err)?;
+                        }
+                        return Ok(val.clone());
+                    }
                     return Ok(result);
                 }
                 // Re-borrow after try_proxy_set
@@ -9385,6 +9442,14 @@ impl<'gc> VM<'gc> {
                         && !has_own_setter
                         && let Some(result) = self.try_proxy_set(ctx, proto_val, key, val, Some(&setter_receiver))?
                     {
+                        if matches!(result, Value::Boolean(false)) {
+                            if self.current_execution_is_strict() {
+                                let err =
+                                    self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                                self.handle_throw(ctx, &err)?;
+                            }
+                            return Ok(val.clone());
+                        }
                         return Ok(result);
                     }
 
@@ -9490,6 +9555,13 @@ impl<'gc> VM<'gc> {
                 && !has_own_setter
                 && let Some(result) = self.try_proxy_set(ctx, proto_val, key, val, Some(&setter_receiver))?
             {
+                if matches!(result, Value::Boolean(false)) {
+                    if self.current_execution_is_strict() {
+                        let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                        self.handle_throw(ctx, &err)?;
+                    }
+                    return Ok(val.clone());
+                }
                 return Ok(result);
             }
 
@@ -9539,7 +9611,53 @@ impl<'gc> VM<'gc> {
                 }
             }
             let props = self.get_fn_props(ctx, *ip, *arity);
-            self.assign_named_property(ctx, &Value::VmObject(props), key, val, None)
+            // For VmClosure with overlay, check overlay for setter/getter first
+            let overlay = self.get_closure_overlay(obj);
+            // Check for setter accessor
+            let setter_key = format!("__set_{}", key);
+            let setter_fn = overlay
+                .and_then(|o| o.borrow().get(&setter_key).cloned())
+                .or_else(|| props.borrow().get(&setter_key).cloned());
+            if let Some(sf) = setter_fn {
+                let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
+                return Ok(val.clone());
+            }
+            // Check for readonly
+            let readonly_key = format!("__readonly_{}__", key);
+            let is_readonly = overlay.is_some_and(|o| matches!(o.borrow().get(&readonly_key), Some(Value::Boolean(true))))
+                || matches!(props.borrow().get(&readonly_key), Some(Value::Boolean(true)));
+            if is_readonly {
+                let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}'", key));
+                self.handle_throw(ctx, &err)?;
+                return Ok(val.clone());
+            }
+            // Check frozen / non-extensible
+            {
+                let b = props.borrow();
+                let is_frozen = matches!(b.get("__frozen__"), Some(Value::Boolean(true)));
+                let is_non_ext = matches!(b.get("__non_extensible__"), Some(Value::Boolean(true)));
+                let key_exists = b.contains_key(key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&setter_key);
+                if is_frozen || (is_non_ext && !key_exists) {
+                    drop(b);
+                    if self.current_execution_is_strict() {
+                        let msg = format!("Cannot add property {}, object is not extensible", key);
+                        let err = self.make_type_error_object(ctx, &msg);
+                        self.handle_throw(ctx, &err)?;
+                    }
+                    return Ok(val.clone());
+                }
+            }
+            // Write to shared fn_props (brand keys go to overlay)
+            if key.starts_with("__brand_") {
+                if let Some(o) = overlay {
+                    o.borrow_mut(ctx).insert(key.to_string(), val.clone());
+                } else {
+                    props.borrow_mut(ctx).insert(key.to_string(), val.clone());
+                }
+            } else {
+                props.borrow_mut(ctx).insert(key.to_string(), val.clone());
+            }
+            Ok(val.clone())
         } else {
             log::warn!("SetProperty on non-object: {}", value_to_string(obj));
             Ok(val.clone())
@@ -9568,6 +9686,28 @@ impl<'gc> VM<'gc> {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Fallback for eval VM: use eval_home_object if set
+        if let Some(home_obj) = self.eval_home_object.clone() {
+            match home_obj {
+                Value::VmObject(map) => {
+                    let base = map.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
+                    match base {
+                        Value::Null | Value::Undefined => {}
+                        proto => return Some(proto),
+                    }
+                }
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let props = self.get_fn_props(ctx, ip, arity);
+                    let base = props.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
+                    match base {
+                        Value::Null | Value::Undefined => {}
+                        proto => return Some(proto),
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -10167,6 +10307,30 @@ impl<'gc> VM<'gc> {
                     }
                     current = next;
                 }
+                Value::VmNativeFunction(id) => {
+                    let props = self.get_native_fn_props(ctx, id);
+                    let borrow = props.borrow();
+                    if let Some(val) = borrow.get(key).cloned() {
+                        match val {
+                            Value::Property { getter: Some(g), .. } => {
+                                drop(borrow);
+                                return self.invoke_getter_with_receiver(ctx, &g, receiver);
+                            }
+                            Value::Property { value: Some(v), .. } => {
+                                return v.borrow().clone();
+                            }
+                            Value::Property { value: None, .. } => {
+                                return Value::Undefined;
+                            }
+                            other => return other,
+                        }
+                    }
+                    if let Some(gf) = borrow.get(&getter_key).cloned() {
+                        drop(borrow);
+                        return self.invoke_getter_with_receiver(ctx, &gf, receiver);
+                    }
+                    current = borrow.get("__proto__").cloned();
+                }
                 _ => break,
             }
         }
@@ -10217,13 +10381,19 @@ impl<'gc> VM<'gc> {
             }
             Value::VmClosure(ip, arity, upvalues) => {
                 let current_fn = Value::VmClosure(*ip, *arity, *upvalues);
-                let props = self.get_fn_props(ctx, *ip, *arity);
-                let borrow = props.borrow();
-                let value = borrow.get(key).cloned();
+                let overlay = self.get_closure_overlay(&current_fn);
+                let shared = self.get_fn_props(ctx, *ip, *arity);
+                // Look up key: overlay first, then shared fn_props
+                let value = overlay
+                    .and_then(|o| o.borrow().get(key).cloned())
+                    .or_else(|| shared.borrow().get(key).cloned());
                 let getter_key = format!("__get_{}", key);
-                let getter_fn = borrow.get(&getter_key).cloned();
-                let proto = borrow.get("__proto__").cloned();
-                drop(borrow);
+                let getter_fn = overlay
+                    .and_then(|o| o.borrow().get(&getter_key).cloned())
+                    .or_else(|| shared.borrow().get(&getter_key).cloned());
+                let proto = overlay
+                    .and_then(|o| o.borrow().get("__proto__").cloned())
+                    .or_else(|| shared.borrow().get("__proto__").cloned());
                 if let Some(gf) = getter_fn {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
@@ -15100,7 +15270,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_EVAL => {
                 let code = args.first().map(value_to_string).unwrap_or_default();
                 let expr = code.trim().trim_end_matches(';').trim();
-                if let Some(name) = expr.strip_prefix("super.")
+                if self.direct_eval
+                    && let Some(name) = expr.strip_prefix("super.")
                     && !name.is_empty()
                     && name.chars().all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
                 {
@@ -15128,6 +15299,19 @@ impl<'gc> VM<'gc> {
                 let result = (|| -> Result<Value<'gc>, JSError> {
                     let tokens = crate::core::tokenize(&code)?;
                     let mut index = 0;
+                    // For direct eval inside class bodies, push private names so parser accepts #field access
+                    let privns_context = if self.direct_eval {
+                        self.frames
+                            .last()
+                            .and_then(|f| self.chunk.fn_private_name_context.get(&f.func_ip).cloned())
+                    } else {
+                        None
+                    };
+                    let _privns_guard = privns_context.as_ref().map(|ctx| {
+                        let all_names: std::collections::HashSet<String> =
+                            ctx.iter().flat_map(|(_, names)| names.iter().cloned()).collect();
+                        crate::core::push_private_names_for_eval(all_names)
+                    });
                     let statements = crate::core::parse_statements(&tokens, &mut index)?;
                     // Check for bare return statements — illegal at top level of eval
                     for stmt in &statements {
@@ -15135,6 +15319,56 @@ impl<'gc> VM<'gc> {
                             return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
                                 message: "Illegal return statement".to_string()
                             }));
+                        }
+                    }
+                    // ── PerformEval early-error restrictions ──────────────
+                    // Indirect eval always runs as global code: reject super(), super.prop, new.target.
+                    // Direct eval in a field initializer: reject `arguments` and `super()`.
+                    {
+                        use crate::core::statement::{SCAN_ARGUMENTS, SCAN_NEW_TARGET, SCAN_SUPER_CALL, SCAN_SUPER_PROP, eval_ast_scan};
+                        if !self.direct_eval {
+                            // Indirect eval: reject super(), super.prop, new.target
+                            let mask = SCAN_SUPER_CALL | SCAN_SUPER_PROP | SCAN_NEW_TARGET;
+                            let found = eval_ast_scan(&statements, mask);
+                            if found & SCAN_SUPER_CALL != 0 {
+                                return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                                    message: "'super' keyword unexpected here".to_string()
+                                }));
+                            }
+                            if found & SCAN_SUPER_PROP != 0 {
+                                return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                                    message: "'super' keyword unexpected here".to_string()
+                                }));
+                            }
+                            if found & SCAN_NEW_TARGET != 0 {
+                                return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                                    message: "new.target expression is not allowed here".to_string()
+                                }));
+                            }
+                        } else {
+                            // Direct eval: check field-init context via VM flag or fn_eval_context
+                            let in_field = self.in_field_init
+                                || self
+                                    .frames
+                                    .last()
+                                    .map(|f| self.chunk.fn_eval_context.get(&f.func_ip).copied().unwrap_or(0) & 0x01 != 0)
+                                    .unwrap_or(false);
+                            if in_field {
+                                // Field initializer: reject `arguments` and `super()`
+                                let mask = SCAN_ARGUMENTS | SCAN_SUPER_CALL;
+                                let found = eval_ast_scan(&statements, mask);
+                                if found & SCAN_ARGUMENTS != 0 {
+                                    return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                                        message: "'arguments' is not allowed in class field initializer or static initialization block"
+                                            .to_string()
+                                    }));
+                                }
+                                if found & SCAN_SUPER_CALL != 0 {
+                                    return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
+                                        message: "'super' keyword unexpected here".to_string()
+                                    }));
+                                }
+                            }
                         }
                     }
                     // Detect strict mode: code begins with "use strict" directive, or enclosing context is strict (direct eval only)
@@ -15148,7 +15382,10 @@ impl<'gc> VM<'gc> {
                     };
                     let is_strict =
                         enclosing_strict || code.trim().starts_with("\"use strict\"") || code.trim().starts_with("'use strict'");
-                    let compiler = crate::core::Compiler::new();
+                    let mut compiler = crate::core::Compiler::new();
+                    if let Some(ref ctx) = privns_context {
+                        compiler.set_private_name_context(ctx.clone());
+                    }
                     let chunk = compiler.compile(&statements)?;
                     // Non-configurable global names (can't be redefined by eval)
                     let non_configurable: [&str; 3] = ["NaN", "Infinity", "undefined"];
@@ -15222,7 +15459,11 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    let mut eval_vm: VM<'gc> = VM::new(chunk, ctx);
+                    let mut eval_vm: VM<'gc> = VM::new(self.chunk.clone(), ctx);
+                    // Merge eval code into eval VM's chunk so it has access to
+                    // host functions (getters, setters, closures) at original IPs
+                    let (eval_code_offset, _) = eval_vm.merge_eval_chunk(&chunk);
+                    eval_vm.ip = eval_code_offset;
                     // Copy caller's globals into eval VM
                     for (k, v) in &self.globals {
                         eval_vm.globals.insert(k.clone(), v.clone());
@@ -15253,26 +15494,54 @@ impl<'gc> VM<'gc> {
                         // Direct eval inherits caller's `this`
                         let caller_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
                         eval_vm.this_stack.push(caller_this);
+                        // Copy fn_props so property access on host functions works in eval
+                        for (ip, props) in &self.fn_props {
+                            eval_vm.fn_props.insert(*ip, *props);
+                        }
+                        // Copy fn_home_objects so super.property works in eval
+                        for (ip, home) in &self.fn_home_objects {
+                            eval_vm.fn_home_objects.insert(*ip, home.clone());
+                        }
+                        // Set eval_home_object so resolve_super_base can find
+                        // the super base even without a matching frame
+                        if let Some(caller_frame) = self.frames.last()
+                            && let Some(home) = self.fn_home_objects.get(&caller_frame.func_ip)
+                        {
+                            eval_vm.eval_home_object = Some(home.clone());
+                        }
+                        // Inherit new.target stack for direct eval
+                        // In field initializers, new.target is undefined per spec
+                        // (eval runs "inside a function", not inside the constructor)
+                        let in_field = self.in_field_init
+                            || self
+                                .frames
+                                .last()
+                                .map(|f| self.chunk.fn_eval_context.get(&f.func_ip).copied().unwrap_or(0) & 0x01 != 0)
+                                .unwrap_or(false);
+                        if in_field {
+                            eval_vm.new_target_stack.push(Value::Undefined);
+                        } else {
+                            eval_vm.new_target_stack = self.new_target_stack.clone();
+                        }
                     } else {
                         // Indirect eval: `this` is globalThis
                         let global_this = self.globals.get("globalThis").cloned().unwrap_or(Value::Undefined);
                         eval_vm.this_stack.push(global_this);
                     }
                     let result = eval_vm.run(ctx)?;
-                    // Merge eval chunk into host chunk so VmFunction values
+                    // Merge original eval chunk into host chunk so VmFunction values
                     // (getters, setters, methods) remain callable in the host VM.
-                    let (code_offset, _const_offset) = self.merge_eval_chunk(&eval_vm.chunk);
+                    let (code_offset, _const_offset) = self.merge_eval_chunk(&chunk);
                     // Build set of function IPs that genuinely belong to the eval chunk
-                    let eval_fn_ips: std::collections::HashSet<usize> = eval_vm
-                        .chunk
+                    let eval_fn_ips: std::collections::HashSet<usize> = chunk
                         .constants
                         .iter()
                         .filter_map(|c| match c {
                             Value::VmFunction(ip, _) => Some(*ip),
                             _ => None,
                         })
-                        .chain(eval_vm.chunk.fn_names.keys().copied())
-                        .chain(eval_vm.chunk.fn_local_names.keys().copied())
+                        .chain(chunk.fn_names.keys().copied())
+                        .chain(chunk.fn_local_names.keys().copied())
                         .collect();
                     for arg in args {
                         let _ = self.adjust_value_ips(ctx, arg, code_offset, &eval_fn_ips);
@@ -15292,25 +15561,23 @@ impl<'gc> VM<'gc> {
                     // Adjust VmFunction IPs in the result value
                     let result = self.adjust_value_ips(ctx, &result, code_offset, &eval_fn_ips);
                     // Also merge fn_home_objects from eval VM
+                    // IPs are already adjusted (eval VM used host chunk clone + merged eval code)
                     for (ip, home) in &eval_vm.fn_home_objects {
-                        let adjusted_home = self.adjust_value_ips(ctx, home, code_offset, &eval_fn_ips);
-                        self.fn_home_objects.insert(ip + code_offset, adjusted_home);
+                        self.fn_home_objects.insert(*ip, home.clone());
                     }
                     // Merge fn_props from eval VM (static methods, etc.)
                     for (ip, props_handle) in &eval_vm.fn_props {
-                        let adjusted_ip = ip + code_offset;
-                        // Adjust VmFunction IPs inside the fn_props IndexMap values
-                        let old_map = props_handle.borrow();
-                        let mut new_map = IndexMap::new();
-                        for (k, v) in old_map.iter() {
-                            new_map.insert(k.clone(), self.adjust_value_ips(ctx, v, code_offset, &eval_fn_ips));
-                        }
-                        drop(old_map);
-                        self.fn_props.insert(adjusted_ip, new_gc_cell_ptr(ctx, new_map));
+                        self.fn_props.insert(*ip, *props_handle);
                     }
-                    // Copy globals back — strict mode keeps eval's own scope isolated
-                    if !is_strict {
+                    // Copy globals back
+                    // Strict mode: skip new declarations AND var-redeclarations
+                    // Sloppy mode: write back all globals (including new declarations)
+                    {
                         for (k, v) in &eval_vm.globals {
+                            // In strict mode, skip globals that were declared in the eval code
+                            if is_strict && (!self.globals.contains_key(k) || chunk.declared_globals.contains(k)) {
+                                continue;
+                            }
                             // Skip globals unchanged by eval: host-chunk VmFunction IPs
                             // can coincide with eval-chunk IPs, causing false adjustment.
                             if let Some(host_val) = self.globals.get(k) {
@@ -15344,6 +15611,11 @@ impl<'gc> VM<'gc> {
                             if let Some(local_names) = self.chunk.fn_local_names.get(&frame.func_ip) {
                                 for (idx, name) in local_names.iter().enumerate() {
                                     if name.starts_with("__") && name.ends_with("__") {
+                                        continue;
+                                    }
+                                    // In strict eval, skip locals whose name was
+                                    // var-declared inside the eval (they shadow, not assign)
+                                    if is_strict && chunk.declared_globals.contains(name) {
                                         continue;
                                     }
                                     if let Some(new_val) = eval_vm.globals.get(name) {
@@ -16722,6 +16994,9 @@ impl<'gc> VM<'gc> {
                     }
                 } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = target {
                     let props = self.get_fn_props(ctx, *ip, *arity);
+                    props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
+                } else if let Value::VmNativeFunction(id) = target {
+                    let props = self.get_native_fn_props(ctx, *id);
                     props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
                 } else if matches!(target, Value::Number(_)) {
                     if let Some(Value::VmObject(number_ctor)) = self.globals.get("Number") {
@@ -25374,6 +25649,25 @@ impl<'gc> VM<'gc> {
         Some((target, handler, revoked))
     }
 
+    /// Recursively unwrap proxy objects to get the underlying target.
+    /// Used for private field access which must bypass proxy traps entirely.
+    fn _unwrap_proxy_for_private(&self, obj: &Value<'gc>) -> Value<'gc> {
+        let mut current = obj.clone();
+        loop {
+            let next = match &current {
+                Value::VmObject(map) => {
+                    let borrow = map.borrow();
+                    borrow.get("__proxy_target__").cloned()
+                }
+                _ => None,
+            };
+            match next {
+                Some(target) => current = target,
+                None => return current,
+            }
+        }
+    }
+
     fn get_proxy_trap(&mut self, ctx: &GcContext<'gc>, handler: &Value<'gc>, trap_name: &str) -> Result<Option<Value<'gc>>, JSError> {
         let trap = self.read_named_property(ctx, handler, trap_name);
         if let Some(thrown) = self.pending_throw.take() {
@@ -26131,7 +26425,7 @@ impl<'gc> VM<'gc> {
                 }
 
                 let closure_uv = if let Value::VmClosure(_, _, uv) = target {
-                    (**uv).clone()
+                    (**uv).to_vec()
                 } else {
                     Vec::new()
                 };
@@ -28452,6 +28746,20 @@ impl<'gc> VM<'gc> {
                 Opcode::DeleteProperty => self.run_opcode_delete_property(ctx)?,
                 Opcode::NewCall => self.run_opcode_new_call(ctx)?,
                 Opcode::DeleteIndex => self.run_opcode_delete_index(ctx)?,
+                Opcode::EnterFieldInit => {
+                    self.in_field_init = true;
+                    OpcodeAction::Continue
+                }
+                Opcode::LeaveFieldInit => {
+                    self.in_field_init = false;
+                    OpcodeAction::Continue
+                }
+                Opcode::AllocBrand => {
+                    self.runtime_brand_counter += 1;
+                    self.stack.push(Value::Number(self.runtime_brand_counter as f64));
+                    OpcodeAction::Continue
+                }
+                Opcode::ResetPrototype => self.run_opcode_reset_prototype(ctx)?,
             };
             if let OpcodeAction::Exit(val) = action {
                 return Ok(val);
@@ -30581,15 +30889,17 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let new_obj = new_gc_cell_ptr(ctx, IndexMap::new());
-                let fn_props = self.get_fn_props(ctx, target_ip, _arity);
+                let fn_props = self
+                    .get_fn_props_for_value(ctx, &constructor)
+                    .unwrap_or_else(|| self.get_fn_props(ctx, target_ip, _arity));
                 if let Some(proto) = fn_props.borrow().get("prototype").cloned() {
                     new_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
                 }
                 let this_val = Value::VmObject(new_obj);
                 self.this_stack.push(this_val);
                 self.new_target_stack.push(constructor.clone());
-                let closure_uv = if let Value::VmClosure(_, _, ref uv) = constructor {
-                    (**uv).clone()
+                let closure_uv = if let Value::VmClosure(_, _, uv) = constructor {
+                    (**uv).to_vec()
                 } else {
                     Vec::new()
                 };
@@ -30941,6 +31251,12 @@ impl<'gc> VM<'gc> {
                 captures.push(cell);
             }
         }
+        // Arrow functions capture the current lexical `this` as an extra
+        // hidden upvalue at the end so GetThis can return it later.
+        if self.chunk.arrow_function_ips.contains(&ip) {
+            let current_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
+            captures.push(new_gc_cell_ptr(ctx, current_this));
+        }
         let closure_value = Value::VmClosure(ip, arity, Gc::new(ctx, captures));
         let props = self.get_fn_props(ctx, ip, arity);
         if let Some(Value::VmObject(proto_obj)) = props.borrow().get("prototype").cloned() {
@@ -31063,6 +31379,62 @@ impl<'gc> VM<'gc> {
     }
 
     // Opcode::GetProperty
+    /// Check the runtime brand on an object for private member access.
+    /// Returns Ok(()) if brand matches or no brand check is needed.
+    /// Returns Err with TypeError if brand mismatch (wrong class evaluation).
+    fn check_private_brand(&self, _ctx: &GcContext<'gc>, obj: &Value<'gc>, key: &str) -> bool {
+        // Extract class_id from private key: "\0#N:name" → N
+        let after_prefix = match key.strip_prefix(super::PRIVATE_KEY_PREFIX) {
+            Some(s) => s,
+            None => {
+                // Auxiliary key like "__get_\0#N:name" — extract the embedded private key
+                if let Some(pos) = key.find(super::PRIVATE_KEY_PREFIX) {
+                    &key[pos + super::PRIVATE_KEY_PREFIX.len()..]
+                } else {
+                    return true; // not a private key — no brand check needed
+                }
+            }
+        };
+        let class_id: usize = if let Some(colon_pos) = after_prefix.find(':') {
+            after_prefix[..colon_pos].parse().unwrap_or(usize::MAX)
+        } else {
+            return true;
+        };
+        // Look up the current frame's brand upvalue
+        let current_ip = self.frames.last().map(|f| f.func_ip).unwrap_or(0);
+        if let Some(&(uv_idx, expected_class_id)) = self.chunk.fn_brand_upvalue.get(&current_ip)
+            && expected_class_id == class_id
+            && let Some(frame) = self.frames.last()
+            && let Some(uv_cell) = frame.upvalues.get(uv_idx as usize)
+        {
+            let expected_brand_num = match &*uv_cell.borrow() {
+                Value::Number(n) => Some(*n as u64),
+                _ => None,
+            };
+            // Check target object for matching brand
+            let brand_key = format!("__brand_{}__", class_id);
+            let actual_brand_num = match obj {
+                Value::VmObject(map) => match map.borrow().get(&brand_key) {
+                    Some(Value::Number(n)) => Some(*n as u64),
+                    _ => None,
+                },
+                Value::VmClosure(..) | Value::VmFunction(..) => {
+                    let handle = self.get_closure_overlay(obj).or_else(|| match obj {
+                        Value::VmClosure(ip, _, _) | Value::VmFunction(ip, _) => self.fn_props.get(ip).copied(),
+                        _ => None,
+                    });
+                    handle.and_then(|h| match h.borrow().get(&brand_key) {
+                        Some(Value::Number(n)) => Some(*n as u64),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            return expected_brand_num.is_some() && expected_brand_num == actual_brand_num;
+        }
+        true // no brand check registered for this frame — allow access
+    }
+
     fn run_opcode_get_property(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let name_idx = self.read_u16() as usize;
         let name_val = &self.chunk.constants[name_idx];
@@ -31073,29 +31445,26 @@ impl<'gc> VM<'gc> {
         };
         let obj = self.stack.pop().expect("VM Stack underflow on GetProperty");
         // Private field brand check for reads: accessing a #-prefixed key on an object
-        // that doesn't own it (and doesn't have it in its prototype chain) is a TypeError.
+        // that doesn't own it is a TypeError. Private members are now per-instance (own props only).
         if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            // Runtime brand check: verify the object was created by the same class evaluation
+            if !self.check_private_brand(ctx, &obj, &key) {
+                let err = self.make_type_error_object(ctx, "Cannot access private member from an object whose class did not declare it");
+                self.handle_throw(ctx, &err)?;
+                self.stack.push(Value::Undefined);
+                return Ok(OpcodeAction::Continue);
+            }
             let has_private = match &obj {
                 Value::VmObject(map) => {
                     let b = map.borrow();
-                    let own =
-                        b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key));
-                    if own {
-                        true
-                    } else {
-                        let proto = b.get("__proto__").cloned();
-                        drop(b);
-                        proto.as_ref().is_some_and(|p| {
-                            self.lookup_proto_chain(Some(p), &key).is_some()
-                                || self.lookup_proto_chain(Some(p), &format!("__get_{}", key)).is_some()
-                                || self.lookup_proto_chain(Some(p), &format!("__set_{}", key)).is_some()
-                        })
-                    }
+                    b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
                 }
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                    let props = self.get_fn_props(ctx, *ip, *arity);
-                    let b = props.borrow();
-                    b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
+                    let overlay = self.get_closure_overlay(&obj);
+                    let shared = self.get_fn_props(ctx, *ip, *arity);
+                    let has_in =
+                        |k: &str| -> bool { overlay.is_some_and(|o| o.borrow().contains_key(k)) || shared.borrow().contains_key(k) };
+                    has_in(&key) || has_in(&format!("__get_{}", key)) || has_in(&format!("__set_{}", key))
                 }
                 _ => false,
             };
@@ -31109,21 +31478,24 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             }
         }
-        match self.try_proxy_get(ctx, &obj, &key, None) {
-            Ok(Some(v)) => {
-                self.stack.push(v);
-                return Ok(OpcodeAction::Continue);
-            }
-            Ok(None) => {}
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
+        // Private field access bypasses proxy traps — access the object directly
+        if !key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            match self.try_proxy_get(ctx, &obj, &key, None) {
+                Ok(Some(v)) => {
+                    self.stack.push(v);
                     return Ok(OpcodeAction::Continue);
                 }
-                return Err(err);
+                Ok(None) => {}
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    return Err(err);
+                }
             }
-        }
+        } // end private-key proxy guard
         match &obj {
             Value::VmObject(map) => {
                 let borrow = map.borrow();
@@ -31580,12 +31952,17 @@ impl<'gc> VM<'gc> {
                 _ => self.stack.push(Value::Undefined),
             },
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let props = self.get_fn_props(ctx, *ip, *arity);
-                let borrow = props.borrow();
+                let overlay = self.get_closure_overlay(&obj);
+                let shared = self.get_fn_props(ctx, *ip, *arity);
+                // Lookup helper: overlay first, then shared
+                let lookup = |k: &str| -> Option<Value<'gc>> {
+                    overlay
+                        .and_then(|o| o.borrow().get(k).cloned())
+                        .or_else(|| shared.borrow().get(k).cloned())
+                };
                 let getter_key = format!("__get_{}", key);
-                let result = if let Some(getter_fn) = borrow.get(&getter_key).cloned() {
+                let result = if let Some(getter_fn) = lookup(&getter_key) {
                     // Accessor getter on the function itself
-                    drop(borrow);
                     match getter_fn {
                         Value::VmFunction(gip, _) => {
                             self.this_stack.push(obj.clone());
@@ -31613,11 +31990,10 @@ impl<'gc> VM<'gc> {
                         }
                         _ => self.invoke_getter_with_receiver(ctx, &getter_fn, &obj),
                     }
-                } else if let Some(v) = borrow.get(&key).cloned() {
+                } else if let Some(v) = lookup(&key) {
                     if key == "prototype"
                         && let Value::VmObject(proto_obj) = v.clone()
                     {
-                        drop(borrow);
                         let current_fn = obj.clone();
                         let needs_update = {
                             let proto_borrow = proto_obj.borrow();
@@ -31635,16 +32011,14 @@ impl<'gc> VM<'gc> {
                 } else {
                     // Check for setter-only accessor
                     let setter_key = format!("__set_{}", key);
-                    if borrow.contains_key(&setter_key) {
-                        drop(borrow);
+                    if lookup(&setter_key).is_some() {
                         if key.starts_with(super::PRIVATE_KEY_PREFIX) {
                             let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
                             self.handle_throw(ctx, &err)?;
                         }
                         Value::Undefined
                     } else {
-                        let proto = borrow.get("__proto__").cloned();
-                        drop(borrow);
+                        let proto = lookup("__proto__");
                         match key.as_str() {
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
@@ -31713,35 +32087,19 @@ impl<'gc> VM<'gc> {
                     let has_own_setter = b.contains_key(&format!("__set_{}", key));
                     let has_own_getter = b.contains_key(&format!("__get_{}", key));
                     if has_own_key && !has_own_getter && !has_own_setter {
-                        PrivateKind::Field
+                        // Check readonly marker for private methods installed per-instance
+                        let ro_key = format!("__readonly_{}__", key);
+                        if matches!(b.get(&ro_key), Some(Value::Boolean(true))) {
+                            PrivateKind::Method
+                        } else {
+                            PrivateKind::Field
+                        }
                     } else if has_own_setter {
                         PrivateKind::AccessorWithSetter
                     } else if has_own_getter {
                         PrivateKind::GetterOnly
                     } else {
-                        // Check prototype chain
-                        let proto = b.get("__proto__").cloned();
-                        drop(b);
-                        let has_setter_in_proto = proto
-                            .as_ref()
-                            .is_some_and(|p| self.lookup_proto_chain(Some(p), &format!("__set_{}", key)).is_some());
-                        if has_setter_in_proto {
-                            PrivateKind::AccessorWithSetter
-                        } else {
-                            let has_getter_in_proto = proto
-                                .as_ref()
-                                .is_some_and(|p| self.lookup_proto_chain(Some(p), &format!("__get_{}", key)).is_some());
-                            if has_getter_in_proto {
-                                PrivateKind::GetterOnly
-                            } else {
-                                let has_key_in_proto = proto.as_ref().is_some_and(|p| self.lookup_proto_chain(Some(p), &key).is_some());
-                                if has_key_in_proto {
-                                    PrivateKind::Method
-                                } else {
-                                    PrivateKind::NotFound
-                                }
-                            }
-                        }
+                        PrivateKind::NotFound
                     }
                 }
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
@@ -31818,10 +32176,13 @@ impl<'gc> VM<'gc> {
         };
         let val = self.stack.pop().expect("VM Stack underflow on InitProperty (val)");
         let obj = self.stack.pop().expect("VM Stack underflow on InitProperty (obj)");
+        // Private fields live on the exact object (including proxies) — no unwrapping.
+        // Proxy traps are not triggered for private field init.
         match &obj {
             Value::VmObject(map) => {
-                // Check for proxy: delegate to defineProperty trap
-                if map.borrow().contains_key("__proxy_target__") {
+                // Check for proxy: delegate to defineProperty trap (non-private and non-brand only)
+                if !key.contains(super::PRIVATE_KEY_PREFIX) && !key.starts_with("__brand_") && map.borrow().contains_key("__proxy_target__")
+                {
                     // Use assign_named_property for proxy to trigger set/defineProperty traps
                     let _ = self.assign_named_property(ctx, &obj, &key, &val, None)?;
                     self.stack.push(val);
@@ -31832,7 +32193,16 @@ impl<'gc> VM<'gc> {
                 let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
                 let key_exists = borrow.contains_key(&key);
                 drop(borrow);
-                if (is_frozen || (is_non_ext && !key_exists)) && !key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                // Duplicate private member check (spec: PrivateFieldAdd / PrivateMethodOrAccessorAdd)
+                let is_private = key.contains(super::PRIVATE_KEY_PREFIX);
+                if is_private && key_exists {
+                    let err =
+                        self.make_type_error_object(ctx, "Cannot initialize private member in an object whose class already declared it");
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+                if (is_frozen || (is_non_ext && !key_exists)) && !is_private {
                     let msg = if is_frozen {
                         format!("Cannot add property {}, object is frozen", key)
                     } else {
@@ -31843,8 +32213,8 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                if is_non_ext && !key_exists && key.starts_with(super::PRIVATE_KEY_PREFIX) {
-                    let err = self.make_type_error_object(ctx, &format!("Cannot add private field {}, object is not extensible", key));
+                if is_non_ext && !key_exists && is_private {
+                    let err = self.make_type_error_object(ctx, "Cannot add private member, object is not extensible");
                     self.handle_throw(ctx, &err)?;
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
@@ -31867,13 +32237,48 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let props = self.get_fn_props(ctx, *ip, *arity);
+                // For closures, brand/prototype go to per-closure overlay; everything else to shared fn_props
+                let is_brand_key = key.starts_with("__brand_");
+                let closure_overlay = self.get_closure_overlay(&obj);
+                let shared_props = self.get_fn_props(ctx, *ip, *arity);
+                // For extensibility/duplicate checks, look in both overlay and shared
+                let props_for_check = if is_brand_key {
+                    closure_overlay.unwrap_or(shared_props)
+                } else {
+                    shared_props
+                };
+                let is_private = key.contains(super::PRIVATE_KEY_PREFIX);
+                if is_private {
+                    let borrow = props_for_check.borrow();
+                    let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
+                    let key_exists = borrow.contains_key(&key);
+                    drop(borrow);
+                    if is_private && key_exists {
+                        let err = self
+                            .make_type_error_object(ctx, "Cannot initialize private member in an object whose class already declared it");
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(val);
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    if is_non_ext && !key_exists {
+                        let err = self.make_type_error_object(ctx, "Cannot add private member, object is not extensible");
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(val);
+                        return Ok(OpcodeAction::Continue);
+                    }
+                }
+                // Write brand keys to per-closure overlay; everything else to shared fn_props
+                let target_props = if is_brand_key {
+                    closure_overlay.unwrap_or(shared_props)
+                } else {
+                    shared_props
+                };
                 let getter_key = format!("__get_{}", key);
                 let setter_key = format!("__set_{}", key);
                 let readonly_key = format!("__readonly_{}__", key);
                 let nonenumerable_key = format!("__nonenumerable_{}__", key);
                 let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
-                let mut borrow = props.borrow_mut(ctx);
+                let mut borrow = target_props.borrow_mut(ctx);
                 borrow.shift_remove(&getter_key);
                 borrow.shift_remove(&setter_key);
                 borrow.shift_remove(&readonly_key);
@@ -32230,7 +32635,7 @@ impl<'gc> VM<'gc> {
         let val = self.stack.pop().expect("VM Stack underflow on SetIndex (val)");
         let index = self.stack.pop().expect("VM Stack underflow on SetIndex (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetIndex (obj)");
-        let is_strict = self.current_execution_is_strict();
+        let _is_strict = self.current_execution_is_strict();
         let coerced_key = match self.as_property_key_string(ctx, &index) {
             Ok(key) => key,
             Err(err) => {
@@ -32244,19 +32649,7 @@ impl<'gc> VM<'gc> {
         };
         match &obj {
             Value::VmArray(_) => match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
-                Ok(result) => {
-                    if matches!(result, Value::Boolean(false)) && is_strict {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from(&format!("Cannot assign to read only property '{}' of object", coerced_key)),
-                        );
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        err_map.insert("name".to_string(), Value::from("TypeError"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                        return Ok(OpcodeAction::Continue);
-                    }
-                }
+                Ok(_) => {}
                 Err(err) => {
                     self.set_pending_throw_from_error(&err);
                     if let Some(thrown) = self.pending_throw.take() {
@@ -32270,19 +32663,7 @@ impl<'gc> VM<'gc> {
                 self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
                 let _ = map;
                 match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
-                    Ok(result) => {
-                        if matches!(result, Value::Boolean(false)) && is_strict {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert(
-                                "message".to_string(),
-                                Value::from(&format!("Cannot assign to read only property '{}' of object", coerced_key)),
-                            );
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("name".to_string(), Value::from("TypeError"));
-                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                            return Ok(OpcodeAction::Continue);
-                        }
-                    }
+                    Ok(_) => {}
                     Err(err) => {
                         self.set_pending_throw_from_error(&err);
                         if let Some(thrown) = self.pending_throw.take() {
@@ -32296,19 +32677,7 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(_, _) | Value::VmClosure(_, _, _) => {
                 self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
                 match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
-                    Ok(result) => {
-                        if matches!(result, Value::Boolean(false)) && is_strict {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert(
-                                "message".to_string(),
-                                Value::from(&format!("Cannot assign to read only property '{}' of object", coerced_key)),
-                            );
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("name".to_string(), Value::from("TypeError"));
-                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                            return Ok(OpcodeAction::Continue);
-                        }
-                    }
+                    Ok(_) => {}
                     Err(err) => {
                         self.set_pending_throw_from_error(&err);
                         if let Some(thrown) = self.pending_throw.take() {
@@ -32641,6 +33010,16 @@ impl<'gc> VM<'gc> {
                 break;
             }
         }
+        // Arrow functions: use the captured `this` stored as the last upvalue
+        // by MakeClosure, rather than the dynamic this_stack.
+        if let Some(frame) = self.frames.last()
+            && self.chunk.arrow_function_ips.contains(&frame.func_ip)
+            && !frame.upvalues.is_empty()
+        {
+            let captured = frame.upvalues.last().unwrap().borrow().clone();
+            self.stack.push(captured);
+            return Ok(OpcodeAction::Continue);
+        }
         let this_val = self.this_stack.last().cloned().unwrap_or(Value::VmObject(self.global_this));
         self.stack.push(this_val);
         Ok(OpcodeAction::Continue)
@@ -32802,7 +33181,15 @@ impl<'gc> VM<'gc> {
         } else {
             value_to_string(name_val)
         };
-        let obj = self.stack.last().cloned().expect("VM Stack underflow on GetMethod");
+        let raw_obj = self.stack.last().cloned().expect("VM Stack underflow on GetMethod");
+        let obj = raw_obj;
+        // Brand check for private method calls
+        if key.contains(super::PRIVATE_KEY_PREFIX) && !self.check_private_brand(ctx, &obj, &key) {
+            let err = self.make_type_error_object(ctx, "Cannot access private member from an object whose class did not declare it");
+            self.handle_throw(ctx, &err)?;
+            self.stack.push(Value::Undefined);
+            return Ok(OpcodeAction::Continue);
+        }
         let method = match &obj {
             Value::VmObject(map) => {
                 let borrow = map.borrow();
@@ -33095,6 +33482,47 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
+    // Opcode::ResetPrototype — create a fresh prototype for the class constructor on TOS.
+    // Each class evaluation must have its own prototype so factory patterns work correctly.
+    // For VmClosure constructors, we create a per-closure fn_props clone so that
+    // different closures with the same IP don't share the same prototype.
+    fn run_opcode_reset_prototype(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let ctor = self.stack.last().cloned().unwrap_or(Value::Undefined);
+        let ip = match &ctor {
+            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => *ip,
+            _ => return Ok(OpcodeAction::Continue),
+        };
+        let arity = match &ctor {
+            Value::VmFunction(_, a) | Value::VmClosure(_, a, _) => *a,
+            _ => 0,
+        };
+        // Create a new prototype object
+        let mut proto = IndexMap::new();
+        proto.insert("constructor".to_string(), ctor.clone());
+        proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
+            && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
+        {
+            proto.insert("__proto__".to_string(), obj_proto);
+        }
+        let new_proto = Value::VmObject(new_gc_cell_ptr(ctx, proto));
+
+        if let Value::VmClosure(_, _, uv) = ctor {
+            // For closures: create a per-closure override map (prototype, brands)
+            // Other properties (static methods, etc.) still use shared fn_props
+            let gc_key = Gc::as_ptr(uv) as usize;
+            let mut overlay = IndexMap::new();
+            overlay.insert("prototype".to_string(), new_proto);
+            let per_closure = new_gc_cell_ptr(ctx, overlay);
+            self.closure_fn_props.insert(gc_key, per_closure);
+        } else {
+            // VmFunction: just update shared fn_props
+            let props = self.get_fn_props(ctx, ip, arity);
+            props.borrow_mut(ctx).insert("prototype".to_string(), new_proto);
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
     // Opcode::ToNumber
     fn run_opcode_to_number(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
@@ -33167,6 +33595,7 @@ impl<'gc> VM<'gc> {
         // Private field keys use the PRIVATE_KEY_PREFIX so external JS code can never
         // forge them; only the compiler emits them via Expr::PrivateName.
         if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            // Private field `in` check: no proxy unwrapping — check the object directly
             let has = match &obj {
                 Value::VmObject(map) => {
                     let b = map.borrow();
@@ -33348,7 +33777,10 @@ impl<'gc> VM<'gc> {
         let has_instance_fn = match &rhs {
             Value::VmObject(map) => map.borrow().get("@@sym:2").cloned(),
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                self.get_fn_props(ctx, *ip, *arity).borrow().get("@@sym:2").cloned()
+                let fn_props = self
+                    .get_fn_props_for_value(ctx, &rhs)
+                    .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
+                fn_props.borrow().get("@@sym:2").cloned()
             }
             _ => None,
         };
@@ -33392,7 +33824,9 @@ impl<'gc> VM<'gc> {
         // Get rhs.prototype for prototype chain walking
         let rhs_proto = match &rhs {
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let fn_props = self.get_fn_props(ctx, *ip, *arity);
+                let fn_props = self
+                    .get_fn_props_for_value(ctx, &rhs)
+                    .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
                 fn_props.borrow().get("prototype").cloned()
             }
             Value::VmObject(map) => map.borrow().get("prototype").cloned(),
@@ -33744,8 +34178,10 @@ impl<'gc> VM<'gc> {
 
                 // Create new empty object as `this`
                 let new_obj = new_gc_cell_ptr(ctx, IndexMap::new());
-                // Set __proto__ to constructor's prototype property
-                let fn_props = self.get_fn_props(ctx, target_ip, _arity);
+                // Set __proto__ to constructor's prototype property (per-closure override first)
+                let fn_props = self
+                    .get_fn_props_for_value(ctx, &callee)
+                    .unwrap_or_else(|| self.get_fn_props(ctx, target_ip, _arity));
                 if let Some(proto) = fn_props.borrow().get("prototype").cloned() {
                     new_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
                 }
@@ -33753,8 +34189,8 @@ impl<'gc> VM<'gc> {
                 self.this_stack.push(this_val);
                 // Push new.target = the constructor being invoked
                 self.new_target_stack.push(callee.clone());
-                let closure_uv = if let Value::VmClosure(_, _, ref uv) = callee {
-                    (**uv).clone()
+                let closure_uv = if let Value::VmClosure(_, _, uv) = callee {
+                    (**uv).to_vec()
                 } else {
                     Vec::new()
                 };

@@ -392,3 +392,319 @@ pub enum ForOfPattern {
     Object(Vec<DestructuringElement>),
     Array(Vec<DestructuringElement>),
 }
+
+// ── Eval restriction helpers (sec-performeval-rules-in-initializer) ──────────
+// These functions walk the AST looking for constructs forbidden in eval inside
+// class field initializers.  They recurse into arrow functions (which inherit
+// the enclosing arguments/super/new.target bindings) but NOT into regular
+// functions, generators, async functions, methods, or class bodies (which
+// create new scopes for those bindings).
+
+/// Bit flags returned by `eval_ast_scan`.
+pub const SCAN_ARGUMENTS: u8 = 0x01;
+pub const SCAN_SUPER_CALL: u8 = 0x02;
+pub const SCAN_SUPER_PROP: u8 = 0x04;
+pub const SCAN_NEW_TARGET: u8 = 0x08;
+
+/// Scan `statements` for forbidden constructs indicated by `mask`.
+/// Returns the subset of `mask` bits that were actually found.
+pub fn eval_ast_scan(statements: &[Statement], mask: u8) -> u8 {
+    let mut found: u8 = 0;
+    for stmt in statements {
+        scan_statement(stmt, mask, &mut found);
+        if found & mask == mask {
+            return found;
+        }
+    }
+    found
+}
+
+fn scan_statement(stmt: &Statement, mask: u8, found: &mut u8) {
+    if *found & mask == mask {
+        return;
+    }
+    match &*stmt.kind {
+        StatementKind::Expr(e) => scan_expr(e, mask, found),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            for (_, init) in decls {
+                if let Some(e) = init {
+                    scan_expr(e, mask, found);
+                }
+            }
+        }
+        StatementKind::Const(decls) => {
+            for (_, e) in decls {
+                scan_expr(e, mask, found);
+            }
+        }
+        StatementKind::Return(opt) => {
+            if let Some(e) = opt {
+                scan_expr(e, mask, found);
+            }
+        }
+        StatementKind::Throw(e) => scan_expr(e, mask, found),
+        StatementKind::Block(stmts) => {
+            for s in stmts {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::If(if_stmt) => {
+            scan_expr(&if_stmt.condition, mask, found);
+            for s in &if_stmt.then_body {
+                scan_statement(s, mask, found);
+            }
+            if let Some(eb) = &if_stmt.else_body {
+                for s in eb {
+                    scan_statement(s, mask, found);
+                }
+            }
+        }
+        StatementKind::While(cond, body) => {
+            scan_expr(cond, mask, found);
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::DoWhile(body, cond) => {
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+            scan_expr(cond, mask, found);
+        }
+        StatementKind::For(f) => {
+            if let Some(init) = &f.init {
+                scan_statement(init, mask, found);
+            }
+            if let Some(test) = &f.test {
+                scan_expr(test, mask, found);
+            }
+            if let Some(upd) = &f.update {
+                scan_statement(upd, mask, found);
+            }
+            for s in &f.body {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::ForOf(_, _, iter, body) | StatementKind::ForIn(_, _, iter, body) | StatementKind::ForAwaitOf(_, _, iter, body) => {
+            scan_expr(iter, mask, found);
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::ForOfExpr(lhs, iter, body)
+        | StatementKind::ForInExpr(lhs, iter, body)
+        | StatementKind::ForAwaitOfExpr(lhs, iter, body) => {
+            scan_expr(lhs, mask, found);
+            scan_expr(iter, mask, found);
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::ForOfDestructuringObject(_, _, iter, body)
+        | StatementKind::ForOfDestructuringArray(_, _, iter, body)
+        | StatementKind::ForInDestructuringObject(_, _, iter, body)
+        | StatementKind::ForInDestructuringArray(_, _, iter, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, iter, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, iter, body) => {
+            scan_expr(iter, mask, found);
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::Switch(sw) => {
+            scan_expr(&sw.expr, mask, found);
+            for case in &sw.cases {
+                match case {
+                    SwitchCase::Case(test, body) => {
+                        scan_expr(test, mask, found);
+                        for s in body {
+                            scan_statement(s, mask, found);
+                        }
+                    }
+                    SwitchCase::Default(body) => {
+                        for s in body {
+                            scan_statement(s, mask, found);
+                        }
+                    }
+                }
+            }
+        }
+        StatementKind::TryCatch(tc) => {
+            for s in &tc.try_body {
+                scan_statement(s, mask, found);
+            }
+            if let Some(cb) = &tc.catch_body {
+                for s in cb {
+                    scan_statement(s, mask, found);
+                }
+            }
+            if let Some(fb) = &tc.finally_body {
+                for s in fb {
+                    scan_statement(s, mask, found);
+                }
+            }
+        }
+        StatementKind::With(expr, body) => {
+            scan_expr(expr, mask, found);
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+        }
+        StatementKind::Label(_, inner) => scan_statement(inner, mask, found),
+        StatementKind::Assign(_, e) => scan_expr(e, mask, found),
+        StatementKind::LetDestructuringArray(_, e)
+        | StatementKind::VarDestructuringArray(_, e)
+        | StatementKind::ConstDestructuringArray(_, e)
+        | StatementKind::LetDestructuringObject(_, e)
+        | StatementKind::VarDestructuringObject(_, e)
+        | StatementKind::ConstDestructuringObject(_, e) => scan_expr(e, mask, found),
+        StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            for (_, e) in decls {
+                scan_expr(e, mask, found);
+            }
+        }
+        // Function/class declarations create new scopes — do NOT recurse
+        StatementKind::FunctionDeclaration(..) | StatementKind::Class(..) => {}
+        // Other statements with no sub-expressions
+        StatementKind::Break(_)
+        | StatementKind::Continue(_)
+        | StatementKind::Debugger
+        | StatementKind::Import(..)
+        | StatementKind::Export(..) => {}
+    }
+}
+
+fn scan_expr(expr: &Expr, mask: u8, found: &mut u8) {
+    if *found & mask == mask {
+        return;
+    }
+    match expr {
+        // Leaf checks
+        Expr::Var(name, _, _) if mask & SCAN_ARGUMENTS != 0 && name == "arguments" => {
+            *found |= SCAN_ARGUMENTS;
+        }
+        Expr::SuperCall(_) => {
+            *found |= SCAN_SUPER_CALL;
+        }
+        Expr::SuperMethod(_, _) => {
+            *found |= SCAN_SUPER_CALL;
+        }
+        Expr::SuperProperty(_) | Expr::SuperComputedProperty(_) => {
+            *found |= SCAN_SUPER_PROP;
+        }
+        Expr::SuperComputedMethod(_, _) => {
+            *found |= SCAN_SUPER_PROP | SCAN_SUPER_CALL;
+        }
+        Expr::NewTarget => {
+            *found |= SCAN_NEW_TARGET;
+        }
+
+        // Arrow functions: recurse (they inherit arguments/super/new.target)
+        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => {
+            for s in body {
+                scan_statement(s, mask, found);
+            }
+        }
+
+        // Regular functions/generators/async — do NOT recurse (new scope)
+        Expr::Function(..) | Expr::GeneratorFunction(..) | Expr::AsyncFunction(..) | Expr::AsyncGeneratorFunction(..) => {}
+
+        // Class expressions — do NOT recurse
+        Expr::Class(_) => {}
+
+        // Recursive cases for compound expressions
+        Expr::Assign(a, b)
+        | Expr::Binary(a, _, b)
+        | Expr::LogicalAnd(a, b)
+        | Expr::LogicalOr(a, b)
+        | Expr::NullishCoalescing(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Pow(a, b)
+        | Expr::LogicalAndAssign(a, b)
+        | Expr::LogicalOrAssign(a, b)
+        | Expr::NullishAssign(a, b)
+        | Expr::AddAssign(a, b)
+        | Expr::SubAssign(a, b)
+        | Expr::PowAssign(a, b)
+        | Expr::MulAssign(a, b)
+        | Expr::DivAssign(a, b)
+        | Expr::ModAssign(a, b)
+        | Expr::BitXorAssign(a, b)
+        | Expr::BitAndAssign(a, b)
+        | Expr::BitOrAssign(a, b)
+        | Expr::LeftShiftAssign(a, b)
+        | Expr::RightShiftAssign(a, b)
+        | Expr::UnsignedRightShiftAssign(a, b)
+        | Expr::Index(a, b)
+        | Expr::Comma(a, b)
+        | Expr::OptionalIndex(a, b) => {
+            scan_expr(a, mask, found);
+            scan_expr(b, mask, found);
+        }
+        Expr::Conditional(a, b, c) => {
+            scan_expr(a, mask, found);
+            scan_expr(b, mask, found);
+            scan_expr(c, mask, found);
+        }
+        Expr::Property(e, _)
+        | Expr::OptionalProperty(e, _)
+        | Expr::PrivateMember(e, _)
+        | Expr::OptionalPrivateMember(e, _)
+        | Expr::TypeOf(e)
+        | Expr::Delete(e)
+        | Expr::Void(e)
+        | Expr::Await(e)
+        | Expr::LogicalNot(e)
+        | Expr::UnaryNeg(e)
+        | Expr::UnaryPlus(e)
+        | Expr::BitNot(e)
+        | Expr::Increment(e)
+        | Expr::Decrement(e)
+        | Expr::Spread(e)
+        | Expr::PostIncrement(e)
+        | Expr::PostDecrement(e)
+        | Expr::Getter(e)
+        | Expr::Setter(e)
+        | Expr::YieldStar(e)
+        | Expr::DynamicImport(e, None) => {
+            scan_expr(e, mask, found);
+        }
+        Expr::DynamicImport(e, Some(opts)) => {
+            scan_expr(e, mask, found);
+            scan_expr(opts, mask, found);
+        }
+        Expr::Yield(Some(e)) => {
+            scan_expr(e, mask, found);
+        }
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            scan_expr(callee, mask, found);
+            for a in args {
+                scan_expr(a, mask, found);
+            }
+        }
+        Expr::Object(entries) => {
+            for (k, v, _, _) in entries {
+                scan_expr(k, mask, found);
+                scan_expr(v, mask, found);
+            }
+        }
+        Expr::Array(elems) => {
+            for e in elems.iter().flatten() {
+                scan_expr(e, mask, found);
+            }
+        }
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => {
+            scan_expr(tag, mask, found);
+            for e in exprs {
+                scan_expr(e, mask, found);
+            }
+        }
+        Expr::TemplateString(_) => {
+            // Template parts store raw tokens, not parsed expressions — skip
+        }
+        // Leaves with no sub-expressions
+        _ => {
+            log::error!("Unhandled expression in scan_expr: {:?}", expr);
+        }
+    }
+}

@@ -5804,6 +5804,26 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
     }
     Ok(pattern)
 }
+
+/// Push a set of private names onto the parser's PRIVATE_NAME_STACK.
+/// Used by the VM to make private fields visible during direct eval inside class bodies.
+/// Returns a guard that pops the entry when dropped.
+pub fn push_private_names_for_eval(names: std::collections::HashSet<String>) -> EvalPrivateNamesGuard {
+    let rc = std::rc::Rc::new(std::cell::RefCell::new(names));
+    PRIVATE_NAME_STACK.with(|s| s.borrow_mut().push(rc));
+    EvalPrivateNamesGuard
+}
+
+/// RAII guard that pops the PRIVATE_NAME_STACK entry pushed by `push_private_names_for_eval`.
+pub struct EvalPrivateNamesGuard;
+impl Drop for EvalPrivateNamesGuard {
+    fn drop(&mut self) {
+        PRIVATE_NAME_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

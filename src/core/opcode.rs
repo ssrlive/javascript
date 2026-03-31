@@ -93,6 +93,10 @@ pub enum Opcode {
     GetSuperPropertyComputed = 87, // computed super property: pop key from stack, look up on super prototype
     ThrowTypeError = 88,           // pop message string from stack, construct TypeError, handle_throw
     Await = 89,                    // async suspension point: pop awaited value and resume in a microtask
+    EnterFieldInit = 90,           // mark start of class field initializer (for eval restrictions)
+    LeaveFieldInit = 91,           // mark end of class field initializer
+    AllocBrand = 92,               // push a runtime-unique brand number onto stack (for private member brand checks)
+    ResetPrototype = 93,           // create a fresh prototype for the constructor on TOS
 }
 
 impl TryFrom<u8> for Opcode {
@@ -190,6 +194,10 @@ impl TryFrom<u8> for Opcode {
             87 => Opcode::GetSuperPropertyComputed,
             88 => Opcode::ThrowTypeError,
             89 => Opcode::Await,
+            90 => Opcode::EnterFieldInit,
+            91 => Opcode::LeaveFieldInit,
+            92 => Opcode::AllocBrand,
+            93 => Opcode::ResetPrototype,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -225,6 +233,22 @@ pub struct Chunk<'gc> {
     pub method_function_ips: std::collections::HashSet<usize>,
     /// Bytecode offset → source (line, column) mapping (sorted by offset).
     pub line_map: Vec<(usize, usize, usize)>,
+    /// Map from function IP to private name context (for direct eval inside class bodies).
+    /// Each entry is a list of (class_id, set_of_private_names) that were in scope.
+    pub fn_private_name_context: std::collections::HashMap<usize, Vec<(usize, std::collections::HashSet<String>)>>,
+    /// Map from function IP to eval context flags (for PerformEval restrictions).
+    /// Bit 0: inside class field initializer (reject `arguments`, `super()`)
+    /// Bit 1: inside method (allow `super.property`)
+    /// Bit 2: inside constructor (allow `super()`)
+    pub fn_eval_context: std::collections::HashMap<usize, u8>,
+    /// Map from function IP to (upvalue_index, class_id) for private member brand checks.
+    /// Methods in classes with private members capture a brand as an upvalue; this records where.
+    pub fn_brand_upvalue: std::collections::HashMap<usize, (u8, usize)>,
+    /// Map from function IP to upvalue names (for brand upvalue lookup).
+    pub fn_upvalue_names: std::collections::HashMap<usize, Vec<String>>,
+    /// Global names declared via `var`/`function`/`class` at the top level of this chunk.
+    /// Used by strict-mode eval to avoid leaking declarations back to the caller.
+    pub declared_globals: std::collections::HashSet<String>,
 }
 
 impl<'gc> Chunk<'gc> {

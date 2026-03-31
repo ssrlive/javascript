@@ -5311,6 +5311,14 @@ impl<'gc> VM<'gc> {
                             || b.props.contains_key(&format!("__set_{}", key));
                         Value::Boolean(is_own && !b.props.contains_key(&ne_key))
                     }
+                    Some(Value::VmFunction(ip, arity)) | Some(Value::VmClosure(ip, arity, _)) => {
+                        let props = self.get_fn_props(ctx, *ip, *arity);
+                        let b = props.borrow();
+                        let ne_key = format!("__nonenumerable_{}__", key);
+                        let is_own =
+                            b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key));
+                        Value::Boolean(is_own && !b.contains_key(&ne_key))
+                    }
                     _ => Value::Boolean(false),
                 }
             }
@@ -5371,6 +5379,10 @@ impl<'gc> VM<'gc> {
                     },
                     None => String::new(),
                 };
+                // Private fields (#-prefixed) must not be observable
+                if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                    return Value::Boolean(false);
+                }
                 let exists = match self.try_proxy_has(ctx, &target, &key) {
                     Ok(Some(v)) => v,
                     Ok(None) => self.has_property_in_chain(ctx, &target, &key),
@@ -8979,7 +8991,11 @@ impl<'gc> VM<'gc> {
         receiver: Option<&Value<'gc>>,
     ) -> Result<Value<'gc>, JSError> {
         if let Some(result) = self.try_proxy_set(ctx, obj, key, val, receiver)? {
-            if matches!(result, Value::Boolean(false)) && !self.current_execution_is_strict() {
+            if matches!(result, Value::Boolean(false)) {
+                if self.current_execution_is_strict() {
+                    let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                    self.handle_throw(ctx, &err)?;
+                }
                 return Ok(val.clone());
             }
             return Ok(result);
@@ -9185,6 +9201,25 @@ impl<'gc> VM<'gc> {
                 } else {
                     let mut b = map.borrow_mut(ctx);
                     b.insert(key.to_string(), val.clone());
+                }
+                return Ok(val.clone());
+            }
+            // If the key exists as an own data property (not accessor), just overwrite directly.
+            // Do not look at prototype chain for setters.
+            let own_is_data = key_exists
+                && !borrow.contains_key(&getter_key)
+                && !borrow.contains_key(&setter_key)
+                && !matches!(own_prop.as_ref(), Some(Value::Property { .. }));
+            if own_is_data && !is_frozen && !is_readonly {
+                drop(borrow);
+                let mut b = map.borrow_mut(ctx);
+                if key == "__proto__" {
+                    b.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
+                } else {
+                    b.insert(key.to_string(), val.clone());
+                }
+                if Gc::ptr_eq(*map, self.global_this) {
+                    self.globals.insert(key.to_string(), val.clone());
                 }
                 return Ok(val.clone());
             }
@@ -17000,6 +17035,10 @@ impl<'gc> VM<'gc> {
                     },
                     None => String::new(),
                 };
+                // Private names (#-prefixed) are not visible via descriptors
+                if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                    return Value::Undefined;
+                }
                 if let Some(Value::String(s)) = args.first() {
                     if key == "length" {
                         return self.make_data_descriptor_object(ctx, &Value::Number(s.len() as f64), false, false, false);
@@ -22890,6 +22929,10 @@ impl<'gc> VM<'gc> {
                 self.throw_type_error(ctx, "Cannot convert undefined or null to object");
                 return Value::Undefined;
             }
+            // Private names (#-prefixed) are not visible as own properties
+            if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                return Value::Boolean(false);
+            }
             return match &receiver {
                 Value::VmObject(map) => {
                     // Proxy: use [[GetOwnProperty]] which routes through traps
@@ -24181,6 +24224,10 @@ impl<'gc> VM<'gc> {
             };
 
             if let Some(key) = candidate {
+                // Private names (#-prefixed) should never appear as enumerable/own keys
+                if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                    continue;
+                }
                 if enumerable_only && map.contains_key(&format!("__nonenumerable_{}__", key)) {
                     continue;
                 }
@@ -28283,6 +28330,14 @@ impl<'gc> VM<'gc> {
     }
 }
 
+enum PrivateKind {
+    Field,
+    Method,
+    AccessorWithSetter,
+    GetterOnly,
+    NotFound,
+}
+
 /// Result of executing a single opcode.
 /// `Continue` means the VM loop keeps running.
 /// `Exit` means `run_inner` should return the contained value.
@@ -31017,6 +31072,43 @@ impl<'gc> VM<'gc> {
             value_to_string(name_val)
         };
         let obj = self.stack.pop().expect("VM Stack underflow on GetProperty");
+        // Private field brand check for reads: accessing a #-prefixed key on an object
+        // that doesn't own it (and doesn't have it in its prototype chain) is a TypeError.
+        if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            let has_private = match &obj {
+                Value::VmObject(map) => {
+                    let b = map.borrow();
+                    let own =
+                        b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key));
+                    if own {
+                        true
+                    } else {
+                        let proto = b.get("__proto__").cloned();
+                        drop(b);
+                        proto.as_ref().is_some_and(|p| {
+                            self.lookup_proto_chain(Some(p), &key).is_some()
+                                || self.lookup_proto_chain(Some(p), &format!("__get_{}", key)).is_some()
+                                || self.lookup_proto_chain(Some(p), &format!("__set_{}", key)).is_some()
+                        })
+                    }
+                }
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let props = self.get_fn_props(ctx, *ip, *arity);
+                    let b = props.borrow();
+                    b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
+                }
+                _ => false,
+            };
+            if !has_private {
+                let err = self.make_type_error_object(
+                    ctx,
+                    &format!("Cannot read private member {} from an object whose class did not declare it", key),
+                );
+                self.handle_throw(ctx, &err)?;
+                self.stack.push(Value::Undefined);
+                return Ok(OpcodeAction::Continue);
+            }
+        }
         match self.try_proxy_get(ctx, &obj, &key, None) {
             Ok(Some(v)) => {
                 self.stack.push(v);
@@ -31080,9 +31172,16 @@ impl<'gc> VM<'gc> {
                     let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
                     self.stack.push(getter_result);
                 } else if borrow.contains_key(&getter_key) || borrow.contains_key(&format!("__set_{}", key)) {
-                    // Accessor property exists but getter is undefined — return undefined
+                    // Accessor property exists but getter is undefined
                     drop(borrow);
-                    self.stack.push(Value::Undefined);
+                    if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                        // Private accessor without getter → TypeError
+                        let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(Value::Undefined);
+                    } else {
+                        self.stack.push(Value::Undefined);
+                    }
                 } else {
                     let val = if key == "__proto__" {
                         borrow
@@ -31120,6 +31219,10 @@ impl<'gc> VM<'gc> {
                         let setter_key = format!("__set_{}", key);
                         if borrow.contains_key(&setter_key) {
                             drop(borrow);
+                            if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                                let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
+                                self.handle_throw(ctx, &err)?;
+                            }
                             self.stack.push(Value::Undefined);
                             return Ok(OpcodeAction::Continue);
                         }
@@ -31302,6 +31405,16 @@ impl<'gc> VM<'gc> {
                                     _ => self.stack.push(Value::Undefined),
                                 }
                             } else {
+                                // For private accessor without getter: throw TypeError
+                                if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                                    let setter_key2 = format!("__set_{}", key);
+                                    if self.lookup_proto_chain(effective_proto.as_ref(), &setter_key2).is_some() {
+                                        let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
+                                        self.handle_throw(ctx, &err)?;
+                                        self.stack.push(Value::Undefined);
+                                        return Ok(OpcodeAction::Continue);
+                                    }
+                                }
                                 let found = self.lookup_proto_chain(effective_proto.as_ref(), &key);
                                 match found {
                                     Some(Value::Property { getter: Some(g), .. }) => {
@@ -31524,6 +31637,10 @@ impl<'gc> VM<'gc> {
                     let setter_key = format!("__set_{}", key);
                     if borrow.contains_key(&setter_key) {
                         drop(borrow);
+                        if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                            let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
+                            self.handle_throw(ctx, &err)?;
+                        }
                         Value::Undefined
                     } else {
                         let proto = borrow.get("__proto__").cloned();
@@ -31584,18 +31701,98 @@ impl<'gc> VM<'gc> {
         };
         let val = self.stack.pop().expect("VM Stack underflow on SetProperty (val)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetProperty (obj)");
+        // Private field brand check: setting a #-prefixed key on an object
+        // that doesn't own it (no own property, no own setter, and not in proto chain) is a TypeError.
+        // Also: private methods (on prototype, not own) are non-writable.
+        // Getter-only accessors are also not writable.
+        if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            let kind = match &obj {
+                Value::VmObject(map) => {
+                    let b = map.borrow();
+                    let has_own_key = b.contains_key(&key);
+                    let has_own_setter = b.contains_key(&format!("__set_{}", key));
+                    let has_own_getter = b.contains_key(&format!("__get_{}", key));
+                    if has_own_key && !has_own_getter && !has_own_setter {
+                        PrivateKind::Field
+                    } else if has_own_setter {
+                        PrivateKind::AccessorWithSetter
+                    } else if has_own_getter {
+                        PrivateKind::GetterOnly
+                    } else {
+                        // Check prototype chain
+                        let proto = b.get("__proto__").cloned();
+                        drop(b);
+                        let has_setter_in_proto = proto
+                            .as_ref()
+                            .is_some_and(|p| self.lookup_proto_chain(Some(p), &format!("__set_{}", key)).is_some());
+                        if has_setter_in_proto {
+                            PrivateKind::AccessorWithSetter
+                        } else {
+                            let has_getter_in_proto = proto
+                                .as_ref()
+                                .is_some_and(|p| self.lookup_proto_chain(Some(p), &format!("__get_{}", key)).is_some());
+                            if has_getter_in_proto {
+                                PrivateKind::GetterOnly
+                            } else {
+                                let has_key_in_proto = proto.as_ref().is_some_and(|p| self.lookup_proto_chain(Some(p), &key).is_some());
+                                if has_key_in_proto {
+                                    PrivateKind::Method
+                                } else {
+                                    PrivateKind::NotFound
+                                }
+                            }
+                        }
+                    }
+                }
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let props = self.get_fn_props(ctx, *ip, *arity);
+                    let b = props.borrow();
+                    if b.contains_key(&key) && !b.contains_key(&format!("__get_{}", key)) && !b.contains_key(&format!("__set_{}", key)) {
+                        let ro_key = format!("__readonly_{}__", key);
+                        if matches!(b.get(&ro_key), Some(Value::Boolean(true))) {
+                            PrivateKind::Method
+                        } else {
+                            PrivateKind::Field
+                        }
+                    } else if b.contains_key(&format!("__set_{}", key)) {
+                        PrivateKind::AccessorWithSetter
+                    } else if b.contains_key(&format!("__get_{}", key)) {
+                        PrivateKind::GetterOnly
+                    } else {
+                        PrivateKind::NotFound
+                    }
+                }
+                _ => PrivateKind::NotFound,
+            };
+            match kind {
+                PrivateKind::Field | PrivateKind::AccessorWithSetter => {
+                    // Allow - field is writable, accessor will use setter
+                }
+                PrivateKind::GetterOnly => {
+                    let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a setter", key));
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+                PrivateKind::Method => {
+                    let err = self.make_type_error_object(ctx, &format!("Cannot assign to private method {}", key));
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+                PrivateKind::NotFound => {
+                    let err = self.make_type_error_object(
+                        ctx,
+                        &format!("Cannot write private member {} to an object whose class did not declare it", key),
+                    );
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+            }
+        }
         match self.assign_named_property(ctx, &obj, &key, &val, None) {
             Ok(result) => {
-                if matches!(result, Value::Boolean(false)) && self.current_execution_is_strict() {
-                    let mut err_map = IndexMap::new();
-                    err_map.insert(
-                        "message".to_string(),
-                        Value::from(&format!("Cannot assign to read only property '{}' of object", key)),
-                    );
-                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                    err_map.insert("name".to_string(), Value::from("TypeError"));
-                    self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                }
                 self.stack.push(result);
                 Ok(OpcodeAction::Continue)
             }
@@ -31623,6 +31820,35 @@ impl<'gc> VM<'gc> {
         let obj = self.stack.pop().expect("VM Stack underflow on InitProperty (obj)");
         match &obj {
             Value::VmObject(map) => {
+                // Check for proxy: delegate to defineProperty trap
+                if map.borrow().contains_key("__proxy_target__") {
+                    // Use assign_named_property for proxy to trigger set/defineProperty traps
+                    let _ = self.assign_named_property(ctx, &obj, &key, &val, None)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+                let borrow = map.borrow();
+                let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
+                let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
+                let key_exists = borrow.contains_key(&key);
+                drop(borrow);
+                if (is_frozen || (is_non_ext && !key_exists)) && !key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                    let msg = if is_frozen {
+                        format!("Cannot add property {}, object is frozen", key)
+                    } else {
+                        format!("Cannot add property {}, object is not extensible", key)
+                    };
+                    let err = self.make_type_error_object(ctx, &msg);
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+                if is_non_ext && !key_exists && key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                    let err = self.make_type_error_object(ctx, &format!("Cannot add private field {}, object is not extensible", key));
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
                 let getter_key = format!("__get_{}", key);
                 let setter_key = format!("__set_{}", key);
                 let readonly_key = format!("__readonly_{}__", key);
@@ -32719,16 +32945,7 @@ impl<'gc> VM<'gc> {
                             },
                             _ => None,
                         };
-                        typed_result.unwrap_or_else(|| {
-                            let effective_proto = proto.or_else(|| {
-                                if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
-                                    obj_global.borrow().get("prototype").cloned()
-                                } else {
-                                    None
-                                }
-                            });
-                            self.lookup_proto_chain(effective_proto.as_ref(), &key).unwrap_or(Value::Undefined)
-                        })
+                        typed_result.unwrap_or_else(|| self.read_named_property_with_receiver(ctx, &obj, &key, &obj))
                     }
                 }
             }
@@ -32811,12 +33028,17 @@ impl<'gc> VM<'gc> {
             },
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 let props = self.get_fn_props(ctx, *ip, *arity);
-                let borrow = props.borrow();
-                if let Some(value) = borrow.get(&key).cloned() {
-                    value
+                // Check for accessor getter (__get_<key>)
+                let getter_key = format!("__get_{}", key);
+                if let Some(getter_fn) = props.borrow().get(&getter_key).cloned() {
+                    self.invoke_getter_with_receiver(ctx, &getter_fn, &obj)
+                } else if let Some(value) = props.borrow().get(&key).cloned() {
+                    match value {
+                        Value::Property { getter: Some(g), .. } => self.invoke_getter_with_receiver(ctx, &g, &obj),
+                        other => other,
+                    }
                 } else {
-                    let proto = borrow.get("__proto__").cloned();
-                    drop(borrow);
+                    let proto = props.borrow().get("__proto__").cloned();
                     match key.as_str() {
                         "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                         "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
@@ -32940,6 +33162,32 @@ impl<'gc> VM<'gc> {
                 return Err(err);
             }
         };
+        // Ergonomic brand check: `#field in obj` (inside the class that owns #field)
+        // must return true when the object has that private field as an own property.
+        // Private field keys use the PRIVATE_KEY_PREFIX so external JS code can never
+        // forge them; only the compiler emits them via Expr::PrivateName.
+        if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            let has = match &obj {
+                Value::VmObject(map) => {
+                    let b = map.borrow();
+                    b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
+                }
+                Value::VmArray(arr) => {
+                    let b = arr.borrow();
+                    b.props.contains_key(&key)
+                        || b.props.contains_key(&format!("__get_{}", key))
+                        || b.props.contains_key(&format!("__set_{}", key))
+                }
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let props = self.get_fn_props(ctx, *ip, *arity);
+                    let b = props.borrow();
+                    b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key))
+                }
+                _ => false,
+            };
+            self.stack.push(Value::Boolean(has));
+            return Ok(OpcodeAction::Continue);
+        }
         match self.try_proxy_has(ctx, &obj, &key) {
             Ok(Some(result)) => {
                 self.stack.push(Value::Boolean(result));

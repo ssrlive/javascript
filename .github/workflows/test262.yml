@@ -185,6 +185,7 @@ jobs:
             25)
               TITLE='"language/statements/class/elements"'
               FOCUS='language/statements/class/elements'
+              RUN_TESTS='true'
               ;;
             26)
               TITLE='"language/statements/class/gen-method" - "language/statements/class/(filesonly)"'

@@ -8,7 +8,6 @@ const SCRIPT_START_NS = process.hrtime.bigint();
 
 const TEST262_ROOT_DIR = path.resolve(__dirname, '..', '..', 'test262');
 const RESULTS_FILE = 'test262-results.log';
-fs.writeFileSync(RESULTS_FILE, '');
 
 // Defaults
 let LIMIT = 100;
@@ -48,8 +47,6 @@ for (let i=0;i<argv.length;i++){
 }
 
 JOBS = Math.max(1, Number.isFinite(JOBS) ? Math.floor(JOBS) : 1);
-
-function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
 
 function formatElapsed(elapsedMs){
   const totalSeconds = Math.floor(elapsedMs / 1000);
@@ -156,6 +153,9 @@ if (!BIN) {
   if (fs.existsSync('target/debug/js')) BIN = path.resolve('target/debug/js');
 }
 console.log(`JS engine binary: ${BIN}`);
+
+fs.writeFileSync(RESULTS_FILE, '');
+function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
 
 // Build harness index
 const HARNESS_INDEX = {};

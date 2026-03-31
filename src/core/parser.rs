@@ -5121,9 +5121,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         let msg = format!("Private field '#{}' must be declared in an enclosing class", prop);
                         return Err(raise_parse_error_with_token!(tokens[*index], msg));
                     }
-                    let prop = format!("#{}", prop);
+                    let prop = super::make_private_key(prop);
                     *index += 1;
-                    expr = Expr::PrivateMember(Box::new(expr), prop);
+                    if contains_optional_chain(&expr) {
+                        expr = Expr::OptionalPrivateMember(Box::new(expr), prop);
+                    } else {
+                        expr = Expr::PrivateMember(Box::new(expr), prop);
+                    }
                 } else {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
@@ -5176,7 +5180,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         let msg = format!("Private field '#{prop}' must be declared in an enclosing class");
                         return Err(raise_parse_error_with_token!(tokens[*index], msg));
                     }
-                    let prop = format!("#{prop}");
+                    let prop = super::make_private_key(prop);
                     *index += 1;
                     expr = Expr::OptionalPrivateMember(Box::new(expr), prop);
                 } else if matches!(tokens[*index].token, Token::LBracket) {

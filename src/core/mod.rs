@@ -26,6 +26,16 @@ pub use statement::*;
 mod token;
 pub use token::*;
 
+/// Prefix for internal private field/method keys to separate them from public
+/// properties that happen to start with `#`.
+pub const PRIVATE_KEY_PREFIX: &str = "\x00#";
+
+/// Create an internal property key for a private class member.
+/// The `name` argument should NOT include the `#` prefix.
+pub fn make_private_key(name: &str) -> String {
+    format!("{}{}", PRIVATE_KEY_PREFIX, name)
+}
+
 mod parser;
 pub use parser::*;
 

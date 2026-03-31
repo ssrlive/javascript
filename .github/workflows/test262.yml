@@ -177,6 +177,7 @@ jobs:
             23)
               TITLE='"language/statements/class/accessor-name-inst" - "language/statements/class/definition"'
               FOCUS='language/statements/class/accessor-name-inst,language/statements/class/accessor-name-static,language/statements/class/arguments,language/statements/class/async-gen-method,language/statements/class/async-gen-method-static,language/statements/class/async-method,language/statements/class/async-method-static,language/statements/class/decorator,language/statements/class/definition'
+              RUN_TESTS='true'
               ;;
             24)
               TITLE='"language/statements/class/dstr"'
@@ -191,6 +192,7 @@ jobs:
             26)
               TITLE='"language/statements/class/gen-method" - "language/statements/class/(filesonly)"'
               FOCUS='language/statements/class/gen-method,language/statements/class/gen-method-static,language/statements/class/method,language/statements/class/method-static,language/statements/class/name-binding,language/statements/class/strict-mode,language/statements/class/subclass,language/statements/class/subclass-builtins,language/statements/class/super,language/statements/class/syntax,"language/statements/class/(filesonly)"'
+              RUN_TESTS='true'
               ;;
             27)
               TITLE='"built-ins/Array"'

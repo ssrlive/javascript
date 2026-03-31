@@ -10202,6 +10202,12 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     if let Some(val) = borrow.get(key).cloned() {
+                        // Setter-only accessor: if __set_{key} exists without __get_{key},
+                        // this is an accessor property and reads return undefined
+                        let setter_key = format!("__set_{}", key);
+                        if borrow.contains_key(&setter_key) && !borrow.contains_key(&getter_key) {
+                            return Value::Undefined;
+                        }
                         if key == "prototype"
                             && let Value::VmObject(proto_obj) = val.clone()
                         {
@@ -10242,6 +10248,11 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     if let Some(val) = borrow.get(key).cloned() {
+                        // Setter-only accessor check
+                        let setter_key = format!("__set_{}", key);
+                        if borrow.contains_key(&setter_key) && !borrow.contains_key(&getter_key) {
+                            return Value::Undefined;
+                        }
                         if key == "prototype"
                             && let Value::VmObject(proto_obj) = val.clone()
                         {
@@ -10354,10 +10365,16 @@ impl<'gc> VM<'gc> {
                 let value = borrow.get(key).cloned();
                 let getter_key = format!("__get_{}", key);
                 let getter_fn = borrow.get(&getter_key).cloned();
+                let setter_key = format!("__set_{}", key);
+                let has_setter = borrow.contains_key(&setter_key);
                 let proto = borrow.get("__proto__").cloned();
                 drop(borrow);
                 if let Some(gf) = getter_fn {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
+                }
+                // Setter-only accessor: no getter means reads return undefined
+                if has_setter {
+                    return Value::Undefined;
                 }
                 if key == "prototype"
                     && let Some(Value::VmObject(proto_obj)) = value.clone()
@@ -10391,11 +10408,17 @@ impl<'gc> VM<'gc> {
                 let getter_fn = overlay
                     .and_then(|o| o.borrow().get(&getter_key).cloned())
                     .or_else(|| shared.borrow().get(&getter_key).cloned());
+                let setter_key = format!("__set_{}", key);
+                let has_setter = overlay.is_some_and(|o| o.borrow().contains_key(&setter_key)) || shared.borrow().contains_key(&setter_key);
                 let proto = overlay
                     .and_then(|o| o.borrow().get("__proto__").cloned())
                     .or_else(|| shared.borrow().get("__proto__").cloned());
                 if let Some(gf) = getter_fn {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
+                }
+                // Setter-only accessor: no getter means reads return undefined
+                if has_setter {
+                    return Value::Undefined;
                 }
                 if key == "prototype"
                     && let Some(Value::VmObject(proto_obj)) = value.clone()
@@ -10423,10 +10446,15 @@ impl<'gc> VM<'gc> {
                 let value = borrow.get(key).cloned();
                 let getter_key = format!("__get_{}", key);
                 let getter_fn = borrow.get(&getter_key).cloned();
+                let setter_key = format!("__set_{}", key);
+                let has_setter = borrow.contains_key(&setter_key);
                 let proto = borrow.get("__proto__").cloned();
                 drop(borrow);
                 if let Some(gf) = getter_fn {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
+                }
+                if has_setter {
+                    return Value::Undefined;
                 }
                 value.or_else(|| self.lookup_proto_chain(proto.as_ref(), key)).unwrap_or(match key {
                     "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
@@ -31991,7 +32019,11 @@ impl<'gc> VM<'gc> {
                         _ => self.invoke_getter_with_receiver(ctx, &getter_fn, &obj),
                     }
                 } else if let Some(v) = lookup(&key) {
-                    if key == "prototype"
+                    // Setter-only accessor shadows data property
+                    let setter_key = format!("__set_{}", key);
+                    if lookup(&setter_key).is_some() {
+                        Value::Undefined
+                    } else if key == "prototype"
                         && let Value::VmObject(proto_obj) = v.clone()
                     {
                         let current_fn = obj.clone();

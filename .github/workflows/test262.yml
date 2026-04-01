@@ -107,10 +107,12 @@ jobs:
             6)
               TITLE='"language/expressions/class/dstr"'
               FOCUS='language/expressions/class/dstr'
+              RUN_TESTS='true'
               ;;
             7)
               TITLE='"language/expressions/class/elements"'
               FOCUS='language/expressions/class/elements'
+              RUN_TESTS='true'
               ;;
             8)
               TITLE='"language/expressions/class/gen-method" - "language/expressions/class/(filesonly)"'

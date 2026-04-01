@@ -97,6 +97,8 @@ pub enum Opcode {
     LeaveFieldInit = 91,           // mark end of class field initializer
     AllocBrand = 92,               // push a runtime-unique brand number onto stack (for private member brand checks)
     ResetPrototype = 93,           // create a fresh prototype for the constructor on TOS
+    IteratorClose = 94,            // pop iterator from stack; call .return() if callable
+    AssertIterResult = 95,         // throw TypeError if TOS is not an object (IteratorResult check)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -198,6 +200,8 @@ impl TryFrom<u8> for Opcode {
             91 => Opcode::LeaveFieldInit,
             92 => Opcode::AllocBrand,
             93 => Opcode::ResetPrototype,
+            94 => Opcode::IteratorClose,
+            95 => Opcode::AssertIterResult,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

@@ -472,9 +472,11 @@ impl<'gc> VM<'gc> {
                 };
                 let count = end.saturating_sub(begin);
                 let new_byte_offset = byte_offset + begin * bpe;
-                // Construct via the matching constructor
-                let ctor = self.globals.get(&ta_name).cloned().unwrap_or(Value::Undefined);
+                // Use TypedArraySpeciesCreate
                 if let Some(buf_val) = buffer {
+                    let Some(ctor) = self.typed_array_species_constructor(ctx, &this_val) else {
+                        return Value::Undefined;
+                    };
                     let result = self.construct_value(
                         ctx,
                         &ctor,
@@ -1047,17 +1049,65 @@ impl<'gc> VM<'gc> {
             }
             // TypedArray map/filter/slice: must return same-type TypedArray
             "typedarray.map" => {
-                let this_val = receiver.unwrap_or(&Value::Undefined);
-                if !self.validate_typed_array(ctx, this_val, "map") {
+                let this_val = receiver.unwrap_or(&Value::Undefined).clone();
+                if !self.validate_typed_array(ctx, &this_val, "map") {
                     return Value::Undefined;
                 }
-                // First call Array.prototype.map to get mapped values
-                let mapped = self.call_method_builtin(ctx, BUILTIN_ARRAY_MAP, this_val, args);
-                if self.pending_throw.is_some() {
+                let callback = match args.first() {
+                    Some(cb) if self.is_callable_value(cb) => cb.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "TypedArray.prototype.map callback is not a function");
+                        return Value::Undefined;
+                    }
+                };
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let len = if let Value::VmArray(arr) = &this_val {
+                    arr.borrow().elements.len()
+                } else {
                     return Value::Undefined;
+                };
+                // Per spec: TypedArraySpeciesCreate BEFORE iteration
+                let Some(result) = self.typed_array_species_create(ctx, &this_val, &[Value::Number(len as f64)]) else {
+                    return Value::Undefined;
+                };
+                let res_ta_name = if let Value::VmArray(res_arr) = &result {
+                    res_arr
+                        .borrow()
+                        .props
+                        .get("__typedarray_name__")
+                        .map(value_to_string)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                for k in 0..len {
+                    let k_value = if let Value::VmArray(arr) = &this_val {
+                        arr.borrow().elements.get(k).cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    };
+                    let mapped =
+                        match self.vm_call_function_value(ctx, &callback, &this_arg, &[k_value, Value::Number(k as f64), this_val.clone()])
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.set_pending_throw_from_error(&e);
+                                return Value::Undefined;
+                            }
+                        };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if let Value::VmArray(res_arr) = &result {
+                        let num = to_number(&mapped);
+                        let coerced = Value::Number(Self::typed_array_coerce_value(num, &res_ta_name));
+                        if k < res_arr.borrow().elements.len() {
+                            res_arr.borrow_mut(ctx).elements[k] = coerced;
+                        }
+                        self.sync_ta_element_to_buffer(ctx, res_arr, k, num, &res_ta_name);
+                    }
                 }
-                // Convert result to same TypedArray type
-                self.wrap_as_typed_array(ctx, this_val, &mapped)
+                result
             }
             "typedarray.filter" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
@@ -1068,18 +1118,185 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                self.wrap_as_typed_array(ctx, this_val, &filtered)
+                // Extract filtered elements
+                let elements = match &filtered {
+                    Value::VmArray(arr) => arr.borrow().elements.clone(),
+                    _ => return filtered,
+                };
+                let len = elements.len();
+                // Use species constructor
+                let Some(result) = self.typed_array_species_create(ctx, this_val, &[Value::Number(len as f64)]) else {
+                    return Value::Undefined;
+                };
+                // Copy filtered values into result
+                if let Value::VmArray(res_arr) = &result {
+                    let ta_name = res_arr
+                        .borrow()
+                        .props
+                        .get("__typedarray_name__")
+                        .map(value_to_string)
+                        .unwrap_or_default();
+                    for (i, v) in elements.iter().enumerate() {
+                        let num = to_number(v);
+                        let coerced = Value::Number(Self::typed_array_coerce_value(num, &ta_name));
+                        if i < res_arr.borrow().elements.len() {
+                            res_arr.borrow_mut(ctx).elements[i] = coerced.clone();
+                        }
+                        self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &ta_name);
+                    }
+                }
+                result
             }
             "typedarray.slice" => {
-                let this_val = receiver.unwrap_or(&Value::Undefined);
-                if !self.validate_typed_array(ctx, this_val, "slice") {
+                let this_val = receiver.unwrap_or(&Value::Undefined).clone();
+                if !self.validate_typed_array(ctx, &this_val, "slice") {
                     return Value::Undefined;
                 }
-                let sliced = self.call_method_builtin(ctx, BUILTIN_ARRAY_SLICE, this_val, args);
-                if self.pending_throw.is_some() {
+                // Get source info
+                let (len, ta_name, bpe) = if let Value::VmArray(arr) = &this_val {
+                    let a = arr.borrow();
+                    let name = a.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
+                    let bpe = match a.props.get("__bytes_per_element__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 1,
+                    };
+                    (a.elements.len() as i64, name, bpe)
+                } else {
+                    return Value::Undefined;
+                };
+
+                // Resolve start with proper ToInteger coercion
+                let k = match args.first() {
+                    None | Some(Value::Undefined) => 0i64,
+                    Some(v) => {
+                        let Some(rel_start) = self.extract_number_with_coercion(ctx, v) else {
+                            return Value::Undefined;
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let rel = if rel_start.is_nan() { 0.0 } else { rel_start.trunc() };
+                        if rel < 0.0 {
+                            (len + rel as i64).max(0)
+                        } else {
+                            (rel as i64).min(len)
+                        }
+                    }
+                };
+
+                // Resolve end with proper ToInteger coercion
+                let fin = match args.get(1) {
+                    None | Some(Value::Undefined) => len,
+                    Some(v) => {
+                        let Some(rel_end) = self.extract_number_with_coercion(ctx, v) else {
+                            return Value::Undefined;
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let rel = if rel_end.is_nan() { 0.0 } else { rel_end.trunc() };
+                        if rel < 0.0 {
+                            (len + rel as i64).max(0)
+                        } else {
+                            (rel as i64).min(len)
+                        }
+                    }
+                };
+
+                let count = (fin - k).max(0) as usize;
+
+                // TypedArraySpeciesCreate
+                let Some(result) = self.typed_array_species_create(ctx, &this_val, &[Value::Number(count as f64)]) else {
+                    return Value::Undefined;
+                };
+                if count == 0 {
+                    return result;
+                }
+
+                // Check if source buffer is detached after species create
+                if let Value::VmArray(src_arr) = &this_val
+                    && let Some(Value::VmObject(buf)) = src_arr.borrow().props.get("__typedarray_buffer__")
+                    && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
+                {
+                    self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
                     return Value::Undefined;
                 }
-                self.wrap_as_typed_array(ctx, this_val, &sliced)
+
+                if let Value::VmArray(res_arr) = &result {
+                    let res_ta_name = res_arr
+                        .borrow()
+                        .props
+                        .get("__typedarray_name__")
+                        .map(value_to_string)
+                        .unwrap_or_default();
+                    let src_buf = if let Value::VmArray(src_arr) = &this_val {
+                        src_arr.borrow().props.get("__typedarray_buffer__").cloned()
+                    } else {
+                        None
+                    };
+                    let res_buf = res_arr.borrow().props.get("__typedarray_buffer__").cloned();
+
+                    // Check if same buffer and same element type
+                    let same_buffer = match (&src_buf, &res_buf) {
+                        (Some(Value::VmObject(a)), Some(Value::VmObject(b))) => Gc::ptr_eq(*a, *b),
+                        _ => false,
+                    };
+
+                    if same_buffer && ta_name == res_ta_name {
+                        // Same buffer, same type: byte-by-byte copy (spec deliberately does NOT
+                        // handle overlap, so we copy directly without an intermediate buffer)
+                        let src_byte_offset = if let Value::VmArray(src_arr) = &this_val {
+                            match src_arr.borrow().props.get("__byte_offset__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        let res_byte_offset = match res_arr.borrow().props.get("__byte_offset__") {
+                            Some(Value::Number(n)) => *n as usize,
+                            _ => 0,
+                        };
+
+                        if let Some(Value::VmObject(buf_obj)) = &src_buf {
+                            let src_start_byte = src_byte_offset + k as usize * bpe;
+                            let target_start_byte = res_byte_offset;
+                            if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
+                                let mut bb = buf_bytes.borrow_mut(ctx);
+                                for i in 0..(count * bpe) {
+                                    let src_idx = src_start_byte + i;
+                                    let tgt_idx = target_start_byte + i;
+                                    if src_idx < bb.elements.len() && tgt_idx < bb.elements.len() {
+                                        let byte_val = bb.elements[src_idx].clone();
+                                        bb.elements[tgt_idx] = byte_val;
+                                    }
+                                }
+                                drop(bb);
+                                // Sync elements from buffer
+                                self.sync_ta_elements_from_buffer(ctx, res_arr, &res_ta_name, bpe, count);
+                            }
+                        }
+                    } else {
+                        // Different buffer or different type: element-by-element set
+                        let src_elements: Vec<Value<'gc>> = if let Value::VmArray(src_arr) = &this_val {
+                            let a = src_arr.borrow();
+                            let start = k as usize;
+                            let end = (k as usize + count).min(a.elements.len());
+                            a.elements[start..end].to_vec()
+                        } else {
+                            vec![]
+                        };
+                        for (i, v) in src_elements.iter().enumerate() {
+                            let num = to_number(v);
+                            let coerced = Value::Number(Self::typed_array_coerce_value(num, &res_ta_name));
+                            if i < res_arr.borrow().elements.len() {
+                                res_arr.borrow_mut(ctx).elements[i] = coerced;
+                            }
+                            self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &res_ta_name);
+                        }
+                    }
+                }
+                result
             }
             "typedarray.copyWithin" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
@@ -1259,8 +1476,117 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Implements SpeciesConstructor(O, defaultConstructor) for TypedArrays.
+    /// Returns the species constructor, or None if a throw was set.
+    fn typed_array_species_constructor(&mut self, ctx: &GcContext<'gc>, this_val: &Value<'gc>) -> Option<Value<'gc>> {
+        let ta_name = if let Value::VmArray(arr) = this_val {
+            arr.borrow()
+                .props
+                .get("__typedarray_name__")
+                .map(value_to_string)
+                .unwrap_or_default()
+        } else {
+            return None;
+        };
+
+        // Default constructor from globals
+        let default_ctor = self.globals.get(&ta_name).cloned().unwrap_or(Value::Undefined);
+
+        // Step 2: Let C be ? Get(O, "constructor")
+        let ctor = self.read_named_property(ctx, this_val, "constructor");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        // Step 3: If C is undefined, return defaultConstructor
+        if matches!(ctor, Value::Undefined) {
+            return Some(default_ctor);
+        }
+
+        // Step 4: If Type(C) is not Object, throw TypeError
+        if !matches!(
+            ctor,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) || Self::is_symbol_value(&ctor)
+        {
+            self.throw_type_error(ctx, "Constructor is not an object");
+            return None;
+        }
+
+        // Step 5: Let S be ? Get(C, @@species)
+        let mut species_ctor = ctor.clone();
+        if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
+            && let Some(species_symbol) = symbol_ctor.borrow().get("species").cloned()
+            && let Some(species_key) = self.symbol_key_string(&species_symbol)
+        {
+            let species = self.read_named_property(ctx, &ctor, &species_key);
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            // Step 6: If S is undefined or null, return defaultConstructor
+            if matches!(species, Value::Undefined | Value::Null) {
+                return Some(default_ctor);
+            }
+            species_ctor = species;
+        }
+
+        // Step 7: If IsConstructor(S), return S
+        if self.is_constructor_value(&species_ctor) {
+            return Some(species_ctor);
+        }
+
+        // Step 8: Throw TypeError
+        self.throw_type_error(ctx, "Species constructor is not a constructor");
+        None
+    }
+
+    /// TypedArraySpeciesCreate: use species constructor to create result,
+    /// falling back to wrap_as_typed_array for default constructors.
+    fn typed_array_species_create(&mut self, ctx: &GcContext<'gc>, this_val: &Value<'gc>, args: &[Value<'gc>]) -> Option<Value<'gc>> {
+        let ctor = self.typed_array_species_constructor(ctx, this_val)?;
+
+        // Check if ctor is the default constructor for this TypedArray type
+        let ta_name = if let Value::VmArray(arr) = this_val {
+            arr.borrow()
+                .props
+                .get("__typedarray_name__")
+                .map(value_to_string)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let default_ctor = self.globals.get(&ta_name).cloned().unwrap_or(Value::Undefined);
+        let is_default = self.same_constructor_identity(&ctor, &default_ctor);
+
+        if is_default {
+            // Use the default constructor
+            match self.construct_value(ctx, &ctor, args, None) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    self.set_pending_throw_from_error(&e);
+                    None
+                }
+            }
+        } else {
+            // Species constructor — call it as a function (it might not be a native ctor)
+            match self.construct_value(ctx, &ctor, args, None) {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    // Fall back to calling as a function
+                    match self.vm_call_function_value(ctx, &ctor, &Value::Undefined, args) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            self.set_pending_throw_from_error(&e);
+                            None
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Wrap a plain Array result as the same TypedArray type as `source`.
-    fn wrap_as_typed_array(&mut self, ctx: &GcContext<'gc>, source: &Value<'gc>, result: &Value<'gc>) -> Value<'gc> {
+    fn _wrap_as_typed_array(&mut self, ctx: &GcContext<'gc>, source: &Value<'gc>, result: &Value<'gc>) -> Value<'gc> {
         let (ta_name, bpe) = if let Value::VmArray(arr) = source {
             let a = arr.borrow();
             let name = a.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();

@@ -9987,7 +9987,11 @@ impl<'gc> VM<'gc> {
                             drop(borrow);
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
-                                !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, obj))
+                                // Don't overwrite accessor properties set via Object.defineProperty
+                                !proto_borrow.contains_key("__get_constructor")
+                                    && !proto_borrow.contains_key("__set_constructor")
+                                    && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
+                                    && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, obj))
                             };
                             if needs_update {
                                 let mut proto_borrow = proto_obj.borrow_mut(ctx);
@@ -10198,7 +10202,10 @@ impl<'gc> VM<'gc> {
                             drop(borrow);
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
-                                !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
+                                !proto_borrow.contains_key("__get_constructor")
+                                    && !proto_borrow.contains_key("__set_constructor")
+                                    && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
+                                    && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                             };
                             if needs_update {
                                 let mut proto_borrow = proto_obj.borrow_mut(ctx);
@@ -10243,7 +10250,10 @@ impl<'gc> VM<'gc> {
                             drop(borrow);
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
-                                !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
+                                !proto_borrow.contains_key("__get_constructor")
+                                    && !proto_borrow.contains_key("__set_constructor")
+                                    && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
+                                    && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                             };
                             if needs_update {
                                 let mut proto_borrow = proto_obj.borrow_mut(ctx);
@@ -10367,7 +10377,11 @@ impl<'gc> VM<'gc> {
                         let proto_borrow = proto_obj.borrow();
                         // Only update constructor if it already exists as an own property
                         // (auto-created prototype). Don't add it to user-assigned prototypes.
+                        // Don't overwrite accessor properties set via Object.defineProperty
                         proto_borrow.contains_key("constructor")
+                            && !proto_borrow.contains_key("__get_constructor")
+                            && !proto_borrow.contains_key("__set_constructor")
+                            && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                             && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
                     if needs_update {
@@ -10413,7 +10427,11 @@ impl<'gc> VM<'gc> {
                     let needs_update = {
                         let proto_borrow = proto_obj.borrow();
                         // Only update constructor if it already exists as an own property
+                        // Don't overwrite accessor properties set via Object.defineProperty
                         proto_borrow.contains_key("constructor")
+                            && !proto_borrow.contains_key("__get_constructor")
+                            && !proto_borrow.contains_key("__set_constructor")
+                            && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                             && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
                     if needs_update {
@@ -11003,11 +11021,13 @@ impl<'gc> VM<'gc> {
         let sym_has_instance = make_well_known_symbol(2, "hasInstance");
         let sym_to_primitive = make_well_known_symbol(3, "toPrimitive");
         let sym_to_string_tag = make_well_known_symbol(4, "toStringTag");
+        let sym_species = make_well_known_symbol(5, "species");
         self.cache_symbol_value(1, &sym_iterator);
         self.cache_symbol_value(2, &sym_has_instance);
         self.cache_symbol_value(3, &sym_to_primitive);
         self.cache_symbol_value(4, &sym_to_string_tag);
-        self.symbol_counter = 4; // user symbols start from 5+
+        self.cache_symbol_value(5, &sym_species);
+        self.symbol_counter = 5; // user symbols start from 6+
 
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
@@ -11015,6 +11035,7 @@ impl<'gc> VM<'gc> {
         sym_obj.insert("hasInstance".to_string(), sym_has_instance);
         sym_obj.insert("toPrimitive".to_string(), sym_to_primitive);
         sym_obj.insert("toStringTag".to_string(), sym_to_string_tag);
+        sym_obj.insert("species".to_string(), sym_species);
         sym_obj.insert("for".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_FOR));
         sym_obj.insert("keyFor".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_KEYFOR));
         self.globals
@@ -19597,7 +19618,14 @@ impl<'gc> VM<'gc> {
 
                 let selected = match &callback {
                     Value::VmFunction(ip, _) => {
-                        self.this_stack.push(this_arg.clone());
+                        let is_arrow = self.chunk.arrow_function_ips.contains(ip);
+                        let fn_strict = self.chunk.fn_strictness.get(ip).copied().unwrap_or(false);
+                        let effective_this = if is_arrow || fn_strict {
+                            this_arg.clone()
+                        } else {
+                            self.coerce_this_for_helper_call(ctx, &this_arg)
+                        };
+                        self.this_stack.push(effective_this);
                         let saved_try_stack = std::mem::take(&mut self.try_stack);
                         let out =
                             self.call_vm_function_result(ctx, *ip, &[value.clone(), Value::Number(k as f64), target.clone()], None, &[]);
@@ -19612,7 +19640,14 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     Value::VmClosure(ip, _, upv) => {
-                        self.this_stack.push(this_arg.clone());
+                        let is_arrow = self.chunk.arrow_function_ips.contains(ip);
+                        let fn_strict = self.chunk.fn_strictness.get(ip).copied().unwrap_or(false);
+                        let effective_this = if is_arrow || fn_strict {
+                            this_arg.clone()
+                        } else {
+                            self.coerce_this_for_helper_call(ctx, &this_arg)
+                        };
+                        self.this_stack.push(effective_this);
                         let saved_try_stack = std::mem::take(&mut self.try_stack);
                         let uv = (**upv).to_vec();
                         let out =

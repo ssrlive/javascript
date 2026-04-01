@@ -103,6 +103,7 @@ jobs:
             5)
               TITLE='"language/expressions/class/accessor-name-inst" - "language/expressions/class/decorator"'
               FOCUS='language/expressions/class/accessor-name-inst,language/expressions/class/accessor-name-static,language/expressions/class/async-gen-method,language/expressions/class/async-gen-method-static,language/expressions/class/async-method,language/expressions/class/async-method-static,language/expressions/class/decorator'
+              RUN_TESTS='true'
               ;;
             6)
               TITLE='"language/expressions/class/dstr"'
@@ -117,6 +118,7 @@ jobs:
             8)
               TITLE='"language/expressions/class/gen-method" - "language/expressions/class/(filesonly)"'
               FOCUS='language/expressions/class/gen-method,language/expressions/class/gen-method-static,language/expressions/class/method,language/expressions/class/method-static,language/expressions/class/subclass-builtins,language/expressions/class/(filesonly)'
+              RUN_TESTS='true'
               ;;
             9)
               TITLE='"language/expressions/coalesce" - "language/expressions/does-not-equals"'

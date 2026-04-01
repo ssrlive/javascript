@@ -3240,7 +3240,8 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         };
         if is_static && *index < t.len() && matches!(t[*index].token, Token::LBrace) {
             *index += 1;
-            let body = parse_statement_block(t, index)?;
+            // Per spec §15.7.1, static blocks must not contain `await` as keyword.
+            let body = with_cleared_await_context(|| parse_statement_block(t, index))?;
             members.push(ClassMember::StaticBlock(body));
             continue;
         }

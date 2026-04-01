@@ -99,6 +99,7 @@ pub enum Opcode {
     ResetPrototype = 93,           // create a fresh prototype for the constructor on TOS
     IteratorClose = 94,            // pop iterator from stack; call .return() if callable
     AssertIterResult = 95,         // throw TypeError if TOS is not an object (IteratorResult check)
+    BoxLocal = 96,                 // create a shared upvalue cell for a local (for class name heritage scope)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -202,6 +203,7 @@ impl TryFrom<u8> for Opcode {
             93 => Opcode::ResetPrototype,
             94 => Opcode::IteratorClose,
             95 => Opcode::AssertIterResult,
+            96 => Opcode::BoxLocal,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

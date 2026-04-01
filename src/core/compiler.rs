@@ -4188,9 +4188,15 @@ impl<'gc> Compiler<'gc> {
     }
 
     /// Add an upvalue to the current function's upvalue list, deduplicating by name.
+    /// When a duplicate name is found and the new entry refers to a more recent
+    /// local (higher index), the existing entry is updated so that variable
+    /// shadowing is handled correctly (e.g. class name scope over outer var).
     fn add_upvalue(&mut self, name: &str, index: u8, is_local: bool) -> u8 {
-        for (i, uv) in self.upvalues.iter().enumerate() {
+        for (i, uv) in self.upvalues.iter_mut().enumerate() {
             if uv.name == name {
+                if is_local && uv.is_local && index > uv.index {
+                    uv.index = index;
+                }
                 return i as u8;
             }
         }
@@ -6215,6 +6221,27 @@ impl<'gc> Compiler<'gc> {
             return Ok(());
         }
 
+        // Per spec §14.6 ClassDefinitionEvaluation, the class name must be bound
+        // in a new class scope BEFORE the heritage expression is evaluated, so that
+        // closures inside the heritage can capture it as an upvalue.  The binding
+        // starts uninitialized (Undefined) and is initialized after the constructor
+        // is created.  This pre-slot is used for class expressions with a heritage.
+        let class_name_heritage_slot = if is_expr && !name.is_empty() && class_def.extends.is_some() {
+            let undef_idx = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef_idx);
+            self.locals.push(name.to_string());
+            self.const_locals.insert(name.to_string());
+            let slot = self.locals.len() - 1;
+            // BoxLocal pre-creates a shared upvalue cell so that closures in the
+            // heritage expression and the later SetLocal share the same cell.
+            self.chunk.write_opcode(Opcode::BoxLocal);
+            self.chunk.write_byte(slot as u8);
+            Some(slot)
+        } else {
+            None
+        };
+
         // Evaluate extends expression and bind to a temp local if it's not a simple Var
         let (parent_name, extends_temp_local) = if let Some(ref ext_expr) = class_def.extends {
             if let Expr::Var(pname, ..) = ext_expr {
@@ -6543,7 +6570,7 @@ impl<'gc> Compiler<'gc> {
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
         let mut ctor_non_rest = 0u8;
-        for p in &ctor_params {
+        for (param_index, p) in ctor_params.iter().enumerate() {
             match p {
                 DestructuringElement::Variable(pname, _) => {
                     self.locals.push(pname.clone());
@@ -6555,9 +6582,19 @@ impl<'gc> Compiler<'gc> {
                     self.locals.push(pname.clone());
                 }
                 _ => {
+                    self.locals.push(format!("__param_slot_{}__", param_index));
                     ctor_non_rest += 1;
                 }
             }
+        }
+
+        if !Self::has_parameter_expressions(&ctor_params) {
+            self.emit_hoisted_var_slots(&ctor_body);
+        }
+        self.emit_parameter_default_initializers(&ctor_params)?;
+        self.emit_parameter_pattern_bindings(&ctor_params)?;
+        if Self::has_parameter_expressions(&ctor_params) {
+            self.emit_hoisted_var_slots(&ctor_body);
         }
 
         // For base classes (no parent), stamp brand and inject instance field initialisers
@@ -6635,6 +6672,13 @@ impl<'gc> Compiler<'gc> {
         // Each class evaluation must get its own prototype (factory pattern).
         // ResetPrototype creates a fresh prototype object for the constructor.
         self.chunk.write_opcode(Opcode::ResetPrototype);
+
+        // Initialize the class name heritage slot (if any) with the constructor.
+        // SetLocal copies TOS without popping, so the constructor remains on stack.
+        if let Some(slot) = class_name_heritage_slot {
+            self.chunk.write_opcode(Opcode::SetLocal);
+            self.chunk.write_byte(slot as u8);
+        }
 
         let mut class_expr_temp: Option<String> = None;
 
@@ -6871,38 +6915,8 @@ impl<'gc> Compiler<'gc> {
                     continue;
                 }
                 self.emit_get_class_ref(name, is_expr)?;
-                let g_jump = self.emit_jump(Opcode::Jump);
-                let g_start = self.chunk.code.len();
-                let saved_locals = std::mem::take(&mut self.locals);
-                let saved_const_locals = std::mem::take(&mut self.const_locals);
-                self.scope_depth += 1;
-                for stmt in body.iter() {
-                    self.compile_statement(stmt, false)?;
-                }
-                self.chunk.write_opcode(Opcode::Constant);
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Return);
-                self.scope_depth -= 1;
-                self.locals = saved_locals;
-                self.const_locals = saved_const_locals;
-                self.patch_jump(g_jump);
-                self.chunk.method_function_ips.insert(g_start);
-                self.chunk.fn_names.insert(g_start, format!("get {}", gname));
-                self.chunk.fn_lengths.insert(g_start, 0);
-                let g_val = Value::VmFunction(g_start, 0);
-                let g_idx = self.chunk.add_constant(g_val);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(g_idx);
-                let getter_key = format!("__get_{}", gname);
-                let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
-                self.chunk.write_opcode(Opcode::SetProperty);
-                self.chunk.write_u16(gk_idx);
+                self.compile_and_install_getter(gname, body)?;
                 self.chunk.write_opcode(Opcode::Pop);
-
-                // Static getters are non-enumerable
-                self.emit_get_class_ref(name, is_expr)?;
-                self.emit_nonenumerable_marker_standalone(gname);
             }
 
             // Static setters
@@ -6911,44 +6925,8 @@ impl<'gc> Compiler<'gc> {
                     continue;
                 }
                 self.emit_get_class_ref(name, is_expr)?;
-                let s_jump = self.emit_jump(Opcode::Jump);
-                let s_start = self.chunk.code.len();
-                let s_arity = params.len() as u8;
-                let saved_locals = std::mem::take(&mut self.locals);
-                let saved_const_locals = std::mem::take(&mut self.const_locals);
-                self.scope_depth += 1;
-                for p in params {
-                    if let DestructuringElement::Variable(pn, _) = p {
-                        self.locals.push(pn.clone());
-                    }
-                }
-                for stmt in body.iter() {
-                    self.compile_statement(stmt, false)?;
-                }
-                self.chunk.write_opcode(Opcode::Constant);
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Return);
-                self.scope_depth -= 1;
-                self.locals = saved_locals;
-                self.const_locals = saved_const_locals;
-                self.patch_jump(s_jump);
-                self.chunk.method_function_ips.insert(s_start);
-                self.chunk.fn_names.insert(s_start, format!("set {}", sname));
-                self.chunk.fn_lengths.insert(s_start, s_arity as usize);
-                let s_val = Value::VmFunction(s_start, s_arity);
-                let s_idx = self.chunk.add_constant(s_val);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(s_idx);
-                let setter_key = format!("__set_{}", sname);
-                let sk_idx = self.chunk.add_constant(Value::from(&setter_key));
-                self.chunk.write_opcode(Opcode::SetProperty);
-                self.chunk.write_u16(sk_idx);
+                self.compile_and_install_setter(sname, params, body)?;
                 self.chunk.write_opcode(Opcode::Pop);
-
-                // Static setters are non-enumerable
-                self.emit_get_class_ref(name, is_expr)?;
-                self.emit_nonenumerable_marker_standalone(sname);
             }
 
             // Static computed getters
@@ -6957,32 +6935,7 @@ impl<'gc> Compiler<'gc> {
                     continue;
                 }
                 self.emit_get_class_ref(name, is_expr)?;
-                self.compile_expr(key_expr)?;
-                self.chunk.write_opcode(Opcode::ToPropertyKey);
-                // Compile getter body
-                let g_jump = self.emit_jump(Opcode::Jump);
-                let g_start = self.chunk.code.len();
-                let saved_locals = std::mem::take(&mut self.locals);
-                let saved_const_locals = std::mem::take(&mut self.const_locals);
-                self.scope_depth += 1;
-                for stmt in body.iter() {
-                    self.compile_statement(stmt, false)?;
-                }
-                self.chunk.write_opcode(Opcode::Constant);
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Return);
-                self.scope_depth -= 1;
-                self.locals = saved_locals;
-                self.const_locals = saved_const_locals;
-                self.patch_jump(g_jump);
-                self.chunk.method_function_ips.insert(g_start);
-                let g_val = Value::VmFunction(g_start, 0);
-                let g_idx = self.chunk.add_constant(g_val);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(g_idx);
-                // stack: [obj, key, getter_fn]
-                self.chunk.write_opcode(Opcode::SetComputedGetter);
+                self.compile_and_install_computed_getter(key_expr, body)?;
                 self.chunk.write_opcode(Opcode::Pop);
             }
 
@@ -6992,37 +6945,7 @@ impl<'gc> Compiler<'gc> {
                     continue;
                 }
                 self.emit_get_class_ref(name, is_expr)?;
-                self.compile_expr(key_expr)?;
-                self.chunk.write_opcode(Opcode::ToPropertyKey);
-                let s_jump = self.emit_jump(Opcode::Jump);
-                let s_start = self.chunk.code.len();
-                let s_arity = params.len() as u8;
-                let saved_locals = std::mem::take(&mut self.locals);
-                let saved_const_locals = std::mem::take(&mut self.const_locals);
-                self.scope_depth += 1;
-                for p in params {
-                    if let DestructuringElement::Variable(pn, _) = p {
-                        self.locals.push(pn.clone());
-                    }
-                }
-                for stmt in body.iter() {
-                    self.compile_statement(stmt, false)?;
-                }
-                self.chunk.write_opcode(Opcode::Constant);
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Return);
-                self.scope_depth -= 1;
-                self.locals = saved_locals;
-                self.const_locals = saved_const_locals;
-                self.patch_jump(s_jump);
-                self.chunk.method_function_ips.insert(s_start);
-                let s_val = Value::VmFunction(s_start, s_arity);
-                let s_idx = self.chunk.add_constant(s_val);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(s_idx);
-                // stack: [obj, key, setter_fn]
-                self.chunk.write_opcode(Opcode::SetComputedSetter);
+                self.compile_and_install_computed_setter(key_expr, params, body)?;
                 self.chunk.write_opcode(Opcode::Pop);
             }
 
@@ -7214,11 +7137,19 @@ impl<'gc> Compiler<'gc> {
         // Pop instance fields stack
         self.current_class_instance_fields.pop();
 
-        // Clean up pre-computed key locals
-        for _ in 0..computed_key_counter {
-            self.chunk.write_opcode(Opcode::Pop);
-            if let Some(pos) = self.locals.iter().rposition(|l| l.starts_with("__ck_")) {
-                self.locals.remove(pos);
+        // Clean up pre-computed key locals.
+        // At function scope the computed-key values sit below other class-related
+        // locals (class name pre-slot, brand, etc.) on the stack.  A naive Pop
+        // would remove the wrong value.  Leave them on the stack as dead locals;
+        // they will be cleaned up when the enclosing scope exits.
+        // At global scope (scope_depth 0) there is nothing above the computed keys
+        // so simple Pops are safe.
+        if self.scope_depth == 0 {
+            for _ in 0..computed_key_counter {
+                self.chunk.write_opcode(Opcode::Pop);
+                if let Some(pos) = self.locals.iter().rposition(|l| l.starts_with("__ck_")) {
+                    self.locals.remove(pos);
+                }
             }
         }
 
@@ -7228,41 +7159,45 @@ impl<'gc> Compiler<'gc> {
 
         // For class expressions, push the class value back onto the stack
         if is_expr {
-            // No alias local to remove (we dropped the alias approach).
             // Retrieve the class value from the global temp.
             self.emit_get_class_ref(name, true)?;
             // NOTE: We intentionally do NOT zero out the global temp here.
             // Inline methods are compiled with GetGlobal(temp_name) to read the class value,
             // and these methods may be called at any time after the class is defined.
             // The temp name is unique (contains a counter) so it won't conflict with user code.
-            // Remove the local copy (at function scope) and pop its stack slot.
-            if let Some(ref temp_name) = class_expr_temp
-                && let Some(pos) = self.locals.iter().rposition(|l| l == temp_name)
-            {
-                self.locals.remove(pos);
-                // stack is: [..., temp_local_val, class_val]
-                // Swap so temp_local_val is on top, then pop it.
-                self.chunk.write_opcode(Opcode::Swap);
-                self.chunk.write_opcode(Opcode::Pop);
+
+            if self.scope_depth == 0 {
+                // At global scope there are no upvalue cells, so we can reclaim stack
+                // slots with Swap+Pop.
+                if let Some(ref temp_name) = class_expr_temp
+                    && let Some(pos) = self.locals.iter().rposition(|l| l == temp_name)
+                {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                if let Some(ref brand_name) = brand_local_name
+                    && let Some(pos) = self.locals.iter().rposition(|l| l == brand_name)
+                {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                if let Some(ref ext_name) = extends_temp_local
+                    && let Some(pos) = self.locals.iter().rposition(|l| l == ext_name)
+                {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
             }
-            // Now clean up dead locals (brand, extends_temp) that were left on the stack
-            // during class compilation. All upvalue captures have already been done,
-            // so it's safe to remove these from self.locals and pop from stack.
-            // class_val is on TOS; dead locals are underneath.
-            if let Some(ref brand_name) = brand_local_name
-                && let Some(pos) = self.locals.iter().rposition(|l| l == brand_name)
-            {
-                self.locals.remove(pos);
-                self.chunk.write_opcode(Opcode::Swap);
-                self.chunk.write_opcode(Opcode::Pop);
-            }
-            if let Some(ref ext_name) = extends_temp_local
-                && let Some(pos) = self.locals.iter().rposition(|l| l == ext_name)
-            {
-                self.locals.remove(pos);
-                self.chunk.write_opcode(Opcode::Swap);
-                self.chunk.write_opcode(Opcode::Pop);
-            }
+            // At function scope (scope_depth > 0), the brand local may have been
+            // captured as an upvalue cell.  Swap+Pop would move the class value into
+            // the brand's stack slot but GetLocal would still read the stale upvalue
+            // cell, returning the brand number instead of the constructor.  Leave the
+            // dead locals on the stack (same strategy as class declarations) and let
+            // the class value sit on top at a fresh position.
+
             self.current_class_expr_refs.pop();
             // Pop the class expression name tracker if we pushed one.
             if !name.is_empty() {
@@ -7736,9 +7671,23 @@ impl<'gc> Compiler<'gc> {
                 // (needed when init_expr is a class expression with private members/brand)
                 self.locals.push("__field_this__".to_string());
                 self.chunk.write_opcode(Opcode::EnterFieldInit);
+                let locals_before = self.locals.len();
                 let func_ip = self.peek_func_ip(init_expr);
                 self.compile_expr(init_expr)?;
                 self.chunk.write_opcode(Opcode::LeaveFieldInit);
+                // Class expressions leave dead locals (brand, temp, etc.) on the stack
+                // between __field_this__ and the expression result.  Clean them up so
+                // InitProperty sees [this, value].  Upvalue cells are heap-allocated
+                // copies so Swap+Pop is safe even for captured locals.
+                let dead_count = self.locals.len() - locals_before;
+                for _ in 0..dead_count {
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                // Remove the dead locals from tracking (in reverse order)
+                while self.locals.len() > locals_before {
+                    self.locals.pop();
+                }
                 if let Some(ip) = func_ip {
                     self.chunk.fn_names.entry(ip).or_insert_with(|| fname.clone());
                 }
@@ -7756,9 +7705,19 @@ impl<'gc> Compiler<'gc> {
                 self.locals.push("__field_this__".to_string());
                 self.chunk.write_opcode(Opcode::EnterFieldInit);
                 let private_name = self.resolve_private_key(fname);
+                let locals_before = self.locals.len();
                 let func_ip = self.peek_func_ip(init_expr);
                 self.compile_expr(init_expr)?;
                 self.chunk.write_opcode(Opcode::LeaveFieldInit);
+                // Same dead-local cleanup as Property above
+                let dead_count = self.locals.len() - locals_before;
+                for _ in 0..dead_count {
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                while self.locals.len() > locals_before {
+                    self.locals.pop();
+                }
                 if let Some(ip) = func_ip {
                     // Display name is #name, not \0#name
                     self.chunk.fn_names.entry(ip).or_insert_with(|| format!("#{}", fname));
@@ -7779,8 +7738,18 @@ impl<'gc> Compiler<'gc> {
                 // The computed key is also a temporary on the stack
                 self.locals.push("__field_key__".to_string());
                 self.chunk.write_opcode(Opcode::EnterFieldInit);
+                let locals_before = self.locals.len();
                 self.compile_expr(val_expr)?;
                 self.chunk.write_opcode(Opcode::LeaveFieldInit);
+                // Same dead-local cleanup as Property above
+                let dead_count = self.locals.len() - locals_before;
+                for _ in 0..dead_count {
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                while self.locals.len() > locals_before {
+                    self.locals.pop();
+                }
                 // stack: [this, key, value]
                 self.chunk.write_opcode(Opcode::SetIndex);
                 self.chunk.write_opcode(Opcode::Pop);

@@ -218,6 +218,7 @@ jobs:
               TITLE='"built-ins/DataView" - "built-ins/TypedArray"'
               FOCUS='built-ins/DataView,built-ins/TypedArray'
               TIMEOUT='200'
+              RUN_TESTS='true'
               ;;
             31)
               TITLE='"built-ins/Date" - "built-ins/encodeURIComponent"'

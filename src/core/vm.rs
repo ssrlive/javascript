@@ -4,7 +4,9 @@ use crate::core::{Expr, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use crate::js_regexp::get_or_compile_regex;
 use indexmap::IndexMap;
-// use std::cell::{Ref, RefCell, RefMut};
+
+mod dataview;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -2621,6 +2623,7 @@ impl<'gc> VM<'gc> {
                             store_i32 as f64
                         };
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(store_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, store_num, &ta_name);
 
                         Value::Number(normalized_ret)
                     }
@@ -3374,6 +3377,7 @@ impl<'gc> VM<'gc> {
                         let new_num = coerce_typed_array_value(new_i32 as f64, &ta_name);
 
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         Value::Number(coerce_typed_array_value(old_num, &ta_name))
                     }
                     _ => {
@@ -3525,6 +3529,7 @@ impl<'gc> VM<'gc> {
                         let new_num = coerce_typed_array_value(new_i32 as f64, &ta_name);
 
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         Value::Number(coerce_typed_array_value(old_num, &ta_name))
                     }
                     _ => {
@@ -3694,6 +3699,7 @@ impl<'gc> VM<'gc> {
                         if old_coerced == expected_coerced {
                             let new_num = coerce_typed_array_value(replacement_i32 as f64, &ta_name);
                             arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                            self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         }
 
                         Value::Number(old_coerced)
@@ -3847,6 +3853,7 @@ impl<'gc> VM<'gc> {
                         let new_num = coerce_typed_array_value(new_i32 as f64, &ta_name);
 
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         Value::Number(coerce_typed_array_value(old_num, &ta_name))
                     }
                     _ => {
@@ -3997,6 +4004,7 @@ impl<'gc> VM<'gc> {
                         let new_num = coerce_typed_array_value(exchanged_with, &ta_name);
 
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         Value::Number(coerce_typed_array_value(old_num, &ta_name))
                     }
                     _ => {
@@ -4148,6 +4156,7 @@ impl<'gc> VM<'gc> {
                         let new_num = coerce_typed_array_value(new_i32 as f64, &ta_name);
 
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         Value::Number(coerce_typed_array_value(old_num, &ta_name))
                     }
                     _ => {
@@ -4300,6 +4309,7 @@ impl<'gc> VM<'gc> {
                         let new_num = coerce_typed_array_value(new_i32 as f64, &ta_name);
 
                         arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                        self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
                         Value::Number(coerce_typed_array_value(old_num, &ta_name))
                     }
                     _ => {
@@ -7516,184 +7526,7 @@ impl<'gc> VM<'gc> {
 
                 target
             }
-            "dataview.getUint8" => {
-                if let Some(Value::VmObject(view)) = receiver {
-                    let view_b = view.borrow();
-                    let base = view_b
-                        .get("byteOffset")
-                        .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
-                        .unwrap_or(0);
-                    let idx = base + args.first().map(to_number).unwrap_or(0.0).max(0.0) as usize;
-                    let buffer = view_b.get("buffer").cloned();
-                    drop(view_b);
-                    if let Some(Value::VmObject(buf)) = buffer
-                        && let Some(Value::VmArray(bytes)) = buf.borrow().get("__buffer_bytes__").cloned()
-                        && let Some(v) = bytes.borrow().elements.get(idx)
-                    {
-                        return Value::Number(to_number(v) as u8 as f64);
-                    }
-                }
-                Value::Number(0.0)
-            }
-            "dataview.getInt8" => {
-                let u = self.call_host_fn(ctx, "dataview.getUint8", receiver, args);
-                let b = to_number(&u) as u8;
-                Value::Number((b as i8) as f64)
-            }
-            "dataview.setUint8" => {
-                if let Some(Value::VmObject(view)) = receiver {
-                    let view_b = view.borrow();
-                    let base = view_b
-                        .get("byteOffset")
-                        .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
-                        .unwrap_or(0);
-                    let idx = base + args.first().map(to_number).unwrap_or(0.0).max(0.0) as usize;
-                    let val = args.get(1).map(to_number).unwrap_or(0.0) as u8;
-                    let buffer = view_b.get("buffer").cloned();
-                    drop(view_b);
-                    if let Some(Value::VmObject(buf)) = buffer
-                        && let Some(Value::VmArray(bytes)) = buf.borrow().get("__buffer_bytes__").cloned()
-                        && idx < bytes.borrow().elements.len()
-                    {
-                        bytes.borrow_mut(ctx).elements[idx] = Value::Number(val as f64);
-                    }
-                }
-                Value::Undefined
-            }
-            "dataview.setInt8" => {
-                let mut next_args = args.to_vec();
-                if next_args.len() > 1 {
-                    let n = to_number(&next_args[1]) as i8;
-                    next_args[1] = Value::Number((n as u8) as f64);
-                }
-                self.call_host_fn(ctx, "dataview.setUint8", receiver, &next_args)
-            }
-            "dataview.getUint16" => {
-                let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                let b0 = to_number(&self.call_host_fn(
-                    ctx,
-                    "dataview.getUint8",
-                    receiver,
-                    &[args.first().cloned().unwrap_or(Value::Number(0.0))],
-                )) as u8;
-                let b1 = to_number(&self.call_host_fn(
-                    ctx,
-                    "dataview.getUint8",
-                    receiver,
-                    &[Value::Number(args.first().map(to_number).unwrap_or(0.0) + 1.0)],
-                )) as u8;
-                let v = if little {
-                    u16::from_le_bytes([b0, b1])
-                } else {
-                    u16::from_be_bytes([b0, b1])
-                };
-                Value::Number(v as f64)
-            }
-            "dataview.getInt16" => {
-                let v = self.call_host_fn(ctx, "dataview.getUint16", receiver, args);
-                Value::Number((to_number(&v) as u16 as i16) as f64)
-            }
-            "dataview.setUint16" => {
-                let off = args.first().map(to_number).unwrap_or(0.0);
-                let n = args.get(1).map(to_number).unwrap_or(0.0) as u16;
-                let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
-                let bytes = if little { n.to_le_bytes() } else { n.to_be_bytes() };
-                let _ = self.call_host_fn(
-                    ctx,
-                    "dataview.setUint8",
-                    receiver,
-                    &[Value::Number(off), Value::Number(bytes[0] as f64)],
-                );
-                let _ = self.call_host_fn(
-                    ctx,
-                    "dataview.setUint8",
-                    receiver,
-                    &[Value::Number(off + 1.0), Value::Number(bytes[1] as f64)],
-                );
-                Value::Undefined
-            }
-            "dataview.setInt16" => {
-                let mut n_args = args.to_vec();
-                if n_args.len() > 1 {
-                    n_args[1] = Value::Number((to_number(&n_args[1]) as i16 as u16) as f64);
-                }
-                self.call_host_fn(ctx, "dataview.setUint16", receiver, &n_args)
-            }
-            "dataview.getUint32" => {
-                let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                let off = args.first().map(to_number).unwrap_or(0.0);
-                let b = [0.0, 1.0, 2.0, 3.0]
-                    .iter()
-                    .map(|d| to_number(&self.call_host_fn(ctx, "dataview.getUint8", receiver, &[Value::Number(off + d)])) as u8)
-                    .collect::<Vec<_>>();
-                let arr = [b[0], b[1], b[2], b[3]];
-                let v = if little { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) };
-                Value::Number(v as f64)
-            }
-            "dataview.getInt32" => {
-                let v = self.call_host_fn(ctx, "dataview.getUint32", receiver, args);
-                Value::Number((to_number(&v) as u32 as i32) as f64)
-            }
-            "dataview.setUint32" => {
-                let off = args.first().map(to_number).unwrap_or(0.0);
-                let n = args.get(1).map(to_number).unwrap_or(0.0) as u32;
-                let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
-                let bytes = if little { n.to_le_bytes() } else { n.to_be_bytes() };
-                for (i, b) in bytes.iter().enumerate() {
-                    let _ = self.call_host_fn(
-                        ctx,
-                        "dataview.setUint8",
-                        receiver,
-                        &[Value::Number(off + i as f64), Value::Number(*b as f64)],
-                    );
-                }
-                Value::Undefined
-            }
-            "dataview.setInt32" => {
-                let mut n_args = args.to_vec();
-                if n_args.len() > 1 {
-                    n_args[1] = Value::Number((to_number(&n_args[1]) as i32 as u32) as f64);
-                }
-                self.call_host_fn(ctx, "dataview.setUint32", receiver, &n_args)
-            }
-            "dataview.getFloat32" => {
-                let v = self.call_host_fn(ctx, "dataview.getUint32", receiver, args);
-                Value::Number(f32::from_bits(to_number(&v) as u32) as f64)
-            }
-            "dataview.setFloat32" => {
-                let mut n_args = args.to_vec();
-                if n_args.len() > 1 {
-                    n_args[1] = Value::Number((to_number(&n_args[1]) as f32).to_bits() as f64);
-                }
-                self.call_host_fn(ctx, "dataview.setUint32", receiver, &n_args)
-            }
-            "dataview.getFloat64" => {
-                let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                let off = args.first().map(to_number).unwrap_or(0.0);
-                let b = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
-                    .iter()
-                    .map(|d| to_number(&self.call_host_fn(ctx, "dataview.getUint8", receiver, &[Value::Number(off + d)])) as u8)
-                    .collect::<Vec<_>>();
-                let arr = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
-                let v = if little { u64::from_le_bytes(arr) } else { u64::from_be_bytes(arr) };
-                Value::Number(f64::from_bits(v))
-            }
-            "dataview.setFloat64" => {
-                let off = args.first().map(to_number).unwrap_or(0.0);
-                let n = args.get(1).map(to_number).unwrap_or(0.0);
-                let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
-                let bits = n.to_bits();
-                let bytes = if little { bits.to_le_bytes() } else { bits.to_be_bytes() };
-                for (i, b) in bytes.iter().enumerate() {
-                    let _ = self.call_host_fn(
-                        ctx,
-                        "dataview.setUint8",
-                        receiver,
-                        &[Value::Number(off + i as f64), Value::Number(*b as f64)],
-                    );
-                }
-                Value::Undefined
-            }
+            _ if name.starts_with("dataview.") => self.dataview_handle_host_fn(ctx, name, receiver, args),
             "promise.catch" => {
                 let recv = receiver.unwrap_or(&Value::Undefined).clone();
                 if matches!(recv, Value::Undefined | Value::Null) {
@@ -9439,10 +9272,8 @@ impl<'gc> VM<'gc> {
             Ok(val.clone())
         } else if let Value::VmArray(arr) = &obj {
             if key == "length" {
-                let borrow = arr.borrow();
-                let readonly_length = matches!(borrow.props.get("__readonly_length__"), Some(Value::Boolean(true)));
-                let frozen = matches!(borrow.props.get("__frozen__"), Some(Value::Boolean(true)));
-                drop(borrow);
+                let readonly_length = matches!(arr.borrow().props.get("__readonly_length__"), Some(Value::Boolean(true)));
+                let frozen = matches!(arr.borrow().props.get("__frozen__"), Some(Value::Boolean(true)));
                 if readonly_length || frozen {
                     let err = self.make_type_error_object(ctx, "Cannot assign to read only property 'length' of array");
                     self.handle_throw(ctx, &err)?;
@@ -9550,6 +9381,8 @@ impl<'gc> VM<'gc> {
                     }
 
                     let mut a = arr.borrow_mut(ctx);
+                    let mut buffer_write_info = None;
+                    let store_val;
                     if idx <= a.elements.len() + 1024 && idx < 1_000_000 {
                         while a.elements.len() <= idx {
                             let hole_idx = a.elements.len();
@@ -9557,15 +9390,38 @@ impl<'gc> VM<'gc> {
                             a.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
                         }
                         // TypedArray: clamp value to element type
-                        let store_val = if let Some(ta_name) = a.props.get("__typedarray_name__").cloned() {
+                        store_val = if let Some(ta_name) = a.props.get("__typedarray_name__").cloned() {
                             let n = to_number(val);
                             Value::Number(coerce_typed_array_value(n, &value_to_string(&ta_name)))
                         } else {
                             val.clone()
                         };
-                        a.elements[idx] = store_val;
+                        a.elements[idx] = store_val.clone();
                         a.props.shift_remove(&format!("__deleted_{}", idx));
+                        // Collect buffer info for buffer-backed TypedArray writes
+                        if a.props.contains_key("__typedarray_buffer__") {
+                            let buffer = a.props.get("__typedarray_buffer__").cloned();
+                            let byte_offset = a
+                                .props
+                                .get("__byte_offset__")
+                                .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                                .unwrap_or(0);
+                            let bpe = a
+                                .props
+                                .get("__bytes_per_element__")
+                                .and_then(|v| {
+                                    if let Value::Number(n) = v {
+                                        Some((*n as usize).max(1))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(1);
+                            let ta_name = a.props.get("__typedarray_name__").map(|v| value_to_string(v)).unwrap_or_default();
+                            buffer_write_info = buffer.map(|b| (b, byte_offset, bpe, ta_name));
+                        }
                     } else {
+                        store_val = val.clone();
                         a.props.insert(key.to_string(), val.clone());
                     }
                     let old_len = if let Some(Value::Number(n)) = a.props.get("__array_length__") {
@@ -9576,6 +9432,68 @@ impl<'gc> VM<'gc> {
                     let new_len = (idx as u64).saturating_add(1);
                     if new_len > old_len {
                         a.props.insert("__array_length__".to_string(), Value::Number(new_len as f64));
+                    }
+                    drop(a);
+                    // Write to shared buffer bytes for buffer-backed TypedArrays
+                    if let Some((Value::VmObject(buf_obj), byte_offset, bpe, ta_name)) = buffer_write_info
+                        && let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
+                    {
+                        let base = byte_offset + idx * bpe;
+                        let n = to_number(&store_val);
+                        let mut bb = buf_bytes.borrow_mut(ctx);
+                        match ta_name.as_str() {
+                            "Uint8Array" | "Uint8ClampedArray" => {
+                                if base < bb.elements.len() {
+                                    bb.elements[base] = Value::Number((n as u8) as f64);
+                                }
+                            }
+                            "Int8Array" => {
+                                if base < bb.elements.len() {
+                                    bb.elements[base] = Value::Number((n as i8 as u8) as f64);
+                                }
+                            }
+                            "Uint16Array" | "Int16Array" => {
+                                let bytes = if ta_name == "Int16Array" {
+                                    (n as i16).to_ne_bytes()
+                                } else {
+                                    (n as u16).to_ne_bytes()
+                                };
+                                for (j, b) in bytes.iter().enumerate() {
+                                    if base + j < bb.elements.len() {
+                                        bb.elements[base + j] = Value::Number(*b as f64);
+                                    }
+                                }
+                            }
+                            "Uint32Array" | "Int32Array" => {
+                                let bytes = if ta_name == "Int32Array" {
+                                    (n as i32).to_ne_bytes()
+                                } else {
+                                    (n as u32).to_ne_bytes()
+                                };
+                                for (j, b) in bytes.iter().enumerate() {
+                                    if base + j < bb.elements.len() {
+                                        bb.elements[base + j] = Value::Number(*b as f64);
+                                    }
+                                }
+                            }
+                            "Float32Array" => {
+                                let bytes = (n as f32).to_ne_bytes();
+                                for (j, b) in bytes.iter().enumerate() {
+                                    if base + j < bb.elements.len() {
+                                        bb.elements[base + j] = Value::Number(*b as f64);
+                                    }
+                                }
+                            }
+                            "Float64Array" => {
+                                let bytes = n.to_ne_bytes();
+                                for (j, b) in bytes.iter().enumerate() {
+                                    if base + j < bb.elements.len() {
+                                        bb.elements[base + j] = Value::Number(*b as f64);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     return Ok(val.clone());
                 } else {
@@ -10454,7 +10372,10 @@ impl<'gc> VM<'gc> {
                 {
                     let needs_update = {
                         let proto_borrow = proto_obj.borrow();
-                        !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
+                        // Only update constructor if it already exists as an own property
+                        // (auto-created prototype). Don't add it to user-assigned prototypes.
+                        proto_borrow.contains_key("constructor")
+                            && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
                     if needs_update {
                         let mut proto_borrow = proto_obj.borrow_mut(ctx);
@@ -10498,7 +10419,9 @@ impl<'gc> VM<'gc> {
                 {
                     let needs_update = {
                         let proto_borrow = proto_obj.borrow();
-                        !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
+                        // Only update constructor if it already exists as an own property
+                        proto_borrow.contains_key("constructor")
+                            && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
                     if needs_update {
                         let mut proto_borrow = proto_obj.borrow_mut(ctx);
@@ -11602,17 +11525,7 @@ impl<'gc> VM<'gc> {
             .borrow_mut(ctx)
             .insert("__nonenumerable_ArrayBuffer__".to_string(), Value::Boolean(true));
 
-        let mut data_view_map = IndexMap::new();
-        data_view_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATAVIEW as f64));
-        data_view_map.insert("name".to_string(), Value::from("DataView"));
-        data_view_map.insert("length".to_string(), Value::Number(1.0));
-        data_view_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
-        data_view_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
-        data_view_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
-        data_view_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
-        data_view_map.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, IndexMap::new())));
-        self.globals
-            .insert("DataView".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, data_view_map)));
+        self.dataview_init_prototype(ctx);
 
         let mut shared_array_buffer_map = IndexMap::new();
         shared_array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_SHAREDARRAYBUFFER as f64));
@@ -12690,7 +12603,35 @@ impl<'gc> VM<'gc> {
         }
         // Most constructors have [[Prototype]] = Function.prototype.
         // Error sub-constructors are handled separately below (their [[Prototype]] = Error).
-        for ctor_name in &["Error", "Array", "Date", "Number", "String", "Boolean", "RegExp", "Proxy"] {
+        for ctor_name in &[
+            "Error",
+            "Array",
+            "Date",
+            "Number",
+            "String",
+            "Boolean",
+            "RegExp",
+            "Proxy",
+            "ArrayBuffer",
+            "SharedArrayBuffer",
+            "DataView",
+            "Map",
+            "Set",
+            "WeakMap",
+            "WeakSet",
+            "WeakRef",
+            "Promise",
+            "Symbol",
+            "Int8Array",
+            "Uint8Array",
+            "Uint8ClampedArray",
+            "Int16Array",
+            "Uint16Array",
+            "Int32Array",
+            "Uint32Array",
+            "Float32Array",
+            "Float64Array",
+        ] {
             if let Some(Value::VmObject(ctor)) = self.globals.get(*ctor_name) {
                 ctor.borrow_mut(ctx).insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
             }
@@ -14716,40 +14657,7 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
             }
-            BUILTIN_CTOR_DATAVIEW => {
-                let buffer = args.first().cloned().unwrap_or(Value::Undefined);
-                let byte_len = if let Value::VmObject(obj) = &buffer {
-                    match obj.borrow().get("byteLength") {
-                        Some(Value::Number(n)) => *n,
-                        _ => 0.0,
-                    }
-                } else {
-                    0.0
-                };
-                let mut map = IndexMap::new();
-                map.insert("__type__".to_string(), Value::from("DataView"));
-                map.insert("buffer".to_string(), buffer);
-                map.insert("__buffer__".to_string(), Value::Boolean(true));
-                map.insert("byteLength".to_string(), Value::Number(byte_len));
-                map.insert("byteOffset".to_string(), Value::Number(0.0));
-                map.insert("getUint8".to_string(), Self::make_host_fn(ctx, "dataview.getUint8"));
-                map.insert("getInt8".to_string(), Self::make_host_fn(ctx, "dataview.getInt8"));
-                map.insert("setUint8".to_string(), Self::make_host_fn(ctx, "dataview.setUint8"));
-                map.insert("setInt8".to_string(), Self::make_host_fn(ctx, "dataview.setInt8"));
-                map.insert("getUint16".to_string(), Self::make_host_fn(ctx, "dataview.getUint16"));
-                map.insert("getInt16".to_string(), Self::make_host_fn(ctx, "dataview.getInt16"));
-                map.insert("setUint16".to_string(), Self::make_host_fn(ctx, "dataview.setUint16"));
-                map.insert("setInt16".to_string(), Self::make_host_fn(ctx, "dataview.setInt16"));
-                map.insert("getUint32".to_string(), Self::make_host_fn(ctx, "dataview.getUint32"));
-                map.insert("getInt32".to_string(), Self::make_host_fn(ctx, "dataview.getInt32"));
-                map.insert("setUint32".to_string(), Self::make_host_fn(ctx, "dataview.setUint32"));
-                map.insert("setInt32".to_string(), Self::make_host_fn(ctx, "dataview.setInt32"));
-                map.insert("getFloat32".to_string(), Self::make_host_fn(ctx, "dataview.getFloat32"));
-                map.insert("setFloat32".to_string(), Self::make_host_fn(ctx, "dataview.setFloat32"));
-                map.insert("getFloat64".to_string(), Self::make_host_fn(ctx, "dataview.getFloat64"));
-                map.insert("setFloat64".to_string(), Self::make_host_fn(ctx, "dataview.setFloat64"));
-                Value::VmObject(new_gc_cell_ptr(ctx, map))
-            }
+            BUILTIN_CTOR_DATAVIEW => self.dataview_call_builtin(ctx, args),
             BUILTIN_CTOR_INT8ARRAY
             | BUILTIN_CTOR_UINT8ARRAY
             | BUILTIN_CTOR_UINT8CLAMPEDARRAY
@@ -18529,36 +18437,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             BUILTIN_CTOR_DATAVIEW => {
-                if let Value::VmObject(recv_obj) = receiver {
-                    let is_valid_buffer = matches!(
-                        args.first(),
-                        Some(Value::VmObject(buf)) if matches!(
-                            buf.borrow().get("__type__"),
-                            Some(Value::String(s)) if {
-                                let t = crate::unicode::utf16_to_utf8(s);
-                                t == "ArrayBuffer" || t == "SharedArrayBuffer"
-                            }
-                        )
-                    );
-                    if !is_valid_buffer {
-                        self.throw_type_error(ctx, "DataView constructor requires a buffer");
-                        return Value::Undefined;
-                    }
-                    let out = self.call_builtin(ctx, id, args);
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    if let Value::VmObject(out_obj) = out {
-                        let out_b = out_obj.borrow();
-                        let mut recv_b = recv_obj.borrow_mut(ctx);
-                        for (k, v) in out_b.iter() {
-                            if k != "__proto__" {
-                                recv_b.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
-                    return receiver.clone();
-                }
+                return self.dataview_call_method_builtin(ctx, receiver, args);
             }
             BUILTIN_CTOR_DATE => {
                 if let Value::VmObject(obj) = receiver {
@@ -26850,6 +26729,11 @@ impl<'gc> VM<'gc> {
                     BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
                     _ => "Object",
                 };
+                // DataView: spec requires argument validation BEFORE GetPrototypeFromConstructor
+                if id == BUILTIN_CTOR_DATAVIEW {
+                    return self.construct_dataview(ctx, target, args, new_target);
+                }
+
                 let ctor_prototype = if id == BUILTIN_CTOR_PROMISE {
                     None
                 } else {
@@ -32700,6 +32584,76 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
                         return Ok(OpcodeAction::Continue);
                     }
+
+                    // Read element from shared buffer bytes for buffer-backed TypedArrays
+                    if let Value::Number(n) = &index {
+                        let i = *n as usize;
+                        if *n >= 0.0 && *n == (i as f64) {
+                            let ta_name = arr
+                                .borrow()
+                                .props
+                                .get("__typedarray_name__")
+                                .map(|v| value_to_string(v))
+                                .unwrap_or_default();
+                            if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
+                                let bb = buf_bytes.borrow();
+                                let base = byte_offset + i * bpe;
+                                let in_range = base + bpe <= bb.elements.len();
+                                if in_range {
+                                    let val = match ta_name.as_str() {
+                                        "Uint8Array" | "Uint8ClampedArray" => {
+                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(b as f64)
+                                        }
+                                        "Int8Array" => {
+                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number((b as i8) as f64)
+                                        }
+                                        "Uint16Array" => {
+                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(u16::from_ne_bytes([b0, b1]) as f64)
+                                        }
+                                        "Int16Array" => {
+                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(i16::from_ne_bytes([b0, b1]) as f64)
+                                        }
+                                        "Uint32Array" => {
+                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(u32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Int32Array" => {
+                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(i32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Float32Array" => {
+                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(f32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Float64Array" => {
+                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(f64::from_ne_bytes(arr8))
+                                        }
+                                        _ => {
+                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(b as f64)
+                                        }
+                                    };
+                                    self.stack.push(val);
+                                    return Ok(OpcodeAction::Continue);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if let Value::Number(n) = &index {
@@ -35698,5 +35652,89 @@ impl<'gc> VM<'gc> {
             self.top_level_cells.insert(index, cell);
         }
         Ok(OpcodeAction::Continue)
+    }
+
+    /// Sync a TypedArray element write to the underlying buffer bytes.
+    fn sync_ta_element_to_buffer(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>, idx: usize, new_num: f64, ta_name: &str) {
+        let (buffer, byte_offset, bpe) = {
+            let a = arr.borrow();
+            let buffer = a.props.get("__typedarray_buffer__").cloned();
+            let byte_offset = a
+                .props
+                .get("__byte_offset__")
+                .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                .unwrap_or(0);
+            let bpe = a
+                .props
+                .get("__bytes_per_element__")
+                .and_then(|v| {
+                    if let Value::Number(n) = v {
+                        Some((*n as usize).max(1))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(1);
+            (buffer, byte_offset, bpe)
+        };
+        if let Some(Value::VmObject(buf_obj)) = buffer
+            && let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
+        {
+            let base = byte_offset + idx * bpe;
+            let mut bb = buf_bytes.borrow_mut(ctx);
+            match ta_name {
+                "Uint8Array" | "Uint8ClampedArray" => {
+                    if base < bb.elements.len() {
+                        bb.elements[base] = Value::Number((new_num as u8) as f64);
+                    }
+                }
+                "Int8Array" => {
+                    if base < bb.elements.len() {
+                        bb.elements[base] = Value::Number((new_num as i8 as u8) as f64);
+                    }
+                }
+                "Uint16Array" | "Int16Array" => {
+                    let bytes = if ta_name == "Int16Array" {
+                        (new_num as i16).to_ne_bytes()
+                    } else {
+                        (new_num as u16).to_ne_bytes()
+                    };
+                    for (j, b) in bytes.iter().enumerate() {
+                        if base + j < bb.elements.len() {
+                            bb.elements[base + j] = Value::Number(*b as f64);
+                        }
+                    }
+                }
+                "Uint32Array" | "Int32Array" => {
+                    let bytes = if ta_name == "Int32Array" {
+                        (new_num as i32).to_ne_bytes()
+                    } else {
+                        (new_num as u32).to_ne_bytes()
+                    };
+                    for (j, b) in bytes.iter().enumerate() {
+                        if base + j < bb.elements.len() {
+                            bb.elements[base + j] = Value::Number(*b as f64);
+                        }
+                    }
+                }
+                "Float32Array" => {
+                    let bytes = (new_num as f32).to_ne_bytes();
+                    for (j, b) in bytes.iter().enumerate() {
+                        if base + j < bb.elements.len() {
+                            bb.elements[base + j] = Value::Number(*b as f64);
+                        }
+                    }
+                }
+                "Float64Array" => {
+                    let bytes = new_num.to_ne_bytes();
+                    for (j, b) in bytes.iter().enumerate() {
+                        if base + j < bb.elements.len() {
+                            bb.elements[base + j] = Value::Number(*b as f64);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }

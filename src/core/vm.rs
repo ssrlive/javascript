@@ -27103,11 +27103,17 @@ impl<'gc> VM<'gc> {
             return Some(make_fallback(self));
         }
 
+        // Spec step 7: "If Type(C) is Object" — only true spec-level Objects,
+        // not primitive symbols (which the engine stores as VmObject with __vm_symbol__).
+        let ctor_is_object = match &ctor {
+            Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
+            Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
+            _ => false,
+        };
+
         let mut species_ctor = ctor.clone();
-        if matches!(
-            ctor,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-        ) && let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
+        if ctor_is_object
+            && let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
             && let Some(species_symbol) = symbol_ctor.borrow().get("species").cloned()
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {

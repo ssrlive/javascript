@@ -2029,6 +2029,10 @@ impl<'gc> VM<'gc> {
                 };
                 Value::Boolean(is_view)
             }
+            "species.getter" => {
+                // get [Symbol.species]() { return this; }
+                receiver.cloned().unwrap_or(Value::Undefined)
+            }
             "arrayBuffer.getByteLength" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
@@ -10390,12 +10394,18 @@ impl<'gc> VM<'gc> {
                         proto_borrow.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
                     }
                 }
-                value.or_else(|| self.lookup_proto_chain(proto.as_ref(), key)).unwrap_or(match key {
-                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                    _ => Value::Undefined,
-                })
+                match value {
+                    Some(v) => v,
+                    None => match proto {
+                        Some(ref p) => self.read_named_property_with_receiver(ctx, p, key, obj),
+                        None => match key {
+                            "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                            "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                            "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            _ => Value::Undefined,
+                        },
+                    },
+                }
             }
             Value::VmClosure(ip, arity, upvalues) => {
                 let current_fn = Value::VmClosure(*ip, *arity, *upvalues);
@@ -10440,12 +10450,18 @@ impl<'gc> VM<'gc> {
                         proto_borrow.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
                     }
                 }
-                value.or_else(|| self.lookup_proto_chain(proto.as_ref(), key)).unwrap_or(match key {
-                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                    _ => Value::Undefined,
-                })
+                match value {
+                    Some(v) => v,
+                    None => match proto {
+                        Some(ref p) => self.read_named_property_with_receiver(ctx, p, key, obj),
+                        None => match key {
+                            "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                            "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                            "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            _ => Value::Undefined,
+                        },
+                    },
+                }
             }
             Value::VmNativeFunction(id) => {
                 let props = self.get_native_fn_props(ctx, *id);
@@ -10463,12 +10479,18 @@ impl<'gc> VM<'gc> {
                 if has_setter {
                     return Value::Undefined;
                 }
-                value.or_else(|| self.lookup_proto_chain(proto.as_ref(), key)).unwrap_or(match key {
-                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                    _ => Value::Undefined,
-                })
+                match value {
+                    Some(v) => v,
+                    None => match proto {
+                        Some(ref p) => self.read_named_property_with_receiver(ctx, p, key, obj),
+                        None => match key {
+                            "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
+                            "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
+                            "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            _ => Value::Undefined,
+                        },
+                    },
+                }
             }
             Value::VmArray(arr) => {
                 let borrow = arr.borrow();
@@ -11735,6 +11757,12 @@ impl<'gc> VM<'gc> {
             false,
             true,
         );
+        // get [Symbol.species]() { return this; }
+        promise_map.insert(
+            "__get_@@sym:5".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "species.getter", "get [Symbol.species]", 0.0, false),
+        );
+        promise_map.insert("__nonenumerable___get_@@sym:5__".to_string(), Value::Boolean(true));
         let promise_ctor_obj = Value::VmObject(new_gc_cell_ptr(ctx, promise_map));
         if let Value::VmObject(proto_obj) = &promise_proto_obj {
             Self::insert_nonenumerable_property(&mut proto_obj.borrow_mut(ctx), "constructor", &promise_ctor_obj);
@@ -32719,7 +32747,10 @@ impl<'gc> VM<'gc> {
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
                             "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                            _ => self.lookup_proto_chain(proto.as_ref(), &coerced_key).unwrap_or(Value::Undefined),
+                            _ => match proto {
+                                Some(ref p) => self.read_named_property_with_receiver(ctx, p, &coerced_key, &obj),
+                                None => Value::Undefined,
+                            },
                         }
                     }
                 };

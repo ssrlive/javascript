@@ -540,7 +540,8 @@ impl<'gc> VM<'gc> {
                     }
                     BUILTIN_DATE_GETTIMEZONEOFFSET => {
                         if let Some(dt) = to_local() {
-                            let mins = -(dt.offset().local_minus_utc() as f64 / 60.0);
+                            let secs = dt.offset().local_minus_utc();
+                            let mins = if secs == 0 { 0.0 } else { -(secs as f64 / 60.0) };
                             return Some(Value::Number(mins));
                         }
                         return Some(Value::Number(f64::NAN));

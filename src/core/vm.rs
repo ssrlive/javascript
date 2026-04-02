@@ -12527,6 +12527,10 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("__nonenumerable_caller__".to_string(), Value::Boolean(true));
         fn_proto.insert("__nonconfigurable_arguments__".to_string(), Value::Boolean(true));
         fn_proto.insert("__nonconfigurable_caller__".to_string(), Value::Boolean(true));
+        fn_proto.insert("length".to_string(), Value::Number(0.0));
+        fn_proto.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        fn_proto.insert("name".to_string(), Value::from(""));
+        fn_proto.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
         {
@@ -26565,6 +26569,20 @@ impl<'gc> VM<'gc> {
                     let out = self.call_builtin(ctx, id, args);
                     self.new_target_stack.pop();
                     out
+                } else if id == BUILTIN_CTOR_DATE {
+                    // Date constructor: compute ms and create Date object with correct proto
+                    let ms = self.date_construct_ms_with_coercion(ctx, args).unwrap_or(f64::NAN);
+                    let mut m = IndexMap::new();
+                    m.insert("__type__".to_string(), Value::from("Date"));
+                    m.insert("__date_ms__".to_string(), Value::Number(ms));
+                    if let Some(proto) = ctor_prototype.clone() {
+                        m.insert("__proto__".to_string(), proto);
+                    } else if let Some(Value::VmObject(date_ctor)) = self.globals.get("Date")
+                        && let Some(proto) = date_ctor.borrow().get("prototype").cloned()
+                    {
+                        m.insert("__proto__".to_string(), proto);
+                    }
+                    Value::VmObject(new_gc_cell_ptr(ctx, m))
                 } else if id == BUILTIN_CTOR_OBJECT
                     && let Some(nt) = new_target
                     && !self.same_constructor_identity(nt, target)

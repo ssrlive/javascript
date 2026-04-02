@@ -3074,6 +3074,10 @@ impl<'gc> VM<'gc> {
                         }
                         // Check typed wrapper built-in methods first
                         let type_name = borrow.get("__type__").map(|v| value_to_string(v));
+                        let is_fn_like = borrow.contains_key("__host_fn__")
+                            || borrow.contains_key("__native_id__")
+                            || borrow.contains_key("__fn_body__")
+                            || borrow.contains_key("__bound_target__");
                         let mut proto = borrow.get("__proto__").cloned();
                         drop(borrow);
                         if proto.is_none()
@@ -3094,6 +3098,13 @@ impl<'gc> VM<'gc> {
                             && let Some(string_proto) = string_ctor.borrow().get("prototype").cloned()
                         {
                             proto = Some(string_proto);
+                        }
+                        if proto.is_none()
+                            && is_fn_like
+                            && let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                            && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+                        {
+                            proto = Some(fn_proto);
                         }
                         let resolved = match type_name.as_deref() {
                             Some("Number") => match key.as_str() {
@@ -5182,9 +5193,32 @@ impl<'gc> VM<'gc> {
 
     // Opcode::ToNumber
     fn run_opcode_to_number(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let val = self.stack.pop().expect("VM Stack underflow on ToNumber");
-        self.stack.push(Value::Number(to_number(&val)));
+        match &val {
+            Value::VmObject(_) | Value::VmArray(_) => {
+                let prim = self.try_to_primitive(ctx, &val, "number");
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                } else {
+                    match &prim {
+                        Value::BigInt(_) => {
+                            self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                            self.stack.push(Value::Number(f64::NAN));
+                        }
+                        _ => self.stack.push(Value::Number(to_number(&prim))),
+                    }
+                }
+            }
+            Value::BigInt(_) => {
+                self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                self.stack.push(Value::Number(f64::NAN));
+            }
+            Value::Symbol(_) => {
+                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                self.stack.push(Value::Number(f64::NAN));
+            }
+            _ => self.stack.push(Value::Number(to_number(&val))),
+        }
         Ok(OpcodeAction::Continue)
     }
 

@@ -2811,8 +2811,8 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::BitwiseNot);
             }
             Expr::UnaryPlus(inner) => {
-                // +x is just coerce to number, for now just compile inner
                 self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::ToNumber);
             }
             Expr::TypeOf(inner) => {
                 // typeof on an undeclared variable must return "undefined", not throw

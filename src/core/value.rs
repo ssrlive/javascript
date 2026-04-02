@@ -73,14 +73,16 @@ impl SymbolData {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Value<'gc> {
+    #[default]
+    Undefined,
+    Null,
+    Uninitialized,
     Number(f64),
     BigInt(Box<BigInt>),
     String(Vec<u16>),
     Boolean(bool),
-    Undefined,
-    Null,
     Function(String),
     VmFunction(usize, u8),
     VmClosure(usize, u8, VmUpvalueCells<'gc>),
@@ -99,7 +101,6 @@ pub enum Value<'gc> {
         setter: Option<Box<Value<'gc>>>,
     },
     Symbol(Gc<'gc, SymbolData>),
-    Uninitialized,
 }
 
 impl<'gc> Value<'gc> {

@@ -318,6 +318,9 @@ const BUILTIN_ASYNCGEN_NEXT: FunctionID = 252;
 const BUILTIN_ASYNCGEN_THROW: FunctionID = 253;
 const BUILTIN_ASYNCGEN_RETURN: FunctionID = 254;
 const BUILTIN_REFLECT_APPLY: FunctionID = 255;
+const BUILTIN_DATE_GETUTCDAY: FunctionID = 256;
+const BUILTIN_DATE_GETUTCMILLISECONDS: FunctionID = 257;
+const BUILTIN_DATE_TOUTCSTRING: FunctionID = 258;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -1166,6 +1169,40 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_KEYS => "keys",
             BUILTIN_OBJECT_ASSIGN => "assign",
             BUILTIN_REFLECT_APPLY => "apply",
+            BUILTIN_DATE_GETTIME => "getTime",
+            BUILTIN_DATE_VALUEOF => "valueOf",
+            BUILTIN_DATE_TOSTRING => "toString",
+            BUILTIN_DATE_TODATESTRING => "toDateString",
+            BUILTIN_DATE_TOLOCALEDATESTRING => "toLocaleDateString",
+            BUILTIN_DATE_TOLOCALETIMESTRING => "toLocaleTimeString",
+            BUILTIN_DATE_TOLOCALESTRING => "toLocaleString",
+            BUILTIN_DATE_TOISOSTRING => "toISOString",
+            BUILTIN_DATE_GETFULLYEAR => "getFullYear",
+            BUILTIN_DATE_GETMONTH => "getMonth",
+            BUILTIN_DATE_GETDATE => "getDate",
+            BUILTIN_DATE_GETDAY => "getDay",
+            BUILTIN_DATE_GETHOURS => "getHours",
+            BUILTIN_DATE_GETMINUTES => "getMinutes",
+            BUILTIN_DATE_GETSECONDS => "getSeconds",
+            BUILTIN_DATE_GETMILLISECONDS => "getMilliseconds",
+            BUILTIN_DATE_GETUTCFULLYEAR => "getUTCFullYear",
+            BUILTIN_DATE_GETUTCMONTH => "getUTCMonth",
+            BUILTIN_DATE_GETUTCDATE => "getUTCDate",
+            BUILTIN_DATE_GETUTCHOURS => "getUTCHours",
+            BUILTIN_DATE_GETUTCMINUTES => "getUTCMinutes",
+            BUILTIN_DATE_GETUTCSECONDS => "getUTCSeconds",
+            BUILTIN_DATE_GETUTCDAY => "getUTCDay",
+            BUILTIN_DATE_GETUTCMILLISECONDS => "getUTCMilliseconds",
+            BUILTIN_DATE_TOUTCSTRING => "toUTCString",
+            BUILTIN_DATE_GETTIMEZONEOFFSET => "getTimezoneOffset",
+            BUILTIN_DATE_SETTIME => "setTime",
+            BUILTIN_DATE_SETFULLYEAR => "setFullYear",
+            BUILTIN_DATE_SETMONTH => "setMonth",
+            BUILTIN_DATE_SETDATE => "setDate",
+            BUILTIN_DATE_SETHOURS => "setHours",
+            BUILTIN_DATE_SETMINUTES => "setMinutes",
+            BUILTIN_DATE_NOW => "now",
+            BUILTIN_DATE_PARSE => "parse",
             _ => "",
         }
     }
@@ -1217,6 +1254,24 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_GROUPBY => 2.0,
             BUILTIN_OBJECT_ASSIGN => 2.0,
             BUILTIN_REFLECT_APPLY => 3.0,
+            // Date getters: all length 0
+            BUILTIN_DATE_GETTIME | BUILTIN_DATE_VALUEOF
+            | BUILTIN_DATE_TOSTRING | BUILTIN_DATE_TODATESTRING
+            | BUILTIN_DATE_TOLOCALEDATESTRING | BUILTIN_DATE_TOLOCALETIMESTRING | BUILTIN_DATE_TOLOCALESTRING
+            | BUILTIN_DATE_TOISOSTRING
+            | BUILTIN_DATE_GETFULLYEAR | BUILTIN_DATE_GETMONTH | BUILTIN_DATE_GETDATE | BUILTIN_DATE_GETDAY
+            | BUILTIN_DATE_GETHOURS | BUILTIN_DATE_GETMINUTES | BUILTIN_DATE_GETSECONDS | BUILTIN_DATE_GETMILLISECONDS
+            | BUILTIN_DATE_GETUTCFULLYEAR | BUILTIN_DATE_GETUTCMONTH | BUILTIN_DATE_GETUTCDATE
+            | BUILTIN_DATE_GETUTCHOURS | BUILTIN_DATE_GETUTCMINUTES | BUILTIN_DATE_GETUTCSECONDS
+            | BUILTIN_DATE_GETUTCDAY | BUILTIN_DATE_GETUTCMILLISECONDS
+            | BUILTIN_DATE_GETTIMEZONEOFFSET | BUILTIN_DATE_NOW | BUILTIN_DATE_TOUTCSTRING => 0.0,
+            // Date setters
+            BUILTIN_DATE_SETTIME | BUILTIN_DATE_SETDATE => 1.0,
+            BUILTIN_DATE_SETMONTH => 2.0,
+            BUILTIN_DATE_SETFULLYEAR => 3.0,
+            BUILTIN_DATE_SETHOURS => 4.0,
+            BUILTIN_DATE_SETMINUTES => 3.0,
+            BUILTIN_DATE_PARSE => 1.0,
             _ => 1.0,
         }
     }
@@ -4326,12 +4381,44 @@ impl<'gc> VM<'gc> {
             }
             "global.isFinite" => Value::Boolean(to_number(args.first().unwrap_or(&Value::Undefined)).is_finite()),
             "global.encodeURI" | "global.encodeURIComponent" => {
-                let s = args.first().map(value_to_string).unwrap_or_default();
-                Value::from(&s.replace(' ', "%20"))
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &arg, "string");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if Self::is_symbol_value(&prim) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
+                }
+                let utf16 = Self::value_to_utf16(&prim);
+                let is_component = name == "global.encodeURIComponent";
+                match Self::js_encode_uri_utf16(&utf16, is_component) {
+                    Ok(encoded) => Value::from(&encoded),
+                    Err(msg) => {
+                        self.throw_uri_error(ctx, &msg);
+                        Value::Undefined
+                    }
+                }
             }
             "global.decodeURI" | "global.decodeURIComponent" => {
-                let s = args.first().map(value_to_string).unwrap_or_default();
-                Value::from(&s.replace("%20", " "))
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &arg, "string");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if Self::is_symbol_value(&prim) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
+                }
+                let utf16 = Self::value_to_utf16(&prim);
+                let is_component = name == "global.decodeURIComponent";
+                match Self::js_decode_uri_utf16(&utf16, is_component) {
+                    Ok(decoded) => Value::String(decoded),
+                    Err(msg) => {
+                        self.throw_uri_error(ctx, &msg);
+                        Value::Undefined
+                    }
+                }
             }
             "iterator.self" => receiver.unwrap_or(&Value::Undefined).clone(),
             "global.__getIterator" => {
@@ -4885,19 +4972,147 @@ impl<'gc> VM<'gc> {
             "os.getcwd" | "os.getpid" | "os.getppid" | "os.open" | "os.write" | "os.read" | "os.seek" | "os.close" | "os.path.basename"
             | "os.path.dirname" | "os.path.join" | "os.path.extname" => self.call_named_host_function(ctx, name, args),
             "date.UTC" => {
-                use chrono::{TimeZone, Utc};
-                let year = args.first().map(to_number).unwrap_or(0.0) as i32;
-                let month = args.get(1).map(to_number).unwrap_or(0.0) as i32;
-                let day = args.get(2).map(to_number).unwrap_or(1.0) as u32;
-                let hour = args.get(3).map(to_number).unwrap_or(0.0) as u32;
-                let minute = args.get(4).map(to_number).unwrap_or(0.0) as u32;
-                let second = args.get(5).map(to_number).unwrap_or(0.0) as u32;
-                let millis = args.get(6).map(to_number).unwrap_or(0.0) as i64;
-                let full_year = if (0..100).contains(&year) { year + 1900 } else { year };
-                match Utc.with_ymd_and_hms(full_year, (month + 1).max(1) as u32, day.max(1), hour, minute, second) {
-                    chrono::LocalResult::Single(dt) => Value::Number(dt.timestamp_millis() as f64 + millis as f64),
-                    _ => Value::Number(f64::NAN),
+                if args.is_empty() {
+                    return Value::Number(f64::NAN);
                 }
+                // Coerce all provided args via ToNumber (triggers valueOf/toString)
+                let mut nums: Vec<f64> = Vec::new();
+                for a in args {
+                    match self.extract_number_with_coercion(ctx, a) {
+                        Some(n) => nums.push(n),
+                        None => return Value::Undefined,
+                    }
+                }
+                let yr = nums[0];
+                let month = nums.get(1).copied().unwrap_or(0.0);
+                let day = nums.get(2).copied().unwrap_or(1.0);
+                let hour = nums.get(3).copied().unwrap_or(0.0);
+                let minute = nums.get(4).copied().unwrap_or(0.0);
+                let second = nums.get(5).copied().unwrap_or(0.0);
+                let millis = nums.get(6).copied().unwrap_or(0.0);
+                if yr.is_nan() || yr.is_infinite() || month.is_nan() || month.is_infinite()
+                    || day.is_nan() || day.is_infinite() || hour.is_nan() || hour.is_infinite()
+                    || minute.is_nan() || minute.is_infinite() || second.is_nan() || second.is_infinite()
+                    || millis.is_nan() || millis.is_infinite()
+                {
+                    Value::Number(f64::NAN)
+                } else {
+                    Value::Number(Self::make_date_from_components(yr, month, day, hour, minute, second, millis, false))
+                }
+            }
+            "date.toPrimitive" => {
+                let this = receiver.cloned().unwrap_or(Value::Undefined);
+                if !matches!(&this, Value::VmObject(_)) {
+                    self.throw_type_error(ctx, "Date.prototype[Symbol.toPrimitive] requires that 'this' be an Object");
+                    return Value::Undefined;
+                }
+                let hint_str = match args.first() {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    Some(v) => value_to_string(v),
+                    None => String::new(),
+                };
+                match hint_str.as_str() {
+                    "string" | "default" => {
+                        // Try toString first, then valueOf
+                        let to_str = self.read_named_property(ctx, &this, "toString");
+                        if self.is_value_callable(&to_str) {
+                            match self.vm_call_function_value(ctx, &to_str, &this, &[]) {
+                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(_) => {}
+                                Err(e) => { self.set_pending_throw_from_error(&e); return Value::Undefined; }
+                            }
+                        }
+                        let val_of = self.read_named_property(ctx, &this, "valueOf");
+                        if self.is_value_callable(&val_of) {
+                            match self.vm_call_function_value(ctx, &val_of, &this, &[]) {
+                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(_) => {}
+                                Err(e) => { self.set_pending_throw_from_error(&e); return Value::Undefined; }
+                            }
+                        }
+                        self.throw_type_error(ctx, "Cannot convert object to primitive value");
+                        Value::Undefined
+                    }
+                    "number" => {
+                        // Try valueOf first, then toString
+                        let val_of = self.read_named_property(ctx, &this, "valueOf");
+                        if self.is_value_callable(&val_of) {
+                            match self.vm_call_function_value(ctx, &val_of, &this, &[]) {
+                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(_) => {}
+                                Err(e) => { self.set_pending_throw_from_error(&e); return Value::Undefined; }
+                            }
+                        }
+                        let to_str = self.read_named_property(ctx, &this, "toString");
+                        if self.is_value_callable(&to_str) {
+                            match self.vm_call_function_value(ctx, &to_str, &this, &[]) {
+                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(_) => {}
+                                Err(e) => { self.set_pending_throw_from_error(&e); return Value::Undefined; }
+                            }
+                        }
+                        self.throw_type_error(ctx, "Cannot convert object to primitive value");
+                        Value::Undefined
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "Invalid hint");
+                        Value::Undefined
+                    }
+                }
+            }
+            "date.toJSON" => {
+                let this = receiver.cloned().unwrap_or(Value::Undefined);
+                // 1. Let O be ? ToObject(this value)
+                if matches!(&this, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Date.prototype.toJSON called on null or undefined");
+                    return Value::Undefined;
+                }
+                let o = if matches!(&this, Value::VmObject(_) | Value::VmArray(_)) {
+                    this.clone()
+                } else {
+                    self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&this))
+                };
+                if self.pending_throw.is_some() { return Value::Undefined; }
+                // 2. Let tv be ? ToPrimitive(O, number)
+                let tv = self.try_to_primitive(ctx, &o, "number");
+                if self.pending_throw.is_some() { return Value::Undefined; }
+                // 3. If tv is a Number and is not finite, return null
+                if let Value::Number(n) = &tv {
+                    if n.is_nan() || n.is_infinite() {
+                        return Value::Null;
+                    }
+                }
+                // 4. Return ? Invoke(O, "toISOString")
+                let to_iso = self.read_named_property(ctx, &o, "toISOString");
+                if self.pending_throw.is_some() { return Value::Undefined; }
+                if !self.is_value_callable(&to_iso) {
+                    self.throw_type_error(ctx, "toISOString is not a function");
+                    return Value::Undefined;
+                }
+                match self.vm_call_function_value(ctx, &to_iso, &o, &[]) {
+                    Ok(v) => v,
+                    Err(e) => { self.set_pending_throw_from_error(&e); Value::Undefined }
+                }
+            }
+            "date.toTimeString" => {
+                let this = receiver.cloned().unwrap_or(Value::Undefined);
+                if let Value::VmObject(obj) = &this {
+                    if let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned() {
+                        if ms.is_nan() || ms.is_infinite() {
+                            return Value::from("Invalid Date");
+                        }
+                        use chrono::{Local, TimeZone};
+                        if let Some(dt) = Local.timestamp_millis_opt(ms as i64).single() {
+                            let s = dt.format("%H:%M:%S GMT%z").to_string();
+                            return Value::from(&s);
+                        }
+                    }
+                }
+                self.throw_type_error(ctx, "this is not a Date object");
+                Value::Undefined
+            }
+            n if n.starts_with("date.set") => {
+                self.date_setter_host_fn(ctx, n, receiver, args)
             }
             "string.concat" => {
                 let base = receiver.map(value_to_string).unwrap_or_default();
@@ -11007,16 +11222,16 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("isFinite".to_string(), Self::make_host_fn(ctx, "global.isFinite"));
         self.globals
-            .insert("encodeURI".to_string(), Self::make_host_fn(ctx, "global.encodeURI"));
+            .insert("encodeURI".to_string(), Self::make_host_fn_with_name_len(ctx, "global.encodeURI", "encodeURI", 1.0, false));
         self.globals
-            .insert("decodeURI".to_string(), Self::make_host_fn(ctx, "global.decodeURI"));
+            .insert("decodeURI".to_string(), Self::make_host_fn_with_name_len(ctx, "global.decodeURI", "decodeURI", 1.0, false));
         self.globals.insert(
             "encodeURIComponent".to_string(),
-            Self::make_host_fn(ctx, "global.encodeURIComponent"),
+            Self::make_host_fn_with_name_len(ctx, "global.encodeURIComponent", "encodeURIComponent", 1.0, false),
         );
         self.globals.insert(
             "decodeURIComponent".to_string(),
-            Self::make_host_fn(ctx, "global.decodeURIComponent"),
+            Self::make_host_fn_with_name_len(ctx, "global.decodeURIComponent", "decodeURIComponent", 1.0, false),
         );
         self.globals.insert(
             crate::core::INTERNAL_FOROF_HELPER.to_string(),
@@ -11438,7 +11653,7 @@ impl<'gc> VM<'gc> {
         Self::init_native_ctor_header(&mut date_map, BUILTIN_CTOR_DATE, "Date", 7.0);
         date_map.insert("now".to_string(), Value::VmNativeFunction(BUILTIN_DATE_NOW));
         date_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_DATE_PARSE));
-        date_map.insert("UTC".to_string(), Self::make_host_fn(ctx, "date.UTC"));
+        date_map.insert("UTC".to_string(), Self::make_host_fn_with_name_len(ctx, "date.UTC", "UTC", 7.0, false));
         let mut date_proto = IndexMap::new();
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
@@ -11453,7 +11668,7 @@ impl<'gc> VM<'gc> {
                 "toTimeString",
                 Self::make_host_fn_with_name_len(ctx, "date.toTimeString", "toTimeString", 0.0, false),
             ),
-            ("toUTCString", Value::VmNativeFunction(BUILTIN_DATE_TOSTRING)),
+            ("toUTCString", Value::VmNativeFunction(BUILTIN_DATE_TOUTCSTRING)),
             ("toDateString", Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING)),
             ("setTime", Value::VmNativeFunction(BUILTIN_DATE_SETTIME)),
             ("toJSON", Self::make_host_fn_with_name_len(ctx, "date.toJSON", "toJSON", 1.0, false)),
@@ -11465,7 +11680,7 @@ impl<'gc> VM<'gc> {
             ("getMonth", Value::VmNativeFunction(BUILTIN_DATE_GETMONTH)),
             ("getDate", Value::VmNativeFunction(BUILTIN_DATE_GETDATE)),
             ("getDay", Value::VmNativeFunction(BUILTIN_DATE_GETDAY)),
-            ("getUTCDay", Value::VmNativeFunction(BUILTIN_DATE_GETDAY)),
+            ("getUTCDay", Value::VmNativeFunction(BUILTIN_DATE_GETUTCDAY)),
             ("getHours", Value::VmNativeFunction(BUILTIN_DATE_GETHOURS)),
             ("getMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES)),
             ("getSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS)),
@@ -11518,11 +11733,18 @@ impl<'gc> VM<'gc> {
             ("getUTCHours", Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS)),
             ("getUTCMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES)),
             ("getUTCSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS)),
-            ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS)),
+            ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMILLISECONDS)),
         ] {
             date_proto.insert(key.to_string(), value);
             date_proto.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
         }
+        // Date.prototype[Symbol.toPrimitive]
+        date_proto.insert(
+            "@@sym:3".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "date.toPrimitive", "[Symbol.toPrimitive]", 1.0, false),
+        );
+        date_proto.insert("__nonenumerable_@@sym:3__".to_string(), Value::Boolean(true));
+        date_proto.insert("__readonly_@@sym:3__".to_string(), Value::Boolean(true));
         let date_proto_obj = new_gc_cell_ptr(ctx, date_proto);
         date_map.insert("__nonenumerable_now__".to_string(), Value::Boolean(true));
         date_map.insert("__nonenumerable_parse__".to_string(), Value::Boolean(true));
@@ -14634,23 +14856,8 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_DATE_PARSE => {
                 let s_str = args.first().map(|v| value_to_string(v)).unwrap_or_default();
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
-                    return Value::Number(dt.timestamp_millis() as f64);
-                } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
-                    let ms = dt
-                        .and_hms_opt(0, 0, 0)
-                        .map(|d| d.and_utc().timestamp_millis() as f64)
-                        .unwrap_or(f64::NAN);
-                    return Value::Number(ms);
-                } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%b %d, %Y") {
-                    // "Aug 9, 1995"
-                    let ms = dt
-                        .and_hms_opt(0, 0, 0)
-                        .map(|d| d.and_utc().timestamp_millis() as f64)
-                        .unwrap_or(f64::NAN);
-                    return Value::Number(ms);
-                }
-                Value::Number(f64::NAN)
+                let ms = self.date_parse_string(&s_str);
+                Value::Number(ms)
             }
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
                 let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(ctx, v)).collect();
@@ -15753,7 +15960,7 @@ impl<'gc> VM<'gc> {
                 Value::Boolean(b)
             }
             BUILTIN_STRING_FROMCHARCODE => {
-                let mut result = String::new();
+                let mut result: Vec<u16> = Vec::new();
                 for arg in args {
                     let code = match arg {
                         Value::Number(n) => *n as u32,
@@ -15767,11 +15974,10 @@ impl<'gc> VM<'gc> {
                         }
                         _ => 0,
                     };
-                    if let Some(c) = char::from_u32(code) {
-                        result.push(c);
-                    }
+                    // Per spec, ToUint16(code) — truncate to 16 bits
+                    result.push((code & 0xFFFF) as u16);
                 }
-                Value::from(&result)
+                Value::String(result)
             }
             BUILTIN_BIGINT => {
                 // BigInt(value) — convert a number or string to BigInt
@@ -18287,6 +18493,11 @@ impl<'gc> VM<'gc> {
                     return receiver.clone();
                 }
             }
+            BUILTIN_DATE_PARSE => {
+                let s_str = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                let ms = self.date_parse_string(&s_str);
+                return Value::Number(ms);
+            }
             BUILTIN_CTOR_DATAVIEW => {
                 return self.dataview_call_method_builtin(ctx, receiver, args);
             }
@@ -18299,80 +18510,55 @@ impl<'gc> VM<'gc> {
                             .map(|d| d.as_millis() as f64)
                             .unwrap_or(0.0)
                     } else if args.len() == 1 {
-                        match &args[0] {
-                            Value::Number(n) => *n,
-                            Value::String(s) => {
-                                let s_str = crate::unicode::utf16_to_utf8(s);
-                                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
-                                    dt.timestamp_millis() as f64
-                                } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
-                                    dt.and_hms_opt(0, 0, 0)
-                                        .map(|d| d.and_utc().timestamp_millis() as f64)
-                                        .unwrap_or(f64::NAN)
-                                } else {
+                        let prim = match &args[0] {
+                            Value::VmObject(_) | Value::VmArray(_) => {
+                                self.try_to_primitive(ctx, &args[0], "default")
+                            }
+                            other => other.clone(),
+                        };
+                        if self.pending_throw.is_some() {
+                            f64::NAN
+                        } else {
+                            match &prim {
+                                Value::Number(n) => Self::time_clip(*n),
+                                Value::String(s) => {
+                                    let s_str = crate::unicode::utf16_to_utf8(s);
+                                    self.date_parse_string(&s_str)
+                                }
+                                Value::BigInt(_) => {
+                                    self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                                     f64::NAN
                                 }
+                                Value::Symbol(_) => {
+                                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                    f64::NAN
+                                }
+                                _ => to_number(&prim),
                             }
-                            _ => f64::NAN,
                         }
                     } else {
-                        let year = to_number(&args[0]) as i32;
-                        let month = to_number(args.get(1).unwrap_or(&Value::Number(0.0))) as u32;
-                        let day = to_number(args.get(2).unwrap_or(&Value::Number(1.0))) as u32;
-                        let hour = to_number(args.get(3).unwrap_or(&Value::Number(0.0))) as u32;
-                        let min = to_number(args.get(4).unwrap_or(&Value::Number(0.0))) as u32;
-                        let sec = to_number(args.get(5).unwrap_or(&Value::Number(0.0))) as u32;
-                        let ms_part = to_number(args.get(6).unwrap_or(&Value::Number(0.0))) as u32;
-                        let full_year = if (0..100).contains(&year) { year + 1900 } else { year };
-                        use chrono::{Local, TimeZone};
-                        let result = Local.with_ymd_and_hms(full_year, month + 1, day, hour, min, sec);
-                        match result {
-                            chrono::LocalResult::Single(dt) => dt.timestamp_millis() as f64 + ms_part as f64,
-                            _ => f64::NAN,
+                        let yr = to_number(&args[0]);
+                        let month = to_number(args.get(1).unwrap_or(&Value::Number(0.0)));
+                        let day = to_number(args.get(2).unwrap_or(&Value::Number(1.0)));
+                        let hour = to_number(args.get(3).unwrap_or(&Value::Number(0.0)));
+                        let min_val = to_number(args.get(4).unwrap_or(&Value::Number(0.0)));
+                        let sec = to_number(args.get(5).unwrap_or(&Value::Number(0.0)));
+                        let ms_part = to_number(args.get(6).unwrap_or(&Value::Number(0.0)));
+                        // Check for NaN/Infinity
+                        if yr.is_nan() || yr.is_infinite() || month.is_nan() || month.is_infinite()
+                            || day.is_nan() || day.is_infinite() || hour.is_nan() || hour.is_infinite()
+                            || min_val.is_nan() || min_val.is_infinite() || sec.is_nan() || sec.is_infinite()
+                            || ms_part.is_nan() || ms_part.is_infinite()
+                        {
+                            f64::NAN
+                        } else {
+                            Self::make_date_from_components(yr, month, day, hour, min_val, sec, ms_part, true)
                         }
                     };
 
                     let mut borrow = obj.borrow_mut(ctx);
                     borrow.insert("__type__".to_string(), Value::from("Date"));
                     borrow.insert("__date_ms__".to_string(), Value::Number(ms));
-                    borrow.insert("getTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETTIME));
-                    borrow.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_DATE_VALUEOF));
-                    borrow.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOSTRING));
-                    borrow.insert("toDateString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING));
-                    borrow.insert("setTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETTIME));
-                    borrow.insert(
-                        "toLocaleDateString".to_string(),
-                        Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING),
-                    );
-                    borrow.insert(
-                        "toLocaleTimeString".to_string(),
-                        Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING),
-                    );
-                    borrow.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING));
-                    borrow.insert("toISOString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING));
-                    borrow.insert("getFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR));
-                    borrow.insert("getMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMONTH));
-                    borrow.insert("getDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDATE));
-                    borrow.insert("getDay".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDAY));
-                    borrow.insert("getHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETHOURS));
-                    borrow.insert("getMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES));
-                    borrow.insert("getSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS));
-                    borrow.insert("getMilliseconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS));
-                    borrow.insert("setFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR));
-                    borrow.insert("setMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMONTH));
-                    borrow.insert("setDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETDATE));
-                    borrow.insert("setHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETHOURS));
-                    borrow.insert("setMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES));
-                    borrow.insert(
-                        "getTimezoneOffset".to_string(),
-                        Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET),
-                    );
-                    borrow.insert("getUTCFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR));
-                    borrow.insert("getUTCMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH));
-                    borrow.insert("getUTCDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE));
-                    borrow.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
-                    borrow.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
-                    borrow.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
                     return receiver.clone();
                 }
             }
@@ -18886,13 +19072,22 @@ impl<'gc> VM<'gc> {
             };
             if let Some(ms) = date_ms {
                 use chrono::{Datelike, Local, TimeZone, Timelike, Utc};
-                let to_local = || Local.timestamp_millis_opt(ms as i64).single();
-                let to_utc = || Utc.timestamp_millis_opt(ms as i64).single();
+                let to_local = || {
+                    if ms.is_nan() || ms.is_infinite() { return None; }
+                    Local.timestamp_millis_opt(ms as i64).single()
+                };
+                let to_utc = || {
+                    if ms.is_nan() || ms.is_infinite() { return None; }
+                    Utc.timestamp_millis_opt(ms as i64).single()
+                };
                 match id {
                     BUILTIN_DATE_GETTIME | BUILTIN_DATE_VALUEOF => return Value::Number(ms),
                     BUILTIN_DATE_TOSTRING => {
                         if let Some(dt) = to_local() {
-                            let s = dt.format("%a %b %d %Y %H:%M:%S GMT%z").to_string();
+                            let y = dt.year();
+                            let year_str = Self::format_year_for_display(y);
+                            let s = format!("{} {}", dt.format("%a %b %d"), year_str)
+                                + &dt.format(" %H:%M:%S GMT%z").to_string();
                             return Value::from(&s);
                         }
                         return Value::from("Invalid Date");
@@ -18919,11 +19114,24 @@ impl<'gc> VM<'gc> {
                         return Value::from("Invalid Date");
                     }
                     BUILTIN_DATE_TOISOSTRING => {
-                        if let Some(dt) = to_utc() {
-                            let s = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-                            return Value::from(&s);
+                        if ms.is_nan() || ms.is_infinite() || ms.abs() > 8.64e15 {
+                            self.throw_range_error_object(ctx, "Invalid time value");
+                            return Value::Undefined;
                         }
-                        return Value::from("Invalid Date");
+                        let s = if let Some(dt) = to_utc() {
+                            let y = dt.year();
+                            if y >= 0 && y <= 9999 {
+                                dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+                            } else if y >= 0 {
+                                format!("+{:06}-{}", y, dt.format("%m-%dT%H:%M:%S%.3fZ"))
+                            } else {
+                                format!("-{:06}-{}", -y, dt.format("%m-%dT%H:%M:%S%.3fZ"))
+                            }
+                        } else {
+                            // Arithmetic fallback for dates outside chrono's ns-based range
+                            Self::format_iso_string_arithmetic(ms)
+                        };
+                        return Value::from(&s);
                     }
                     BUILTIN_DATE_GETFULLYEAR => {
                         return Value::Number(to_local().map(|dt| dt.year() as f64).unwrap_or(f64::NAN));
@@ -18967,6 +19175,12 @@ impl<'gc> VM<'gc> {
                     BUILTIN_DATE_GETUTCSECONDS => {
                         return Value::Number(to_utc().map(|dt| dt.second() as f64).unwrap_or(f64::NAN));
                     }
+                    BUILTIN_DATE_GETUTCDAY => {
+                        return Value::Number(to_utc().map(|dt| dt.weekday().num_days_from_sunday() as f64).unwrap_or(f64::NAN));
+                    }
+                    BUILTIN_DATE_GETUTCMILLISECONDS => {
+                        return Value::Number(to_utc().map(|dt| dt.timestamp_subsec_millis() as f64).unwrap_or(f64::NAN));
+                    }
                     BUILTIN_DATE_GETTIMEZONEOFFSET => {
                         if let Some(dt) = to_local() {
                             let mins = -(dt.offset().local_minus_utc() as f64 / 60.0);
@@ -18976,46 +19190,89 @@ impl<'gc> VM<'gc> {
                     }
                     BUILTIN_DATE_TODATESTRING => {
                         if let Some(dt) = to_local() {
-                            let s = dt.format("%a %b %d %Y").to_string();
+                            let y = dt.year();
+                            let year_str = Self::format_year_for_display(y);
+                            let s = format!("{} {}", dt.format("%a %b %d"), year_str);
+                            return Value::from(&s);
+                        }
+                        return Value::from("Invalid Date");
+                    }
+                    BUILTIN_DATE_TOUTCSTRING => {
+                        if let Some(dt) = to_utc() {
+                            let y = dt.year();
+                            let year_str = Self::format_year_for_display(y);
+                            let s = format!("{} {} {}", dt.format("%a, %d %b"), year_str, dt.format("%H:%M:%S GMT"));
                             return Value::from(&s);
                         }
                         return Value::from("Invalid Date");
                     }
                     BUILTIN_DATE_SETTIME => {
-                        let mut new_ms = f64::NAN;
-                        if let Some(Value::Number(n)) = args.first() {
-                            new_ms = *n;
-                        }
+                        let new_ms = if args.is_empty() {
+                            f64::NAN
+                        } else {
+                            match self.extract_number_with_coercion(ctx, &args[0]) {
+                                Some(n) => Self::time_clip(n),
+                                None => return Value::Undefined,
+                            }
+                        };
                         obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(new_ms));
                         return Value::Number(new_ms);
                     }
                     BUILTIN_DATE_SETFULLYEAR => {
-                        let mut new_ms = f64::NAN;
-                        if let Some(Value::Number(y)) = args.first()
-                            && let Some(dt) = to_local()
-                            && let Some(new_dt) = dt.with_year(*y as i32)
-                        {
-                            new_ms = new_dt.timestamp_millis() as f64;
-                        }
-                        obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(new_ms));
-                        return Value::Number(new_ms);
+                        return self.date_setter_host_fn(ctx, "date.setFullYear", Some(&receiver), args);
                     }
                     BUILTIN_DATE_SETDATE => {
-                        let mut new_ms = f64::NAN;
-                        if let Some(Value::Number(d)) = args.first()
-                            && let Some(dt) = to_local()
-                        {
-                            let current_day = dt.day() as i64;
-                            let target_day = *d as i64;
-                            let diff_sec = (target_day - current_day) * 86400;
-                            new_ms = dt.timestamp_millis() as f64 + (diff_sec * 1000) as f64;
-                        }
-                        obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(new_ms));
-                        return Value::Number(new_ms);
+                        return self.date_setter_host_fn(ctx, "date.setDate", Some(&receiver), args);
+                    }
+                    BUILTIN_DATE_SETMONTH => {
+                        return self.date_setter_host_fn(ctx, "date.setMonth", Some(&receiver), args);
+                    }
+                    BUILTIN_DATE_SETHOURS => {
+                        return self.date_setter_host_fn(ctx, "date.setHours", Some(&receiver), args);
+                    }
+                    BUILTIN_DATE_SETMINUTES => {
+                        return self.date_setter_host_fn(ctx, "date.setMinutes", Some(&receiver), args);
                     }
                     _ => {}
                 }
             }
+            // Receiver is VmObject but doesn't have __date_ms__ — not a Date
+            if matches!(
+                id,
+                BUILTIN_DATE_GETTIME | BUILTIN_DATE_VALUEOF | BUILTIN_DATE_TOSTRING | BUILTIN_DATE_TODATESTRING
+                | BUILTIN_DATE_TOUTCSTRING
+                | BUILTIN_DATE_TOLOCALEDATESTRING | BUILTIN_DATE_TOLOCALETIMESTRING | BUILTIN_DATE_TOLOCALESTRING
+                | BUILTIN_DATE_TOISOSTRING | BUILTIN_DATE_GETFULLYEAR | BUILTIN_DATE_GETMONTH | BUILTIN_DATE_GETDATE
+                | BUILTIN_DATE_GETDAY | BUILTIN_DATE_GETHOURS | BUILTIN_DATE_GETMINUTES | BUILTIN_DATE_GETSECONDS
+                | BUILTIN_DATE_GETMILLISECONDS | BUILTIN_DATE_GETUTCFULLYEAR | BUILTIN_DATE_GETUTCMONTH
+                | BUILTIN_DATE_GETUTCDATE | BUILTIN_DATE_GETUTCHOURS | BUILTIN_DATE_GETUTCMINUTES
+                | BUILTIN_DATE_GETUTCSECONDS | BUILTIN_DATE_GETUTCDAY | BUILTIN_DATE_GETUTCMILLISECONDS
+                | BUILTIN_DATE_GETTIMEZONEOFFSET | BUILTIN_DATE_SETTIME
+                | BUILTIN_DATE_SETFULLYEAR | BUILTIN_DATE_SETMONTH | BUILTIN_DATE_SETDATE
+                | BUILTIN_DATE_SETHOURS | BUILTIN_DATE_SETMINUTES
+            ) {
+                self.throw_type_error(ctx, "this is not a Date object");
+                return Value::Undefined;
+            }
+        }
+        // Non-object receiver for Date methods
+        if matches!(
+            id,
+            BUILTIN_DATE_GETTIME | BUILTIN_DATE_VALUEOF | BUILTIN_DATE_TOSTRING | BUILTIN_DATE_TODATESTRING
+            | BUILTIN_DATE_TOUTCSTRING
+            | BUILTIN_DATE_TOLOCALEDATESTRING | BUILTIN_DATE_TOLOCALETIMESTRING | BUILTIN_DATE_TOLOCALESTRING
+            | BUILTIN_DATE_TOISOSTRING | BUILTIN_DATE_GETFULLYEAR | BUILTIN_DATE_GETMONTH | BUILTIN_DATE_GETDATE
+            | BUILTIN_DATE_GETDAY | BUILTIN_DATE_GETHOURS | BUILTIN_DATE_GETMINUTES | BUILTIN_DATE_GETSECONDS
+            | BUILTIN_DATE_GETMILLISECONDS | BUILTIN_DATE_GETUTCFULLYEAR | BUILTIN_DATE_GETUTCMONTH
+            | BUILTIN_DATE_GETUTCDATE | BUILTIN_DATE_GETUTCHOURS | BUILTIN_DATE_GETUTCMINUTES
+            | BUILTIN_DATE_GETUTCSECONDS | BUILTIN_DATE_GETUTCDAY | BUILTIN_DATE_GETUTCMILLISECONDS
+            | BUILTIN_DATE_GETTIMEZONEOFFSET | BUILTIN_DATE_SETTIME
+            | BUILTIN_DATE_SETFULLYEAR | BUILTIN_DATE_SETMONTH | BUILTIN_DATE_SETDATE
+            | BUILTIN_DATE_SETHOURS | BUILTIN_DATE_SETMINUTES
+        ) && !matches!(receiver, Value::VmObject(_))
+        {
+            self.throw_type_error(ctx, "this is not a Date object");
+            return Value::Undefined;
         }
 
         // Array methods that are generic over array-like receivers
@@ -24021,11 +24278,16 @@ impl<'gc> VM<'gc> {
                 return val.clone();
             }
 
-            let tp_fn = {
+            // Use read_named_property to properly invoke getters (e.g. Object.defineProperty with get)
+            let has_sym = {
                 let borrow = map.borrow();
-                borrow.get("@@sym:3").cloned()
+                borrow.contains_key("@@sym:3") || borrow.contains_key("__get_@@sym:3")
             };
-            if let Some(func) = tp_fn {
+            if has_sym {
+                let func = self.read_named_property(ctx, val, "@@sym:3");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 // Per GetMethod, undefined/null means "method missing" and we
                 // should continue with ordinary coercion.
                 if !matches!(func, Value::Undefined | Value::Null) {
@@ -24114,6 +24376,580 @@ impl<'gc> VM<'gc> {
             Value::Symbol(_) => true,
             Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
             _ => false,
+        }
+    }
+
+    /// Handle date setter host functions (date.setUTCFullYear, date.setSeconds, etc.)
+    fn date_setter_host_fn(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        name: &str,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
+        let this = receiver.cloned().unwrap_or(Value::Undefined);
+        let Value::VmObject(obj) = &this else {
+            self.throw_type_error(ctx, "this is not a Date object");
+            return Value::Undefined;
+        };
+        let ms_val = obj.borrow().get("__date_ms__").cloned();
+        let Some(Value::Number(ms)) = ms_val else {
+            self.throw_type_error(ctx, "this is not a Date object");
+            return Value::Undefined;
+        };
+
+        // Coerce all arguments to numbers first (per spec: all ToNumber happen before mutation)
+        let mut nums: Vec<f64> = Vec::with_capacity(args.len());
+        for a in args {
+            match self.extract_number_with_coercion(ctx, a) {
+                Some(n) => nums.push(n),
+                None => return Value::Undefined, // pending_throw already set
+            }
+        }
+
+        // Check if any arg is NaN or Infinity — result is NaN
+        let any_nan = nums.iter().any(|n| n.is_nan() || n.is_infinite());
+
+        let is_utc = name.contains("UTC");
+
+        // Get current date components in local or UTC time
+        let get_components = |ms: f64, utc: bool| -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
+            if ms.is_nan() || ms.is_infinite() {
+                return None;
+            }
+            use chrono::{Datelike, Local, TimeZone, Timelike, Utc};
+            if utc {
+                Utc.timestamp_millis_opt(ms as i64).single().map(|dt| {
+                    (
+                        dt.year() as f64, (dt.month0()) as f64, dt.day() as f64,
+                        dt.hour() as f64, dt.minute() as f64, dt.second() as f64,
+                        dt.timestamp_subsec_millis() as f64,
+                    )
+                })
+            } else {
+                Local.timestamp_millis_opt(ms as i64).single().map(|dt| {
+                    (
+                        dt.year() as f64, (dt.month0()) as f64, dt.day() as f64,
+                        dt.hour() as f64, dt.minute() as f64, dt.second() as f64,
+                        dt.timestamp_subsec_millis() as f64,
+                    )
+                })
+            }
+        };
+
+        let new_ms = match name {
+            "date.setUTCFullYear" | "date.setFullYear" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    // setFullYear: if date is invalid, use +0 per spec step 4
+                    let comps = get_components(ms, is_utc).unwrap_or((0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0));
+                    let year = nums[0];
+                    let month = nums.get(1).copied().unwrap_or(comps.1);
+                    let day = nums.get(2).copied().unwrap_or(comps.2);
+                    Self::make_date_from_components_no_year_adjust(year, month, day, comps.3, comps.4, comps.5, comps.6, !is_utc)
+                }
+            }
+            _ if ms.is_nan() => {
+                // Per spec: if t is NaN, return NaN (step 5) without updating
+                return Value::Number(f64::NAN);
+            }
+            "date.setUTCMonth" | "date.setMonth" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    let Some(comps) = get_components(ms, is_utc) else { return self.date_store_nan(ctx, &obj); };
+                    let month = nums[0];
+                    let day = nums.get(1).copied().unwrap_or(comps.2);
+                    Self::make_date_from_components_no_year_adjust(comps.0, month, day, comps.3, comps.4, comps.5, comps.6, !is_utc)
+                }
+            }
+            "date.setUTCDate" | "date.setDate" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    let Some(comps) = get_components(ms, is_utc) else { return self.date_store_nan(ctx, &obj); };
+                    let day = nums[0];
+                    Self::make_date_from_components_no_year_adjust(comps.0, comps.1, day, comps.3, comps.4, comps.5, comps.6, !is_utc)
+                }
+            }
+            "date.setUTCHours" | "date.setHours" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    let Some(comps) = get_components(ms, is_utc) else { return self.date_store_nan(ctx, &obj); };
+                    let hour = nums[0];
+                    let min = nums.get(1).copied().unwrap_or(comps.4);
+                    let sec = nums.get(2).copied().unwrap_or(comps.5);
+                    let ms_val = nums.get(3).copied().unwrap_or(comps.6);
+                    Self::make_date_from_components_no_year_adjust(comps.0, comps.1, comps.2, hour, min, sec, ms_val, !is_utc)
+                }
+            }
+            "date.setUTCMinutes" | "date.setMinutes" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    let Some(comps) = get_components(ms, is_utc) else { return self.date_store_nan(ctx, &obj); };
+                    let min = nums[0];
+                    let sec = nums.get(1).copied().unwrap_or(comps.5);
+                    let ms_val = nums.get(2).copied().unwrap_or(comps.6);
+                    Self::make_date_from_components_no_year_adjust(comps.0, comps.1, comps.2, comps.3, min, sec, ms_val, !is_utc)
+                }
+            }
+            "date.setUTCSeconds" | "date.setSeconds" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    let Some(comps) = get_components(ms, is_utc) else { return self.date_store_nan(ctx, &obj); };
+                    let sec = nums[0];
+                    let ms_val = nums.get(1).copied().unwrap_or(comps.6);
+                    Self::make_date_from_components_no_year_adjust(comps.0, comps.1, comps.2, comps.3, comps.4, sec, ms_val, !is_utc)
+                }
+            }
+            "date.setUTCMilliseconds" | "date.setMilliseconds" => {
+                if args.is_empty() || any_nan {
+                    f64::NAN
+                } else {
+                    let Some(comps) = get_components(ms, is_utc) else { return self.date_store_nan(ctx, &obj); };
+                    let ms_val = nums[0];
+                    Self::make_date_from_components_no_year_adjust(comps.0, comps.1, comps.2, comps.3, comps.4, comps.5, ms_val, !is_utc)
+                }
+            }
+            _ => {
+                // date.setTime — handled elsewhere via BUILTIN_DATE_SETTIME, but fall through
+                if args.is_empty() {
+                    f64::NAN
+                } else {
+                    nums[0]
+                }
+            }
+        };
+        obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(new_ms));
+        Value::Number(new_ms)
+    }
+
+    fn date_store_nan(&mut self, ctx: &GcContext<'gc>, obj: &Gc<'gc, GcCell<IndexMap<String, Value<'gc>>>>) -> Value<'gc> {
+        obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(f64::NAN));
+        Value::Number(f64::NAN)
+    }
+
+    /// Compute a Date ms value from year/month/day/hour/min/sec/ms components,
+    /// handling overflow/underflow per ES spec (MakeDay / MakeTime).
+    /// When `local` is true, interprets the result as local time; otherwise UTC.
+    fn make_date_from_components(yr: f64, month: f64, day: f64, hour: f64, min: f64, sec: f64, ms: f64, local: bool) -> f64 {
+        Self::make_date_from_components_inner(yr, month, day, hour, min, sec, ms, local, true)
+    }
+
+    fn make_date_from_components_no_year_adjust(yr: f64, month: f64, day: f64, hour: f64, min: f64, sec: f64, ms: f64, local: bool) -> f64 {
+        Self::make_date_from_components_inner(yr, month, day, hour, min, sec, ms, local, false)
+    }
+
+    fn make_date_from_components_inner(yr: f64, month: f64, day: f64, hour: f64, min: f64, sec: f64, ms: f64, local: bool, ctor_year_adjust: bool) -> f64 {
+        // Apply ToInteger (trunc) to all components per spec
+        let yr = yr.trunc();
+        let month = month.trunc();
+        let day = day.trunc();
+        let hour = hour.trunc();
+        let min = min.trunc();
+        let sec = sec.trunc();
+        let ms = ms.trunc();
+
+        let yi = yr as i64;
+        let full_year = if ctor_year_adjust && (0..100).contains(&yi) { yi + 1900 } else { yi };
+        let mi = month as i64;
+        // Normalize month into 0..11 range, adjusting year
+        let adj_year = full_year + mi.div_euclid(12);
+        let adj_month = mi.rem_euclid(12) as u32; // 0-based
+
+        // Start from the 1st of the adjusted month, then add day-1 via ms arithmetic
+        let base_day = 1u32;
+        use chrono::{Local, NaiveDate, TimeZone};
+        let base_ms = if let Some(naive) = NaiveDate::from_ymd_opt(adj_year as i32, adj_month + 1, base_day) {
+            let naive_dt = match naive.and_hms_opt(0, 0, 0) {
+                Some(d) => d,
+                None => return f64::NAN,
+            };
+            if local {
+                match Local.from_local_datetime(&naive_dt).single() {
+                    Some(dt) => dt.timestamp_millis() as f64,
+                    None => return f64::NAN,
+                }
+            } else {
+                naive_dt.and_utc().timestamp_millis() as f64
+            }
+        } else if !local {
+            // Pure arithmetic fallback for years outside chrono's range (UTC only)
+            Self::make_day_arithmetic(adj_year, adj_month as i64) * 86_400_000.0
+        } else {
+            return f64::NAN;
+        };
+        // Add all components as milliseconds, allowing overflow/underflow
+        let day_offset = day - 1.0;
+        let total_ms = base_ms
+            + day_offset * 86_400_000.0
+            + hour * 3_600_000.0
+            + min * 60_000.0
+            + sec * 1_000.0
+            + ms;
+        Self::time_clip(total_ms)
+    }
+
+    /// Format year for display: positive years ≥4 digits, negative with - prefix and ≥4 digits
+    fn format_year_for_display(y: i32) -> String {
+        if y >= 0 {
+            format!("{:04}", y)
+        } else {
+            format!("-{:04}", -y)
+        }
+    }
+
+    fn time_clip(t: f64) -> f64 {
+        if t.is_nan() || t.is_infinite() || t.abs() > 8.64e15 {
+            f64::NAN
+        } else {
+            let v = t.trunc();
+            if v == 0.0 { 0.0 } else { v } // -0 → +0
+        }
+    }
+
+    /// Pure arithmetic MakeDay for years outside chrono's range.
+    /// Returns day count (from epoch) for the 1st of the given 0-based month.
+    fn make_day_arithmetic(year: i64, month0: i64) -> f64 {
+        // Days in months (non-leap year)
+        const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        fn is_leap(y: i64) -> bool {
+            y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+        }
+        fn days_from_year(y: i64) -> i64 {
+            365 * (y - 1970) + ((y - 1969) as f64 / 4.0).floor() as i64
+                - ((y - 1901) as f64 / 100.0).floor() as i64
+                + ((y - 1601) as f64 / 400.0).floor() as i64
+        }
+        let mut d = days_from_year(year);
+        for m in 0..month0 {
+            d += MONTH_DAYS[m as usize];
+            if m == 1 && is_leap(year) {
+                d += 1;
+            }
+        }
+        d as f64
+    }
+
+    /// Format a UTC date as ISO string using pure arithmetic (for dates outside chrono's range)
+    fn format_iso_string_arithmetic(ms: f64) -> String {
+        const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        fn is_leap(y: i64) -> bool {
+            y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+        }
+        fn days_in_year(y: i64) -> i64 { if is_leap(y) { 366 } else { 365 } }
+
+        let total_ms = ms as i64;
+        let mut remaining_days = total_ms.div_euclid(86_400_000);
+        let time_ms = total_ms.rem_euclid(86_400_000);
+        let hours = time_ms / 3_600_000;
+        let minutes = (time_ms % 3_600_000) / 60_000;
+        let seconds = (time_ms % 60_000) / 1_000;
+        let millis = time_ms % 1_000;
+
+        let mut year: i64 = 1970;
+        if remaining_days >= 0 {
+            loop {
+                let dy = days_in_year(year);
+                if remaining_days < dy { break; }
+                remaining_days -= dy;
+                year += 1;
+            }
+        } else {
+            loop {
+                year -= 1;
+                remaining_days += days_in_year(year);
+                if remaining_days >= 0 { break; }
+            }
+        }
+
+        let mut month = 0u32;
+        loop {
+            let dm = MONTH_DAYS[month as usize] + if month == 1 && is_leap(year) { 1 } else { 0 };
+            if remaining_days < dm { break; }
+            remaining_days -= dm;
+            month += 1;
+        }
+        let day = remaining_days + 1;
+
+        if year >= 0 && year <= 9999 {
+            format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", year, month + 1, day, hours, minutes, seconds, millis)
+        } else if year >= 0 {
+            format!("+{:06}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", year, month + 1, day, hours, minutes, seconds, millis)
+        } else {
+            format!("-{:06}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", -year, month + 1, day, hours, minutes, seconds, millis)
+        }
+    }
+
+    fn date_parse_string(& self, s: &str) -> f64 {
+        // Reject "-000000" (negative zero year) per spec
+        if s.starts_with("-000000") {
+            return f64::NAN;
+        }
+        // Try extended year format: +YYYYYY-MM-DDTHH:MM[:SS[.sss]]Z or -YYYYYY-...
+        if let Some(ms) = Self::parse_extended_year_iso(s) {
+            return Self::time_clip(ms);
+        }
+        // Try ISO 8601 / RFC 3339
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Self::time_clip(dt.timestamp_millis() as f64);
+        }
+        // Try YYYY-MM-DDTHH:MM:SSZ
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ") {
+            return Self::time_clip(dt.and_utc().timestamp_millis() as f64);
+        }
+        // Try YYYY-MM-DDTHH:MMZ
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%MZ") {
+            return Self::time_clip(dt.and_utc().timestamp_millis() as f64);
+        }
+        // Try YYYY-MM-DD (parsed as UTC per spec)
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            if let Some(d) = dt.and_hms_opt(0, 0, 0) {
+                return Self::time_clip(d.and_utc().timestamp_millis() as f64);
+            }
+        }
+        // Try YYYY-MM (parsed as UTC per spec)
+        if s.len() >= 7 && s.len() <= 7 && s.chars().nth(4) == Some('-') {
+            if let Ok(dt) = chrono::NaiveDate::parse_from_str(&format!("{}-01", s), "%Y-%m-%d") {
+                if let Some(d) = dt.and_hms_opt(0, 0, 0) {
+                    return Self::time_clip(d.and_utc().timestamp_millis() as f64);
+                }
+            }
+        }
+        // Try YYYY (year only, parsed as UTC per spec)
+        if s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(year) = s.parse::<i32>() {
+                if let Some(dt) = chrono::NaiveDate::from_ymd_opt(year, 1, 1) {
+                    if let Some(d) = dt.and_hms_opt(0, 0, 0) {
+                        return Self::time_clip(d.and_utc().timestamp_millis() as f64);
+                    }
+                }
+            }
+        }
+        // Try YYYY-MM-DDTHH:MM:SS (no timezone → local)
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            use chrono::{Local, TimeZone};
+            if let Some(local_dt) = Local.from_local_datetime(&dt).single() {
+                return Self::time_clip(local_dt.timestamp_millis() as f64);
+            }
+        }
+        // Try YYYY-MM-DDTHH:MM:SS.sss (no timezone → local)
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+            use chrono::{Local, TimeZone};
+            if let Some(local_dt) = Local.from_local_datetime(&dt).single() {
+                return Self::time_clip(local_dt.timestamp_millis() as f64);
+            }
+        }
+        // Try toString format: "Thu Jan 01 1970 08:00:00 GMT+0800"
+        // Pattern: Day Mon DD YYYY HH:MM:SS GMT[+-]HHMM
+        if let Some(ms) = Self::parse_tostring_format(s) {
+            return Self::time_clip(ms);
+        }
+        // Try toUTCString format: "Thu, 01 Jan 1970 00:00:00 GMT"
+        if let Some(ms) = Self::parse_utcstring_format(s) {
+            return Self::time_clip(ms);
+        }
+        f64::NAN
+    }
+
+    fn month_name_to_num(name: &str) -> Option<u32> {
+        match name {
+            "Jan" => Some(1), "Feb" => Some(2), "Mar" => Some(3), "Apr" => Some(4),
+            "May" => Some(5), "Jun" => Some(6), "Jul" => Some(7), "Aug" => Some(8),
+            "Sep" => Some(9), "Oct" => Some(10), "Nov" => Some(11), "Dec" => Some(12),
+            _ => None,
+        }
+    }
+
+    /// Parse Date.prototype.toString format: "Thu Jan 01 1970 08:00:00 GMT+0800"
+    fn parse_tostring_format(s: &str) -> Option<f64> {
+        // Format: "DDD MMM DD YYYY HH:MM:SS GMT[+-]HHMM"
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() < 5 { return None; }
+        let month = Self::month_name_to_num(parts[1])?;
+        let day: u32 = parts[2].parse().ok()?;
+        let year: i32 = parts[3].parse().ok()?;
+        let time_parts: Vec<&str> = parts[4].split(':').collect();
+        if time_parts.len() != 3 { return None; }
+        let hour: u32 = time_parts[0].parse().ok()?;
+        let minute: u32 = time_parts[1].parse().ok()?;
+        let sec: u32 = time_parts[2].parse().ok()?;
+
+        use chrono::NaiveDate;
+        let naive = NaiveDate::from_ymd_opt(year, month, day)?;
+        let naive_dt = naive.and_hms_opt(hour, minute, sec)?;
+
+        // Parse timezone offset (GMT+0800 or GMT-0500)
+        if parts.len() >= 6 && parts[5].starts_with("GMT") {
+            let tz_str = &parts[5][3..];
+            if tz_str.len() >= 4 {
+                let tz_sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
+                let tz_digits = &tz_str[1..];
+                let tz_h: i64 = tz_digits[..2].parse().ok()?;
+                let tz_m: i64 = tz_digits[2..4].parse().ok()?;
+                let tz_offset_ms = tz_sign * (tz_h * 3_600_000 + tz_m * 60_000);
+                let utc_ms = naive_dt.and_utc().timestamp_millis() as f64 - tz_offset_ms as f64;
+                return Some(utc_ms);
+            }
+        }
+        // No timezone info → treat as local
+        use chrono::{Local, TimeZone};
+        let local_dt = Local.from_local_datetime(&naive_dt).single()?;
+        Some(local_dt.timestamp_millis() as f64)
+    }
+
+    /// Parse Date.prototype.toUTCString format: "Thu, 01 Jan 1970 00:00:00 GMT"
+    fn parse_utcstring_format(s: &str) -> Option<f64> {
+        // Format: "DDD, DD MMM YYYY HH:MM:SS GMT"
+        let s = s.trim_end_matches(" GMT");
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() < 5 { return None; }
+        // parts[0] = "Thu," or "Thu"
+        let day_str = parts[1];
+        let month_str = parts[2];
+        let year_str = parts[3];
+        let time_str = parts[4];
+
+        let day: u32 = day_str.parse().ok()?;
+        let month = Self::month_name_to_num(month_str)?;
+        let year: i32 = year_str.parse().ok()?;
+        let time_parts: Vec<&str> = time_str.split(':').collect();
+        if time_parts.len() != 3 { return None; }
+        let hour: u32 = time_parts[0].parse().ok()?;
+        let minute: u32 = time_parts[1].parse().ok()?;
+        let sec: u32 = time_parts[2].parse().ok()?;
+
+        use chrono::NaiveDate;
+        let naive = NaiveDate::from_ymd_opt(year, month, day)?;
+        let naive_dt = naive.and_hms_opt(hour, minute, sec)?;
+        Some(naive_dt.and_utc().timestamp_millis() as f64)
+    }
+
+    /// Parse extended-year ISO 8601 strings like "+002016-07-01T00:00Z" or "-000001-07-01T00:00Z"
+    fn parse_extended_year_iso(s: &str) -> Option<f64> {
+        if s.len() < 7 { return None; }
+        let (sign, rest) = if s.starts_with('+') {
+            (1i64, &s[1..])
+        } else if s.starts_with('-') {
+            (-1i64, &s[1..])
+        } else {
+            return None;
+        };
+        // Find the first '-' after the year digits
+        let year_end = rest.find('-')?;
+        if year_end < 4 { return None; }
+        let year_str = &rest[..year_end];
+        let year: i64 = year_str.parse().ok()?;
+        // Reject "-000000" (negative zero) per spec
+        if sign == -1 && year == 0 {
+            return None;
+        }
+        let year = sign * year;
+        let remainder = &rest[year_end..]; // "-MM-DDTHH:MM:SSZ" etc.
+
+        // Parse the rest: -MM-DD or -MM-DDTHH:MM:SSZ etc.
+        let parts: Vec<&str> = remainder.split('T').collect();
+        let date_part = parts[0]; // -MM-DD
+        let date_fields: Vec<&str> = date_part.split('-').filter(|x| !x.is_empty()).collect();
+        let month: u32 = date_fields.first()?.parse().ok()?;
+        let day: u32 = date_fields.get(1).and_then(|x| x.parse().ok()).unwrap_or(1);
+
+        let (hour, minute, sec, ms_val, tz_offset_ms) = if parts.len() > 1 {
+            let time_str = parts[1];
+            // Check for timezone offset: Z, +HH:MM, -HH:MM
+            let (time_part, tz_off) = if time_str.ends_with('Z') {
+                (time_str.trim_end_matches('Z'), Some(0i64))
+            } else if let Some(pos) = time_str.rfind('+') {
+                if pos > 0 {
+                    let tz = &time_str[pos+1..];
+                    let tz_parts: Vec<&str> = tz.split(':').collect();
+                    let tz_h: i64 = tz_parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                    let tz_m: i64 = tz_parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+                    (&time_str[..pos], Some(-(tz_h * 60 + tz_m) * 60000))
+                } else {
+                    (time_str, None)
+                }
+            } else if let Some(pos) = time_str.rfind('-') {
+                if pos > 0 {
+                    let tz = &time_str[pos+1..];
+                    let tz_parts: Vec<&str> = tz.split(':').collect();
+                    let tz_h: i64 = tz_parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                    let tz_m: i64 = tz_parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+                    (&time_str[..pos], Some((tz_h * 60 + tz_m) * 60000))
+                } else {
+                    (time_str, None)
+                }
+            } else {
+                (time_str, None)
+            };
+            let time_fields: Vec<&str> = time_part.split(':').collect();
+            let h: u32 = time_fields.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let m: u32 = time_fields.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+            let (s, ms) = if let Some(sec_str) = time_fields.get(2) {
+                let sec_parts: Vec<&str> = sec_str.split('.').collect();
+                let s: u32 = sec_parts[0].parse().ok()?;
+                let ms: f64 = if sec_parts.len() > 1 {
+                    let frac = sec_parts[1];
+                    let frac_val: f64 = frac.parse().ok()?;
+                    frac_val / 10f64.powi(frac.len() as i32) * 1000.0
+                } else { 0.0 };
+                (s, ms)
+            } else { (0, 0.0) };
+            (h, m, s, ms, tz_off)
+        } else {
+            (0, 0, 0, 0.0, Some(0)) // date-only → UTC
+        };
+
+        use chrono::NaiveDate;
+        // Try chrono first; fall back to arithmetic for years outside chrono's range
+        let chrono_result = if let Some(naive) = NaiveDate::from_ymd_opt(year as i32, month, day) {
+            naive.and_hms_opt(hour, minute, sec).map(|naive_dt| {
+                let base_ms = naive_dt.and_utc().timestamp_millis() as f64 + ms_val;
+                if let Some(tz) = tz_offset_ms {
+                    base_ms + tz as f64
+                } else {
+                    use chrono::{Local, TimeZone};
+                    if let Some(local_dt) = Local.from_local_datetime(&naive_dt).single() {
+                        local_dt.timestamp_millis() as f64 + ms_val
+                    } else {
+                        base_ms
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(ms) = chrono_result {
+            return Some(ms);
+        }
+        // Arithmetic fallback for years outside chrono's NaiveDate range (-262144..=262143)
+        let base_ms = (Self::make_day_arithmetic(year, (month as i64) - 1)
+            + (day as f64 - 1.0)) * 86_400_000.0
+            + (hour as f64) * 3_600_000.0
+            + (minute as f64) * 60_000.0
+            + (sec as f64) * 1000.0
+            + ms_val;
+        let adjusted = if let Some(tz) = tz_offset_ms {
+            base_ms + tz as f64
+        } else {
+            use chrono::Local;
+            let offset_ms = Local::now().offset().local_minus_utc() as f64 * 1000.0;
+            base_ms - offset_ms
+        };
+        Some(adjusted)
+    }
+
+    fn value_to_utf16(val: &Value<'gc>) -> Vec<u16> {
+        match val {
+            Value::String(s) => s.clone(),
+            _ => {
+                let s = value_to_string(val);
+                s.encode_utf16().collect()
+            }
         }
     }
 
@@ -24368,6 +25204,177 @@ impl<'gc> VM<'gc> {
 
     fn throw_range_error_object(&mut self, ctx: &GcContext<'gc>, message: &str) {
         self.pending_throw = Some(self.make_range_error_object(ctx, message));
+    }
+
+    fn make_uri_error_object(&self, ctx: &GcContext<'gc>, message: &str) -> Value<'gc> {
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::from("URIError"));
+        map.insert("name".to_string(), Value::from("URIError"));
+        map.insert("message".to_string(), Value::from(message));
+        if let Some(ctor) = self.globals.get("URIError").cloned() {
+            map.insert("constructor".to_string(), ctor.clone());
+            if let Value::VmObject(ctor_obj) = ctor
+                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
+            {
+                map.insert("__proto__".to_string(), proto);
+            }
+        }
+        Value::VmObject(new_gc_cell_ptr(ctx, map))
+    }
+
+    fn throw_uri_error(&mut self, ctx: &GcContext<'gc>, message: &str) {
+        self.pending_throw = Some(self.make_uri_error_object(ctx, message));
+    }
+
+    fn js_encode_uri_utf16(utf16: &[u16], is_component: bool) -> Result<String, String> {
+        let mut result = String::new();
+        let len = utf16.len();
+        let mut i = 0;
+
+        while i < len {
+            let c = utf16[i];
+            if Self::is_uri_unescaped(c, is_component) {
+                result.push(c as u8 as char);
+                i += 1;
+            } else {
+                let code_point: u32;
+                if c >= 0xDC00 && c <= 0xDFFF {
+                    return Err("URI malformed".to_string());
+                }
+                if c >= 0xD800 && c <= 0xDBFF {
+                    i += 1;
+                    if i >= len {
+                        return Err("URI malformed".to_string());
+                    }
+                    let c2 = utf16[i];
+                    if c2 < 0xDC00 || c2 > 0xDFFF {
+                        return Err("URI malformed".to_string());
+                    }
+                    code_point = 0x10000 + ((c as u32 - 0xD800) << 10) + (c2 as u32 - 0xDC00);
+                } else {
+                    code_point = c as u32;
+                }
+                let mut utf8_bytes = [0u8; 4];
+                let ch = char::from_u32(code_point).ok_or_else(|| "URI malformed".to_string())?;
+                let encoded = ch.encode_utf8(&mut utf8_bytes);
+                for b in encoded.bytes() {
+                    result.push('%');
+                    result.push(Self::hex_digit(b >> 4));
+                    result.push(Self::hex_digit(b & 0x0F));
+                }
+                i += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    fn js_decode_uri_utf16(input: &[u16], is_component: bool) -> Result<Vec<u16>, String> {
+        let mut result: Vec<u16> = Vec::new();
+        let len = input.len();
+        let mut i = 0;
+
+        while i < len {
+            let c = input[i];
+            if c == 0x25 {
+                // '%' character
+                if i + 2 >= len {
+                    return Err("URI malformed".to_string());
+                }
+                let hi = Self::hex_value_u16(input[i + 1]).ok_or_else(|| "URI malformed".to_string())?;
+                let lo = Self::hex_value_u16(input[i + 2]).ok_or_else(|| "URI malformed".to_string())?;
+                let b0 = (hi << 4) | lo;
+                let start_i = i;
+                i += 3;
+
+                if b0 < 0x80 {
+                    let ch = b0 as u8 as char;
+                    if !is_component && Self::is_uri_reserved_or_hash(ch) {
+                        // Keep original %XX
+                        result.push(input[start_i]);
+                        result.push(input[start_i + 1]);
+                        result.push(input[start_i + 2]);
+                    } else {
+                        result.push(b0 as u16);
+                    }
+                } else {
+                    let n = if b0 & 0xE0 == 0xC0 { 2 }
+                        else if b0 & 0xF0 == 0xE0 { 3 }
+                        else if b0 & 0xF8 == 0xF0 { 4 }
+                        else { return Err("URI malformed".to_string()); };
+
+                    let mut utf8_bytes = vec![b0 as u8];
+                    for _ in 1..n {
+                        if i + 2 > len || input[i] != 0x25 {
+                            return Err("URI malformed".to_string());
+                        }
+                        let h = Self::hex_value_u16(input[i + 1]).ok_or_else(|| "URI malformed".to_string())?;
+                        let l = Self::hex_value_u16(input[i + 2]).ok_or_else(|| "URI malformed".to_string())?;
+                        let b = (h << 4) | l;
+                        if b & 0xC0 != 0x80 {
+                            return Err("URI malformed".to_string());
+                        }
+                        utf8_bytes.push(b as u8);
+                        i += 3;
+                    }
+
+                    let decoded = std::str::from_utf8(&utf8_bytes).map_err(|_| "URI malformed".to_string())?;
+                    let code_point = decoded.chars().next().ok_or_else(|| "URI malformed".to_string())? as u32;
+
+                    if (0xD800..=0xDFFF).contains(&code_point) {
+                        return Err("URI malformed".to_string());
+                    }
+
+                    if code_point <= 0xFFFF {
+                        result.push(code_point as u16);
+                    } else {
+                        let cp = code_point - 0x10000;
+                        result.push((0xD800 + (cp >> 10)) as u16);
+                        result.push((0xDC00 + (cp & 0x3FF)) as u16);
+                    }
+                }
+            } else {
+                result.push(c);
+                i += 1;
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn hex_value_u16(c: u16) -> Option<u16> {
+        match c {
+            0x30..=0x39 => Some(c - 0x30),       // '0'-'9'
+            0x41..=0x46 => Some(c - 0x41 + 10),   // 'A'-'F'
+            0x61..=0x66 => Some(c - 0x61 + 10),   // 'a'-'f'
+            _ => None,
+        }
+    }
+
+    fn is_uri_unescaped(c: u16, is_component: bool) -> bool {
+        // A-Z a-z 0-9
+        if (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) || (c >= 0x30 && c <= 0x39) {
+            return true;
+        }
+        // - _ . ! ~ * ' ( )
+        if matches!(c, 0x2D | 0x5F | 0x2E | 0x21 | 0x7E | 0x2A | 0x27 | 0x28 | 0x29) {
+            return true;
+        }
+        // For encodeURI only: ; , / ? : @ & = + $ #
+        if !is_component {
+            if matches!(c, 0x3B | 0x2C | 0x2F | 0x3F | 0x3A | 0x40 | 0x26 | 0x3D | 0x2B | 0x24 | 0x23) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_uri_reserved_or_hash(c: char) -> bool {
+        // Reserved set for decodeURI: ; / ? : @ & = + $ , #
+        matches!(c, ';' | '/' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | ',' | '#')
+    }
+
+    fn hex_digit(n: u8) -> char {
+        if n < 10 { (b'0' + n) as char } else { (b'A' + n - 10) as char }
     }
 
     fn extract_number_with_coercion(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<f64> {
@@ -34750,107 +35757,54 @@ impl<'gc> VM<'gc> {
                                 .map(|d| d.as_millis() as f64)
                                 .unwrap_or(0.0)
                         } else if args.len() == 1 {
-                            // new Date(value) — parse or timestamp
-                            match &args[0] {
-                                Value::Number(n) => *n,
-                                Value::String(s) => {
-                                    let s_str = crate::unicode::utf16_to_utf8(s);
-                                    // Try to parse ISO date string
-                                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
-                                        dt.timestamp_millis() as f64
-                                    } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
-                                        dt.and_hms_opt(0, 0, 0)
-                                            .map(|d| d.and_utc().timestamp_millis() as f64)
-                                            .unwrap_or(f64::NAN)
-                                    } else {
+                            let prim = match &args[0] {
+                                Value::VmObject(_) | Value::VmArray(_) => {
+                                    self.try_to_primitive(ctx, &args[0], "default")
+                                }
+                                other => other.clone(),
+                            };
+                            if self.pending_throw.is_some() {
+                                f64::NAN
+                            } else {
+                                match &prim {
+                                    Value::Number(n) => Self::time_clip(*n),
+                                    Value::String(s) => {
+                                        let s_str = crate::unicode::utf16_to_utf8(s);
+                                        self.date_parse_string(&s_str)
+                                    }
+                                    Value::BigInt(_) => {
+                                        self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                                         f64::NAN
                                     }
+                                    Value::Symbol(_) => {
+                                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                        f64::NAN
+                                    }
+                                    _ => to_number(&prim),
                                 }
-                                _ => f64::NAN,
                             }
                         } else {
                             // new Date(year, month, day?, hours?, min?, sec?, ms?)
-                            let year = if let Value::Number(n) = &args[0] { *n as i32 } else { 0 };
-                            let month = if let Value::Number(n) = args.get(1).unwrap_or(&Value::Number(0.0)) {
-                                *n as u32
+                            let yr = to_number(&args[0]);
+                            let month = to_number(args.get(1).unwrap_or(&Value::Number(0.0)));
+                            let day = to_number(args.get(2).unwrap_or(&Value::Number(1.0)));
+                            let hour = to_number(args.get(3).unwrap_or(&Value::Number(0.0)));
+                            let min_val = to_number(args.get(4).unwrap_or(&Value::Number(0.0)));
+                            let sec = to_number(args.get(5).unwrap_or(&Value::Number(0.0)));
+                            let ms_part = to_number(args.get(6).unwrap_or(&Value::Number(0.0)));
+                            if yr.is_nan() || yr.is_infinite() || month.is_nan() || month.is_infinite()
+                                || day.is_nan() || day.is_infinite() || hour.is_nan() || hour.is_infinite()
+                                || min_val.is_nan() || min_val.is_infinite() || sec.is_nan() || sec.is_infinite()
+                                || ms_part.is_nan() || ms_part.is_infinite()
+                            {
+                                f64::NAN
                             } else {
-                                0
-                            };
-                            let day = if let Value::Number(n) = args.get(2).unwrap_or(&Value::Number(1.0)) {
-                                *n as u32
-                            } else {
-                                1
-                            };
-                            let hour = if let Value::Number(n) = args.get(3).unwrap_or(&Value::Number(0.0)) {
-                                *n as u32
-                            } else {
-                                0
-                            };
-                            let min = if let Value::Number(n) = args.get(4).unwrap_or(&Value::Number(0.0)) {
-                                *n as u32
-                            } else {
-                                0
-                            };
-                            let sec = if let Value::Number(n) = args.get(5).unwrap_or(&Value::Number(0.0)) {
-                                *n as u32
-                            } else {
-                                0
-                            };
-                            let ms_part = if let Value::Number(n) = args.get(6).unwrap_or(&Value::Number(0.0)) {
-                                *n as u32
-                            } else {
-                                0
-                            };
-                            // Adjust year: 0-99 maps to 1900-1999
-                            let full_year = if (0..100).contains(&year) { year + 1900 } else { year };
-                            // Use chrono to build the date in local timezone
-                            use chrono::{Local, TimeZone};
-                            let result = Local.with_ymd_and_hms(full_year, month + 1, day, hour, min, sec);
-                            match result {
-                                chrono::LocalResult::Single(dt) => dt.timestamp_millis() as f64 + ms_part as f64,
-                                _ => f64::NAN,
+                                Self::make_date_from_components(yr, month, day, hour, min_val, sec, ms_part, true)
                             }
                         };
                         let mut map = IndexMap::new();
                         map.insert("__type__".to_string(), Value::from("Date"));
                         map.insert("__date_ms__".to_string(), Value::Number(ms));
-                        // Install Date instance methods
-                        map.insert("getTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETTIME));
-                        map.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_DATE_VALUEOF));
-                        map.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOSTRING));
-                        map.insert(
-                            "toLocaleDateString".to_string(),
-                            Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING),
-                        );
-                        map.insert(
-                            "toLocaleTimeString".to_string(),
-                            Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING),
-                        );
-                        map.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING));
-                        map.insert("toISOString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING));
-                        map.insert("getFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR));
-                        map.insert("getMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMONTH));
-                        map.insert("getDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDATE));
-                        map.insert("getDay".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDAY));
-                        map.insert("getHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETHOURS));
-                        map.insert("getMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES));
-                        map.insert("getSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS));
-                        map.insert("getMilliseconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS));
-                        map.insert("setFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR));
-                        map.insert("setMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMONTH));
-                        map.insert("setDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETDATE));
-                        map.insert("setHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETHOURS));
-                        map.insert("setMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES));
-                        map.insert(
-                            "getTimezoneOffset".to_string(),
-                            Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET),
-                        );
-                        map.insert("getUTCFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR));
-                        map.insert("getUTCMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH));
-                        map.insert("getUTCDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE));
-                        map.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
-                        map.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
-                        map.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
                         if let Some(Value::VmObject(ctor)) = self.globals.get("Date")
                             && let Some(proto) = ctor.borrow().get("prototype").cloned()
                         {
@@ -34985,104 +35939,112 @@ impl<'gc> VM<'gc> {
                                     .map(|d| d.as_millis() as f64)
                                     .unwrap_or(0.0)
                             } else if args.len() == 1 {
-                                match &args[0] {
-                                    Value::Number(n) => *n,
-                                    Value::String(s) => {
-                                        let s_str = crate::unicode::utf16_to_utf8(s);
-                                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s_str) {
-                                            dt.timestamp_millis() as f64
-                                        } else if let Ok(dt) = chrono::NaiveDate::parse_from_str(&s_str, "%Y-%m-%d") {
-                                            dt.and_hms_opt(0, 0, 0)
-                                                .map(|d| d.and_utc().timestamp_millis() as f64)
-                                                .unwrap_or(f64::NAN)
-                                        } else {
+                                // Per spec: if value is a Date object, copy its [[DateValue]]
+                                if let Value::VmObject(obj) = &args[0] {
+                                    if let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned() {
+                                        Self::time_clip(ms)
+                                    } else {
+                                        // Non-Date object: call ToPrimitive(value)
+                                        let prim = self.try_to_primitive(ctx, &args[0], "default");
+                                        if self.pending_throw.is_some() {
                                             f64::NAN
+                                        } else {
+                                            match &prim {
+                                                Value::Number(n) => Self::time_clip(*n),
+                                                Value::String(s) => {
+                                                    let s_str = crate::unicode::utf16_to_utf8(s);
+                                                    self.date_parse_string(&s_str)
+                                                }
+                                                Value::BigInt(_) => {
+                                                    self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                                                    f64::NAN
+                                                }
+                                                Value::Symbol(_) => {
+                                                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                                    f64::NAN
+                                                }
+                                                _ if Self::is_symbol_value(&prim) => {
+                                                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                                    f64::NAN
+                                                }
+                                                _ => to_number(&prim),
+                                            }
                                         }
                                     }
-                                    _ => f64::NAN,
+                                } else {
+                                    let prim = match &args[0] {
+                                        Value::VmArray(_) => {
+                                            self.try_to_primitive(ctx, &args[0], "default")
+                                        }
+                                        other => other.clone(),
+                                    };
+                                    if self.pending_throw.is_some() {
+                                        f64::NAN
+                                    } else {
+                                        match &prim {
+                                            Value::Number(n) => Self::time_clip(*n),
+                                            Value::String(s) => {
+                                                let s_str = crate::unicode::utf16_to_utf8(s);
+                                                self.date_parse_string(&s_str)
+                                            }
+                                            Value::BigInt(_) => {
+                                                self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                                                f64::NAN
+                                            }
+                                            Value::Symbol(_) => {
+                                                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                                f64::NAN
+                                            }
+                                            _ if Self::is_symbol_value(&prim) => {
+                                                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                                f64::NAN
+                                            }
+                                            _ => to_number(&prim),
+                                        }
+                                    }
                                 }
                             } else {
-                                let year = if let Value::Number(n) = &args[0] { *n as i32 } else { 0 };
-                                let month = if let Value::Number(n) = args.get(1).unwrap_or(&Value::Number(0.0)) {
-                                    *n as u32
+                                // Coerce all args via ToNumber (triggers valueOf/toString)
+                                let defaults: [f64; 7] = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+                                let mut nums = Vec::with_capacity(args.len().min(7));
+                                for i in 0..args.len().min(7) {
+                                    let val = &args[i];
+                                    match self.extract_number_with_coercion(ctx, val) {
+                                        Some(n) => nums.push(n),
+                                        None => {
+                                            // abrupt completion from ToNumber
+                                            let mut m = IndexMap::new();
+                                            m.insert("__type__".to_string(), Value::from("Date"));
+                                            m.insert("__date_ms__".to_string(), Value::Number(f64::NAN));
+                                            if let Some(proto) = ctor_prototype.clone() {
+                                                m.insert("__proto__".to_string(), proto);
+                                            }
+                                            self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
+                                            return Ok(OpcodeAction::Continue);
+                                        }
+                                    }
+                                }
+                                let yr = nums[0];
+                                let month = nums.get(1).copied().unwrap_or(defaults[1]);
+                                let day = nums.get(2).copied().unwrap_or(defaults[2]);
+                                let hour = nums.get(3).copied().unwrap_or(defaults[3]);
+                                let min_val = nums.get(4).copied().unwrap_or(defaults[4]);
+                                let sec = nums.get(5).copied().unwrap_or(defaults[5]);
+                                let ms_part = nums.get(6).copied().unwrap_or(defaults[6]);
+                                if yr.is_nan() || yr.is_infinite() || month.is_nan() || month.is_infinite()
+                                    || day.is_nan() || day.is_infinite() || hour.is_nan() || hour.is_infinite()
+                                    || min_val.is_nan() || min_val.is_infinite() || sec.is_nan() || sec.is_infinite()
+                                    || ms_part.is_nan() || ms_part.is_infinite()
+                                {
+                                    f64::NAN
                                 } else {
-                                    0
-                                };
-                                let day = if let Value::Number(n) = args.get(2).unwrap_or(&Value::Number(1.0)) {
-                                    *n as u32
-                                } else {
-                                    1
-                                };
-                                let hour = if let Value::Number(n) = args.get(3).unwrap_or(&Value::Number(0.0)) {
-                                    *n as u32
-                                } else {
-                                    0
-                                };
-                                let min = if let Value::Number(n) = args.get(4).unwrap_or(&Value::Number(0.0)) {
-                                    *n as u32
-                                } else {
-                                    0
-                                };
-                                let sec = if let Value::Number(n) = args.get(5).unwrap_or(&Value::Number(0.0)) {
-                                    *n as u32
-                                } else {
-                                    0
-                                };
-                                let ms_part = if let Value::Number(n) = args.get(6).unwrap_or(&Value::Number(0.0)) {
-                                    *n as u32
-                                } else {
-                                    0
-                                };
-                                let full_year = if (0..100).contains(&year) { year + 1900 } else { year };
-                                use chrono::{Local, TimeZone};
-                                let result = Local.with_ymd_and_hms(full_year, month + 1, day, hour, min, sec);
-                                match result {
-                                    chrono::LocalResult::Single(dt) => dt.timestamp_millis() as f64 + ms_part as f64,
-                                    _ => f64::NAN,
+                                    Self::make_date_from_components(yr, month, day, hour, min_val, sec, ms_part, true)
                                 }
                             };
 
                             let mut m = IndexMap::new();
                             m.insert("__type__".to_string(), Value::from("Date"));
                             m.insert("__date_ms__".to_string(), Value::Number(ms));
-                            m.insert("getTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETTIME));
-                            m.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_DATE_VALUEOF));
-                            m.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOSTRING));
-                            m.insert("toDateString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING));
-                            m.insert("setTime".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETTIME));
-                            m.insert(
-                                "toLocaleDateString".to_string(),
-                                Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING),
-                            );
-                            m.insert(
-                                "toLocaleTimeString".to_string(),
-                                Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING),
-                            );
-                            m.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING));
-                            m.insert("toISOString".to_string(), Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING));
-                            m.insert("getFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR));
-                            m.insert("getMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMONTH));
-                            m.insert("getDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDATE));
-                            m.insert("getDay".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETDAY));
-                            m.insert("getHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETHOURS));
-                            m.insert("getMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES));
-                            m.insert("getSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS));
-                            m.insert("getMilliseconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS));
-                            m.insert("setFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR));
-                            m.insert("setMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMONTH));
-                            m.insert("setDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETDATE));
-                            m.insert("setHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETHOURS));
-                            m.insert("setMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES));
-                            m.insert(
-                                "getTimezoneOffset".to_string(),
-                                Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET),
-                            );
-                            m.insert("getUTCFullYear".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR));
-                            m.insert("getUTCMonth".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH));
-                            m.insert("getUTCDate".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE));
-                            m.insert("getUTCHours".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS));
-                            m.insert("getUTCMinutes".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES));
-                            m.insert("getUTCSeconds".to_string(), Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS));
                             if let Some(proto) = ctor_prototype.clone() {
                                 m.insert("__proto__".to_string(), proto);
                             }

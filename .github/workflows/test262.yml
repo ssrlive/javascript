@@ -223,6 +223,7 @@ jobs:
             31)
               TITLE='"built-ins/Date" - "built-ins/encodeURIComponent"'
               FOCUS='built-ins/Date,built-ins/decodeURI,built-ins/decodeURIComponent,built-ins/encodeURI,built-ins/encodeURIComponent'
+              RUN_TESTS='true'
               ;;
             32)
               TITLE='"built-ins/DisposableStack" - "built-ins/isNaN"'

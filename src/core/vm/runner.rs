@@ -2964,10 +2964,14 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 } else if let Some(Value::VmObject(getter_obj)) = borrow.get(&getter_key) {
-                    let host_name = getter_obj.borrow().get("__host_fn__").cloned();
+                    let gborrow = getter_obj.borrow();
+                    let host_name = gborrow.get("__host_fn__").cloned();
+                    let regexp_home = gborrow.get("__regexp_home_proto__").cloned();
+                    drop(gborrow);
                     drop(borrow);
                     if let Some(Value::String(host_name_u16)) = host_name {
                         let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
+                        self.regexp_home_proto_temp = regexp_home;
                         let getter_result = self.call_host_fn(ctx, &host_name, Some(&obj), &[]);
                         self.stack.push(getter_result);
                     } else {
@@ -3208,8 +3212,13 @@ impl<'gc> VM<'gc> {
                                         }
                                     }
                                     Value::VmObject(getter_obj) => {
-                                        if let Some(Value::String(host_name_u16)) = getter_obj.borrow().get("__host_fn__").cloned() {
+                                        let gborrow = getter_obj.borrow();
+                                        let host_name_val = gborrow.get("__host_fn__").cloned();
+                                        let regexp_home = gborrow.get("__regexp_home_proto__").cloned();
+                                        drop(gborrow);
+                                        if let Some(Value::String(host_name_u16)) = host_name_val {
                                             let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
+                                            self.regexp_home_proto_temp = regexp_home;
                                             let getter_result = self.call_host_fn(ctx, &host_name, Some(&obj), &[]);
                                             self.stack.push(getter_result);
                                         } else {

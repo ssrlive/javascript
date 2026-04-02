@@ -109,6 +109,22 @@ fn preprocess_pattern_non_unicode(pattern: &[u16]) -> Vec<u32> {
 
 impl<'gc> VM<'gc> {
     /// Dispatch all `"regexp.*"` host function calls.
+    /// Check if `re_obj` is the "home" RegExp.prototype for the currently
+    /// executing getter.  Uses `regexp_home_proto_temp` (set by the call-site
+    /// before dispatching the host function) when available; falls back to
+    /// `self.globals["RegExp"].prototype` for the common single-realm case.
+    fn is_home_regexp_prototype(&self, re_obj: &VmObjectHandle<'gc>) -> bool {
+        if let Some(Value::VmObject(home)) = &self.regexp_home_proto_temp {
+            return Gc::ptr_eq(*re_obj, *home);
+        }
+        if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp")
+            && let Some(Value::VmObject(proto)) = regexp_ctor.borrow().get("prototype")
+        {
+            return Gc::ptr_eq(*re_obj, *proto);
+        }
+        false
+    }
+
     pub(super) fn regexp_handle_host_fn(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -150,8 +166,7 @@ impl<'gc> VM<'gc> {
                                 }
                                 Value::from(&escaped)
                             }
-                        } else if borrow.contains_key("__get_source") {
-                            // RegExp.prototype itself
+                        } else if self.is_home_regexp_prototype(re_obj) {
                             Value::from("(?:)")
                         } else {
                             drop(borrow);
@@ -191,8 +206,7 @@ impl<'gc> VM<'gc> {
                         if borrow.get("__type__").map(value_to_string).as_deref() == Some("RegExp") {
                             let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
                             Value::Boolean(flags.contains(flag_char))
-                        } else if borrow.contains_key(&format!("__get_{}", prop_name)) {
-                            // RegExp.prototype itself
+                        } else if self.is_home_regexp_prototype(re_obj) {
                             Value::Undefined
                         } else {
                             drop(borrow);
@@ -363,10 +377,27 @@ impl<'gc> VM<'gc> {
         regexp_proto.insert("__nonenumerable_test__".to_string(), Value::Boolean(true));
         regexp_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
         let regexp_proto_obj = new_gc_cell_ptr(ctx, regexp_proto);
+        // Stamp each getter with a back-reference to this prototype so that
+        // cross-realm identity checks work (spec: SameValue(R, %RegExpPrototype%)).
+        Self::stamp_regexp_getters_with_home_proto(ctx, regexp_proto_obj);
         let mut regexp_ctor = IndexMap::new();
         Self::init_native_ctor_header(&mut regexp_ctor, BUILTIN_CTOR_REGEXP, "RegExp", 2.0);
         let regexp_ctor_val = Self::finalize_ctor_with_prototype(ctx, regexp_ctor, regexp_proto_obj);
         self.globals.insert("RegExp".to_string(), regexp_ctor_val);
+    }
+
+    /// Set `__regexp_home_proto__` on each getter function in the given prototype
+    /// so cross-realm identity checks can find the correct %RegExpPrototype%.
+    pub(super) fn stamp_regexp_getters_with_home_proto(ctx: &GcContext<'gc>, proto: VmObjectHandle<'gc>) {
+        let proto_val = Value::VmObject(proto);
+        let getter_keys: Vec<String> = proto.borrow().keys().filter(|k| k.starts_with("__get_")).cloned().collect();
+        for key in getter_keys {
+            if let Some(Value::VmObject(getter_obj)) = proto.borrow().get(&key) {
+                getter_obj
+                    .borrow_mut(ctx)
+                    .insert("__regexp_home_proto__".to_string(), proto_val.clone());
+            }
+        }
     }
 
     /// Handle `RegExp(pattern, flags)` called without `new`.

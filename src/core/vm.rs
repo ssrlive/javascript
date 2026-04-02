@@ -610,6 +610,9 @@ pub struct VM<'gc> {
     closure_fn_props: HashMap<usize, VmObjectHandle<'gc>>,
     // Upvalue cells for top-level locals captured by closures (no CallFrame at top level).
     top_level_cells: HashMap<usize, VmUpvalueCell<'gc>>,
+    // Temp slot: the RegExp.prototype that the currently-executing getter "belongs to".
+    // Set before call_host_fn by the caller, read by regexp_handle_host_fn.
+    regexp_home_proto_temp: Option<Value<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -741,6 +744,7 @@ impl<'gc> VM<'gc> {
             runtime_brand_counter: 0,
             closure_fn_props: HashMap::new(),
             top_level_cells: HashMap::new(),
+            regexp_home_proto_temp: None,
         };
         vm.register_builtins(ctx);
         vm
@@ -1728,7 +1732,6 @@ impl<'gc> VM<'gc> {
                     "Number",
                     "Boolean",
                     "Date",
-                    "RegExp",
                     "Math",
                     "JSON",
                     "Promise",
@@ -1761,6 +1764,29 @@ impl<'gc> VM<'gc> {
                     cloned.insert("__origin_global".to_string(), realm_global_val.clone());
                     let realm_function = Value::VmObject(new_gc_cell_ptr(ctx, cloned));
                     realm_global.borrow_mut(ctx).insert("Function".to_string(), realm_function);
+                }
+
+                // Deep-clone RegExp so each realm gets its own prototype (for cross-realm identity checks).
+                if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp") {
+                    let mut ctor_map = regexp_ctor.borrow().clone();
+                    if let Some(Value::VmObject(orig_proto)) = ctor_map.get("prototype") {
+                        let mut proto_map = orig_proto.borrow().clone();
+                        let new_proto = new_gc_cell_ptr(ctx, IndexMap::new());
+                        // Deep-clone getter functions so each gets its own __regexp_home_proto__
+                        let getter_keys: Vec<String> = proto_map.keys().filter(|k| k.starts_with("__get_")).cloned().collect();
+                        for k in getter_keys {
+                            if let Some(Value::VmObject(getter)) = proto_map.get(&k) {
+                                let cloned_getter_map = getter.borrow().clone();
+                                let new_getter = new_gc_cell_ptr(ctx, cloned_getter_map);
+                                proto_map.insert(k, Value::VmObject(new_getter));
+                            }
+                        }
+                        *new_proto.borrow_mut(ctx) = proto_map;
+                        Self::stamp_regexp_getters_with_home_proto(ctx, new_proto);
+                        ctor_map.insert("prototype".to_string(), Value::VmObject(new_proto));
+                    }
+                    let realm_regexp = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
+                    realm_global.borrow_mut(ctx).insert("RegExp".to_string(), realm_regexp);
                 }
 
                 self.install_realm_hidden_intrinsics(ctx, &realm_global_val, "__async_function_ctor", "__async_function_prototype", None);
@@ -13037,7 +13063,9 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_this = borrow.get("__host_this__").cloned();
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                    let regexp_home = borrow.get("__regexp_home_proto__").cloned();
                     drop(borrow);
+                    self.regexp_home_proto_temp = regexp_home;
                     let receiver = host_this.as_ref().unwrap_or(this_arg);
                     Ok(self.call_host_fn(ctx, &host_name, Some(receiver), args))
                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {

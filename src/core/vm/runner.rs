@@ -4949,8 +4949,6 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Some("RegExp") => match key.as_str() {
-                                "exec" => Some(Value::VmNativeFunction(BUILTIN_REGEX_EXEC)),
-                                "test" => Some(Value::VmNativeFunction(BUILTIN_REGEX_TEST)),
                                 "toString" => Some(Self::make_bound_host_fn(ctx, "regexp.toString", &obj)),
                                 _ => None,
                             },
@@ -5556,7 +5554,17 @@ impl<'gc> VM<'gc> {
                         obj.borrow().get("__proto__").cloned()
                     }
                 }
-                Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned(),
+                Value::VmArray(arr) => {
+                    if let Some(proto) = arr.borrow().props.get("__proto__").cloned() {
+                        Some(proto)
+                    } else {
+                        let arr_ctor = self.globals.get("Array").cloned();
+                        arr_ctor.and_then(|ctor| {
+                            let proto = self.read_named_property(ctx, &ctor, "prototype");
+                            if matches!(proto, Value::Undefined) { None } else { Some(proto) }
+                        })
+                    }
+                }
                 Value::VmMap(_) => {
                     let map_ctor = self.globals.get("Map").cloned();
                     map_ctor.and_then(|ctor| {
@@ -5691,7 +5699,8 @@ impl<'gc> VM<'gc> {
                         ctor_str == "Object"
                     }
                 }
-                Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => ctor_str == "Object",
+                Value::VmArray(_) => matches!(ctor_str.as_str(), "Object" | "Array"),
+                Value::VmMap(_) | Value::VmSet(_) => ctor_str == "Object",
                 _ if ctor_str == "Function" => {
                     matches!(&lhs, Value::VmNativeFunction(_) | Value::VmFunction(..) | Value::VmClosure(..))
                         || matches!(&lhs, Value::VmObject(m) if {
@@ -6112,62 +6121,48 @@ impl<'gc> VM<'gc> {
                     }
                     BUILTIN_CTOR_REGEXP => {
                         // new RegExp(pattern, flags)
-                        let pattern = args.first().map(value_to_string).unwrap_or_default();
-                        let flags = args.get(1).map(value_to_string).unwrap_or_default();
+                        let (pattern, flags) = match args.first() {
+                            Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
+                                let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                                let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
+                                    pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
+                                } else {
+                                    self.vm_to_string(ctx, args.get(1).unwrap())
+                                };
+                                (p, f)
+                            }
+                            _ => {
+                                let p = match args.first() {
+                                    None | Some(Value::Undefined) => String::new(),
+                                    Some(v) => self.vm_to_string(ctx, v),
+                                };
+                                let f = match args.get(1) {
+                                    None | Some(Value::Undefined) => String::new(),
+                                    Some(v) => self.vm_to_string(ctx, v),
+                                };
+                                (p, f)
+                            }
+                        };
+                        if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
+                            self.throw_syntax_error(ctx, &err_msg);
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
                         let mut map = IndexMap::new();
                         map.insert("__regex_pattern__".to_string(), Value::from(&pattern));
                         map.insert("__regex_flags__".to_string(), Value::from(&flags));
                         map.insert("__type__".to_string(), Value::from("RegExp"));
                         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
-                        map.insert("source".to_string(), Value::from(&pattern));
-                        map.insert("flags".to_string(), Value::from(&flags));
-                        map.insert("global".to_string(), Value::Boolean(flags.contains('g')));
-                        map.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
-                        map.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
-                        map.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
-                        map.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
-                        map.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
-                        map.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
-                        map.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
                         map.insert("lastIndex".to_string(), Value::Number(0.0));
-                        // Per spec, RegExp instance properties are non-enumerable
-                        for ne_key in [
-                            "source",
-                            "flags",
-                            "global",
-                            "ignoreCase",
-                            "multiline",
-                            "dotAll",
-                            "sticky",
-                            "unicode",
-                            "hasIndices",
-                            "unicodeSets",
-                            "lastIndex",
-                        ] {
-                            map.insert(format!("__nonenumerable_{}__", ne_key), Value::Boolean(true));
-                        }
-                        // source, flags, and flag accessors are non-writable (spec: getters on prototype)
-                        for ro_key in [
-                            "source",
-                            "flags",
-                            "global",
-                            "ignoreCase",
-                            "multiline",
-                            "dotAll",
-                            "sticky",
-                            "unicode",
-                            "hasIndices",
-                            "unicodeSets",
-                        ] {
-                            map.insert(format!("__readonly_{}__", ro_key), Value::Boolean(true));
-                            map.insert(format!("__nonconfigurable_{}__", ro_key), Value::Boolean(true));
-                        }
                         if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
                             && let Some(proto) = ctor.borrow().get("prototype").cloned()
                         {
                             map.insert("__proto__".to_string(), proto);
                         }
                         map.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
+                        map.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
                         self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, map)));
                     }
                     BUILTIN_CTOR_DATE => {
@@ -6328,58 +6323,46 @@ impl<'gc> VM<'gc> {
                         }
 
                         if id == BUILTIN_CTOR_REGEXP {
-                            let pattern = args.first().map(value_to_string).unwrap_or_default();
-                            let flags = args.get(1).map(value_to_string).unwrap_or_default();
+                            let (pattern, flags) = match args.first() {
+                                Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
+                                    let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                                    let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
+                                        pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
+                                    } else {
+                                        self.vm_to_string(ctx, args.get(1).unwrap())
+                                    };
+                                    (p, f)
+                                }
+                                _ => {
+                                    let p = match args.first() {
+                                        None | Some(Value::Undefined) => String::new(),
+                                        Some(v) => self.vm_to_string(ctx, v),
+                                    };
+                                    let f = match args.get(1) {
+                                        None | Some(Value::Undefined) => String::new(),
+                                        Some(v) => self.vm_to_string(ctx, v),
+                                    };
+                                    (p, f)
+                                }
+                            };
+                            if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
+                                self.throw_syntax_error(ctx, &err_msg);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(ctx, &thrown)?;
+                                }
+                                return Ok(OpcodeAction::Continue);
+                            }
                             let mut m = IndexMap::new();
                             m.insert("__regex_pattern__".to_string(), Value::from(&pattern));
                             m.insert("__regex_flags__".to_string(), Value::from(&flags));
                             m.insert("__type__".to_string(), Value::from("RegExp"));
                             m.insert("__toStringTag__".to_string(), Value::from("RegExp"));
-                            m.insert("source".to_string(), Value::from(&pattern));
-                            m.insert("flags".to_string(), Value::from(&flags));
-                            m.insert("global".to_string(), Value::Boolean(flags.contains('g')));
-                            m.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
-                            m.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
-                            m.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
-                            m.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
-                            m.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
-                            m.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
-                            m.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
                             m.insert("lastIndex".to_string(), Value::Number(0.0));
-                            for ne_key in [
-                                "source",
-                                "flags",
-                                "global",
-                                "ignoreCase",
-                                "multiline",
-                                "dotAll",
-                                "sticky",
-                                "unicode",
-                                "hasIndices",
-                                "unicodeSets",
-                                "lastIndex",
-                            ] {
-                                m.insert(format!("__nonenumerable_{}__", ne_key), Value::Boolean(true));
-                            }
-                            for ro_key in [
-                                "source",
-                                "flags",
-                                "global",
-                                "ignoreCase",
-                                "multiline",
-                                "dotAll",
-                                "sticky",
-                                "unicode",
-                                "hasIndices",
-                                "unicodeSets",
-                            ] {
-                                m.insert(format!("__readonly_{}__", ro_key), Value::Boolean(true));
-                                m.insert(format!("__nonconfigurable_{}__", ro_key), Value::Boolean(true));
-                            }
                             if let Some(proto) = ctor_prototype.clone() {
                                 m.insert("__proto__".to_string(), proto);
                             }
                             m.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
+                            m.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
                             self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
                             return Ok(OpcodeAction::Continue);
                         }

@@ -96,18 +96,20 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_crlf_normalization() {
-        // 'R' flag should allow patterns expecting '\n' to match CRLF sequences in the original string
+        // 'R' flag is non-standard; per ES2024 spec, invalid flags throw SyntaxError
         let script = r#"
         (function(){
-            var s = 'o\r\nw';
-            var r = new RegExp('o\\nw','gR');
-            var m = r.exec(s);
-            return m ? m[0] : 'nomatch';
+            try {
+                var r = new RegExp('o\\nw','gR');
+                return 'no error';
+            } catch(e) {
+                return e instanceof SyntaxError ? 'SyntaxError' : 'other';
+            }
         })()
         "#;
 
         let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"o\\r\\nw\""); // "o\r\nw" escaped in JSON
+        assert_eq!(result, "\"SyntaxError\"");
     }
 
     #[test]

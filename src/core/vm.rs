@@ -998,6 +998,16 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
+    /// Create a VmObject wrapper for a native builtin ID with proper name/length metadata.
+    fn make_native_fn(ctx: &GcContext<'gc>, id: FunctionID, display_name: &str, length: f64) -> Value<'gc> {
+        let mut map = IndexMap::new();
+        map.insert("__native_id__".to_string(), Value::Number(id as f64));
+        map.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        Self::insert_property_with_attributes(&mut map, "length", &Value::Number(length), false, false, true);
+        Self::insert_property_with_attributes(&mut map, "name", &Value::from(display_name), false, false, true);
+        Value::VmObject(new_gc_cell_ptr(ctx, map))
+    }
+
     fn bind_host_fn(ctx: &GcContext<'gc>, func: Value<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
         if let Value::VmObject(obj) = &func {
             obj.borrow_mut(ctx).insert("__host_this__".to_string(), receiver.clone());
@@ -7267,42 +7277,128 @@ impl<'gc> VM<'gc> {
                 Value::from(&parts.join(","))
             }
             "regexp.toString" => {
-                if let Some(Value::VmObject(re_obj)) = receiver {
-                    Value::from(&self.regex_to_string(re_obj))
-                } else {
-                    Value::from("/[object Object]/")
+                match receiver {
+                    Some(Value::VmObject(re_obj)) => {
+                        Value::from(&self.regex_to_string(re_obj))
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype.toString called on incompatible receiver");
+                        return Value::Undefined;
+                    }
                 }
             }
             "regexp.get_source" => {
-                if let Some(Value::VmObject(re_obj)) = receiver {
-                    match re_obj.borrow().get("source") {
-                        Some(Value::String(s)) => Value::String(s.clone()),
-                        Some(v) => Value::from(&value_to_string(v)),
-                        None => Value::from("(?:)"),
+                match receiver {
+                    Some(Value::VmObject(re_obj)) => {
+                        let borrow = re_obj.borrow();
+                        if borrow.get("__type__").map(value_to_string).as_deref() == Some("RegExp") {
+                            let raw = match borrow.get("__regex_pattern__") {
+                                Some(v) => value_to_string(v),
+                                None => String::new(),
+                            };
+                            if raw.is_empty() {
+                                Value::from("(?:)")
+                            } else {
+                                // EscapeRegExpPattern: escape / and line terminators
+                                let mut escaped = String::with_capacity(raw.len());
+                                for ch in raw.chars() {
+                                    match ch {
+                                        '/' => escaped.push_str("\\/"),
+                                        '\n' => escaped.push_str("\\n"),
+                                        '\r' => escaped.push_str("\\r"),
+                                        '\u{2028}' => escaped.push_str("\\u2028"),
+                                        '\u{2029}' => escaped.push_str("\\u2029"),
+                                        _ => escaped.push(ch),
+                                    }
+                                }
+                                Value::from(&escaped)
+                            }
+                        } else if borrow.contains_key("__get_source") {
+                            // RegExp.prototype itself
+                            Value::from("(?:)")
+                        } else {
+                            drop(borrow);
+                            self.throw_type_error(ctx, "RegExp.prototype.source getter called on incompatible receiver");
+                            return Value::Undefined;
+                        }
                     }
-                } else {
-                    Value::from("(?:)")
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype.source getter called on incompatible receiver");
+                        return Value::Undefined;
+                    }
                 }
             }
-            "regexp.get_global" => {
-                if let Some(Value::VmObject(re_obj)) = receiver {
-                    re_obj.borrow().get("global").cloned().unwrap_or(Value::Boolean(false))
-                } else {
-                    Value::Boolean(false)
+            "regexp.get_global" | "regexp.get_ignoreCase" | "regexp.get_multiline"
+            | "regexp.get_sticky" | "regexp.get_dotAll" | "regexp.get_unicode"
+            | "regexp.get_hasIndices" | "regexp.get_unicodeSets" => {
+                let prop_name = &name[11..]; // strip "regexp.get_"
+                let flag_char = match prop_name {
+                    "global" => 'g',
+                    "ignoreCase" => 'i',
+                    "multiline" => 'm',
+                    "sticky" => 'y',
+                    "dotAll" => 's',
+                    "unicode" => 'u',
+                    "hasIndices" => 'd',
+                    "unicodeSets" => 'v',
+                    _ => unreachable!(),
+                };
+                match receiver {
+                    Some(Value::VmObject(re_obj)) => {
+                        let borrow = re_obj.borrow();
+                        if borrow.get("__type__").map(value_to_string).as_deref() == Some("RegExp") {
+                            let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+                            Value::Boolean(flags.contains(flag_char))
+                        } else if borrow.contains_key(&format!("__get_{}", prop_name)) {
+                            // RegExp.prototype itself
+                            Value::Undefined
+                        } else {
+                            drop(borrow);
+                            self.throw_type_error(ctx, &format!("RegExp.prototype.{} getter called on incompatible receiver", prop_name));
+                            return Value::Undefined;
+                        }
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, &format!("RegExp.prototype.{} getter called on incompatible receiver", prop_name));
+                        return Value::Undefined;
+                    }
                 }
             }
-            "regexp.get_ignoreCase" => {
-                if let Some(Value::VmObject(re_obj)) = receiver {
-                    re_obj.borrow().get("ignoreCase").cloned().unwrap_or(Value::Boolean(false))
-                } else {
-                    Value::Boolean(false)
-                }
-            }
-            "regexp.get_multiline" => {
-                if let Some(Value::VmObject(re_obj)) = receiver {
-                    re_obj.borrow().get("multiline").cloned().unwrap_or(Value::Boolean(false))
-                } else {
-                    Value::Boolean(false)
+            "regexp.get_flags" => {
+                match receiver {
+                    Some(recv @ Value::VmObject(_)) | Some(recv @ Value::VmArray(_)) => {
+                        let recv = recv.clone();
+                        let mut result = String::new();
+                        let d = self.read_named_property(ctx, &recv, "hasIndices");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if d.to_truthy() { result.push('d'); }
+                        let g = self.read_named_property(ctx, &recv, "global");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if g.to_truthy() { result.push('g'); }
+                        let i = self.read_named_property(ctx, &recv, "ignoreCase");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if i.to_truthy() { result.push('i'); }
+                        let m = self.read_named_property(ctx, &recv, "multiline");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if m.to_truthy() { result.push('m'); }
+                        let s = self.read_named_property(ctx, &recv, "dotAll");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if s.to_truthy() { result.push('s'); }
+                        let u = self.read_named_property(ctx, &recv, "unicode");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if u.to_truthy() { result.push('u'); }
+                        let v = self.read_named_property(ctx, &recv, "unicodeSets");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if v.to_truthy() { result.push('v'); }
+                        let y = self.read_named_property(ctx, &recv, "sticky");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if y.to_truthy() { result.push('y'); }
+                        Value::from(&result)
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
+                        return Value::Undefined;
+                    }
                 }
             }
             "array.entries" => {
@@ -12338,20 +12434,32 @@ impl<'gc> VM<'gc> {
             {
                 regexp_proto.insert("__proto__".to_string(), obj_proto);
             }
-            regexp_proto.insert("exec".to_string(), Value::VmNativeFunction(BUILTIN_REGEX_EXEC));
-            regexp_proto.insert("test".to_string(), Value::VmNativeFunction(BUILTIN_REGEX_TEST));
+            regexp_proto.insert("exec".to_string(), Self::make_native_fn(ctx, BUILTIN_REGEX_EXEC, "exec", 1.0));
+            regexp_proto.insert("test".to_string(), Self::make_native_fn(ctx, BUILTIN_REGEX_TEST, "test", 1.0));
             regexp_proto.insert(
                 "toString".to_string(),
                 Self::make_host_fn_with_name_len(ctx, "regexp.toString", "toString", 0.0, false),
             );
-            regexp_proto.insert("__get_source".to_string(), Self::make_host_fn(ctx, "regexp.get_source"));
-            regexp_proto.insert("__get_global".to_string(), Self::make_host_fn(ctx, "regexp.get_global"));
-            regexp_proto.insert("__get_ignoreCase".to_string(), Self::make_host_fn(ctx, "regexp.get_ignoreCase"));
-            regexp_proto.insert("__get_multiline".to_string(), Self::make_host_fn(ctx, "regexp.get_multiline"));
+            regexp_proto.insert("__get_source".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_source", "get source", 0.0, false));
+            regexp_proto.insert("__get_global".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_global", "get global", 0.0, false));
+            regexp_proto.insert("__get_ignoreCase".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_ignoreCase", "get ignoreCase", 0.0, false));
+            regexp_proto.insert("__get_multiline".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_multiline", "get multiline", 0.0, false));
+            regexp_proto.insert("__get_sticky".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_sticky", "get sticky", 0.0, false));
+            regexp_proto.insert("__get_dotAll".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_dotAll", "get dotAll", 0.0, false));
+            regexp_proto.insert("__get_unicode".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_unicode", "get unicode", 0.0, false));
+            regexp_proto.insert("__get_hasIndices".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_hasIndices", "get hasIndices", 0.0, false));
+            regexp_proto.insert("__get_unicodeSets".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_unicodeSets", "get unicodeSets", 0.0, false));
+            regexp_proto.insert("__get_flags".to_string(), Self::make_host_fn_with_name_len(ctx, "regexp.get_flags", "get flags", 0.0, false));
             regexp_proto.insert("__nonenumerable_source__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_global__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_ignoreCase__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_multiline__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_sticky__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_dotAll__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_unicode__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_hasIndices__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_unicodeSets__".to_string(), Value::Boolean(true));
+            regexp_proto.insert("__nonenumerable_flags__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_exec__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_test__".to_string(), Value::Boolean(true));
             regexp_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
@@ -13609,17 +13717,55 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
+    /// Validate RegExp flags per spec: only d,g,i,m,s,u,v,y allowed; no duplicates; u+v not together
+    fn validate_regexp_flags(flags: &str) -> Option<String> {
+        let valid = "dgimsuy";  // v handled separately
+        let mut seen = [false; 128];
+        for ch in flags.chars() {
+            if ch == 'v' {
+                // v is valid
+            } else if !valid.contains(ch) {
+                return Some(format!("Invalid flags supplied to RegExp constructor '{}'", flags));
+            }
+            let c = ch as usize;
+            if c < 128 {
+                if seen[c] {
+                    return Some(format!("Invalid flags supplied to RegExp constructor '{}'", flags));
+                }
+                seen[c] = true;
+            }
+        }
+        // u and v cannot appear together
+        if flags.contains('u') && flags.contains('v') {
+            return Some(format!("Invalid flags supplied to RegExp constructor '{}'", flags));
+        }
+        None
+    }
+
     fn regex_to_string(&self, re_obj: &VmObjectHandle<'gc>) -> String {
         let borrow = re_obj.borrow();
-        let pattern = borrow
-            .get("source")
-            .map(value_to_string)
-            .unwrap_or_else(|| borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default());
-        let flags = borrow
-            .get("flags")
-            .map(value_to_string)
-            .unwrap_or_else(|| borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default());
-        format!("/{}/{}", pattern, flags)
+        let raw_pattern = borrow.get("__regex_pattern__").map(value_to_string)
+            .unwrap_or_else(|| borrow.get("source").map(value_to_string).unwrap_or_default());
+        let flags = borrow.get("__regex_flags__").map(value_to_string)
+            .unwrap_or_else(|| borrow.get("flags").map(value_to_string).unwrap_or_default());
+        // EscapeRegExpPattern
+        let source = if raw_pattern.is_empty() {
+            "(?:)".to_string()
+        } else {
+            let mut escaped = String::with_capacity(raw_pattern.len());
+            for ch in raw_pattern.chars() {
+                match ch {
+                    '/' => escaped.push_str("\\/"),
+                    '\n' => escaped.push_str("\\n"),
+                    '\r' => escaped.push_str("\\r"),
+                    '\u{2028}' => escaped.push_str("\\u2028"),
+                    '\u{2029}' => escaped.push_str("\\u2029"),
+                    _ => escaped.push(ch),
+                }
+            }
+            escaped
+        };
+        format!("/{}/{}", source, flags)
     }
 
     fn regex_prepare_input(&self, input: &str, flags: &str) -> (Vec<u16>, bool) {
@@ -18173,6 +18319,70 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            BUILTIN_REGEX_EXEC | BUILTIN_REGEX_TEST => {
+                // Called without a receiver — must throw TypeError
+                self.throw_type_error(ctx, "RegExp.prototype.exec/test called on incompatible receiver");
+                Value::Undefined
+            }
+            BUILTIN_CTOR_REGEXP => {
+                // RegExp(pattern, flags) called without 'new'
+                // Per spec: if pattern is RegExp and flags is undefined, return pattern if pattern.constructor === RegExp
+                if let Some(pat @ Value::VmObject(pat_obj)) = args.first() {
+                    if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
+                        && matches!(args.get(1), None | Some(Value::Undefined))
+                    {
+                        let ctor = self.read_named_property(ctx, pat, "constructor");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let regexp_ctor = self.globals.get("RegExp").cloned().unwrap_or(Value::Undefined);
+                        if self.values_same(&ctor, &regexp_ctor) {
+                            return pat.clone();
+                        }
+                    }
+                }
+                // Otherwise create a new RegExp
+                let (pattern, flags) = match args.first() {
+                    Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
+                        let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                        let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
+                            pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
+                        } else {
+                            self.vm_to_string(ctx, args.get(1).unwrap())
+                        };
+                        (p, f)
+                    }
+                    _ => {
+                        let p = match args.first() {
+                            None | Some(Value::Undefined) => String::new(),
+                            Some(v) => self.vm_to_string(ctx, v),
+                        };
+                        let f = match args.get(1) {
+                            None | Some(Value::Undefined) => String::new(),
+                            Some(v) => self.vm_to_string(ctx, v),
+                        };
+                        (p, f)
+                    }
+                };
+                if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
+                    self.throw_syntax_error(ctx, &err_msg);
+                    return Value::Undefined;
+                }
+                let mut map = IndexMap::new();
+                map.insert("__regex_pattern__".to_string(), Value::from(pattern.as_str()));
+                map.insert("__regex_flags__".to_string(), Value::from(flags.as_str()));
+                map.insert("__type__".to_string(), Value::from("RegExp"));
+                map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
+                map.insert("lastIndex".to_string(), Value::Number(0.0));
+                if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
+                    && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
+                map.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
+                map.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
+                Value::VmObject(new_gc_cell_ptr(ctx, map))
+            }
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
                 Value::Undefined
@@ -18279,55 +18489,40 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_CTOR_REGEXP => {
                 if let Value::VmObject(obj) = receiver {
-                    let pattern = args.first().map(value_to_string).unwrap_or_default();
-                    let flags = args.get(1).map(value_to_string).unwrap_or_default();
+                    let (pattern, flags) = match args.first() {
+                        Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
+                            let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                            let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
+                                pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
+                            } else {
+                                self.vm_to_string(ctx, args.get(1).unwrap())
+                            };
+                            (p, f)
+                        }
+                        _ => {
+                            let p = match args.first() {
+                                None | Some(Value::Undefined) => String::new(),
+                                Some(v) => self.vm_to_string(ctx, v),
+                            };
+                            let f = match args.get(1) {
+                                None | Some(Value::Undefined) => String::new(),
+                                Some(v) => self.vm_to_string(ctx, v),
+                            };
+                            (p, f)
+                        }
+                    };
+                    if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
+                        self.throw_syntax_error(ctx, &err_msg);
+                        return Value::Undefined;
+                    }
                     let mut borrow = obj.borrow_mut(ctx);
                     borrow.insert("__regex_pattern__".to_string(), Value::from(pattern.as_str()));
                     borrow.insert("__regex_flags__".to_string(), Value::from(flags.as_str()));
                     borrow.insert("__type__".to_string(), Value::from("RegExp"));
                     borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
-                    borrow.insert("source".to_string(), Value::from(pattern.as_str()));
-                    borrow.insert("flags".to_string(), Value::from(flags.as_str()));
-                    borrow.insert("global".to_string(), Value::Boolean(flags.contains('g')));
-                    borrow.insert("ignoreCase".to_string(), Value::Boolean(flags.contains('i')));
-                    borrow.insert("multiline".to_string(), Value::Boolean(flags.contains('m')));
-                    borrow.insert("dotAll".to_string(), Value::Boolean(flags.contains('s')));
-                    borrow.insert("sticky".to_string(), Value::Boolean(flags.contains('y')));
-                    borrow.insert("unicode".to_string(), Value::Boolean(flags.contains('u')));
-                    borrow.insert("hasIndices".to_string(), Value::Boolean(flags.contains('d')));
-                    borrow.insert("unicodeSets".to_string(), Value::Boolean(flags.contains('v')));
                     borrow.insert("lastIndex".to_string(), Value::Number(0.0));
-                    for ne_key in [
-                        "source",
-                        "flags",
-                        "global",
-                        "ignoreCase",
-                        "multiline",
-                        "dotAll",
-                        "sticky",
-                        "unicode",
-                        "hasIndices",
-                        "unicodeSets",
-                        "lastIndex",
-                    ] {
-                        borrow.insert(format!("__nonenumerable_{}__", ne_key), Value::Boolean(true));
-                    }
-                    for ro_key in [
-                        "source",
-                        "flags",
-                        "global",
-                        "ignoreCase",
-                        "multiline",
-                        "dotAll",
-                        "sticky",
-                        "unicode",
-                        "hasIndices",
-                        "unicodeSets",
-                    ] {
-                        borrow.insert(format!("__readonly_{}__", ro_key), Value::Boolean(true));
-                        borrow.insert(format!("__nonconfigurable_{}__", ro_key), Value::Boolean(true));
-                    }
                     borrow.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
+                    borrow.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
                     return receiver.clone();
                 }
             }
@@ -23326,20 +23521,40 @@ impl<'gc> VM<'gc> {
         // RegExp.prototype.exec(string)
         if id == BUILTIN_REGEX_EXEC {
             if let Value::VmObject(map) = receiver {
-                let input = args.first().map(value_to_string).unwrap_or_default();
+                if map.borrow().get("__type__").map(value_to_string).as_deref() != Some("RegExp") {
+                    self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &arg, "string");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let input = value_to_string(&prim);
                 return self.regex_exec(ctx, map, &input);
             }
-            return Value::Null;
+            self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
+            return Value::Undefined;
         }
 
         // RegExp.prototype.test(string)
         if id == BUILTIN_REGEX_TEST {
             if let Value::VmObject(map) = receiver {
-                let input = args.first().map(value_to_string).unwrap_or_default();
+                if map.borrow().get("__type__").map(value_to_string).as_deref() != Some("RegExp") {
+                    self.throw_type_error(ctx, "RegExp.prototype.test called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &arg, "string");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let input = value_to_string(&prim);
                 let result = self.regex_exec(ctx, map, &input);
                 return Value::Boolean(!matches!(result, Value::Null));
             }
-            return Value::Boolean(false);
+            self.throw_type_error(ctx, "RegExp.prototype.test called on incompatible receiver");
+            return Value::Undefined;
         }
 
         log::warn!("Unknown method builtin ID {} on {}", id, value_to_string(receiver));
@@ -23347,20 +23562,34 @@ impl<'gc> VM<'gc> {
     }
 
     /// Execute a regex match, returning an array result or Null
-    fn regex_exec(&self, ctx: &GcContext<'gc>, re_obj: &VmObjectHandle<'gc>, input: &str) -> Value<'gc> {
+    fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &VmObjectHandle<'gc>, input: &str) -> Value<'gc> {
         let borrow = re_obj.borrow();
         let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
         let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        let is_global = flags.contains('g') || flags.contains('y');
-        let last_index = if is_global {
-            match borrow.get("lastIndex") {
-                Some(Value::Number(n)) => *n as usize,
-                _ => 0,
-            }
-        } else {
-            0
-        };
+        let is_global = flags.contains('g');
+        let is_sticky = flags.contains('y');
+        let last_index_val = borrow.get("lastIndex").cloned().unwrap_or(Value::Number(0.0));
         drop(borrow);
+
+        // ToLength(lastIndex) — must call valueOf on objects
+        let last_index_num = match &last_index_val {
+            Value::Number(n) => *n,
+            Value::VmObject(_) | Value::VmArray(_) => {
+                let prim = self.try_to_primitive(ctx, &last_index_val, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Null;
+                }
+                to_number(&prim)
+            }
+            other => to_number(other),
+        };
+        // ToLength: clamp to [0, 2^53-1]
+        let last_index_len = if last_index_num.is_nan() || last_index_num <= 0.0 {
+            0usize
+        } else {
+            last_index_num.min(9007199254740991.0) as usize
+        };
+        let last_index = if is_global || is_sticky { last_index_len } else { 0 };
 
         let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
         let regress_flags: String = flags.chars().filter(|flag| "gimsuvy".contains(*flag)).collect();
@@ -23378,7 +23607,7 @@ impl<'gc> VM<'gc> {
         };
 
         match match_result {
-            Some(m) => {
+            Some(m) if !is_sticky || m.range.start == last_index => {
                 let (match_start, match_end) = if mapped_input {
                     (
                         Self::regex_map_index_back(&input_u16, m.range.start),
@@ -23447,7 +23676,11 @@ impl<'gc> VM<'gc> {
                 let arr = Value::VmArray(new_gc_cell_ptr(ctx, arr_data));
 
                 // Update lastIndex for global/sticky
-                if is_global {
+                if is_global || is_sticky {
+                    if matches!(re_obj.borrow().get("__readonly_lastIndex__"), Some(Value::Boolean(true))) {
+                        self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
+                        return Value::Null;
+                    }
                     re_obj
                         .borrow_mut(ctx)
                         .insert("lastIndex".to_string(), Value::Number(match_end as f64));
@@ -23455,8 +23688,12 @@ impl<'gc> VM<'gc> {
 
                 arr
             }
-            None => {
-                if is_global {
+            _ => {
+                if is_global || is_sticky {
+                    if matches!(re_obj.borrow().get("__readonly_lastIndex__"), Some(Value::Boolean(true))) {
+                        self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
+                        return Value::Null;
+                    }
                     re_obj.borrow_mut(ctx).insert("lastIndex".to_string(), Value::Number(0.0));
                 }
                 Value::Null
@@ -24082,6 +24319,22 @@ impl<'gc> VM<'gc> {
 
     fn throw_range_error_object(&mut self, ctx: &GcContext<'gc>, message: &str) {
         self.pending_throw = Some(self.make_range_error_object(ctx, message));
+    }
+
+    fn throw_syntax_error(&mut self, ctx: &GcContext<'gc>, message: &str) {
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::from("SyntaxError"));
+        map.insert("name".to_string(), Value::from("SyntaxError"));
+        map.insert("message".to_string(), Value::from(message));
+        if let Some(ctor) = self.globals.get("SyntaxError").cloned() {
+            map.insert("constructor".to_string(), ctor.clone());
+            if let Value::VmObject(ctor_obj) = ctor
+                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
+            {
+                map.insert("__proto__".to_string(), proto);
+            }
+        }
+        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, map)));
     }
 
     fn extract_number_with_coercion(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<f64> {

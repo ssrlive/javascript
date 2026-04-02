@@ -245,6 +245,7 @@ jobs:
             36)
               TITLE='"built-ins/RegExp" - "built-ins/ShadowRealm"'
               FOCUS='built-ins/RegExp,built-ins/RegExpStringIteratorPrototype,built-ins/ShadowRealm'
+              RUN_TESTS='true'
               ;;
             37)
               TITLE='"built-ins/SharedArrayBuffer" - "built-ins/SuppressedError"'

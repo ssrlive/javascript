@@ -99,6 +99,7 @@ jobs:
             4)
               TITLE='"language/expressions/bitwise-and" - "language/expressions/call"'
               FOCUS='language/expressions/bitwise-and,language/expressions/bitwise-not,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/call'
+              RUN_TESTS='true'
               ;;
             5)
               TITLE='"language/expressions/class/accessor-name-inst" - "language/expressions/class/decorator"'

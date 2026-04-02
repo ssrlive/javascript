@@ -601,6 +601,8 @@ pub struct VM<'gc> {
     async_generator_function_prototype: Value<'gc>,
     // True while the VM is executing a class field initializer (for eval restrictions)
     in_field_init: bool,
+    // Force strict mode for this VM (set when eval inherits strict context)
+    force_strict: bool,
     // Home object for eval VM — enables super.property resolution in direct eval
     eval_home_object: Option<Value<'gc>>,
     // Runtime brand counter for unique class brands per class evaluation
@@ -740,6 +742,7 @@ impl<'gc> VM<'gc> {
             async_generator_prototype: Value::Undefined,
             async_generator_function_prototype: Value::Undefined,
             in_field_init: false,
+            force_strict: false,
             eval_home_object: None,
             runtime_brand_counter: 0,
             closure_fn_props: HashMap::new(),
@@ -15433,15 +15436,71 @@ impl<'gc> VM<'gc> {
                     }
                     // Detect strict mode: code begins with "use strict" directive, or enclosing context is strict (direct eval only)
                     let enclosing_strict = if self.direct_eval {
-                        self.frames
-                            .last()
-                            .map(|f| self.chunk.fn_strictness.get(&f.func_ip).copied().unwrap_or(false))
-                            .unwrap_or(false)
+                        self.force_strict
+                            || self
+                                .frames
+                                .last()
+                                .map(|f| self.chunk.fn_strictness.get(&f.func_ip).copied().unwrap_or(false))
+                                .unwrap_or(false)
+                            || self.current_execution_is_strict()
                     } else {
                         false // indirect eval never inherits caller strict mode
                     };
                     let is_strict =
                         enclosing_strict || code.trim().starts_with("\"use strict\"") || code.trim().starts_with("'use strict'");
+                    // Strict-mode early errors: reject `with` and reserved-word bindings
+                    if is_strict {
+                        fn check_strict_errors(stmts: &[crate::core::Statement]) -> Option<&'static str> {
+                            use crate::core::StatementKind;
+                            for stmt in stmts {
+                                match &*stmt.kind {
+                                    StatementKind::With(..) => {
+                                        return Some("Strict mode code may not include a with statement");
+                                    }
+                                    StatementKind::Var(decls) | StatementKind::Let(decls) => {
+                                        for (name, _) in decls {
+                                            if matches!(
+                                                name.as_str(),
+                                                "static" | "implements" | "interface" | "package" | "private" | "protected" | "public"
+                                            ) {
+                                                return Some("Unexpected strict mode reserved word");
+                                            }
+                                        }
+                                    }
+                                    StatementKind::Const(decls) => {
+                                        for (name, _) in decls {
+                                            if matches!(
+                                                name.as_str(),
+                                                "static" | "implements" | "interface" | "package" | "private" | "protected" | "public"
+                                            ) {
+                                                return Some("Unexpected strict mode reserved word");
+                                            }
+                                        }
+                                    }
+                                    StatementKind::Block(inner) => {
+                                        if let Some(msg) = check_strict_errors(inner) {
+                                            return Some(msg);
+                                        }
+                                    }
+                                    StatementKind::If(if_stmt) => {
+                                        if let Some(msg) = check_strict_errors(&if_stmt.then_body) {
+                                            return Some(msg);
+                                        }
+                                        if let Some(ref else_body) = if_stmt.else_body
+                                            && let Some(msg) = check_strict_errors(else_body)
+                                        {
+                                            return Some(msg);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            None
+                        }
+                        if let Some(msg) = check_strict_errors(&statements) {
+                            return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError { message: msg.to_string() }));
+                        }
+                    }
                     let mut compiler = crate::core::Compiler::new();
                     if let Some(ref ctx) = privns_context {
                         compiler.set_private_name_context(ctx.clone());
@@ -15523,6 +15582,8 @@ impl<'gc> VM<'gc> {
                     let mut eval_vm: VM<'gc> = VM::new(self.chunk.clone(), ctx);
                     // Ensure unique brands across eval VMs
                     eval_vm.runtime_brand_counter = self.runtime_brand_counter;
+                    // Propagate strict mode to eval VM
+                    eval_vm.force_strict = is_strict;
                     // Merge eval code into eval VM's chunk so it has access to
                     // host functions (getters, setters, closures) at original IPs
                     let (eval_code_offset, _) = eval_vm.merge_eval_chunk(&chunk);
@@ -15594,7 +15655,7 @@ impl<'gc> VM<'gc> {
                         let global_this = self.globals.get("globalThis").cloned().unwrap_or(Value::Undefined);
                         eval_vm.this_stack.push(global_this);
                     }
-                    let result = eval_vm.run(ctx)?;
+                    let eval_result = eval_vm.run(ctx);
                     // Sync brand counter so subsequent evals get unique brands
                     if eval_vm.runtime_brand_counter > self.runtime_brand_counter {
                         self.runtime_brand_counter = eval_vm.runtime_brand_counter;
@@ -15628,8 +15689,11 @@ impl<'gc> VM<'gc> {
                             reject: self.adjust_value_ips(ctx, &task.reject, code_offset, &eval_fn_ips),
                         });
                     }
-                    // Adjust VmFunction IPs in the result value
-                    let result = self.adjust_value_ips(ctx, &result, code_offset, &eval_fn_ips);
+                    // Adjust VmFunction IPs in the result value (only on success)
+                    let result = match &eval_result {
+                        Ok(r) => Some(self.adjust_value_ips(ctx, r, code_offset, &eval_fn_ips)),
+                        Err(_) => None,
+                    };
                     // Also merge fn_home_objects from eval VM
                     // IPs are already adjusted (eval VM used host chunk clone + merged eval code)
                     for (ip, home) in &eval_vm.fn_home_objects {
@@ -15648,9 +15712,25 @@ impl<'gc> VM<'gc> {
                     // Strict mode: skip new declarations AND var-redeclarations
                     // Sloppy mode: write back all globals (including new declarations)
                     {
+                        // For direct eval, build a set of local variable names from
+                        // enclosing frames so we don't overwrite them as globals.
+                        let local_names_set: std::collections::HashSet<&str> = if self.direct_eval {
+                            self.frames
+                                .iter()
+                                .filter_map(|f| self.chunk.fn_local_names.get(&f.func_ip))
+                                .flat_map(|names| names.iter().map(|n| n.as_str()))
+                                .collect()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
                         for (k, v) in &eval_vm.globals {
                             // In strict mode, skip globals that were declared in the eval code
                             if is_strict && (!self.globals.contains_key(k) || chunk.declared_globals.contains(k)) {
+                                continue;
+                            }
+                            // For direct eval, skip variables that are locals in caller frames;
+                            // they are written back to the stack separately below.
+                            if self.direct_eval && local_names_set.contains(k.as_str()) {
                                 continue;
                             }
                             // Skip globals unchanged by eval: host-chunk VmFunction IPs
@@ -15708,7 +15788,11 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    Ok(result)
+                    // Propagate error or return result
+                    match eval_result {
+                        Ok(_) => Ok(result.unwrap_or(Value::Undefined)),
+                        Err(e) => Err(e),
+                    }
                 })();
                 match result {
                     Ok(v) => {
@@ -15779,16 +15863,28 @@ impl<'gc> VM<'gc> {
                             || msg_lower.contains("unexpected token")
                             || msg_lower.contains("unexpected end");
                         let is_type_error = msg_lower.contains("typeerror") || msg_lower.contains("type error");
+                        let is_reference_error = msg_lower.contains("referenceerror") || msg_lower.contains("reference error");
                         let type_name = if is_syntax {
                             "SyntaxError"
                         } else if is_type_error {
                             "TypeError"
+                        } else if is_reference_error {
+                            "ReferenceError"
                         } else {
                             "Error"
                         };
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::from(type_name));
+                        err_map.insert("name".to_string(), Value::from(type_name));
                         err_map.insert("message".to_string(), Value::from(&msg));
+                        if let Some(ctor) = self.globals.get(type_name).cloned() {
+                            err_map.insert("constructor".to_string(), ctor.clone());
+                            if let Value::VmObject(ctor_obj) = ctor
+                                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
+                            {
+                                err_map.insert("__proto__".to_string(), proto);
+                            }
+                        }
                         self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
                         Value::Undefined
                     }
@@ -26064,12 +26160,16 @@ impl<'gc> VM<'gc> {
     }
 
     fn current_execution_is_strict(&self) -> bool {
-        if let Some(frame) = self.frames.last()
-            && self.chunk.fn_strictness.get(&frame.func_ip).copied().unwrap_or(false)
-        {
+        // Check VM-level force_strict flag (set by strict-mode eval)
+        if self.force_strict {
             return true;
         }
 
+        if let Some(frame) = self.frames.last() {
+            return self.chunk.fn_strictness.get(&frame.func_ip).copied().unwrap_or(false);
+        }
+
+        // At top level: check script source for "use strict" directive
         self.script_source.as_deref().is_some_and(|src| {
             let trimmed = src.trim_start();
             trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'")

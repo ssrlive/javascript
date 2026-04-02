@@ -1872,7 +1872,6 @@ impl<'gc> VM<'gc> {
 
     // Opcode::BitwiseAnd
     fn run_opcode_bitwise_and(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
         match (&a, &b) {
@@ -1883,8 +1882,31 @@ impl<'gc> VM<'gc> {
                 return Err(crate::raise_type_error!("Cannot mix BigInt and other types in &"));
             }
             _ => {
-                let lhs = to_int32(to_number(&a));
-                let rhs = to_int32(to_number(&b));
+                // Spec: evaluate lhs ToNumeric first, then rhs (left-to-right valueOf order)
+                let lnum = match self.extract_number_with_coercion(ctx, &a) {
+                    Some(n) => n,
+                    None => {
+                        self.stack.push(Value::Number(f64::NAN));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                    return Ok(OpcodeAction::Continue);
+                }
+                let rnum = match self.extract_number_with_coercion(ctx, &b) {
+                    Some(n) => n,
+                    None => {
+                        self.stack.push(Value::Number(f64::NAN));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                    return Ok(OpcodeAction::Continue);
+                }
+                let lhs = to_int32(lnum);
+                let rhs = to_int32(rnum);
                 self.stack.push(Value::Number((lhs & rhs) as f64));
             }
         }
@@ -1893,7 +1915,6 @@ impl<'gc> VM<'gc> {
 
     // Opcode::BitwiseOr
     fn run_opcode_bitwise_or(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
         match (&a, &b) {
@@ -1904,8 +1925,30 @@ impl<'gc> VM<'gc> {
                 return Err(crate::raise_type_error!("Cannot mix BigInt and other types in |"));
             }
             _ => {
-                let lhs = to_int32(to_number(&a));
-                let rhs = to_int32(to_number(&b));
+                let lnum = match self.extract_number_with_coercion(ctx, &a) {
+                    Some(n) => n,
+                    None => {
+                        self.stack.push(Value::Number(f64::NAN));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                    return Ok(OpcodeAction::Continue);
+                }
+                let rnum = match self.extract_number_with_coercion(ctx, &b) {
+                    Some(n) => n,
+                    None => {
+                        self.stack.push(Value::Number(f64::NAN));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                    return Ok(OpcodeAction::Continue);
+                }
+                let lhs = to_int32(lnum);
+                let rhs = to_int32(rnum);
                 self.stack.push(Value::Number((lhs | rhs) as f64));
             }
         }
@@ -1914,7 +1957,6 @@ impl<'gc> VM<'gc> {
 
     // Opcode::BitwiseXor
     fn run_opcode_bitwise_xor(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
         match (&a, &b) {
@@ -1925,8 +1967,30 @@ impl<'gc> VM<'gc> {
                 return Err(crate::raise_type_error!("Cannot mix BigInt and other types in ^"));
             }
             _ => {
-                let lhs = to_int32(to_number(&a));
-                let rhs = to_int32(to_number(&b));
+                let lnum = match self.extract_number_with_coercion(ctx, &a) {
+                    Some(n) => n,
+                    None => {
+                        self.stack.push(Value::Number(f64::NAN));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                    return Ok(OpcodeAction::Continue);
+                }
+                let rnum = match self.extract_number_with_coercion(ctx, &b) {
+                    Some(n) => n,
+                    None => {
+                        self.stack.push(Value::Number(f64::NAN));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                    return Ok(OpcodeAction::Continue);
+                }
+                let lhs = to_int32(lnum);
+                let rhs = to_int32(rnum);
                 self.stack.push(Value::Number((lhs ^ rhs) as f64));
             }
         }
@@ -2009,9 +2073,23 @@ impl<'gc> VM<'gc> {
 
     // Opcode::BitwiseNot
     fn run_opcode_bitwise_not(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let a = self.stack.pop().expect("VM Stack underflow");
-        self.stack.push(Value::Number((!(to_number(&a) as i32)) as f64));
+        if let Value::BigInt(bi) = &a {
+            self.stack.push(Value::BigInt(Box::new(-((**bi).clone()) - 1)));
+            return Ok(OpcodeAction::Continue);
+        }
+        let num = match self.extract_number_with_coercion(ctx, &a) {
+            Some(n) => n,
+            None => {
+                self.stack.push(Value::Number(f64::NAN));
+                return Ok(OpcodeAction::Continue);
+            }
+        };
+        if self.pending_throw.is_some() {
+            self.stack.push(Value::Number(f64::NAN));
+            return Ok(OpcodeAction::Continue);
+        }
+        self.stack.push(Value::Number((!to_int32(num)) as f64));
         Ok(OpcodeAction::Continue)
     }
 
@@ -2043,35 +2121,93 @@ impl<'gc> VM<'gc> {
     fn run_opcode_array_spread(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         // Stack: [..., array, iterable] → [..., array] (with iterable elements spread)
         let source = self.stack.pop().expect("VM Stack underflow on ArraySpread");
-        let arr = self.stack.last().expect("VM Stack underflow on ArraySpread (array)");
-        if let Value::VmArray(arr_data) = arr {
-            match &source {
-                Value::VmArray(src) => {
-                    let elems = src.borrow().elements.clone();
-                    arr_data.borrow_mut(ctx).elements.extend(elems);
+        // Clone the GcCell pointer to avoid borrow conflict with self
+        let arr_data = if let Some(Value::VmArray(arr_data)) = self.stack.last() {
+            *arr_data
+        } else {
+            return Ok(OpcodeAction::Continue);
+        };
+        match &source {
+            Value::VmArray(src) => {
+                let elems = src.borrow().elements.clone();
+                arr_data.borrow_mut(ctx).elements.extend(elems);
+            }
+            Value::VmSet(src) => {
+                let elems: Vec<Value<'gc>> = src.borrow().values.to_vec();
+                arr_data.borrow_mut(ctx).elements.extend(elems);
+            }
+            Value::VmMap(src) => {
+                let borrowed = src.borrow();
+                for (k, v) in borrowed.entries.iter() {
+                    let key_val: Value<'gc> = k.clone();
+                    let val_val: Value<'gc> = v.clone();
+                    let pair = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![key_val, val_val])));
+                    arr_data.borrow_mut(ctx).elements.push(pair);
                 }
-                Value::VmSet(src) => {
-                    let elems: Vec<Value<'gc>> = src.borrow().values.to_vec();
-                    arr_data.borrow_mut(ctx).elements.extend(elems);
+            }
+            Value::String(s) => {
+                for ch in String::from_utf16_lossy(s).chars() {
+                    arr_data.borrow_mut(ctx).elements.push(Value::from(&ch.to_string()));
                 }
-                Value::VmMap(src) => {
-                    // Map spread produces [key, value] pairs
-                    let borrowed = src.borrow();
-                    for (k, v) in borrowed.entries.iter() {
-                        let key_val: Value<'gc> = k.clone();
-                        let val_val: Value<'gc> = v.clone();
-                        let pair = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![key_val, val_val])));
-                        arr_data.borrow_mut(ctx).elements.push(pair);
+            }
+            _ => {
+                let iter_fn = self.read_named_property(ctx, &source, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Ok(OpcodeAction::Continue);
+                }
+                if matches!(iter_fn, Value::Undefined | Value::Null) {
+                    let err = self.make_type_error_object(ctx, "Spread syntax requires an iterable");
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                if !self.is_value_callable(&iter_fn) {
+                    let err = self.make_type_error_object(ctx, "Result of the Symbol.iterator method is not an object");
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                let iterator = match self.vm_call_function_value(ctx, &iter_fn, &source, &[]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let thrown = self.vm_value_from_error(ctx, &e);
+                        self.handle_throw(ctx, &thrown)?;
+                        return Ok(OpcodeAction::Continue);
                     }
+                };
+                if !matches!(&iterator, Value::VmObject(_) | Value::VmArray(_)) {
+                    let err = self.make_type_error_object(ctx, "Result of the Symbol.iterator method is not an object");
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
                 }
-                Value::String(s) => {
-                    // Spread a string into individual characters
-                    for ch in String::from_utf16_lossy(s).chars() {
-                        arr_data.borrow_mut(ctx).elements.push(Value::from(&ch.to_string()));
+                loop {
+                    let next_fn = self.read_named_property(ctx, &iterator, "next");
+                    if self.pending_throw.is_some() {
+                        return Ok(OpcodeAction::Continue);
                     }
-                }
-                _ => {
-                    // Try to treat as iterable object — for now just ignore non-iterables
+                    let result = match self.vm_call_function_value(ctx, &next_fn, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let thrown = self.vm_value_from_error(ctx, &e);
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    };
+                    if !matches!(&result, Value::VmObject(_) | Value::VmArray(_)) {
+                        let err = self.make_type_error_object(ctx, "Iterator result is not an object");
+                        self.handle_throw(ctx, &err)?;
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    let done = self.read_named_property(ctx, &result, "done");
+                    if self.pending_throw.is_some() {
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+                    let value = self.read_named_property(ctx, &result, "value");
+                    if self.pending_throw.is_some() {
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    arr_data.borrow_mut(ctx).elements.push(value);
                 }
             }
         }
@@ -2083,6 +2219,8 @@ impl<'gc> VM<'gc> {
         // Stack: [..., callee, argsArray] (regular) or [..., receiver, callee, argsArray] (method)
         let flags = self.read_byte();
         let is_method = (flags & 0x80) != 0;
+        let is_direct_eval = (flags & 0x40) != 0;
+        self.direct_eval = is_direct_eval;
         let args_val = self.stack.pop().expect("VM Stack underflow on CallSpread");
         let spread_args: Vec<Value<'gc>> = if let Value::VmArray(arr) = &args_val {
             arr.borrow().elements.clone()
@@ -4912,6 +5050,18 @@ impl<'gc> VM<'gc> {
             value_to_string(name_val)
         };
         let raw_obj = self.stack.last().cloned().expect("VM Stack underflow on GetMethod");
+        // Accessing a property on undefined/null is a TypeError
+        if matches!(raw_obj, Value::Undefined | Value::Null) {
+            let err_msg = format!(
+                "Cannot read properties of {} (reading '{}')",
+                if matches!(raw_obj, Value::Undefined) { "undefined" } else { "null" },
+                key
+            );
+            let err = self.make_type_error_object(ctx, &err_msg);
+            self.handle_throw(ctx, &err)?;
+            self.stack.push(Value::Undefined);
+            return Ok(OpcodeAction::Continue);
+        }
         let obj = raw_obj;
         // Brand check for private method calls
         if key.contains(PRIVATE_KEY_PREFIX) && !self.check_private_brand(ctx, &obj, &key) {

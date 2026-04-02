@@ -44,6 +44,9 @@ pub enum JSErrorKind {
 
     #[error("std::num::ParseFloatError: {0}")]
     ParseFloatError(#[from] std::num::ParseFloatError),
+
+    #[error("regexp error: {0}")]
+    RegExpError(#[from] regress::Error),
 }
 
 #[derive(Debug)]
@@ -132,6 +135,7 @@ impl JSError {
             JSErrorKind::IoError(e) => format!("IOError: {e}"),
             JSErrorKind::ParseIntError(e) => format!("ParseIntError: {e}"),
             JSErrorKind::ParseFloatError(e) => format!("ParseFloatError: {e}"),
+            JSErrorKind::RegExpError(e) => format!("RegExpError: {e}"),
         }
     }
 
@@ -371,5 +375,13 @@ macro_rules! raise_runtime_error {
 macro_rules! raise_throw_error {
     ($value:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::Throw($crate::core::value_to_string(&$value)))
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! raise_regexp_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::RegExpError($msg))
     };
 }

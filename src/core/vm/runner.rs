@@ -6122,7 +6122,9 @@ impl<'gc> VM<'gc> {
                     BUILTIN_CTOR_REGEXP => {
                         // new RegExp(pattern, flags)
                         let (pattern, flags) = match args.first() {
-                            Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
+                            Some(Value::VmObject(pat_obj))
+                                if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") =>
+                            {
                                 let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
                                 let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
                                     pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
@@ -6136,15 +6138,43 @@ impl<'gc> VM<'gc> {
                                     None | Some(Value::Undefined) => String::new(),
                                     Some(v) => self.vm_to_string(ctx, v),
                                 };
+                                if self.pending_throw.is_some() {
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(ctx, &thrown)?;
+                                    }
+                                    return Ok(OpcodeAction::Continue);
+                                }
                                 let f = match args.get(1) {
                                     None | Some(Value::Undefined) => String::new(),
                                     Some(v) => self.vm_to_string(ctx, v),
                                 };
+                                if self.pending_throw.is_some() {
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(ctx, &thrown)?;
+                                    }
+                                    return Ok(OpcodeAction::Continue);
+                                }
                                 (p, f)
                             }
                         };
+                        if self.pending_throw.is_some() {
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
                         if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
                             self.throw_syntax_error(ctx, &err_msg);
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        // Validate pattern by attempting compilation
+                        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                        let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
+                        if let Err(e) = super::get_or_compile_regex(&pattern_u16, &regress_flags) {
+                            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
                             if let Some(thrown) = self.pending_throw.take() {
                                 self.handle_throw(ctx, &thrown)?;
                             }
@@ -6324,7 +6354,9 @@ impl<'gc> VM<'gc> {
 
                         if id == BUILTIN_CTOR_REGEXP {
                             let (pattern, flags) = match args.first() {
-                                Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
+                                Some(Value::VmObject(pat_obj))
+                                    if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") =>
+                                {
                                     let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
                                     let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
                                         pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
@@ -6338,15 +6370,43 @@ impl<'gc> VM<'gc> {
                                         None | Some(Value::Undefined) => String::new(),
                                         Some(v) => self.vm_to_string(ctx, v),
                                     };
+                                    if self.pending_throw.is_some() {
+                                        if let Some(thrown) = self.pending_throw.take() {
+                                            self.handle_throw(ctx, &thrown)?;
+                                        }
+                                        return Ok(OpcodeAction::Continue);
+                                    }
                                     let f = match args.get(1) {
                                         None | Some(Value::Undefined) => String::new(),
                                         Some(v) => self.vm_to_string(ctx, v),
                                     };
+                                    if self.pending_throw.is_some() {
+                                        if let Some(thrown) = self.pending_throw.take() {
+                                            self.handle_throw(ctx, &thrown)?;
+                                        }
+                                        return Ok(OpcodeAction::Continue);
+                                    }
                                     (p, f)
                                 }
                             };
+                            if self.pending_throw.is_some() {
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(ctx, &thrown)?;
+                                }
+                                return Ok(OpcodeAction::Continue);
+                            }
                             if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
                                 self.throw_syntax_error(ctx, &err_msg);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(ctx, &thrown)?;
+                                }
+                                return Ok(OpcodeAction::Continue);
+                            }
+                            // Validate pattern by attempting compilation
+                            let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                            let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
+                            if let Err(e) = super::get_or_compile_regex(&pattern_u16, &regress_flags) {
+                                self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
                                 if let Some(thrown) = self.pending_throw.take() {
                                     self.handle_throw(ctx, &thrown)?;
                                 }

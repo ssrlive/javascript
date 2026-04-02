@@ -6,7 +6,6 @@ pub(crate) mod core;
 pub(crate) mod error;
 pub(crate) mod js_agent;
 pub(crate) mod js_bigint;
-pub(crate) mod js_regexp;
 #[cfg(feature = "std")]
 pub(crate) mod js_std;
 pub(crate) mod repl;

@@ -30,7 +30,9 @@ indexmap = "2.13.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-regress = { version = "0.11.1", features = ["utf16"] }
+regress = { version = "0.11", git = "https://github.com/ssrlive/regress.git", rev = "225ae0b", features = [
+    "utf16",
+] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 thiserror = "2.0.18"
 unicode-normalization = "0.1.25"

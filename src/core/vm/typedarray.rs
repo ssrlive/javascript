@@ -587,79 +587,55 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 };
-                // Apply mapFn if present
-                let mapped: Vec<Value<'gc>> = if let Some(map_fn) = map_fn {
-                    if matches!(map_fn, Value::Undefined) {
-                        items
-                    } else {
-                        let mut mapped = Vec::with_capacity(items.len());
-                        for (i, item) in items.into_iter().enumerate() {
-                            let result = self.vm_call_function_value(ctx, &map_fn, &this_arg, &[item, Value::Number(i as f64)]);
-                            match result {
-                                Ok(v) => mapped.push(v),
-                                Err(e) => {
-                                    self.set_pending_throw_from_error(&e);
-                                    return Value::Undefined;
-                                }
-                            }
-                        }
-                        mapped
-                    }
-                } else {
-                    items
-                };
-                // Construct
-                let result = self.construct_value(ctx, &ctor, &[Value::Number(mapped.len() as f64)], None);
+                // Construct TypedArray first, then interleave mapfn+Set per element (spec step 6e/8f)
+                let has_mapping = matches!(&map_fn, Some(mf) if !matches!(mf, Value::Undefined));
+                let result = self.construct_value(ctx, &ctor, &[Value::Number(items.len() as f64)], None);
                 match result {
-                    Ok(Value::VmArray(result_arr)) => {
-                        let ta_name = {
-                            let r = result_arr.borrow();
-                            match r.props.get("__typedarray_name__") {
-                                Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
-                                _ => String::new(),
-                            }
+                    Ok(ta @ Value::VmArray(_)) => {
+                        if !self.validate_typed_array(ctx, &ta, "from") {
+                            return Value::Undefined;
+                        }
+                        let ta_len = if let Value::VmArray(a) = &ta {
+                            a.borrow().elements.len()
+                        } else {
+                            0
                         };
-                        let bpe = {
-                            let r = result_arr.borrow();
-                            match r.props.get("__bytes_per_element__") {
-                                Some(Value::Number(n)) => *n as usize,
-                                _ => 1,
-                            }
-                        };
-                        for (i, v) in mapped.into_iter().enumerate() {
-                            // Convert via ToNumber (calls valueOf/toString)
-                            let num = match self.extract_number_with_coercion(ctx, &v) {
-                                Some(n) => n,
-                                None => {
-                                    if self.pending_throw.is_some() {
+                        if ta_len < items.len() {
+                            self.throw_type_error(ctx, "TypedArray is too small");
+                            return Value::Undefined;
+                        }
+                        for (i, item) in items.into_iter().enumerate() {
+                            let mapped_value = if has_mapping {
+                                let mf = map_fn.as_ref().unwrap();
+                                match self.vm_call_function_value(ctx, mf, &this_arg, &[item, Value::Number(i as f64)]) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        self.set_pending_throw_from_error(&e);
                                         return Value::Undefined;
                                     }
-                                    f64::NAN
                                 }
+                            } else {
+                                item
                             };
+                            let key = i.to_string();
+                            if let Err(e) = self.assign_named_property(ctx, &ta, &key, &mapped_value, None) {
+                                self.set_pending_throw_from_error(&e);
+                                return Value::Undefined;
+                            }
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
-                            let typed_val = if !ta_name.is_empty() {
-                                let mut tmp = vec![Value::Number(0.0); bpe];
-                                Self::encode_typed_element(&mut tmp, 0, bpe, &ta_name, num);
-                                Self::decode_typed_element(&tmp, 0, bpe, &ta_name)
-                            } else {
-                                Value::Number(num)
-                            };
-                            let mut r = result_arr.borrow_mut(ctx);
-                            if i < r.elements.len() {
-                                r.elements[i] = typed_val;
-                            }
-                            drop(r);
-                            self.sync_ta_element_to_buffer(ctx, &result_arr, i, num, &ta_name);
                         }
-                        Value::VmArray(result_arr)
+                        ta
                     }
-                    Ok(v) => v,
+                    Ok(v) => {
+                        if !self.validate_typed_array(ctx, &v, "from") {
+                            return Value::Undefined;
+                        }
+                        v
+                    }
                     Err(e) => {
-                        let msg = e.message();
-                        self.throw_type_error(ctx, &msg);
+                        self.set_pending_throw_from_error(&e);
                         Value::Undefined
                     }
                 }
@@ -667,28 +643,52 @@ impl<'gc> VM<'gc> {
             "typedarray.of" => {
                 // TypedArray.of(...items)
                 let ctor = receiver.unwrap_or(&Value::Undefined).clone();
-                // Must be a constructor
                 if !self.is_constructor_value(&ctor) {
                     self.throw_type_error(ctx, "TypedArray.of requires a constructor");
                     return Value::Undefined;
                 }
-                let result = self.construct_value(ctx, &ctor, &[Value::Number(args.len() as f64)], None);
+                let len = args.len();
+                let result = self.construct_value(ctx, &ctor, &[Value::Number(len as f64)], None);
                 match result {
-                    Ok(Value::VmArray(result_arr)) => {
-                        {
-                            let mut r = result_arr.borrow_mut(ctx);
-                            for (i, v) in args.iter().enumerate() {
-                                if i < r.elements.len() {
-                                    r.elements[i] = v.clone();
-                                }
+                    Ok(ta @ Value::VmArray(_)) => {
+                        if !self.validate_typed_array(ctx, &ta, "of") {
+                            return Value::Undefined;
+                        }
+                        // TypedArrayCreate: verify length >= required
+                        let ta_len = if let Value::VmArray(a) = &ta {
+                            a.borrow().elements.len()
+                        } else {
+                            0
+                        };
+                        if ta_len < len {
+                            self.throw_type_error(ctx, "TypedArray is too small");
+                            return Value::Undefined;
+                        }
+                        for (i, v) in args.iter().enumerate() {
+                            if Self::is_symbol_value(v) {
+                                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                return Value::Undefined;
+                            }
+                            let key = i.to_string();
+                            if let Err(e) = self.assign_named_property(ctx, &ta, &key, v, None) {
+                                self.set_pending_throw_from_error(&e);
+                                return Value::Undefined;
+                            }
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
                             }
                         }
-                        Value::VmArray(result_arr)
+                        ta
                     }
-                    Ok(v) => v,
+                    Ok(v) => {
+                        // Custom constructor returned non-TypedArray → TypeError
+                        if !self.validate_typed_array(ctx, &v, "of") {
+                            return Value::Undefined;
+                        }
+                        v
+                    }
                     Err(e) => {
-                        let msg = e.message();
-                        self.throw_type_error(ctx, &msg);
+                        self.set_pending_throw_from_error(&e);
                         Value::Undefined
                     }
                 }
@@ -2031,6 +2031,12 @@ impl<'gc> VM<'gc> {
     }
 
     pub(super) fn typedarray_call_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, args: &[Value<'gc>]) -> Value<'gc> {
+        // TypedArray constructors must be called with new
+        if self.new_target_stack.is_empty() {
+            self.throw_type_error(ctx, "Constructor requires 'new'");
+            return Value::Undefined;
+        }
+
         let bytes_per_element = match id {
             BUILTIN_CTOR_INT16ARRAY | BUILTIN_CTOR_UINT16ARRAY => 2usize,
             BUILTIN_CTOR_INT32ARRAY | BUILTIN_CTOR_UINT32ARRAY | BUILTIN_CTOR_FLOAT32ARRAY => 4usize,
@@ -2063,7 +2069,9 @@ impl<'gc> VM<'gc> {
             })
             .flatten();
 
-        if let Some(Value::VmArray(src_arr)) = args.first() {
+        if let Some(Value::VmArray(src_arr)) = args.first()
+            && src_arr.borrow().props.contains_key("__typedarray_name__")
+        {
             let elements_clone: Vec<Value<'gc>> = src_arr.borrow().elements.clone();
             let len = elements_clone.len();
             // Coerce each source element to the typed numeric representation
@@ -2072,7 +2080,7 @@ impl<'gc> VM<'gc> {
             for elements_clone_i in elements_clone.iter().take(len) {
                 let v = elements_clone_i;
                 let num = match v {
-                    Value::VmObject(_) => match self.extract_number_with_coercion(ctx, v) {
+                    Value::VmObject(_) | Value::VmArray(_) => match self.extract_number_with_coercion(ctx, v) {
                         Some(n) => n,
                         None => {
                             if self.pending_throw.is_some() {
@@ -2115,6 +2123,125 @@ impl<'gc> VM<'gc> {
             return Value::VmArray(new_gc_cell_ptr(ctx, data));
         }
 
+        // Regular VmArray (non-TypedArray) — use iterator protocol like VmObject
+        if let Some(Value::VmArray(_)) = args.first() {
+            let obj_val = args.first().unwrap().clone();
+            let iter_fn = self.read_named_property(ctx, &obj_val, "@@sym:1");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let has_iterator = !matches!(iter_fn, Value::Undefined | Value::Null);
+            if has_iterator && !self.is_value_callable(&iter_fn) {
+                self.throw_type_error(ctx, "object is not iterable (Symbol.iterator is not a function)");
+                return Value::Undefined;
+            }
+            let elements = if has_iterator {
+                let iterator = match self.vm_call_function_value(ctx, &iter_fn, &obj_val, &[]) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
+                        return Value::Undefined;
+                    }
+                };
+                let mut elems = Vec::new();
+                loop {
+                    let next_fn = self.read_named_property(ctx, &iterator, "next");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let result = match self.vm_call_function_value(ctx, &next_fn, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.set_pending_throw_from_error(&e);
+                            return Value::Undefined;
+                        }
+                    };
+                    let done = self.read_named_property(ctx, &result, "done");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+                    let value = self.read_named_property(ctx, &result, "value");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    elems.push(value);
+                }
+                elems
+            } else {
+                let len_val = self.read_named_property(ctx, &obj_val, "length");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let len = match &len_val {
+                    Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as usize,
+                    _ => 0,
+                };
+                let mut elems = Vec::with_capacity(len);
+                for i in 0..len {
+                    let v = self.read_named_property(ctx, &obj_val, &i.to_string());
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    elems.push(v);
+                }
+                elems
+            };
+            let len = elements.len();
+            let mut coerced_elements = Vec::with_capacity(len);
+            let mut numeric_vals = Vec::with_capacity(len);
+            for elem in elements.iter() {
+                if Self::is_symbol_value(elem) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                }
+                let num = match self.extract_number_with_coercion(ctx, elem) {
+                    Some(n) => n,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                numeric_vals.push(num);
+                coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
+            }
+            let mut data = VmArrayData::new(coerced_elements);
+            data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
+            data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
+            let mut buf_map = IndexMap::new();
+            buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
+            buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
+            let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
+            for (i, &num) in numeric_vals.iter().enumerate() {
+                Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+            }
+            buf_map.insert(
+                "__buffer_bytes__".to_string(),
+                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+            );
+            let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+            data.props.insert("buffer".to_string(), buffer_obj.clone());
+            data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+            data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
+            data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
+            data.props
+                .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
+            if let Some(proto) = &ta_instance_proto {
+                data.props.insert("__proto__".to_string(), proto.clone());
+            }
+            return Value::VmArray(new_gc_cell_ptr(ctx, data));
+        }
+
+        // Symbol check: must reject Symbols before they reach the VmObject path
+        if let Some(first) = args.first()
+            && Self::is_symbol_value(first)
+        {
+            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return Value::Undefined;
+        }
+
         if let Some(Value::VmObject(buf_obj)) = args.first() {
             let buffer_type = buf_obj.borrow().get("__type__").map(value_to_string).unwrap_or_default();
             let is_array_buffer = matches!(
@@ -2133,16 +2260,114 @@ impl<'gc> VM<'gc> {
                     Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
                     _ => 0,
                 };
-                let byte_offset = match args.get(1) {
-                    Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
-                    _ => 0,
-                };
-                let explicit_len = match args.get(2) {
-                    Some(Value::Number(n)) if *n >= 0.0 => Some(*n as usize),
-                    _ => None,
-                };
-                let available = byte_len.saturating_sub(byte_offset) / bytes_per_element;
-                let initial_len = explicit_len.unwrap_or(available);
+
+                // ToIndex(byteOffset)
+                let raw_offset = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let byte_offset: usize;
+                if matches!(&raw_offset, Value::Undefined) {
+                    byte_offset = 0;
+                } else if Self::is_symbol_value(&raw_offset) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                } else {
+                    let n = match self.extract_number_with_coercion(ctx, &raw_offset) {
+                        Some(v) => v,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    // ToIndex: ToIntegerOrInfinity then range check
+                    let int_n = if n.is_nan() || n == 0.0 {
+                        0.0
+                    } else if !n.is_finite() {
+                        n
+                    } else {
+                        n.trunc()
+                    };
+                    if int_n < 0.0 || !int_n.is_finite() || int_n > 9007199254740991.0 {
+                        self.throw_range_error_object(ctx, "Invalid typed array byte offset");
+                        return Value::Undefined;
+                    }
+                    byte_offset = int_n as usize;
+                }
+
+                // byteOffset must be a multiple of elementSize
+                if !byte_offset.is_multiple_of(bytes_per_element) {
+                    self.throw_range_error_object(
+                        ctx,
+                        &format!("Start offset of {} should be a multiple of {}", typedarray_name, bytes_per_element),
+                    );
+                    return Value::Undefined;
+                }
+
+                // Check for detached buffer after ToIndex conversions
+                if matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))) {
+                    self.throw_type_error(ctx, "Cannot construct a TypedArray with a detached ArrayBuffer");
+                    return Value::Undefined;
+                }
+
+                // ToIndex(length) if provided
+                let raw_len = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let explicit_len: Option<usize>;
+                if matches!(&raw_len, Value::Undefined) {
+                    explicit_len = None;
+                } else if Self::is_symbol_value(&raw_len) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                } else {
+                    let n = match self.extract_number_with_coercion(ctx, &raw_len) {
+                        Some(v) => v,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    // ToIndex: ToIntegerOrInfinity then range check
+                    let int_n = if n.is_nan() || n == 0.0 {
+                        0.0
+                    } else if !n.is_finite() {
+                        n
+                    } else {
+                        n.trunc()
+                    };
+                    if int_n < 0.0 || !int_n.is_finite() || int_n > 9007199254740991.0 {
+                        self.throw_range_error_object(ctx, "Invalid typed array length");
+                        return Value::Undefined;
+                    }
+                    explicit_len = Some(int_n as usize);
+                }
+
+                // Check for detached buffer after ToIndex(length)
+                if matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))) {
+                    self.throw_type_error(ctx, "Cannot construct a TypedArray with a detached ArrayBuffer");
+                    return Value::Undefined;
+                }
+
+                let initial_len;
+                if let Some(len) = explicit_len {
+                    // Explicit length: check it doesn't exceed buffer
+                    let needed = byte_offset + len * bytes_per_element;
+                    if needed > byte_len {
+                        self.throw_range_error_object(ctx, "Invalid typed array length");
+                        return Value::Undefined;
+                    }
+                    initial_len = len;
+                } else {
+                    // No explicit length: buffer must be aligned
+                    if byte_len % bytes_per_element != 0 {
+                        self.throw_range_error_object(
+                            ctx,
+                            &format!("Byte length of {} should be a multiple of {}", typedarray_name, bytes_per_element),
+                        );
+                        return Value::Undefined;
+                    }
+                    if byte_offset > byte_len {
+                        self.throw_range_error_object(ctx, "Start offset is outside the bounds of the buffer");
+                        return Value::Undefined;
+                    }
+                    initial_len = (byte_len - byte_offset) / bytes_per_element;
+                }
                 // Decode elements from buffer bytes
                 let elements = if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
                     let bb = buf_bytes.borrow();
@@ -2181,7 +2406,12 @@ impl<'gc> VM<'gc> {
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
-            let elements = if self.is_value_callable(&iter_fn) {
+            let has_iterator = !matches!(iter_fn, Value::Undefined | Value::Null);
+            if has_iterator && !self.is_value_callable(&iter_fn) {
+                self.throw_type_error(ctx, "object is not iterable (Symbol.iterator is not a function)");
+                return Value::Undefined;
+            }
+            let elements = if has_iterator {
                 // Iterable: call Symbol.iterator, collect all values
                 let iterator = match self.vm_call_function_value(ctx, &iter_fn, &obj_val, &[]) {
                     Ok(v) => v,
@@ -2223,9 +2453,35 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                let len = match len_val {
-                    Value::Number(n) if n.is_finite() && n >= 0.0 => n as usize,
-                    _ => 0,
+                if Self::is_symbol_value(&len_val) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                }
+                let len = match &len_val {
+                    Value::Number(n) if n.is_finite() && *n >= 0.0 => {
+                        if *n > 9007199254740991.0 {
+                            self.throw_range_error_object(ctx, "Invalid typed array length");
+                            return Value::Undefined;
+                        }
+                        *n as usize
+                    }
+                    _ => {
+                        let n = match self.extract_number_with_coercion(ctx, &len_val) {
+                            Some(v) => v,
+                            None => return Value::Undefined,
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() || n == 0.0 {
+                            0
+                        } else if n < 0.0 || !n.is_finite() {
+                            self.throw_range_error_object(ctx, "Invalid typed array length");
+                            return Value::Undefined;
+                        } else {
+                            n as usize
+                        }
+                    }
                 };
                 let mut elems = Vec::with_capacity(len);
                 for i in 0..len {
@@ -2238,13 +2494,24 @@ impl<'gc> VM<'gc> {
                 elems
             };
             let len = elements.len();
-            // Coerce elements to typed numeric representation
-            let coerced_elements: Vec<Value<'gc>> = (0..len)
-                .map(|i| {
-                    let num = to_number(elements.get(i).unwrap_or(&Value::Number(0.0)));
-                    Value::Number(Self::typed_array_coerce_value(num, typedarray_name))
-                })
-                .collect();
+            // Coerce elements to typed numeric representation (calls valueOf/toString)
+            let mut coerced_elements = Vec::with_capacity(len);
+            let mut numeric_vals = Vec::with_capacity(len);
+            for elem in elements.iter() {
+                if Self::is_symbol_value(elem) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                }
+                let num = match self.extract_number_with_coercion(ctx, elem) {
+                    Some(n) => n,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                numeric_vals.push(num);
+                coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
+            }
             let mut data = VmArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
@@ -2253,8 +2520,7 @@ impl<'gc> VM<'gc> {
             buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
             buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
-            for i in 0..len {
-                let num = to_number(elements.get(i).unwrap_or(&Value::Number(0.0)));
+            for (i, &num) in numeric_vals.iter().enumerate() {
                 Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
             }
             buf_map.insert(
@@ -2274,9 +2540,152 @@ impl<'gc> VM<'gc> {
             return Value::VmArray(new_gc_cell_ptr(ctx, data));
         }
 
-        let length = match args.first() {
-            Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
-            _ => 0,
+        // Object-arg catch-all: functions and other object-like values use iterator protocol
+        if let Some(first) = args.first() {
+            let is_object_like = matches!(first, Value::VmClosure(..) | Value::VmFunction(..) | Value::VmNativeFunction(_));
+            if is_object_like {
+                let obj_val = first.clone();
+                let iter_fn = self.read_named_property(ctx, &obj_val, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let has_iterator = !matches!(iter_fn, Value::Undefined | Value::Null);
+                if has_iterator && !self.is_value_callable(&iter_fn) {
+                    self.throw_type_error(ctx, "object is not iterable (Symbol.iterator is not a function)");
+                    return Value::Undefined;
+                }
+                let elements = if has_iterator {
+                    let iterator = match self.vm_call_function_value(ctx, &iter_fn, &obj_val, &[]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.set_pending_throw_from_error(&e);
+                            return Value::Undefined;
+                        }
+                    };
+                    let mut elems = Vec::new();
+                    loop {
+                        let next_fn = self.read_named_property(ctx, &iterator, "next");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let result = match self.vm_call_function_value(ctx, &next_fn, &iterator, &[]) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.set_pending_throw_from_error(&e);
+                                return Value::Undefined;
+                            }
+                        };
+                        let done = self.read_named_property(ctx, &result, "done");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if Self::value_is_truthy(&done) {
+                            break;
+                        }
+                        let value = self.read_named_property(ctx, &result, "value");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        elems.push(value);
+                    }
+                    elems
+                } else {
+                    let len_val = self.read_named_property(ctx, &obj_val, "length");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let len = match &len_val {
+                        Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as usize,
+                        _ => 0,
+                    };
+                    let mut elems = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let v = self.read_named_property(ctx, &obj_val, &i.to_string());
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        elems.push(v);
+                    }
+                    elems
+                };
+                let len = elements.len();
+                let mut coerced_elements = Vec::with_capacity(len);
+                let mut numeric_vals = Vec::with_capacity(len);
+                for elem in elements.iter() {
+                    if Self::is_symbol_value(elem) {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
+                    let num = match self.extract_number_with_coercion(ctx, elem) {
+                        Some(n) => n,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    numeric_vals.push(num);
+                    coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
+                }
+                let mut data = VmArrayData::new(coerced_elements);
+                data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
+                data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
+                let mut buf_map = IndexMap::new();
+                buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
+                buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
+                let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
+                for (i, &num) in numeric_vals.iter().enumerate() {
+                    Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+                }
+                buf_map.insert(
+                    "__buffer_bytes__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+                );
+                let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+                data.props.insert("buffer".to_string(), buffer_obj.clone());
+                data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+                data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
+                data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
+                data.props
+                    .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
+                if let Some(proto) = &ta_instance_proto {
+                    data.props.insert("__proto__".to_string(), proto.clone());
+                }
+                return Value::VmArray(new_gc_cell_ptr(ctx, data));
+            }
+        }
+
+        // Length-arg or no-arg path
+        let first_arg = args.first().cloned().unwrap_or(Value::Undefined);
+        // Check for Symbol
+        if Self::is_symbol_value(&first_arg) {
+            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return Value::Undefined;
+        }
+        let length = match &first_arg {
+            Value::Undefined => 0,
+            _ => {
+                let n = match self.extract_number_with_coercion(ctx, &first_arg) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                // ToIndex: ToIntegerOrInfinity then range check
+                let int_index = if n.is_nan() || n == 0.0 {
+                    0.0
+                } else if !n.is_finite() {
+                    n
+                } else {
+                    n.trunc()
+                };
+                if int_index < 0.0 || !int_index.is_finite() || int_index > 9007199254740991.0 {
+                    self.throw_range_error_object(ctx, "Invalid typed array length");
+                    return Value::Undefined;
+                } else {
+                    int_index as usize
+                }
+            }
         };
         let mut data = VmArrayData::new(vec![Value::Number(0.0); length]);
         data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
@@ -2511,6 +2920,8 @@ impl<'gc> VM<'gc> {
             p.borrow_mut(ctx)
                 .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
         }
+        // Expose %TypedArray% as a global (abstract constructor, not directly constructible)
+        self.globals.insert("TypedArray".to_string(), typed_array_ctor.clone());
 
         // Individual TypedArray constructors — all share the %TypedArray%.prototype
         let ta_types: &[(&str, FunctionID, f64)] = &[
@@ -2536,27 +2947,29 @@ impl<'gc> VM<'gc> {
             ctor_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
             ctor_map.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
             ctor_map.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
             // Create per-type prototype with __proto__ → %TypedArray%.prototype
             let mut per_proto = IndexMap::new();
             per_proto.insert("__proto__".to_string(), ta_proto.clone());
             per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
             per_proto.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
             per_proto.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            per_proto.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
             let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
-            // constructor backref
+            ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
+            ctor_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+            // XxxArray.__proto__ = %TypedArray%
+            ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
+            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
+            // constructor backref (must point to same GC object)
             if let Value::VmObject(p) = &per_proto_obj {
-                let ctor_val_tmp = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map.clone()));
-                p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val_tmp);
+                p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
                 p.borrow_mut(ctx)
                     .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
             }
-            ctor_map.insert("prototype".to_string(), per_proto_obj);
-            ctor_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-            // XxxArray.__proto__ = %TypedArray%
-            ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
-            self.globals
-                .insert(name.to_string(), Value::VmObject(new_gc_cell_ptr(ctx, ctor_map)));
+            self.globals.insert(name.to_string(), ctor_val);
         }
 
         // BigInt typed arrays (host-fn based)
@@ -2565,15 +2978,36 @@ impl<'gc> VM<'gc> {
             ctor_map.insert("__host_fn__".to_string(), Value::from(host_fn));
             ctor_map.insert("__constructible__".to_string(), Value::Boolean(true));
             ctor_map.insert("name".to_string(), Value::from(name));
+            ctor_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonconfigurable_name__".to_string(), Value::Boolean(true));
             ctor_map.insert("length".to_string(), Value::Number(0.0));
+            ctor_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonconfigurable_length__".to_string(), Value::Boolean(true));
             ctor_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
+            ctor_map.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
             let mut per_proto = IndexMap::new();
             per_proto.insert("__proto__".to_string(), ta_proto.clone());
             per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
-            ctor_map.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, per_proto)));
+            per_proto.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            per_proto.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            per_proto.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
+            ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
+            ctor_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            ctor_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
             ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
-            self.globals
-                .insert(name.to_string(), Value::VmObject(new_gc_cell_ptr(ctx, ctor_map)));
+            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
+            if let Value::VmObject(p) = &per_proto_obj {
+                p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
+                p.borrow_mut(ctx)
+                    .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            }
+            self.globals.insert(name.to_string(), ctor_val);
         }
     }
 }

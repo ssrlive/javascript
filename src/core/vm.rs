@@ -5657,6 +5657,43 @@ impl<'gc> VM<'gc> {
                     }
                 }
 
+                // TypedArray [[Set]] internal method (spec 10.4.5.5):
+                // When target is a TypedArray and key is a canonical numeric index,
+                // apply TypedArray-specific semantics before OrdinarySet.
+                if let Value::VmArray(ref arr) = target
+                    && arr.borrow().props.contains_key("__typedarray_name__")
+                    && let Some(numeric_index) = Self::canonical_numeric_index_string(&key)
+                {
+                    let arr_len = arr.borrow().elements.len();
+                    let is_valid = numeric_index >= 0.0
+                        && numeric_index.fract() == 0.0
+                        && !numeric_index.is_nan()
+                        && numeric_index != f64::INFINITY
+                        && numeric_index != f64::NEG_INFINITY
+                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                        && (numeric_index as usize) < arr_len;
+                    let is_same = self.values_equal(&receiver, &target);
+                    if is_same {
+                        // TypedArraySetElement: spec always calls ToNumber/ToBigInt,
+                        // even for invalid indices (only the actual store is skipped).
+                        let _ = self.extract_number_with_coercion(ctx, &value);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if !is_valid {
+                            return Value::Boolean(true);
+                        }
+                        // Valid index, same receiver → proceed to assign_named_property below
+                    } else {
+                        // Different receiver
+                        if !is_valid {
+                            // Invalid index → return true, no changes, no value coercion
+                            return Value::Boolean(true);
+                        }
+                        // Valid index, different receiver → fall through to OrdinarySet on receiver
+                    }
+                }
+
                 if !self.values_equal(&receiver, &target) {
                     // First, check target's own property descriptor
                     let target_desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[target.clone(), Value::from(key.as_str())]);
@@ -9230,6 +9267,41 @@ impl<'gc> VM<'gc> {
                 }
                 return Ok(val.clone());
             }
+            // TypedArray [[Set]] prototype chain interception:
+            // When prototype chain contains a TypedArray and key is a canonical numeric index,
+            // apply TypedArray [[Set]] semantics (spec 10.4.5.5) before general setter lookup.
+            if !key_exists
+                && let Some(ref proto_val) = proto_for_lookup
+                && let Value::VmArray(proto_arr) = proto_val
+                && proto_arr.borrow().props.contains_key("__typedarray_name__")
+                && let Some(numeric_index) = Self::canonical_numeric_index_string(key)
+            {
+                let proto_borrow = proto_arr.borrow();
+                let proto_len = proto_borrow.elements.len();
+                let is_valid = numeric_index >= 0.0
+                    && numeric_index.fract() == 0.0
+                    && !numeric_index.is_nan()
+                    && numeric_index != f64::INFINITY
+                    && numeric_index != f64::NEG_INFINITY
+                    && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                    && (numeric_index as usize) < proto_len;
+                drop(proto_borrow);
+                drop(borrow);
+                if !is_valid {
+                    // Invalid index → return true, no changes anywhere
+                    return Ok(val.clone());
+                }
+                // Valid index → OrdinarySet creates property on receiver directly
+                // (don't traverse further up prototype chain for setters)
+                if !is_non_ext {
+                    let mut b = map.borrow_mut(ctx);
+                    b.insert(key.to_string(), val.clone());
+                } else {
+                    let err = self.make_type_error_object(ctx, &format!("Cannot add property {}, object is not extensible", key));
+                    self.handle_throw(ctx, &err)?;
+                }
+                return Ok(val.clone());
+            }
             let proto_prop = proto_for_lookup
                 .as_ref()
                 .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
@@ -9337,7 +9409,83 @@ impl<'gc> VM<'gc> {
                 return Ok(val.clone());
             }
 
-            if let Ok(idx) = key.parse::<usize>() {
+            // For typed arrays, use canonical numeric index for element access.
+            // Non-canonical numeric strings ("+1", "1.0") go to string prop path.
+            let is_ta = arr.borrow().props.contains_key("__typedarray_name__");
+
+            // TypedArray [[Set]] internal method per spec 10.4.5.5:
+            // If key is a canonical numeric index, check receiver identity.
+            if is_ta && let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                let is_valid_integer_index = numeric_index >= 0.0
+                    && numeric_index.fract() == 0.0
+                    && !numeric_index.is_nan()
+                    && numeric_index != f64::INFINITY
+                    && numeric_index != f64::NEG_INFINITY
+                    && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                    && (numeric_index as usize) < arr.borrow().elements.len();
+
+                // Check if SameValue(O, Receiver) — i.e., receiver is the target itself
+                let is_same_receiver = match receiver {
+                    None => true, // no explicit receiver means target
+                    Some(Value::VmArray(recv_arr)) => gc_arena::Gc::ptr_eq(*arr, *recv_arr),
+                    _ => false,
+                };
+
+                if !is_same_receiver {
+                    // Receiver !== target
+                    if !is_valid_integer_index {
+                        // Invalid index with different receiver → return true, no changes
+                        return Ok(val.clone());
+                    }
+                    // Valid index with different receiver → OrdinarySet on receiver
+                    let recv_val = receiver.unwrap();
+                    return self.assign_named_property(ctx, recv_val, key, val, None);
+                }
+
+                // SameValue(O, Receiver) is true → IntegerIndexedElementSet
+                if !is_valid_integer_index {
+                    // Invalid index → no-op per spec (return success but don't set)
+                    return Ok(val.clone());
+                }
+
+                // Valid index, same receiver → IntegerIndexedElementSet directly.
+                // TypedArray elements bypass prototype chain setters entirely.
+                let idx = numeric_index as usize;
+                let ta_name = arr
+                    .borrow()
+                    .props
+                    .get("__typedarray_name__")
+                    .map(|v| value_to_string(v))
+                    .unwrap_or_default();
+                let n = match self.extract_number_with_coercion(ctx, val) {
+                    Some(n) => n,
+                    None => return Ok(val.clone()),
+                };
+                if self.pending_throw.is_some() {
+                    return Ok(val.clone());
+                }
+                let coerced = coerce_typed_array_value(n, &ta_name);
+                {
+                    let mut a = arr.borrow_mut(ctx);
+                    if idx < a.elements.len() {
+                        a.elements[idx] = Value::Number(coerced);
+                    }
+                }
+                self.sync_ta_element_to_buffer(ctx, arr, idx, n, &ta_name);
+                return Ok(Value::Number(coerced));
+            }
+
+            let should_be_elem_index = if is_ta {
+                if let Some(n) = Self::canonical_numeric_index_string(key) {
+                    n >= 0.0 && n.fract() == 0.0 && !n.is_nan() && n != f64::INFINITY && !(n == 0.0 && n.is_sign_negative())
+                } else {
+                    false
+                }
+            } else {
+                key.parse::<usize>().is_ok()
+            };
+
+            if should_be_elem_index && let Ok(idx) = key.parse::<usize>() {
                 // Only treat as array element index if idx < 2^32 - 1 (max array index per spec).
                 // Keys >= 2^32 - 1 (e.g. "4294967295") are stored as string properties.
                 if idx < 0xFFFF_FFFF {
@@ -9380,6 +9528,57 @@ impl<'gc> VM<'gc> {
                             proto_for_lookup,
                         )
                     };
+
+                    // TypedArray [[Set]] prototype chain interception for VmArray receivers.
+                    // When prototype chain contains a TypedArray and key is canonical numeric index,
+                    // TypedArray's [[Set]] semantics take over (no setter calls from TA.prototype).
+                    if !is_ta && !key_exists {
+                        let mut ta_proto_check = proto_for_lookup.clone();
+                        while let Some(ref pv) = ta_proto_check {
+                            if let Value::VmArray(ta_arr) = pv
+                                && ta_arr.borrow().props.contains_key("__typedarray_name__")
+                            {
+                                if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                                    let ta_len = ta_arr.borrow().elements.len();
+                                    let ta_is_valid = numeric_index >= 0.0
+                                        && numeric_index.fract() == 0.0
+                                        && !numeric_index.is_nan()
+                                        && numeric_index != f64::INFINITY
+                                        && numeric_index != f64::NEG_INFINITY
+                                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                                        && (numeric_index as usize) < ta_len;
+                                    if !ta_is_valid {
+                                        // Invalid index → return success, no changes
+                                        return Ok(val.clone());
+                                    }
+                                    // Valid index → bypass setters, create property on receiver
+                                    let mut a = arr.borrow_mut(ctx);
+                                    let uidx = numeric_index as usize;
+                                    while a.elements.len() <= uidx {
+                                        a.elements.push(Value::Undefined);
+                                    }
+                                    a.elements[uidx] = val.clone();
+                                    a.props.shift_remove(&format!("__deleted_{}", uidx));
+                                    let old_len = if let Some(Value::Number(n)) = a.props.get("__array_length__") {
+                                        *n as u64
+                                    } else {
+                                        a.elements.len() as u64
+                                    };
+                                    let new_len = (uidx as u64).saturating_add(1);
+                                    if new_len > old_len {
+                                        a.props.insert("__array_length__".to_string(), Value::Number(new_len as f64));
+                                    }
+                                    return Ok(val.clone());
+                                }
+                                break;
+                            }
+                            ta_proto_check = match pv {
+                                Value::VmObject(m) => m.borrow().get("__proto__").cloned(),
+                                Value::VmArray(a) => a.borrow().props.get("__proto__").cloned(),
+                                _ => None,
+                            };
+                        }
+                    }
 
                     if !key_exists
                         && !is_non_ext
@@ -9427,6 +9626,22 @@ impl<'gc> VM<'gc> {
                         return Ok(val.clone());
                     }
 
+                    // Pre-coerce typed array values (may call valueOf/toString) before mutable borrow
+                    let pre_coerced_ta = {
+                        let borrow = arr.borrow();
+                        if let Some(ta_name) = borrow.props.get("__typedarray_name__").cloned() {
+                            drop(borrow);
+                            let n = match self.extract_number_with_coercion(ctx, val) {
+                                Some(n) => n,
+                                None => return Ok(val.clone()),
+                            };
+                            let coerced = coerce_typed_array_value(n, &value_to_string(&ta_name));
+                            Some(Value::Number(coerced))
+                        } else {
+                            None
+                        }
+                    };
+
                     let mut a = arr.borrow_mut(ctx);
                     let mut buffer_write_info = None;
                     let store_val;
@@ -9436,10 +9651,9 @@ impl<'gc> VM<'gc> {
                             a.elements.push(Value::Undefined);
                             a.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
                         }
-                        // TypedArray: clamp value to element type
-                        store_val = if let Some(ta_name) = a.props.get("__typedarray_name__").cloned() {
-                            let n = to_number(val);
-                            Value::Number(coerce_typed_array_value(n, &value_to_string(&ta_name)))
+                        // TypedArray: use pre-coerced value
+                        store_val = if let Some(coerced) = pre_coerced_ta.clone() {
+                            coerced
                         } else {
                             val.clone()
                         };
@@ -10594,21 +10808,47 @@ impl<'gc> VM<'gc> {
                     drop(borrow);
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
-                if let Ok(idx) = key.parse::<usize>()
-                    && idx < 0xFFFF_FFFF
-                    && idx < logical_len
-                    && idx < borrow.elements.len()
-                    && !borrow.props.contains_key(&format!("__deleted_{}", idx))
-                {
-                    return borrow.elements[idx].clone();
-                }
-                if let Some(v) = borrow.props.get(key)
-                    && key
-                        .parse::<usize>()
-                        .map(|idx| idx >= 0xFFFF_FFFF || idx < logical_len)
-                        .unwrap_or(true)
-                {
-                    return v.clone();
+                let is_ta = borrow.props.contains_key("__typedarray_name__");
+                if is_ta {
+                    // TypedArray: use canonical numeric index for element access.
+                    // Non-canonical strings ("+1", "1.0") are ordinary string properties.
+                    if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                        if numeric_index >= 0.0
+                            && numeric_index.fract() == 0.0
+                            && !numeric_index.is_nan()
+                            && numeric_index != f64::INFINITY
+                            && numeric_index != f64::NEG_INFINITY
+                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                        {
+                            let idx = numeric_index as usize;
+                            if idx < borrow.elements.len() {
+                                return borrow.elements[idx].clone();
+                            }
+                        }
+                        // Canonical numeric index but invalid → return undefined per spec
+                        return Value::Undefined;
+                    }
+                    // Not a canonical numeric index → look up ordinary string property
+                    if let Some(v) = borrow.props.get(key) {
+                        return v.clone();
+                    }
+                } else {
+                    if let Ok(idx) = key.parse::<usize>()
+                        && idx < 0xFFFF_FFFF
+                        && idx < logical_len
+                        && idx < borrow.elements.len()
+                        && !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                    {
+                        return borrow.elements[idx].clone();
+                    }
+                    if let Some(v) = borrow.props.get(key)
+                        && key
+                            .parse::<usize>()
+                            .map(|idx| idx >= 0xFFFF_FFFF || idx < logical_len)
+                            .unwrap_or(true)
+                    {
+                        return v.clone();
+                    }
                 }
                 let setter_key = format!("__set_{}", key);
                 if borrow.props.contains_key(&setter_key) {
@@ -17110,6 +17350,9 @@ impl<'gc> VM<'gc> {
                     args.first().cloned().unwrap_or(Value::Undefined)
                 } else if let Some(Value::VmArray(arr)) = args.first() {
                     if !self.apply_array_property_descriptor(ctx, arr, &key, &desc) {
+                        if self.pending_throw.is_none() {
+                            self.throw_type_error(ctx, &format!("Cannot define property {}, incompatible descriptor", key));
+                        }
                         return Value::Undefined;
                     }
                     Value::VmArray(*arr)
@@ -17348,6 +17591,7 @@ impl<'gc> VM<'gc> {
                     }
                     Some(Value::VmArray(arr)) => {
                         let borrow = arr.borrow();
+                        let is_ta = borrow.props.contains_key("__typedarray_name__");
                         if key == "length" {
                             let len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
                                 *n
@@ -17359,7 +17603,48 @@ impl<'gc> VM<'gc> {
                         } else {
                             let (writable, enumerable, configurable) = Self::property_attributes(&borrow.props, &key);
 
-                            if let Ok(idx) = key.parse::<usize>()
+                            // For TypedArrays, use canonical_numeric_index_string to decide
+                            // whether the key is an element index or an ordinary property.
+                            if is_ta {
+                                if let Some(numeric_index) = Self::canonical_numeric_index_string(&key) {
+                                    // It IS a canonical numeric index — only return element if valid index
+                                    let idx = numeric_index as usize;
+                                    if numeric_index >= 0.0
+                                        && numeric_index.fract() == 0.0
+                                        && !numeric_index.is_nan()
+                                        && numeric_index != f64::INFINITY
+                                        && numeric_index != f64::NEG_INFINITY
+                                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                                        && idx < borrow.elements.len()
+                                    {
+                                        self.make_data_descriptor_object(ctx, &borrow.elements[idx], true, true, true)
+                                    } else {
+                                        // Invalid canonical numeric index — return undefined per spec
+                                        Value::Undefined
+                                    }
+                                } else {
+                                    // Not a canonical numeric index — treat as ordinary property
+                                    if let Some(val) = borrow.props.get(&key) {
+                                        self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable)
+                                    } else {
+                                        let getter_key = format!("__get_{}", key);
+                                        let setter_key = format!("__set_{}", key);
+                                        let has_getter = borrow.props.contains_key(&getter_key);
+                                        let has_setter = borrow.props.contains_key(&setter_key);
+                                        if has_getter || has_setter {
+                                            self.make_accessor_descriptor_object(
+                                                ctx,
+                                                borrow.props.get(&getter_key),
+                                                borrow.props.get(&setter_key),
+                                                enumerable,
+                                                configurable,
+                                            )
+                                        } else {
+                                            Value::Undefined
+                                        }
+                                    }
+                                }
+                            } else if let Ok(idx) = key.parse::<usize>()
                                 && idx < borrow.elements.len()
                                 && !borrow.props.contains_key(&format!("__deleted_{}", idx))
                             {
@@ -23301,6 +23586,42 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        // Also check VmArray for @@toPrimitive (e.g. TypedArrays with custom Symbol.toPrimitive)
+        if let Value::VmArray(arr) = val {
+            let has_sym = {
+                let borrow = arr.borrow();
+                borrow.props.contains_key("@@sym:3") || borrow.props.contains_key("__get_@@sym:3")
+            };
+            if has_sym {
+                let func = self.read_named_property(ctx, val, "@@sym:3");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !matches!(func, Value::Undefined | Value::Null) {
+                    if !self.is_value_callable(&func) {
+                        self.pending_throw = Some(self.make_type_error_object(ctx, "@@toPrimitive is not a function"));
+                        return Value::Undefined;
+                    }
+                    match self.call_internal_callback_with_isolated_try_stack(|vm| {
+                        vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)])
+                    }) {
+                        Ok(r) => {
+                            if is_object_like(&r) {
+                                self.pending_throw =
+                                    Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
+                                return Value::Undefined;
+                            }
+                            return r;
+                        }
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    }
+                }
+            }
+        }
+
         // Date objects use string-preferred coercion for default hint.
         let effective_hint = if hint == "default"
             && matches!(
@@ -23363,6 +23684,29 @@ impl<'gc> VM<'gc> {
             Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
             _ => false,
         }
+    }
+
+    /// CanonicalNumericIndexString: returns Some(n) if the string is a valid
+    /// numeric index string (i.e., ToString(ToNumber(s)) === s), None otherwise.
+    fn canonical_numeric_index_string(s: &str) -> Option<f64> {
+        if s == "-0" {
+            return Some(-0.0_f64);
+        }
+        let n: f64 = match s.parse() {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+        // ToString(n) must equal s
+        let back = if n == f64::INFINITY {
+            "Infinity".to_string()
+        } else if n == f64::NEG_INFINITY {
+            "-Infinity".to_string()
+        } else if n.is_nan() {
+            "NaN".to_string()
+        } else {
+            crate::core::value::format_js_number(n)
+        };
+        if back == s { Some(n) } else { None }
     }
 
     fn value_to_utf16(val: &Value<'gc>) -> Vec<u16> {
@@ -23778,6 +24122,8 @@ impl<'gc> VM<'gc> {
         let mut keys: Vec<String> = Vec::new();
         let _ = ctx;
 
+        let is_typed_array = array.props.contains_key("__typedarray_name__");
+
         for (i, _) in array.elements.iter().enumerate() {
             if array.props.contains_key(&format!("__deleted_{}", i)) {
                 continue;
@@ -23788,13 +24134,21 @@ impl<'gc> VM<'gc> {
             keys.push(i.to_string());
         }
 
-        if include_length {
+        // TypedArrays: length is not an own enumerable property (it's a getter on the prototype)
+        if include_length && !is_typed_array {
             keys.push("length".to_string());
         }
 
         for key in array.props.keys() {
-            if key.starts_with("__") {
+            if key.starts_with("__") || key.starts_with("@@sym:") {
                 continue;
+            }
+            // TypedArrays: skip internal properties that are not user-defined
+            if is_typed_array {
+                match key.as_str() {
+                    "length" | "buffer" | "byteLength" | "byteOffset" => continue,
+                    _ => {}
+                }
             }
             if enumerable_only && array.props.contains_key(&format!("__nonenumerable_{}__", key)) {
                 continue;
@@ -23809,6 +24163,7 @@ impl<'gc> VM<'gc> {
             array.props.keys().filter_map(|key| {
                 key.strip_prefix("__get_")
                     .or_else(|| key.strip_prefix("__set_"))
+                    .filter(|k| !k.starts_with("@@sym:"))
                     .map(str::to_string)
             }),
             |key| array.props.contains_key(&format!("__nonenumerable_{}__", key)),
@@ -23967,10 +24322,26 @@ impl<'gc> VM<'gc> {
                         }
                         Value::VmArray(arr) => {
                             let b = arr.borrow();
+                            let is_typed_array = b.props.contains_key("__typedarray_name__");
                             if key == "length" {
                                 return true;
                             }
-                            if let Ok(idx) = key.parse::<usize>()
+                            // TypedArray: use canonical numeric index string
+                            if is_typed_array {
+                                if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                                    // Valid integer index within bounds → true; otherwise → false
+                                    if numeric_index >= 0.0
+                                        && numeric_index.fract() == 0.0
+                                        && !numeric_index.is_nan()
+                                        && numeric_index != f64::INFINITY
+                                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                                    {
+                                        let idx = numeric_index as usize;
+                                        return idx < b.len();
+                                    }
+                                    return false;
+                                }
+                            } else if let Ok(idx) = key.parse::<usize>()
                                 && idx < b.len()
                                 && (!b.props.contains_key(&format!("__deleted_{}", idx))
                                     || b.props.contains_key(key)
@@ -23997,7 +24368,22 @@ impl<'gc> VM<'gc> {
                     return true;
                 }
                 let b = arr.borrow();
-                if let Ok(idx) = key.parse::<usize>()
+                let is_typed_array = b.props.contains_key("__typedarray_name__");
+                // TypedArray: use canonical numeric index string
+                if is_typed_array {
+                    if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                        if numeric_index >= 0.0
+                            && numeric_index.fract() == 0.0
+                            && !numeric_index.is_nan()
+                            && numeric_index != f64::INFINITY
+                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                        {
+                            let idx = numeric_index as usize;
+                            return idx < b.len();
+                        }
+                        return false;
+                    }
+                } else if let Ok(idx) = key.parse::<usize>()
                     && idx < b.len()
                     && (!b.props.contains_key(&format!("__deleted_{}", idx))
                         || b.props.contains_key(key)
@@ -24376,24 +24762,65 @@ impl<'gc> VM<'gc> {
     ) -> bool {
         let is_accessor = desc.contains_key("get") || desc.contains_key("set");
 
-        // TypedArrays: length is not a regular array property - skip the array length machinery.
-        // Just store the value as a regular own data property (the TA methods use internal length).
+        // TypedArray [[DefineOwnProperty]] for numeric index keys
         {
             let b = arr.borrow();
-            if b.props.contains_key("__typedarray_name__") && key == "length" {
-                drop(b);
-                let mut bw = arr.borrow_mut(ctx);
-                if let Some(val) = desc.get("value") {
-                    bw.props.insert("length".to_string(), val.clone());
-                    bw.props.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+            if b.props.contains_key("__typedarray_name__") {
+                // Check if key is a canonical numeric index string
+                if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                    let arr_len = b.elements.len();
+                    drop(b);
+                    // Must be a non-negative integer within bounds
+                    if numeric_index.is_nan()
+                        || numeric_index < 0.0
+                        || numeric_index.fract() != 0.0
+                        || numeric_index == f64::INFINITY
+                        || numeric_index == f64::NEG_INFINITY
+                        || (numeric_index == 0.0 && numeric_index.is_sign_negative())
+                    {
+                        return false;
+                    }
+                    let idx = numeric_index as usize;
+                    if idx >= arr_len {
+                        return false;
+                    }
+                    // Accessor descriptor → false
+                    if is_accessor {
+                        return false;
+                    }
+                    // configurable: false → false
+                    if matches!(desc.get("configurable"), Some(Value::Boolean(false))) {
+                        return false;
+                    }
+                    // enumerable: false → false
+                    if matches!(desc.get("enumerable"), Some(Value::Boolean(false))) {
+                        return false;
+                    }
+                    // writable: false → false
+                    if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
+                        return false;
+                    }
+                    // If desc has value, set the element
+                    if let Some(val) = desc.get("value") {
+                        let ta_val = Value::VmArray(*arr);
+                        if self.assign_named_property(ctx, &ta_val, key, val, None).is_err() {
+                            return false;
+                        }
+                    }
+                    return true;
                 }
-                return true;
+                // Non-canonical-numeric-index keys on TypedArrays: fall through
+                // to normal property logic (length, buffer, etc. are prototype accessors,
+                // not blocked own properties on instances).
             }
         }
 
+        let is_typed_array = arr.borrow().props.contains_key("__typedarray_name__");
+
         // Coerce length descriptor value before mutably borrowing the array object.
         // Coercion can execute user code (valueOf/toString) and re-enter property access.
-        let coerced_length_value = if key == "length" && desc.contains_key("value") {
+        // Skip for TypedArrays where length is a prototype accessor.
+        let coerced_length_value = if key == "length" && !is_typed_array && desc.contains_key("value") {
             match desc.get("value") {
                 Some(v) => {
                     // ArraySetLength step order: ToUint32(value), then ToNumber(value).
@@ -24417,7 +24844,7 @@ impl<'gc> VM<'gc> {
         let mut b = arr.borrow_mut(ctx);
         let is_non_extensible = matches!(b.props.get("__non_extensible__"), Some(Value::Boolean(true)));
 
-        if key == "length" {
+        if key == "length" && !is_typed_array {
             let old_len = self.array_length_u64(&b);
             let old_len_writable = !matches!(b.props.get("__readonly_length__"), Some(Value::Boolean(true)));
 
@@ -24539,7 +24966,9 @@ impl<'gc> VM<'gc> {
             return true;
         }
 
-        if let Ok(idx_u64) = key.parse::<u64>() {
+        let is_typed_arr = b.props.contains_key("__typedarray_name__");
+
+        if !is_typed_arr && let Ok(idx_u64) = key.parse::<u64>() {
             let is_array_index = idx_u64 < 4294967295;
             if is_array_index {
                 let old_len = self.array_length_u64(&b);
@@ -25809,7 +26238,14 @@ impl<'gc> VM<'gc> {
                                 if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(ctx, args, new_target)
                                 } else if host_name == "typedarray.bigint64" || host_name == "typedarray.biguint64" {
+                                    let ctor_val = Value::VmObject(map);
+                                    let ctor_new_target = new_target.cloned().unwrap_or_else(|| ctor_val.clone());
+                                    self.new_target_stack.push(ctor_new_target);
                                     let mut out = self.call_builtin(ctx, BUILTIN_CTOR_FLOAT64ARRAY, args);
+                                    self.new_target_stack.pop();
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                                    }
                                     if let Value::VmArray(arr) = &mut out {
                                         let ta_name = if host_name == "typedarray.bigint64" {
                                             "BigInt64Array"
@@ -25825,7 +26261,8 @@ impl<'gc> VM<'gc> {
                                     }
                                     Ok(out)
                                 } else {
-                                    Err(crate::raise_type_error!("Target is not a constructor"))
+                                    let err = self.make_type_error_object(ctx, "Target is not a constructor");
+                                    Err(self.vm_error_to_js_error(ctx, &err))
                                 }
                             } else if map.borrow().contains_key("__fn_body__") {
                                 // Dynamic function created via `new Function(...)`.
@@ -25846,7 +26283,8 @@ impl<'gc> VM<'gc> {
                                     _ => Ok(this_val),
                                 }
                             } else {
-                                Err(crate::raise_type_error!("Target is not a constructor"))
+                                let err = self.make_type_error_object(ctx, "Target is not a constructor");
+                                return Err(self.vm_error_to_js_error(ctx, &err));
                             };
                         }
                     };
@@ -25893,6 +26331,38 @@ impl<'gc> VM<'gc> {
                     return self.construct_dataview(ctx, target, args, new_target);
                 }
 
+                // TypedArray: spec requires ToIndex(firstArgument) BEFORE AllocateTypedArray
+                // (which calls GetPrototypeFromConstructor) when firstArgument is not an Object.
+                let is_ta_ctor = matches!(
+                    id,
+                    BUILTIN_CTOR_INT8ARRAY
+                        | BUILTIN_CTOR_UINT8ARRAY
+                        | BUILTIN_CTOR_UINT8CLAMPEDARRAY
+                        | BUILTIN_CTOR_INT16ARRAY
+                        | BUILTIN_CTOR_UINT16ARRAY
+                        | BUILTIN_CTOR_INT32ARRAY
+                        | BUILTIN_CTOR_UINT32ARRAY
+                        | BUILTIN_CTOR_FLOAT32ARRAY
+                        | BUILTIN_CTOR_FLOAT64ARRAY
+                );
+                if is_ta_ctor && let Some(first) = args.first() {
+                    let is_object = matches!(
+                        first,
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                    ) && !Self::is_symbol_value(first);
+                    if !is_object {
+                        // Symbol and BigInt both throw TypeError in ToNumber
+                        if Self::is_symbol_value(first) {
+                            let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
+                            return Err(self.vm_error_to_js_error(ctx, &err));
+                        }
+                        if matches!(first, Value::BigInt(_)) {
+                            let err = self.make_type_error_object(ctx, "Cannot convert a BigInt value to a number");
+                            return Err(self.vm_error_to_js_error(ctx, &err));
+                        }
+                    }
+                }
+
                 let ctor_prototype = if id == BUILTIN_CTOR_PROMISE {
                     None
                 } else {
@@ -25904,10 +26374,16 @@ impl<'gc> VM<'gc> {
                     self.new_target_stack.push(ctor_new_target);
                     let out = self.call_builtin(ctx, id, args);
                     self.new_target_stack.pop();
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
                     out
                 } else if id == BUILTIN_CTOR_DATE {
                     // Date constructor: compute ms and create Date object with correct proto
                     let ms = self.date_construct_ms_with_coercion(ctx, args).unwrap_or(f64::NAN);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
                     let mut m = IndexMap::new();
                     m.insert("__type__".to_string(), Value::from("Date"));
                     m.insert("__date_ms__".to_string(), Value::Number(ms));
@@ -25929,6 +26405,9 @@ impl<'gc> VM<'gc> {
                     self.new_target_stack.push(ctor_new_target);
                     let out = self.call_builtin(ctx, id, args);
                     self.new_target_stack.pop();
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
                     out
                 };
                 let result = if matches!(
@@ -25958,6 +26437,30 @@ impl<'gc> VM<'gc> {
                 } else {
                     result
                 };
+                // Apply cross-realm prototype for RegExp (same pattern as Array/Date/Error)
+                if id == BUILTIN_CTOR_REGEXP
+                    && let Some(proto) = ctor_prototype.clone()
+                    && let Value::VmObject(obj) = &result
+                {
+                    obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
+                }
+                // Apply custom prototype for TypedArray constructors
+                if matches!(
+                    id,
+                    BUILTIN_CTOR_INT8ARRAY
+                        | BUILTIN_CTOR_UINT8ARRAY
+                        | BUILTIN_CTOR_UINT8CLAMPEDARRAY
+                        | BUILTIN_CTOR_INT16ARRAY
+                        | BUILTIN_CTOR_UINT16ARRAY
+                        | BUILTIN_CTOR_INT32ARRAY
+                        | BUILTIN_CTOR_UINT32ARRAY
+                        | BUILTIN_CTOR_FLOAT32ARRAY
+                        | BUILTIN_CTOR_FLOAT64ARRAY
+                ) && let Some(proto) = ctor_prototype.clone()
+                    && let Value::VmArray(arr) = &result
+                {
+                    arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
+                }
                 let result = if id == BUILTIN_CTOR_ARRAY {
                     if let Value::VmArray(arr) = &result {
                         if matches!(
@@ -26072,6 +26575,9 @@ impl<'gc> VM<'gc> {
                     self.new_target_stack.push(ctor_new_target);
                     let out = self.call_builtin(ctx, id, args);
                     self.new_target_stack.pop();
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
                     Ok(out)
                 } else if id == BUILTIN_CTOR_OBJECT
                     && let Some(nt) = new_target
@@ -26083,6 +26589,9 @@ impl<'gc> VM<'gc> {
                     self.new_target_stack.push(ctor_new_target);
                     let out = self.call_builtin(ctx, id, args);
                     self.new_target_stack.pop();
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
                     Ok(out)
                 }
             }

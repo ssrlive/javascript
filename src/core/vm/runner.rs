@@ -825,11 +825,16 @@ impl<'gc> VM<'gc> {
                                 }
                             } else {
                                 self.this_stack.push(bound_this.clone());
-                                let r = self
-                                    .call_vm_function_result(ctx, ip, &final_args, None, &[])
-                                    .unwrap_or(Value::Undefined);
+                                let call_result = self.call_vm_function_result(ctx, ip, &final_args, None, &[]);
                                 self.this_stack.pop();
-                                r
+                                match call_result {
+                                    Ok(r) => r,
+                                    Err(err) => {
+                                        let thrown = self.vm_value_from_error(ctx, &err);
+                                        self.handle_throw(ctx, &thrown)?;
+                                        return Ok(OpcodeAction::Continue);
+                                    }
+                                }
                             }
                         }
                         Value::VmClosure(ip, _, ups) => {
@@ -848,11 +853,16 @@ impl<'gc> VM<'gc> {
                                 }
                             } else {
                                 self.this_stack.push(bound_this.clone());
-                                let r = self
-                                    .call_vm_function_result(ctx, ip, &final_args, None, &ups)
-                                    .unwrap_or(Value::Undefined);
+                                let call_result = self.call_vm_function_result(ctx, ip, &final_args, None, &ups);
                                 self.this_stack.pop();
-                                r
+                                match call_result {
+                                    Ok(r) => r,
+                                    Err(err) => {
+                                        let thrown = self.vm_value_from_error(ctx, &err);
+                                        self.handle_throw(ctx, &thrown)?;
+                                        return Ok(OpcodeAction::Continue);
+                                    }
+                                }
                             }
                         }
                         Value::VmNativeFunction(id) => {
@@ -3982,9 +3992,96 @@ impl<'gc> VM<'gc> {
                                     };
                                     self.stack.push(val);
                                     return Ok(OpcodeAction::Continue);
+                                } else {
+                                    // Out of bounds → undefined (don't fall to prototype)
+                                    self.stack.push(Value::Undefined);
+                                    return Ok(OpcodeAction::Continue);
+                                }
+                            }
+                        } else {
+                            // Non-integer numeric index (e.g. 1.5, -0) → undefined
+                            self.stack.push(Value::Undefined);
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    }
+
+                    // String key that is a canonical numeric index
+                    if let Some(numeric_index) = Self::canonical_numeric_index_string(&coerced_key) {
+                        // Valid non-negative integer → try buffer read
+                        if numeric_index >= 0.0
+                            && numeric_index.fract() == 0.0
+                            && !numeric_index.is_nan()
+                            && numeric_index != f64::INFINITY
+                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                        {
+                            let i = numeric_index as usize;
+                            let ta_name = arr
+                                .borrow()
+                                .props
+                                .get("__typedarray_name__")
+                                .map(|v| value_to_string(v))
+                                .unwrap_or_default();
+                            if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
+                                let bb = buf_bytes.borrow();
+                                let base = byte_offset + i * bpe;
+                                let in_range = base + bpe <= bb.elements.len();
+                                if in_range {
+                                    let val = match ta_name.as_str() {
+                                        "Uint8Array" | "Uint8ClampedArray" => {
+                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(b as f64)
+                                        }
+                                        "Int8Array" => {
+                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number((b as i8) as f64)
+                                        }
+                                        "Uint16Array" => {
+                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(u16::from_ne_bytes([b0, b1]) as f64)
+                                        }
+                                        "Int16Array" => {
+                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(i16::from_ne_bytes([b0, b1]) as f64)
+                                        }
+                                        "Uint32Array" => {
+                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(u32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Int32Array" => {
+                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(i32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Float32Array" => {
+                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(f32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Float64Array" => {
+                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::Number(f64::from_ne_bytes(arr8))
+                                        }
+                                        _ => {
+                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(b as f64)
+                                        }
+                                    };
+                                    self.stack.push(val);
+                                    return Ok(OpcodeAction::Continue);
                                 }
                             }
                         }
+                        // Invalid canonical numeric index (non-integer, -0, OOB) → undefined
+                        self.stack.push(Value::Undefined);
+                        return Ok(OpcodeAction::Continue);
                     }
                 }
 
@@ -5384,7 +5481,44 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmArray(arr) => {
-                if let Ok(idx) = key.parse::<usize>() {
+                let is_ta = arr.borrow().props.contains_key("__typedarray_name__");
+
+                // TypedArray [[HasProperty]]: canonical numeric index strings are
+                // never looked up on the prototype chain — only valid integer indices
+                // within bounds return true; all other canonical numeric indices
+                // (including non-canonical strings like "+1" that parse as usize)
+                // must fall through to ordinary string property lookup.
+                if is_ta {
+                    if let Some(numeric_index) = Self::canonical_numeric_index_string(&key) {
+                        let borrow = arr.borrow();
+                        numeric_index >= 0.0
+                            && numeric_index.fract() == 0.0
+                            && !numeric_index.is_nan()
+                            && numeric_index != f64::INFINITY
+                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
+                            && (numeric_index as usize) < borrow.elements.len()
+                    } else {
+                        let borrow = arr.borrow();
+                        if borrow.props.contains_key(&key)
+                            || borrow.props.contains_key(&format!("__get_{}", key))
+                            || borrow.props.contains_key(&format!("__set_{}", key))
+                        {
+                            true
+                        } else {
+                            let proto = borrow.props.get("__proto__").cloned();
+                            drop(borrow);
+                            if let Some(ref proto_val) = proto
+                                && let Ok(Some(result)) = self.try_proxy_has(ctx, proto_val, &key)
+                            {
+                                self.stack.push(Value::Boolean(result));
+                                return Ok(OpcodeAction::Continue);
+                            }
+                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                        }
+                    }
+                } else if let Ok(idx) = key.parse::<usize>() {
                     let borrow = arr.borrow();
                     if idx < 0xFFFF_FFFF {
                         let logical_len = self.vm_array_logical_length_u64(&borrow) as usize;

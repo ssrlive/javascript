@@ -26969,26 +26969,6 @@ impl<'gc> VM<'gc> {
                                 let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                                 if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(ctx, args, new_target)
-                                } else if host_name == "typedarray.bigint64" || host_name == "typedarray.biguint64" {
-                                    let ctor_val = Value::VmObject(map);
-                                    let ctor_new_target = new_target.cloned().unwrap_or_else(|| ctor_val.clone());
-                                    self.new_target_stack.push(ctor_new_target);
-                                    let bigint_id = if host_name == "typedarray.bigint64" {
-                                        BUILTIN_CTOR_BIGINT64ARRAY
-                                    } else {
-                                        BUILTIN_CTOR_BIGUINT64ARRAY
-                                    };
-                                    let mut out = self.call_builtin(ctx, bigint_id, args);
-                                    self.new_target_stack.pop();
-                                    if let Some(thrown) = self.pending_throw.take() {
-                                        return Err(self.vm_error_to_js_error(ctx, &thrown));
-                                    }
-                                    if let Value::VmArray(arr) = &mut out {
-                                        if let Some(proto) = map.borrow().get("prototype").cloned() {
-                                            arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
-                                        }
-                                    }
-                                    Ok(out)
                                 } else {
                                     let err = self.make_type_error_object(ctx, "Target is not a constructor");
                                     Err(self.vm_error_to_js_error(ctx, &err))

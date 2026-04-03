@@ -1088,7 +1088,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     } else {
-                        bi_elements.sort_by(|a, b| a.cmp(b));
+                        bi_elements.sort();
                     }
 
                     {

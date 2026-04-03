@@ -2875,7 +2875,7 @@ impl<'gc> VM<'gc> {
     fn run_opcode_type_of(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
         let a = self.stack.pop().expect("VM Stack underflow");
-        let type_str = Self::typeof_value(&a);
+        let type_str = a.typeof_value();
         self.stack.push(Value::from(type_str));
         Ok(OpcodeAction::Continue)
     }
@@ -2890,7 +2890,7 @@ impl<'gc> VM<'gc> {
             String::new()
         };
         let type_str = if let Some(val) = self.globals.get(&name) {
-            Self::typeof_value(val)
+            val.typeof_value()
         } else {
             "undefined"
         };

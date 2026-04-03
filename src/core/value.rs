@@ -114,6 +114,36 @@ impl<'gc> Value<'gc> {
             _ => true,
         }
     }
+
+    pub fn typeof_value(&self) -> &'static str {
+        match self {
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Boolean(_) => "boolean",
+            Value::BigInt(_) => "bigint",
+            Value::Undefined | Value::Uninitialized => "undefined",
+            Value::Null => "object",
+            Value::Symbol(_) => "symbol",
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
+            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::Property { .. } => "object",
+            Value::VmObject(map) => {
+                let b = map.borrow();
+                if b.contains_key("__vm_symbol__") {
+                    "symbol"
+                } else if let Some(target) = b.get("__proxy_target__") {
+                    target.typeof_value()
+                } else if b.contains_key("__fn_body__")
+                    || b.contains_key("__native_id__")
+                    || b.contains_key("__bound_target__")
+                    || b.contains_key("__host_fn__")
+                {
+                    "function"
+                } else {
+                    "object"
+                }
+            }
+        }
+    }
 }
 
 impl From<f64> for Value<'_> {

@@ -1988,6 +1988,29 @@ impl<'gc> VM<'gc> {
                     realm_global.borrow_mut(ctx).insert("Function".to_string(), realm_function);
                 }
 
+                // Deep-clone Error and NativeError constructors so each realm gets its own prototype
+                for err_name in [
+                    "Error",
+                    "TypeError",
+                    "SyntaxError",
+                    "RangeError",
+                    "ReferenceError",
+                    "EvalError",
+                    "URIError",
+                    "AggregateError",
+                ] {
+                    if let Some(Value::VmObject(err_ctor)) = self.globals.get(err_name) {
+                        let mut ctor_map = err_ctor.borrow().clone();
+                        if let Some(Value::VmObject(orig_proto)) = ctor_map.get("prototype") {
+                            let proto_map = orig_proto.borrow().clone();
+                            let new_proto = new_gc_cell_ptr(ctx, proto_map);
+                            ctor_map.insert("prototype".to_string(), Value::VmObject(new_proto));
+                        }
+                        let realm_err = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
+                        realm_global.borrow_mut(ctx).insert(err_name.to_string(), realm_err);
+                    }
+                }
+
                 // Deep-clone RegExp so each realm gets its own prototype (for cross-realm identity checks).
                 if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp") {
                     let mut ctor_map = regexp_ctor.borrow().clone();
@@ -9201,35 +9224,6 @@ impl<'gc> VM<'gc> {
         props_rc
     }
 
-    fn typeof_value(val: &Value<'gc>) -> &'static str {
-        match val {
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Boolean(_) => "boolean",
-            Value::Undefined => "undefined",
-            Value::Null => "object",
-            Value::Symbol(_) => "symbol",
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
-            Value::VmObject(map) => {
-                let b = map.borrow();
-                if b.contains_key("__vm_symbol__") {
-                    "symbol"
-                } else if let Some(target) = b.get("__proxy_target__") {
-                    Self::typeof_value(target)
-                } else if b.contains_key("__fn_body__")
-                    || b.contains_key("__native_id__")
-                    || b.contains_key("__bound_target__")
-                    || b.contains_key("__host_fn__")
-                {
-                    "function"
-                } else {
-                    "object"
-                }
-            }
-            _ => "object",
-        }
-    }
-
     fn assign_named_property(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -13311,7 +13305,7 @@ impl<'gc> VM<'gc> {
     fn is_error_type_name(name: &str) -> bool {
         matches!(
             name,
-            "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" | "AggregateError"
+            "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" | "EvalError" | "URIError" | "AggregateError"
         )
     }
 
@@ -26953,18 +26947,16 @@ impl<'gc> VM<'gc> {
                         | BUILTIN_CTOR_REFERENCEERROR
                 ) {
                     let type_name = self.error_type_name_from_constructor(ctx, target, id);
-                    let instance_proto_source = new_target.unwrap_or(target);
-                    let instance_proto = self.read_named_property(ctx, instance_proto_source, "prototype");
-                    if let Some(thrown) = self.pending_throw.take() {
-                        return Err(self.vm_error_to_js_error(ctx, &thrown));
-                    }
+                    // Use GetPrototypeFromConstructor(newTarget, "%<ErrorType>Prototype%")
+                    let proto_source = new_target.unwrap_or(target);
+                    let instance_proto = self.get_prototype_from_constructor_with_intrinsic(ctx, proto_source, &type_name)?;
                     if let Value::VmObject(obj) = &result {
                         let mut borrow = obj.borrow_mut(ctx);
                         borrow.insert("__type__".to_string(), Value::from(type_name.as_str()));
                         borrow.shift_remove("name");
                         borrow.shift_remove("constructor");
-                        if !matches!(instance_proto, Value::Undefined) {
-                            borrow.insert("__proto__".to_string(), instance_proto);
+                        if let Some(proto) = instance_proto {
+                            borrow.insert("__proto__".to_string(), proto);
                         }
                     }
                     result

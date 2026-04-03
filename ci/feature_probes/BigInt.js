@@ -9,5 +9,5 @@ try {
   if (a + b !== 3n) throw new Error('BigInt arithmetic failed');
   console.log('OK');
 } catch (e) {
-  console.log('NO');
+  console.log('NO. reason:', e.message);
 }

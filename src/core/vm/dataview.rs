@@ -397,15 +397,12 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let value_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let big_val: i128 = match &value_arg {
-                    Value::BigInt(b) => {
-                        let s = b.to_string();
+                let big_val: i128 = match self.value_to_bigint(ctx, &value_arg) {
+                    Some(bi) => {
+                        let s = bi.to_string();
                         s.parse::<i128>().unwrap_or(0)
                     }
-                    _ => {
-                        self.throw_type_error(ctx, "Cannot convert a non-BigInt value to a BigInt");
-                        return Value::Undefined;
-                    }
+                    None => return Value::Undefined,
                 };
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let b = view.borrow();

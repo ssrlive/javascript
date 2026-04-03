@@ -30,11 +30,7 @@ impl Repl {
     pub fn eval<T: AsRef<str>>(&mut self, script: T) -> Result<String, JSError> {
         let script = script.as_ref();
         // let mut vm = self.vm.borrow_mut();
-        self.arena.mutate_root(|ctx, vm| {
-            // We spawn a child VM for each REPL evaluation to ensure that any
-            // state created during evaluation (e.g. objects, functions) is
-            // properly rooted and won't be accidentally collected.
-
+        let result = self.arena.mutate_root(|ctx, vm| {
             let v = vm.eval_repl_snippet(ctx, script)?;
 
             match v {
@@ -48,7 +44,12 @@ impl Repl {
                 Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
                 _ => Ok(value_to_string(&v)),
             }
-        })
+        });
+
+        // Run incremental GC between REPL evaluations.
+        self.arena.collect_debt();
+
+        result
     }
 
     /// Returns true when the given `input` looks like a complete JavaScript

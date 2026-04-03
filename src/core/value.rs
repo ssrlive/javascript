@@ -182,6 +182,11 @@ impl From<&String> for Value<'_> {
 unsafe impl<'gc> Collect<'gc> for Value<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         match self {
+            Value::VmClosure(_, _, upvals) => upvals.trace(cc),
+            Value::VmArray(handle) => handle.trace(cc),
+            Value::VmObject(handle) => handle.trace(cc),
+            Value::VmMap(handle) => handle.trace(cc),
+            Value::VmSet(handle) => handle.trace(cc),
             Value::Property { value, getter, setter } => {
                 if let Some(v) = value {
                     v.trace(cc);

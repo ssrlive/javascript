@@ -1,4 +1,4 @@
-use crate::core::{JSError, Value};
+use crate::core::{Collect, GcTrace, JSError, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -257,6 +257,12 @@ pub struct Chunk<'gc> {
     /// Global names declared via `var`/`function`/`class` at the top level of this chunk.
     /// Used by strict-mode eval to avoid leaking declarations back to the caller.
     pub declared_globals: std::collections::HashSet<String>,
+}
+
+unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.constants.trace(cc);
+    }
 }
 
 impl<'gc> Chunk<'gc> {

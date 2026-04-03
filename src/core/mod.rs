@@ -147,7 +147,7 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
 
     let mut arena = JsArenaVm::new(|ctx| VM::new(Chunk::new(), ctx));
 
-    arena.mutate_root(|ctx, vm| {
+    let result = arena.mutate_root(|ctx, vm| {
         if !crate::js_agent::is_agent_thread() {
             crate::js_agent::reset_agent_state();
         }
@@ -219,5 +219,10 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
             _ => Ok(value_to_string(&v)),
         }
-    })
+    });
+
+    // Run incremental GC to reclaim unreachable objects before returning.
+    arena.collect_debt();
+
+    result
 }

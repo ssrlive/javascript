@@ -1,6 +1,6 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
-use crate::core::{Expr, JSError, Value, new_gc_cell_ptr};
+use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use indexmap::IndexMap;
 
@@ -698,6 +698,86 @@ struct AsyncFunctionState<'gc> {
     promise: Value<'gc>,
 }
 
+// ── GC Collect implementations ──────────────────────────────────────────────
+
+unsafe impl<'gc> Collect<'gc> for CallFrame<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.arguments_obj.trace(cc);
+        self.upvalues.trace(cc);
+        self.saved_args.trace(cc);
+        self.local_cells.trace(cc);
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for PendingTimer<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.callback.trace(cc);
+        self.args.trace(cc);
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for Microtask<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.callback.trace(cc);
+        self.value.trace(cc);
+        self.resolve.trace(cc);
+        self.reject.trace(cc);
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for GeneratorState<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.locals.trace(cc);
+        self.saved_args.trace(cc);
+        self.upvalues.trace(cc);
+        self.this_val.trace(cc);
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for AsyncFunctionState<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.frame.trace(cc);
+        self.locals.trace(cc);
+        self.this_val.trace(cc);
+        self.promise.trace(cc);
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for VM<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.chunk.trace(cc);
+        self.stack.trace(cc);
+        self.globals.trace(cc);
+        self.frames.trace(cc);
+        self.this_stack.trace(cc);
+        self.new_target_stack.trace(cc);
+        self.fn_props.trace(cc);
+        self.native_fn_props.trace(cc);
+        self.fn_home_objects.trace(cc);
+        self.global_this.trace(cc);
+        self.symbol_registry.trace(cc);
+        self.symbol_values.trace(cc);
+        self.pending_throw.trace(cc);
+        self.preserved_throw_value.trace(cc);
+        self.pending_timers.trace(cc);
+        self.microtask_queue.trace(cc);
+        self.generator_states.trace(cc);
+        self.async_function_states.trace(cc);
+        self.generator_objects.trace(cc);
+        self.generator_yield_value.trace(cc);
+        self.active_async_promises.trace(cc);
+        self.generator_prototype.trace(cc);
+        self.generator_function_prototype.trace(cc);
+        self.async_generator_prototype.trace(cc);
+        self.async_generator_function_prototype.trace(cc);
+        self.eval_home_object.trace(cc);
+        self.closure_fn_props.trace(cc);
+        self.top_level_cells.trace(cc);
+        self.regexp_home_proto_temp.trace(cc);
+        self.child_realms.trace(cc);
+    }
+}
+
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     pub(crate) chunk: Chunk<'gc>,
@@ -778,8 +858,10 @@ pub struct VM<'gc> {
     // Temp slot: the RegExp.prototype that the currently-executing getter "belongs to".
     // Set before call_host_fn by the caller, read by regexp_handle_host_fn.
     regexp_home_proto_temp: Option<Value<'gc>>,
-    // Temp slot: the cross-realm TypeError constructor for the currently-executing getter.
-    regexp_realm_type_error_temp: Option<Value<'gc>>,
+    // Child VMs for cross-realm support. Each child VM is a fully independent VM
+    // with its own builtins, globals, and constructors. Use Option + take() pattern
+    // for borrow-checker-safe mutable access.
+    child_realms: Vec<Option<Box<VM<'gc>>>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -913,7 +995,7 @@ impl<'gc> VM<'gc> {
             closure_fn_props: HashMap::new(),
             top_level_cells: HashMap::new(),
             regexp_home_proto_temp: None,
-            regexp_realm_type_error_temp: None,
+            child_realms: Vec::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1963,132 +2045,38 @@ impl<'gc> VM<'gc> {
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         match name {
             "__createRealm__" => {
-                let realm_global = new_gc_cell_ptr(ctx, IndexMap::new());
-                let realm_global_val = Value::VmObject(realm_global);
+                let realm_id = self.child_realms.len();
+                let child = Box::new(VM::new(Chunk::default(), ctx));
+                let child_global_this = child.global_this;
 
-                for name in [
-                    "Object",
-                    "Function",
-                    "Array",
-                    "String",
-                    "Number",
-                    "Boolean",
-                    "BigInt",
-                    "Date",
-                    "Math",
-                    "JSON",
-                    "Promise",
-                    "Symbol",
-                    "Error",
-                    "AggregateError",
-                    "TypeError",
-                    "SyntaxError",
-                    "RangeError",
-                    "ReferenceError",
-                    "EvalError",
-                    "URIError",
-                    "ArrayBuffer",
-                    "SharedArrayBuffer",
-                    "DataView",
-                    "Proxy",
-                    "Reflect",
-                    "parseInt",
-                    "parseFloat",
-                    "isNaN",
-                    "isFinite",
-                ] {
-                    if let Some(v) = self.globals.get(name).cloned() {
-                        realm_global.borrow_mut(ctx).insert(name.to_string(), v);
-                    }
-                }
+                // Stamp all objects reachable from the child VM's global_this with __realm_id__
+                // so cross-realm function dispatch can route calls to the correct child VM.
+                let mut visited = std::collections::HashSet::new();
+                Self::stamp_realm_id_recursive(ctx, child_global_this, realm_id, &mut visited);
 
-                if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
-                    let mut cloned = function_ctor.borrow().clone();
-                    cloned.insert("__origin_global".to_string(), realm_global_val.clone());
-                    let realm_function = Value::VmObject(new_gc_cell_ptr(ctx, cloned));
-                    realm_global.borrow_mut(ctx).insert("Function".to_string(), realm_function);
-                }
+                self.child_realms.push(Some(child));
 
-                // Deep-clone Error and NativeError constructors so each realm gets its own prototype
-                for err_name in [
-                    "Error",
-                    "TypeError",
-                    "SyntaxError",
-                    "RangeError",
-                    "ReferenceError",
-                    "EvalError",
-                    "URIError",
-                    "AggregateError",
-                ] {
-                    if let Some(Value::VmObject(err_ctor)) = self.globals.get(err_name) {
-                        let mut ctor_map = err_ctor.borrow().clone();
-                        if let Some(Value::VmObject(orig_proto)) = ctor_map.get("prototype") {
-                            let proto_map = orig_proto.borrow().clone();
-                            let new_proto = new_gc_cell_ptr(ctx, proto_map);
-                            ctor_map.insert("prototype".to_string(), Value::VmObject(new_proto));
-                        }
-                        let realm_err = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
-                        realm_global.borrow_mut(ctx).insert(err_name.to_string(), realm_err);
-                    }
-                }
-
-                // Deep-clone RegExp so each realm gets its own prototype (for cross-realm identity checks).
-                if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp") {
-                    let realm_type_error = realm_global.borrow().get("TypeError").cloned();
-                    let mut ctor_map = regexp_ctor.borrow().clone();
-                    if let Some(Value::VmObject(orig_proto)) = ctor_map.get("prototype") {
-                        let mut proto_map = orig_proto.borrow().clone();
-                        let new_proto = new_gc_cell_ptr(ctx, IndexMap::new());
-                        // Deep-clone getter functions so each gets its own __regexp_home_proto__
-                        // and __realm_type_error__ for cross-realm TypeError identity
-                        let getter_keys: Vec<String> = proto_map.keys().filter(|k| k.starts_with("__get_")).cloned().collect();
-                        for k in getter_keys {
-                            if let Some(Value::VmObject(getter)) = proto_map.get(&k) {
-                                let mut cloned_getter_map = getter.borrow().clone();
-                                if let Some(ref te) = realm_type_error {
-                                    cloned_getter_map.insert("__realm_type_error__".to_string(), te.clone());
-                                }
-                                let new_getter = new_gc_cell_ptr(ctx, cloned_getter_map);
-                                proto_map.insert(k, Value::VmObject(new_getter));
-                            }
-                        }
-                        *new_proto.borrow_mut(ctx) = proto_map;
-                        Self::stamp_regexp_getters_with_home_proto(ctx, new_proto);
-                        ctor_map.insert("prototype".to_string(), Value::VmObject(new_proto));
-                    }
-                    let realm_regexp = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
-                    realm_global.borrow_mut(ctx).insert("RegExp".to_string(), realm_regexp);
-                }
-
-                self.install_realm_hidden_intrinsics(ctx, &realm_global_val, "__async_function_ctor", "__async_function_prototype", None);
-                self.install_realm_hidden_intrinsics(
-                    ctx,
-                    &realm_global_val,
-                    "__async_generator_function_ctor",
-                    "__async_generator_function_prototype",
-                    Some("__async_generator_prototype"),
-                );
-
+                // Create realm eval function stamped with __realm_id__
                 let mut eval_map = IndexMap::new();
                 eval_map.insert("__host_fn__".to_string(), Value::from("__realm_eval__"));
-                eval_map.insert("__host_this__".to_string(), realm_global_val.clone());
+                eval_map.insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
                 eval_map.insert("name".to_string(), Value::from("eval"));
                 eval_map.insert("length".to_string(), Value::Number(1.0));
                 eval_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
                 eval_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
                 eval_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
                 eval_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
-                realm_global
+                child_global_this
                     .borrow_mut(ctx)
                     .insert("eval".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, eval_map)));
 
                 let mut out = IndexMap::new();
-                out.insert("global".to_string(), realm_global_val);
+                out.insert("global".to_string(), Value::VmObject(child_global_this));
                 Value::VmObject(new_gc_cell_ptr(ctx, out))
             }
             "__realm_eval__" => {
-                let realm_global = receiver.cloned().unwrap_or(Value::VmObject(self.global_this));
-
+                // When dispatched via cross-realm, this runs on the child VM itself.
+                // Parse and compile the source, then execute on this VM.
                 let src = if let Some(v) = args.first() {
                     match self.vm_to_string_like_spec(ctx, v) {
                         Ok(s) => s,
@@ -2101,42 +2089,41 @@ impl<'gc> VM<'gc> {
                     String::new()
                 };
 
-                let mut function_ctor = self.read_named_property(ctx, &realm_global, "Function");
-                if self.pending_throw.is_some() || !self.is_constructor_value(&function_ctor) {
-                    self.pending_throw = None;
-                    function_ctor = self.globals.get("Function").cloned().unwrap_or(Value::Undefined);
-                }
-                if !self.is_constructor_value(&function_ctor) {
-                    self.throw_type_error(ctx, "Realm eval requires a Function constructor");
+                if src.is_empty() {
                     return Value::Undefined;
                 }
 
-                let expr_body = format!("with (this) {{ return ({}); }}", src);
-                let stmt_body = format!("with (this) {{ {} }}", src);
-
-                let expr_fn = self.construct_value(ctx, &function_ctor, &[Value::from(expr_body.as_str())], None);
-                let result = match expr_fn {
-                    Ok(f) => self.vm_call_function_value(ctx, &f, &realm_global, &[]),
-                    Err(_) => Err(crate::raise_type_error!("realm eval compile failed")),
+                let tokens = match crate::core::tokenize(&src) {
+                    Ok(t) => t,
+                    Err(err) => {
+                        self.throw_syntax_error(ctx, &format!("realm eval parse error: {}", err.message()));
+                        return Value::Undefined;
+                    }
                 };
-
-                let evaluated = match result {
-                    Ok(v) => Ok(v),
-                    Err(_) => {
-                        self.pending_throw = None;
-                        match self.construct_value(ctx, &function_ctor, &[Value::from(stmt_body.as_str())], None) {
-                            Ok(f) => self.vm_call_function_value(ctx, &f, &realm_global, &[]),
-                            Err(err) => Err(err),
-                        }
+                let mut index = 0;
+                let stmts = match crate::core::parse_statements(&tokens, &mut index) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        self.throw_syntax_error(ctx, &format!("realm eval parse error: {}", err.message()));
+                        return Value::Undefined;
+                    }
+                };
+                let compiler = crate::core::Compiler::new();
+                let eval_chunk = match compiler.compile(&stmts) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        self.throw_syntax_error(ctx, &format!("realm eval compile error: {}", err.message()));
+                        return Value::Undefined;
                     }
                 };
 
-                match evaluated {
-                    Ok(v) => {
-                        self.mark_value_origin_global(ctx, &v, &realm_global);
-                        self.adopt_origin_global_function_intrinsics(ctx, &v, &realm_global, Some(&src));
-                        v
-                    }
+                let (code_offset, _) = self.merge_eval_chunk(&eval_chunk);
+                let saved_ip = self.ip;
+                self.ip = code_offset;
+                let result = self.run(ctx);
+                self.ip = saved_ip;
+                match result {
+                    Ok(v) => v,
                     Err(err) => {
                         self.set_pending_throw_from_error(&err);
                         Value::Undefined
@@ -13637,10 +13624,25 @@ impl<'gc> VM<'gc> {
                     let host_this = borrow.get("__host_this__").cloned();
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     let regexp_home = borrow.get("__regexp_home_proto__").cloned();
-                    let realm_te = borrow.get("__realm_type_error__").cloned();
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
                     drop(borrow);
                     self.regexp_home_proto_temp = regexp_home;
-                    self.regexp_realm_type_error_temp = realm_te;
+                    // Cross-realm dispatch: run host function on child VM
+                    if let Some(rid) = realm_id
+                        && rid < self.child_realms.len()
+                        && let Some(mut child) = self.child_realms[rid].take()
+                    {
+                        child.regexp_home_proto_temp = self.regexp_home_proto_temp.take();
+                        let result = child.call_host_fn(ctx, &host_name, Some(this_arg), args);
+                        if let Some(thrown) = child.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                        }
+                        self.child_realms[rid] = Some(child);
+                        return Ok(result);
+                    }
                     let receiver = host_this.as_ref().unwrap_or(this_arg);
                     Ok(self.call_host_fn(ctx, &host_name, Some(receiver), args))
                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
@@ -24588,15 +24590,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn make_type_error_object(&self, ctx: &GcContext<'gc>, message: &str) -> Value<'gc> {
-        self.make_type_error_with_ctor(ctx, message, self.globals.get("TypeError").cloned())
-    }
-
-    fn make_type_error_with_ctor(&self, ctx: &GcContext<'gc>, message: &str, ctor_opt: Option<Value<'gc>>) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__type__".to_string(), Value::from("TypeError"));
         map.insert("name".to_string(), Value::from("TypeError"));
         map.insert("message".to_string(), Value::from(message));
-        if let Some(ctor) = ctor_opt {
+        if let Some(ctor) = self.globals.get("TypeError").cloned() {
             map.insert("constructor".to_string(), ctor.clone());
             if let Value::VmObject(ctor_obj) = ctor
                 && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
@@ -27733,6 +27731,30 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Recursively stamp all VmObjects reachable from `obj` with `__realm_id__`.
+    /// Used after creating a child VM so cross-realm dispatch can route calls.
+    fn stamp_realm_id_recursive(
+        ctx: &GcContext<'gc>,
+        obj: VmObjectHandle<'gc>,
+        realm_id: usize,
+        visited: &mut std::collections::HashSet<usize>,
+    ) {
+        let ptr_key = Gc::as_ptr(obj) as *const _ as usize;
+        if !visited.insert(ptr_key) {
+            return;
+        }
+        obj.borrow_mut(ctx)
+            .insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
+        let children: Vec<VmObjectHandle<'gc>> = obj
+            .borrow()
+            .values()
+            .filter_map(|v| if let Value::VmObject(o) = v { Some(*o) } else { None })
+            .collect();
+        for child in children {
+            Self::stamp_realm_id_recursive(ctx, child, realm_id, visited);
+        }
+    }
+
     fn mark_value_origin_global(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>, origin_global: &Value<'gc>) {
         match value {
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
@@ -27744,61 +27766,6 @@ impl<'gc> VM<'gc> {
                 map.borrow_mut(ctx).insert("__origin_global".to_string(), origin_global.clone());
             }
             _ => {}
-        }
-    }
-
-    fn clone_global_object(&self, ctx: &GcContext<'gc>, name: &str) -> Option<Value<'gc>> {
-        self.globals.get(name).and_then(|value| match value {
-            Value::VmObject(obj) => Some(Value::VmObject(new_gc_cell_ptr(ctx, obj.borrow().clone()))),
-            _ => None,
-        })
-    }
-
-    fn install_realm_hidden_intrinsics(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        origin_global: &Value<'gc>,
-        ctor_name: &str,
-        fn_proto_name: &str,
-        own_proto_name: Option<&str>,
-    ) {
-        let Value::VmObject(realm_global) = origin_global else {
-            return;
-        };
-        let Some(realm_ctor) = self.clone_global_object(ctx, ctor_name) else {
-            return;
-        };
-        let Some(realm_fn_proto) = self.clone_global_object(ctx, fn_proto_name) else {
-            return;
-        };
-        let realm_own_proto = own_proto_name.and_then(|name| self.clone_global_object(ctx, name));
-
-        if let Value::VmObject(ctor_obj) = &realm_ctor {
-            let mut borrow = ctor_obj.borrow_mut(ctx);
-            borrow.insert("prototype".to_string(), realm_fn_proto.clone());
-            borrow.insert("__origin_global".to_string(), origin_global.clone());
-        }
-        if let Value::VmObject(fn_proto_obj) = &realm_fn_proto {
-            let mut borrow = fn_proto_obj.borrow_mut(ctx);
-            borrow.insert("constructor".to_string(), realm_ctor.clone());
-            if let Some(own_proto) = realm_own_proto.as_ref() {
-                borrow.insert("prototype".to_string(), own_proto.clone());
-            }
-            borrow.insert("__origin_global".to_string(), origin_global.clone());
-        }
-        if let Some(Value::VmObject(own_proto_obj)) = realm_own_proto.as_ref() {
-            let mut borrow = own_proto_obj.borrow_mut(ctx);
-            borrow.insert("constructor".to_string(), realm_fn_proto.clone());
-            borrow.insert("__origin_global".to_string(), origin_global.clone());
-        }
-
-        let mut realm_borrow = realm_global.borrow_mut(ctx);
-        realm_borrow.insert(ctor_name.to_string(), realm_ctor);
-        realm_borrow.insert(fn_proto_name.to_string(), realm_fn_proto);
-        if let Some(own_proto_name) = own_proto_name
-            && let Some(own_proto) = realm_own_proto
-        {
-            realm_borrow.insert(own_proto_name.to_string(), own_proto);
         }
     }
 
@@ -27994,72 +27961,6 @@ impl<'gc> VM<'gc> {
         self.mutate_value_props(ctx, wrapped, |props| {
             props.insert("__proto__".to_string(), resolved_proto);
         });
-    }
-
-    fn realm_hidden_intrinsic(&self, origin_global: &Value<'gc>, name: &str) -> Option<Value<'gc>> {
-        match origin_global {
-            Value::VmObject(obj) => obj.borrow().get(name).cloned(),
-            _ => None,
-        }
-    }
-
-    fn adopt_origin_global_function_intrinsics(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        value: &Value<'gc>,
-        origin_global: &Value<'gc>,
-        source_hint: Option<&str>,
-    ) {
-        let source_lower = source_hint.map(str::to_ascii_lowercase);
-        if source_lower.as_ref().is_some_and(|source| source.contains("async function*")) {
-            if let Some(realm_async_gen_fn_proto) = self.realm_hidden_intrinsic(origin_global, "__async_generator_function_prototype") {
-                let realm_async_gen_proto = self.realm_hidden_intrinsic(origin_global, "__async_generator_prototype");
-                self.set_function_realm_intrinsic(
-                    ctx,
-                    value,
-                    realm_async_gen_fn_proto,
-                    "__async_dynamic_generator_function__",
-                    realm_async_gen_proto,
-                );
-            }
-            return;
-        }
-
-        if source_lower.as_ref().is_some_and(|source| source.contains("async function")) {
-            if let Some(realm_async_fn_proto) = self.realm_hidden_intrinsic(origin_global, "__async_function_prototype") {
-                self.set_function_realm_intrinsic(ctx, value, realm_async_fn_proto, "__async_dynamic_function__", None);
-            }
-            return;
-        }
-
-        let current_proto = self.value_props_get(ctx, value, "__proto__");
-        let Some(current_proto) = current_proto else {
-            return;
-        };
-
-        if let (Some(current_async_fn_proto), Some(realm_async_fn_proto)) = (
-            self.globals.get("__async_function_prototype").cloned(),
-            self.realm_hidden_intrinsic(origin_global, "__async_function_prototype"),
-        ) && self.values_same(&current_proto, &current_async_fn_proto)
-        {
-            self.set_function_realm_intrinsic(ctx, value, realm_async_fn_proto, "__async_dynamic_function__", None);
-            return;
-        }
-
-        if let (Some(current_async_gen_fn_proto), Some(realm_async_gen_fn_proto)) = (
-            self.globals.get("__async_generator_function_prototype").cloned(),
-            self.realm_hidden_intrinsic(origin_global, "__async_generator_function_prototype"),
-        ) && self.values_same(&current_proto, &current_async_gen_fn_proto)
-        {
-            let realm_async_gen_proto = self.realm_hidden_intrinsic(origin_global, "__async_generator_prototype");
-            self.set_function_realm_intrinsic(
-                ctx,
-                value,
-                realm_async_gen_fn_proto,
-                "__async_dynamic_generator_function__",
-                realm_async_gen_proto,
-            );
-        }
     }
 
     fn set_object_like_prototype(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>, proto: &Value<'gc>) -> Result<bool, JSError> {

@@ -722,7 +722,7 @@ impl<'gc> VM<'gc> {
         if matches!(val, Value::Undefined) {
             return Ok(0);
         }
-        if Self::is_symbol_value(val) {
+        if val.is_symbol_value() {
             let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
             return Err(self.vm_error_to_js_error(ctx, &err));
         }
@@ -730,7 +730,7 @@ impl<'gc> VM<'gc> {
         if let Some(thrown) = self.pending_throw.take() {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }
-        if Self::is_symbol_value(&prim) {
+        if prim.is_symbol_value() {
             let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
             return Err(self.vm_error_to_js_error(ctx, &err));
         }

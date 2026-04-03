@@ -972,7 +972,7 @@ impl<'gc> VM<'gc> {
                                         | Value::VmClosure(..)
                                         | Value::VmNativeFunction(_)
                                 )
-                                && !Self::is_symbol_value(&ctor_gen_proto)
+                                && !ctor_gen_proto.is_symbol_value()
                             {
                                 async_gen_proto_from_ctor_realm = Some(ctor_gen_proto);
                             }
@@ -1545,7 +1545,7 @@ impl<'gc> VM<'gc> {
 
         // Symbol operands must throw in + regardless of potential
         // object-to-string fallback paths.
-        if Self::is_symbol_value(&a_raw) || Self::is_symbol_value(&b_raw) {
+        if a_raw.is_symbol_value() || b_raw.is_symbol_value() {
             let mut err_map = IndexMap::new();
             err_map.insert("__type__".to_string(), Value::from("TypeError"));
             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -1564,7 +1564,7 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         // Symbols cannot be implicitly converted
-        if Self::is_symbol_value(&a) || Self::is_symbol_value(&b) {
+        if a.is_symbol_value() || b.is_symbol_value() {
             let mut err_map = IndexMap::new();
             err_map.insert("__type__".to_string(), Value::from("TypeError"));
             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -1617,10 +1617,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_sub(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b_raw = self.stack.pop().expect("VM Stack underflow on Sub (b)");
         let a_raw = self.stack.pop().expect("VM Stack underflow on Sub (a)");
-        let a = self.to_numeric(ctx, &a_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let b = self.to_numeric(ctx, &b_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let a = self.__to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let b = self.__to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() - (**b_bi).clone())));
@@ -1643,10 +1649,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_mul(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b_raw = self.stack.pop().expect("VM Stack underflow on Mul (b)");
         let a_raw = self.stack.pop().expect("VM Stack underflow on Mul (a)");
-        let a = self.to_numeric(ctx, &a_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let b = self.to_numeric(ctx, &b_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let a = self.__to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let b = self.__to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() * (**b_bi).clone())));
@@ -1665,10 +1677,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_div(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b_raw = self.stack.pop().expect("VM Stack underflow on Div (b)");
         let a_raw = self.stack.pop().expect("VM Stack underflow on Div (a)");
-        let a = self.to_numeric(ctx, &a_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let b = self.to_numeric(ctx, &b_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let a = self.__to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let b = self.__to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() / (**b_bi).clone())));
@@ -1687,7 +1705,7 @@ impl<'gc> VM<'gc> {
     fn run_opcode_less_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        if Self::is_symbol_value(&a) || Self::is_symbol_value(&b) {
+        if a.is_symbol_value() || b.is_symbol_value() {
             let mut err_map = IndexMap::new();
             err_map.insert("__type__".to_string(), Value::from("TypeError"));
             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -1710,7 +1728,7 @@ impl<'gc> VM<'gc> {
     fn run_opcode_greater_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        if Self::is_symbol_value(&a) || Self::is_symbol_value(&b) {
+        if a.is_symbol_value() || b.is_symbol_value() {
             let mut err_map = IndexMap::new();
             err_map.insert("__type__".to_string(), Value::from("TypeError"));
             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -1851,10 +1869,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_mod(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b_raw = self.stack.pop().expect("VM Stack underflow");
         let a_raw = self.stack.pop().expect("VM Stack underflow");
-        let a = self.to_numeric(ctx, &a_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let b = self.to_numeric(ctx, &b_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let a = self.__to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let b = self.__to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() % (**b_bi).clone())));
@@ -1873,10 +1897,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_pow(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b_raw = self.stack.pop().expect("VM Stack underflow");
         let a_raw = self.stack.pop().expect("VM Stack underflow");
-        let a = self.to_numeric(ctx, &a_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let b = self.to_numeric(ctx, &b_raw)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let a = self.__to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let b = self.__to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 let exp_opt = (**b_bi).clone().try_into().ok();
@@ -1904,10 +1934,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_bitwise_and(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let lnum = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let rnum = self.to_numeric(ctx, &b)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let lnum = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rnum = self.__to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() & (**b_bi).clone())));
@@ -1930,10 +1966,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_bitwise_or(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let lnum = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let rnum = self.to_numeric(ctx, &b)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let lnum = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rnum = self.__to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() | (**b_bi).clone())));
@@ -1956,10 +1998,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_bitwise_xor(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let lnum = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let rnum = self.to_numeric(ctx, &b)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let lnum = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rnum = self.__to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() ^ (**b_bi).clone())));
@@ -1982,10 +2030,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_shift_left(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let lnum = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let rnum = self.to_numeric(ctx, &b)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let lnum = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rnum = self.__to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 let shift: usize = match (**b_bi).clone().try_into() {
@@ -2015,10 +2069,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_shift_right(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let lnum = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let rnum = self.to_numeric(ctx, &b)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let lnum = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rnum = self.__to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 let shift: usize = match (**b_bi).clone().try_into() {
@@ -2048,10 +2108,16 @@ impl<'gc> VM<'gc> {
     fn run_opcode_unsigned_shift_right(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let lnum = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
-        let rnum = self.to_numeric(ctx, &b)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let lnum = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rnum = self.__to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match (&lnum, &rnum) {
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 let err = self.make_type_error_object(ctx, "Unsigned right shift is not allowed for BigInt");
@@ -2070,8 +2136,11 @@ impl<'gc> VM<'gc> {
     // Opcode::BitwiseNot
     fn run_opcode_bitwise_not(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let a = self.stack.pop().expect("VM Stack underflow");
-        let num = self.to_numeric(ctx, &a)?;
-        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let num = self.__to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
         match &num {
             Value::BigInt(bi) => {
                 self.stack.push(Value::BigInt(Box::new(-((**bi).clone()) - 1)));
@@ -5184,7 +5253,7 @@ impl<'gc> VM<'gc> {
                                         _ => None,
                                     }
                                 }
-                            },
+                            }
                             Some("String") => match key.as_str() {
                                 "toString" | "valueOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_VALUEOF)),
                                 "constructor" => self.globals.get("String").cloned(),

@@ -665,7 +665,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         for (i, v) in args.iter().enumerate() {
-                            if Self::is_symbol_value(v) {
+                            if v.is_symbol_value() {
                                 self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                                 return Value::Undefined;
                             }
@@ -1507,7 +1507,7 @@ impl<'gc> VM<'gc> {
         if !matches!(
             ctor,
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-        ) || Self::is_symbol_value(&ctor)
+        ) || ctor.is_symbol_value()
         {
             self.throw_type_error(ctx, "Constructor is not an object");
             return None;
@@ -2193,7 +2193,7 @@ impl<'gc> VM<'gc> {
             let mut coerced_elements = Vec::with_capacity(len);
             let mut numeric_vals = Vec::with_capacity(len);
             for elem in elements.iter() {
-                if Self::is_symbol_value(elem) {
+                if elem.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
                 }
@@ -2236,7 +2236,7 @@ impl<'gc> VM<'gc> {
 
         // Symbol check: must reject Symbols before they reach the VmObject path
         if let Some(first) = args.first()
-            && Self::is_symbol_value(first)
+            && first.is_symbol_value()
         {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return Value::Undefined;
@@ -2266,7 +2266,7 @@ impl<'gc> VM<'gc> {
                 let byte_offset: usize;
                 if matches!(&raw_offset, Value::Undefined) {
                     byte_offset = 0;
-                } else if Self::is_symbol_value(&raw_offset) {
+                } else if raw_offset.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
                 } else {
@@ -2312,7 +2312,7 @@ impl<'gc> VM<'gc> {
                 let explicit_len: Option<usize>;
                 if matches!(&raw_len, Value::Undefined) {
                     explicit_len = None;
-                } else if Self::is_symbol_value(&raw_len) {
+                } else if raw_len.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
                 } else {
@@ -2453,7 +2453,7 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                if Self::is_symbol_value(&len_val) {
+                if len_val.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
                 }
@@ -2498,7 +2498,7 @@ impl<'gc> VM<'gc> {
             let mut coerced_elements = Vec::with_capacity(len);
             let mut numeric_vals = Vec::with_capacity(len);
             for elem in elements.iter() {
-                if Self::is_symbol_value(elem) {
+                if elem.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
                 }
@@ -2612,7 +2612,7 @@ impl<'gc> VM<'gc> {
                 let mut coerced_elements = Vec::with_capacity(len);
                 let mut numeric_vals = Vec::with_capacity(len);
                 for elem in elements.iter() {
-                    if Self::is_symbol_value(elem) {
+                    if elem.is_symbol_value() {
                         self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                         return Value::Undefined;
                     }
@@ -2657,7 +2657,7 @@ impl<'gc> VM<'gc> {
         // Length-arg or no-arg path
         let first_arg = args.first().cloned().unwrap_or(Value::Undefined);
         // Check for Symbol
-        if Self::is_symbol_value(&first_arg) {
+        if first_arg.is_symbol_value() {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return Value::Undefined;
         }

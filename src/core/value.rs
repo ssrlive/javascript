@@ -144,6 +144,14 @@ impl<'gc> Value<'gc> {
             }
         }
     }
+
+    pub fn is_symbol_value(&self) -> bool {
+        match self {
+            Value::Symbol(_) => true,
+            Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
+            _ => false,
+        }
+    }
 }
 
 impl From<f64> for Value<'_> {

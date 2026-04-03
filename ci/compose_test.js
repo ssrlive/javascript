@@ -191,6 +191,7 @@ function get262StubLines() {
     '      g.Number = Number;',
     '      g.String = String;',
     '      g.Boolean = Boolean;',
+    '      g.BigInt = (typeof BigInt !== "undefined") ? BigInt : undefined;',
     '      g.parseInt = parseInt;',
     '      g.parseFloat = parseFloat;',
     '      g.isNaN = isNaN;',

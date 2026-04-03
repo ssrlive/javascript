@@ -10,7 +10,7 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                if Self::is_symbol_value(&prim) {
+                if prim.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                     return Value::Undefined;
                 }
@@ -30,7 +30,7 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                if Self::is_symbol_value(&prim) {
+                if prim.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                     return Value::Undefined;
                 }

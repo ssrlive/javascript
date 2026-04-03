@@ -1003,7 +1003,7 @@ impl<'gc> VM<'gc> {
         if !matches!(
             constructor,
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-        ) || Self::is_symbol_value(&constructor)
+        ) || constructor.is_symbol_value()
         {
             return Err(crate::raise_type_error!("Promise constructor receiver must be an object"));
         }
@@ -1069,7 +1069,7 @@ impl<'gc> VM<'gc> {
         if !matches!(
             ctor,
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-        ) || Self::is_symbol_value(&ctor)
+        ) || ctor.is_symbol_value()
         {
             return Err(crate::raise_type_error!("Promise constructor is not an object"));
         }
@@ -1532,7 +1532,11 @@ impl<'gc> VM<'gc> {
             BUILTIN_MATH_RANDOM => 0.0,
             BUILTIN_MATH_LOG2 | BUILTIN_MATH_LOG10 => 1.0,
             // Number methods
-            BUILTIN_NUM_VALUEOF | BUILTIN_NUM_TOLOCALESTRING | BUILTIN_BIGINT_VALUEOF | BUILTIN_BIGINT_TOLOCALESTRING | BUILTIN_BIGINT_TOSTRING => 0.0,
+            BUILTIN_NUM_VALUEOF
+            | BUILTIN_NUM_TOLOCALESTRING
+            | BUILTIN_BIGINT_VALUEOF
+            | BUILTIN_BIGINT_TOLOCALESTRING
+            | BUILTIN_BIGINT_TOSTRING => 0.0,
             BUILTIN_NUM_TOSTRING | BUILTIN_NUM_TOFIXED | BUILTIN_NUM_TOEXPONENTIAL | BUILTIN_NUM_TOPRECISION => 1.0,
             // parseInt/parseFloat
             BUILTIN_PARSEINT | BUILTIN_BIGINT_ASINTN | BUILTIN_BIGINT_ASUINTN => 2.0,
@@ -1961,6 +1965,7 @@ impl<'gc> VM<'gc> {
                     "String",
                     "Number",
                     "Boolean",
+                    "BigInt",
                     "Date",
                     "Math",
                     "JSON",
@@ -2462,7 +2467,7 @@ impl<'gc> VM<'gc> {
                     self.pending_throw = Some(thrown);
                     return Value::Undefined;
                 }
-                if Self::is_symbol_value(&ctor_v) {
+                if ctor_v.is_symbol_value() {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
                     err_map.insert(
@@ -2509,7 +2514,7 @@ impl<'gc> VM<'gc> {
                 };
 
                 let coerce_to_number = |vm: &mut VM<'gc>, v: Value<'gc>| -> Option<f64> {
-                    if Self::is_symbol_value(&v) {
+                    if v.is_symbol_value() {
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::from("TypeError"));
                         err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -2564,7 +2569,7 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    if Self::is_symbol_value(&prim) {
+                    if prim.is_symbol_value() {
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::from("TypeError"));
                         err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -2668,7 +2673,7 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(thrown);
                             return Value::Undefined;
                         }
-                        if Self::is_symbol_value(&index_prim) {
+                        if index_prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -2721,7 +2726,7 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
-                        if Self::is_symbol_value(&index_prim) {
+                        if index_prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -2770,7 +2775,7 @@ impl<'gc> VM<'gc> {
             }
             "atomics.isLockFree" => {
                 let size_v = args.first().cloned().unwrap_or(Value::Undefined);
-                if Self::is_symbol_value(&size_v) {
+                if size_v.is_symbol_value() {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
                     err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3055,7 +3060,7 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(thrown);
                             return Value::Undefined;
                         }
-                        if Self::is_symbol_value(&index_prim) {
+                        if index_prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3108,7 +3113,7 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
-                        if Self::is_symbol_value(&index_prim) {
+                        if index_prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3149,7 +3154,7 @@ impl<'gc> VM<'gc> {
                         let _count = if matches!(count_v, Value::Undefined) {
                             f64::INFINITY
                         } else {
-                            if Self::is_symbol_value(&count_v) {
+                            if count_v.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3162,7 +3167,7 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(thrown);
                                 return Value::Undefined;
                             }
-                            if Self::is_symbol_value(&count_prim) {
+                            if count_prim.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3215,7 +3220,7 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
-                            if Self::is_symbol_value(&count_prim) {
+                            if count_prim.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3322,7 +3327,7 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(thrown);
                             return Value::Undefined;
                         }
-                        if Self::is_symbol_value(&index_prim) {
+                        if index_prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3375,7 +3380,7 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
-                        if Self::is_symbol_value(&index_prim) {
+                        if index_prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3413,7 +3418,7 @@ impl<'gc> VM<'gc> {
 
                         let expected = if ta_name == "Int32Array" {
                             let value_v = args.get(2).cloned().unwrap_or(Value::Undefined);
-                            if Self::is_symbol_value(&value_v) {
+                            if value_v.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3425,7 +3430,7 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(thrown);
                                 return Value::Undefined;
                             }
-                            if Self::is_symbol_value(&value_prim) {
+                            if value_prim.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3478,7 +3483,7 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
-                            if Self::is_symbol_value(&value_prim) {
+                            if value_prim.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3488,7 +3493,7 @@ impl<'gc> VM<'gc> {
                             Value::Number(to_int32(to_number(&value_prim)) as f64)
                         } else {
                             let value_v = args.get(2).cloned().unwrap_or(Value::Undefined);
-                            if Self::is_symbol_value(&value_v) {
+                            if value_v.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3502,7 +3507,7 @@ impl<'gc> VM<'gc> {
                         // Coerce timeout for abrupt-completion coverage (e.g. Symbol/object valueOf throws).
                         let timeout_v = args.get(3).cloned().unwrap_or(Value::Undefined);
                         if !matches!(timeout_v, Value::Undefined) {
-                            if Self::is_symbol_value(&timeout_v) {
+                            if timeout_v.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3514,7 +3519,7 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(thrown);
                                 return Value::Undefined;
                             }
-                            if Self::is_symbol_value(&timeout_prim) {
+                            if timeout_prim.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -3567,7 +3572,7 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
-                            if Self::is_symbol_value(&timeout_prim) {
+                            if timeout_prim.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                 err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -5250,7 +5255,9 @@ impl<'gc> VM<'gc> {
                 let mut out = base;
                 for a in args {
                     let prim = self.try_to_primitive(ctx, a, "string");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     out.push_str(&value_to_string(&prim));
                 }
                 Value::from(&out)
@@ -5550,7 +5557,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     proto,
                     Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
-                ) || Self::is_symbol_value(&proto)
+                ) || proto.is_symbol_value()
                 {
                     return Value::Undefined;
                 }
@@ -5796,7 +5803,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.has requires an object");
                     return Value::Undefined;
@@ -5830,7 +5837,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.get requires an object");
                     return Value::Undefined;
@@ -5859,7 +5866,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.set requires an object");
                     return Value::Undefined;
@@ -6011,7 +6018,7 @@ impl<'gc> VM<'gc> {
                     if !matches!(
                         receiver,
                         Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                    ) || Self::is_symbol_value(&receiver)
+                    ) || receiver.is_symbol_value()
                     {
                         return Value::Boolean(false);
                     }
@@ -6079,7 +6086,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.deleteProperty requires an object");
                     return Value::Undefined;
@@ -6174,7 +6181,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.ownKeys requires an object");
                     return Value::Undefined;
@@ -6232,7 +6239,7 @@ impl<'gc> VM<'gc> {
 
                             let mut trap_keys: Vec<String> = Vec::new();
                             for item in &trap_items {
-                                if !matches!(item, Value::String(_)) && !Self::is_symbol_value(item) {
+                                if !matches!(item, Value::String(_)) && !item.is_symbol_value() {
                                     self.throw_type_error(ctx, "ownKeys trap result must contain only strings and symbols");
                                     return Value::Undefined;
                                 }
@@ -6371,7 +6378,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.isExtensible requires an object");
                     return Value::Undefined;
@@ -6436,7 +6443,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.getPrototypeOf requires an object");
                     return Value::Undefined;
@@ -6448,7 +6455,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.getOwnPropertyDescriptor requires an object");
                     return Value::Undefined;
@@ -6464,7 +6471,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.defineProperty requires an object");
                     return Value::Undefined;
@@ -6568,7 +6575,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.preventExtensions requires an object");
                     return Value::Undefined;
@@ -6704,7 +6711,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Reflect.setPrototypeOf requires an object");
                     return Value::Undefined;
@@ -6712,7 +6719,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     proto,
                     Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
-                ) || Self::is_symbol_value(&proto)
+                ) || proto.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Object prototype may only be an Object or null");
                     return Value::Undefined;
@@ -6837,7 +6844,7 @@ impl<'gc> VM<'gc> {
 
                         let mut trap_keys: Vec<String> = Vec::new();
                         for item in &trap_items {
-                            if !matches!(item, Value::String(_)) && !Self::is_symbol_value(item) {
+                            if !matches!(item, Value::String(_)) && !item.is_symbol_value() {
                                 self.throw_type_error(ctx, "ownKeys trap result must contain only strings and symbols");
                                 return Value::Undefined;
                             }
@@ -7009,9 +7016,7 @@ impl<'gc> VM<'gc> {
                 }
 
                 let target = match input {
-                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
-                        if !Self::is_symbol_value(&input) =>
-                    {
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) if !input.is_symbol_value() => {
                         input
                     }
                     _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&input)),
@@ -7076,7 +7081,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     target,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&target)
+                ) || target.is_symbol_value()
                 {
                     return Value::Boolean(false);
                 }
@@ -8794,7 +8799,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     recv,
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                ) || Self::is_symbol_value(&recv)
+                ) || recv.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Promise.prototype.finally requires an object receiver");
                     return Value::Undefined;
@@ -9305,7 +9310,7 @@ impl<'gc> VM<'gc> {
             );
             let receiver_is_proxy = matches!(&setter_receiver, Value::VmObject(map) if map.borrow().contains_key("__proxy_target__"));
 
-            if receiver_is_object_like && !receiver_is_proxy && !receiver_proto_is_proxy && !Self::is_symbol_value(val) {
+            if receiver_is_object_like && !receiver_is_proxy && !receiver_proto_is_proxy && !val.is_symbol_value() {
                 if matches!(
                     val,
                     Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
@@ -12839,10 +12844,11 @@ impl<'gc> VM<'gc> {
             Self::set_property_attributes(&mut bigint_map, "prototype", false, false, false);
             let bigint_ctor = Value::VmObject(new_gc_cell_ptr(ctx, bigint_map));
             // Add constructor back-reference on prototype
-            bigint_proto_ptr.borrow_mut(ctx).insert("constructor".to_string(), bigint_ctor.clone());
+            bigint_proto_ptr
+                .borrow_mut(ctx)
+                .insert("constructor".to_string(), bigint_ctor.clone());
             Self::set_property_attributes(&mut bigint_proto_ptr.borrow_mut(ctx), "constructor", true, false, true);
-            self.globals
-                .insert("BigInt".to_string(), bigint_ctor);
+            self.globals.insert("BigInt".to_string(), bigint_ctor);
         }
         self.regexp_init_prototype(ctx);
 
@@ -13675,7 +13681,7 @@ impl<'gc> VM<'gc> {
         }
 
         // ToString(Symbol) must throw TypeError.
-        if Self::is_symbol_value(&prim) {
+        if prim.is_symbol_value() {
             return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
         }
 
@@ -13692,7 +13698,7 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
         ) {
             let out = self.vm_call_function_value(ctx, &to_string_fn, &prim, &[])?;
-            if Self::is_symbol_value(&out) {
+            if out.is_symbol_value() {
                 return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
             }
             if !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
@@ -13709,7 +13715,7 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
         ) {
             let out = self.vm_call_function_value(ctx, &value_of_fn, &prim, &[])?;
-            if Self::is_symbol_value(&out) {
+            if out.is_symbol_value() {
                 return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
             }
             if !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
@@ -14487,7 +14493,7 @@ impl<'gc> VM<'gc> {
                     if !matches!(
                         target,
                         Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                    ) || Self::is_symbol_value(&target)
+                    ) || target.is_symbol_value()
                     {
                         self.throw_type_error(ctx, "Proxy target must be an object");
                         return Value::Undefined;
@@ -14495,7 +14501,7 @@ impl<'gc> VM<'gc> {
                     if !matches!(
                         handler,
                         Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                    ) || Self::is_symbol_value(&handler)
+                    ) || handler.is_symbol_value()
                     {
                         self.throw_type_error(ctx, "Proxy handler must be an object");
                         return Value::Undefined;
@@ -14638,7 +14644,7 @@ impl<'gc> VM<'gc> {
                 if matches!(
                     arg_array,
                     Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
-                ) || Self::is_symbol_value(&arg_array)
+                ) || arg_array.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "CreateListFromArrayLike called on non-object");
                     return Value::Undefined;
@@ -14728,7 +14734,7 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(thrown);
                             return None;
                         }
-                        if Self::is_symbol_value(&prim) {
+                        if prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -14779,7 +14785,7 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
-                        if Self::is_symbol_value(&prim) {
+                        if prim.is_symbol_value() {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -14893,7 +14899,7 @@ impl<'gc> VM<'gc> {
                 let len = if matches!(length_v, Value::Undefined) {
                     0usize
                 } else {
-                    if Self::is_symbol_value(&length_v) {
+                    if length_v.is_symbol_value() {
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::from("TypeError"));
                         err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -14951,7 +14957,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
 
-                    if Self::is_symbol_value(&prim) {
+                    if prim.is_symbol_value() {
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::from("TypeError"));
                         err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
@@ -16313,7 +16319,7 @@ impl<'gc> VM<'gc> {
             // Number() as function: convert argument to number
             BUILTIN_CTOR_NUMBER => {
                 let arg = args.first().cloned().unwrap_or(Value::Number(0.0));
-                if Self::is_symbol_value(&arg) {
+                if arg.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
                 }
@@ -16384,7 +16390,10 @@ impl<'gc> VM<'gc> {
                         if n.is_finite() && *n == n.trunc() {
                             Value::BigInt(Box::new(num_bigint::BigInt::from(*n as i64)))
                         } else {
-                            self.throw_range_error_object(ctx, "The number is not safe to convert to a BigInt because it is not an integer");
+                            self.throw_range_error_object(
+                                ctx,
+                                "The number is not safe to convert to a BigInt because it is not an integer",
+                            );
                             Value::Undefined
                         }
                     }
@@ -16401,35 +16410,40 @@ impl<'gc> VM<'gc> {
             BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {
                 // Step 1: ToIndex(bits) — must be done BEFORE ToBigInt(bigint)
                 let bits_arg = args.first().cloned().unwrap_or(Value::Undefined);
-                let bits: usize;
-                if matches!(bits_arg, Value::Undefined) {
-                    bits = 0;
+                let bits: usize = if matches!(bits_arg, Value::Undefined) {
+                    0
                 } else {
                     // ToIndex: ToPrimitive first, then reject BigInt/Symbol, then ToIntegerOrInfinity
                     let prim = self.try_to_primitive(ctx, &bits_arg, "number");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     if matches!(prim, Value::BigInt(_)) {
                         self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                         return Value::Undefined;
                     }
-                    if Self::is_symbol_value(&prim) {
+                    if prim.is_symbol_value() {
                         self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                         return Value::Undefined;
                     }
                     let bits_num = to_number(&prim);
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     let integer_index = if bits_num.is_nan() { 0.0 } else { bits_num.trunc() };
-                    if integer_index < 0.0 || integer_index > 9007199254740991.0 || integer_index.is_infinite() {
+                    if !(0.0..=9007199254740991.0).contains(&integer_index) || integer_index.is_infinite() {
                         self.throw_range_error_object(ctx, "Invalid index");
                         return Value::Undefined;
                     }
-                    bits = integer_index as usize;
-                }
+                    integer_index as usize
+                };
 
                 // Step 2: ToBigInt(bigint)
                 let bigint_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let bigint_prim = self.try_to_primitive(ctx, &bigint_arg, "number");
-                if self.pending_throw.is_some() { return Value::Undefined; }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 let as_bigint = match &bigint_prim {
                     Value::BigInt(bi) => (**bi).clone(),
                     Value::Boolean(b) => num_bigint::BigInt::from(if *b { 1 } else { 0 }),
@@ -16540,7 +16554,7 @@ impl<'gc> VM<'gc> {
                 map.insert("__type__".to_string(), Value::from(type_name.as_str()));
                 if let Some(message) = args.first().filter(|value| !matches!(value, Value::Undefined)) {
                     // ToString(message) per spec — must throw TypeError for Symbols
-                    if Self::is_symbol_value(message) {
+                    if message.is_symbol_value() {
                         self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                         return Value::Undefined;
                     }
@@ -16548,7 +16562,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    if Self::is_symbol_value(&prim) {
+                    if prim.is_symbol_value() {
                         self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                         return Value::Undefined;
                     }
@@ -17431,7 +17445,7 @@ impl<'gc> VM<'gc> {
                                             | Value::VmFunction(..)
                                             | Value::VmClosure(..)
                                             | Value::VmNativeFunction(_)
-                                    ) && !Self::is_symbol_value(&v);
+                                    ) && !v.is_symbol_value();
                                     if !is_object_or_null {
                                         self.throw_type_error(ctx, "'getPrototypeOf' on proxy: trap returned neither object nor null");
                                         return Value::Undefined;
@@ -17894,7 +17908,7 @@ impl<'gc> VM<'gc> {
                                             | Value::VmFunction(..)
                                             | Value::VmClosure(..)
                                             | Value::VmNativeFunction(_)
-                                    ) || Self::is_symbol_value(&trap_result)
+                                    ) || trap_result.is_symbol_value()
                                     {
                                         self.throw_type_error(
                                             ctx,
@@ -18180,7 +18194,7 @@ impl<'gc> VM<'gc> {
                 if !matches!(
                     proto,
                     Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
-                ) || Self::is_symbol_value(&proto)
+                ) || proto.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Object prototype may only be an Object or null");
                     return Value::Undefined;
@@ -18421,7 +18435,7 @@ impl<'gc> VM<'gc> {
 
                                     let mut trap_keys: Vec<String> = Vec::new();
                                     for item in &trap_items {
-                                        if !matches!(item, Value::String(_)) && !Self::is_symbol_value(item) {
+                                        if !matches!(item, Value::String(_)) && !item.is_symbol_value() {
                                             self.throw_type_error(ctx, "ownKeys trap result must contain only strings and symbols");
                                             return Value::Undefined;
                                         }
@@ -18948,7 +18962,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_NUMBER => {
                 if let Value::VmObject(obj) = receiver {
                     let arg = args.first().cloned().unwrap_or(Value::Number(0.0));
-                    if Self::is_symbol_value(&arg) {
+                    if arg.is_symbol_value() {
                         self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                         return Value::Undefined;
                     }
@@ -19015,7 +19029,7 @@ impl<'gc> VM<'gc> {
                     borrow.shift_remove("name");
                     borrow.shift_remove("constructor");
                     if let Some(message) = args.first().filter(|value| !matches!(value, Value::Undefined)) {
-                        if Self::is_symbol_value(message) {
+                        if message.is_symbol_value() {
                             self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                             return Value::Undefined;
                         }
@@ -19024,7 +19038,7 @@ impl<'gc> VM<'gc> {
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
-                        if Self::is_symbol_value(&prim) {
+                        if prim.is_symbol_value() {
                             self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
                             return Value::Undefined;
                         }
@@ -19194,6 +19208,7 @@ impl<'gc> VM<'gc> {
             | BUILTIN_NUMBER_ISINTEGER
             | BUILTIN_NUMBER_ISSAFEINTEGER
             | BUILTIN_CTOR_ARRAY
+            | BUILTIN_CTOR_OBJECT
             | BUILTIN_OBJECT_KEYS
             | BUILTIN_OBJECT_VALUES
             | BUILTIN_OBJECT_ENTRIES
@@ -22948,7 +22963,7 @@ impl<'gc> VM<'gc> {
                             self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                             return Value::Undefined;
                         }
-                        if Self::is_symbol_value(radix_arg) {
+                        if radix_arg.is_symbol_value() {
                             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                             return Value::Undefined;
                         }
@@ -24270,14 +24285,6 @@ impl<'gc> VM<'gc> {
         result
     }
 
-    fn is_symbol_value(val: &Value<'gc>) -> bool {
-        match val {
-            Value::Symbol(_) => true,
-            Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
-            _ => false,
-        }
-    }
-
     /// CanonicalNumericIndexString: returns Some(n) if the string is a valid
     /// numeric index string (i.e., ToString(ToNumber(s)) === s), None otherwise.
     fn canonical_numeric_index_string(s: &str) -> Option<f64> {
@@ -24581,7 +24588,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn extract_number_with_coercion(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<f64> {
-        if Self::is_symbol_value(value) {
+        if value.is_symbol_value() {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return None;
         }
@@ -24591,7 +24598,7 @@ impl<'gc> VM<'gc> {
             return None;
         }
 
-        if Self::is_symbol_value(&prim) {
+        if prim.is_symbol_value() {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return None;
         }
@@ -24600,8 +24607,8 @@ impl<'gc> VM<'gc> {
     }
 
     /// ToNumeric(value): returns Value::BigInt or Value::Number after ToPrimitive coercion.
-    fn to_numeric(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
-        if Self::is_symbol_value(value) {
+    fn __to_numeric(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+        if value.is_symbol_value() {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return Ok(Value::Number(f64::NAN));
         }
@@ -24609,7 +24616,7 @@ impl<'gc> VM<'gc> {
         if self.pending_throw.is_some() {
             return Ok(Value::Number(f64::NAN));
         }
-        if Self::is_symbol_value(&prim) {
+        if prim.is_symbol_value() {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return Ok(Value::Number(f64::NAN));
         }
@@ -26820,7 +26827,7 @@ impl<'gc> VM<'gc> {
                                 | Value::VmFunction(..)
                                 | Value::VmClosure(..)
                                 | Value::VmNativeFunction(_)
-                        ) && !Self::is_symbol_value(&out)
+                        ) && !out.is_symbol_value()
                         {
                             return Ok(out);
                         }
@@ -26965,10 +26972,10 @@ impl<'gc> VM<'gc> {
                     let is_object = matches!(
                         first,
                         Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                    ) && !Self::is_symbol_value(first);
+                    ) && !first.is_symbol_value();
                     if !is_object {
                         // Symbol and BigInt both throw TypeError in ToNumber
-                        if Self::is_symbol_value(first) {
+                        if first.is_symbol_value() {
                             let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
                             return Err(self.vm_error_to_js_error(ctx, &err));
                         }
@@ -27175,7 +27182,7 @@ impl<'gc> VM<'gc> {
                                 | Value::VmFunction(..)
                                 | Value::VmClosure(..)
                                 | Value::VmNativeFunction(_)
-                        ) && !Self::is_symbol_value(&ctor_async_gen_proto)
+                        ) && !ctor_async_gen_proto.is_symbol_value()
                         {
                             self.ensure_function_prototype_object(ctx, &wrapped, ctor_async_gen_proto);
                         }
@@ -27353,7 +27360,7 @@ impl<'gc> VM<'gc> {
                                     | Value::VmClosure(..)
                                     | Value::VmNativeFunction(_)
                             )
-                            && !Self::is_symbol_value(&proto)
+                            && !proto.is_symbol_value()
                         {
                             return Some(proto);
                         }
@@ -27411,7 +27418,7 @@ impl<'gc> VM<'gc> {
                 | Value::VmFunction(..)
                 | Value::VmClosure(..)
                 | Value::VmNativeFunction(_)
-        ) && !Self::is_symbol_value(&proto);
+        ) && !proto.is_symbol_value();
 
         Ok(if is_object_prototype {
             Some(proto)

@@ -1,5 +1,39 @@
 use super::*;
 
+/// Returns true if the given TypedArray name is a BigInt variant.
+pub(crate) fn is_bigint_typed_array(name: &str) -> bool {
+    matches!(name, "BigInt64Array" | "BigUint64Array")
+}
+
+/// Truncate a BigInt to a signed 64-bit value (two's complement).
+fn bigint_to_i64(bi: &num_bigint::BigInt) -> i64 {
+    let bytes = bi.to_signed_bytes_le();
+    let mut arr = [0u8; 8];
+    let copy_len = bytes.len().min(8);
+    arr[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    // Sign-extend if the representation is shorter than 8 bytes and negative
+    if bytes.len() < 8 && !bytes.is_empty() && (bytes[bytes.len() - 1] & 0x80) != 0 {
+        for b in arr[copy_len..].iter_mut() {
+            *b = 0xFF;
+        }
+    }
+    i64::from_le_bytes(arr)
+}
+
+/// Truncate a BigInt to an unsigned 64-bit value.
+fn bigint_to_u64(bi: &num_bigint::BigInt) -> u64 {
+    bigint_to_i64(bi) as u64
+}
+
+/// Coerce a BigInt for storage in a BigInt TypedArray (truncate to 64 bits).
+pub(crate) fn coerce_bigint_for_ta(bi: &num_bigint::BigInt, ta_name: &str) -> num_bigint::BigInt {
+    match ta_name {
+        "BigInt64Array" => num_bigint::BigInt::from(bigint_to_i64(bi)),
+        "BigUint64Array" => num_bigint::BigInt::from(bigint_to_u64(bi)),
+        _ => bi.clone(),
+    }
+}
+
 /// Coerce a numeric value according to the TypedArray element type.
 pub(crate) fn coerce_typed_array_value(n: f64, ta_name: &str) -> f64 {
     if n.is_nan() || !n.is_finite() || n == 0.0 {
@@ -303,18 +337,36 @@ impl<'gc> VM<'gc> {
                     };
 
                     // Copy element by element: decode from source, encode to target
+                    let target_is_bigint = is_bigint_typed_array(&ta_name);
+                    let src_is_bigint = is_bigint_typed_array(&src_name);
+                    if target_is_bigint != src_is_bigint {
+                        self.throw_type_error(ctx, "Cannot mix BigInt and other types, use explicit conversions");
+                        return Value::Undefined;
+                    }
                     for i in 0..src_len {
                         let src_base = src_byte_offset + i * src_bpe;
                         let val = Self::decode_typed_element(&src_bytes, src_base, src_bpe, &src_name);
-                        let num = to_number(&val);
-                        // Store in target elements
                         let target_idx = offset + i;
-                        let converted = Self::typed_array_coerce_value(num, &ta_name);
-                        {
-                            let mut t = target_arr.borrow_mut(ctx);
-                            t.elements[target_idx] = Value::Number(converted);
+                        if target_is_bigint {
+                            let bi = match &val {
+                                Value::BigInt(b) => (**b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                            {
+                                let mut t = target_arr.borrow_mut(ctx);
+                                t.elements[target_idx] = Value::BigInt(Box::new(coerced));
+                            }
+                            self.sync_ta_element_to_buffer(ctx, target_arr, target_idx, 0.0, &ta_name);
+                        } else {
+                            let num = to_number(&val);
+                            let converted = Self::typed_array_coerce_value(num, &ta_name);
+                            {
+                                let mut t = target_arr.borrow_mut(ctx);
+                                t.elements[target_idx] = Value::Number(converted);
+                            }
+                            self.sync_ta_element_to_buffer(ctx, target_arr, target_idx, num, &ta_name);
                         }
-                        self.sync_ta_element_to_buffer(ctx, target_arr, target_idx, num, &ta_name);
                     }
                 } else {
                     // Array / array-like / primitive source path
@@ -337,24 +389,41 @@ impl<'gc> VM<'gc> {
                                 return Value::Undefined;
                             }
                             // For string source, copy string indices
+                            let target_is_bigint = is_bigint_typed_array(&ta_name);
                             for i in 0..len {
                                 let v = self.read_named_property(ctx, &source, &i.to_string());
                                 if self.pending_throw.is_some() {
                                     return Value::Undefined;
                                 }
-                                let num = match self.extract_number_with_coercion(ctx, &v) {
-                                    Some(n) => n,
-                                    None => return Value::Undefined,
-                                };
-                                if self.pending_throw.is_some() {
-                                    return Value::Undefined;
+                                if target_is_bigint {
+                                    let bi = match self.value_to_bigint(ctx, &v) {
+                                        Some(b) => b,
+                                        None => return Value::Undefined,
+                                    };
+                                    if self.pending_throw.is_some() {
+                                        return Value::Undefined;
+                                    }
+                                    let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                                    {
+                                        let mut t = target_arr.borrow_mut(ctx);
+                                        t.elements[offset + i] = Value::BigInt(Box::new(coerced));
+                                    }
+                                    self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, 0.0, &ta_name);
+                                } else {
+                                    let num = match self.extract_number_with_coercion(ctx, &v) {
+                                        Some(n) => n,
+                                        None => return Value::Undefined,
+                                    };
+                                    if self.pending_throw.is_some() {
+                                        return Value::Undefined;
+                                    }
+                                    let converted = Self::typed_array_coerce_value(num, &ta_name);
+                                    {
+                                        let mut t = target_arr.borrow_mut(ctx);
+                                        t.elements[offset + i] = Value::Number(converted);
+                                    }
+                                    self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, num, &ta_name);
                                 }
-                                let converted = Self::typed_array_coerce_value(num, &ta_name);
-                                {
-                                    let mut t = target_arr.borrow_mut(ctx);
-                                    t.elements[offset + i] = Value::Number(converted);
-                                }
-                                self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, num, &ta_name);
                             }
                             return Value::Undefined;
                         }
@@ -385,24 +454,41 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
 
+                    let target_is_bigint = is_bigint_typed_array(&ta_name);
                     for i in 0..src_len {
                         let v = self.read_named_property(ctx, &src_obj, &i.to_string());
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
-                        let num = match self.extract_number_with_coercion(ctx, &v) {
-                            Some(n) => n,
-                            None => return Value::Undefined,
-                        };
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
+                        if target_is_bigint {
+                            let bi = match self.value_to_bigint(ctx, &v) {
+                                Some(b) => b,
+                                None => return Value::Undefined,
+                            };
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                            {
+                                let mut t = target_arr.borrow_mut(ctx);
+                                t.elements[offset + i] = Value::BigInt(Box::new(coerced));
+                            }
+                            self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, 0.0, &ta_name);
+                        } else {
+                            let num = match self.extract_number_with_coercion(ctx, &v) {
+                                Some(n) => n,
+                                None => return Value::Undefined,
+                            };
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let converted = Self::typed_array_coerce_value(num, &ta_name);
+                            {
+                                let mut t = target_arr.borrow_mut(ctx);
+                                t.elements[offset + i] = Value::Number(converted);
+                            }
+                            self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, num, &ta_name);
                         }
-                        let converted = Self::typed_array_coerce_value(num, &ta_name);
-                        {
-                            let mut t = target_arr.borrow_mut(ctx);
-                            t.elements[offset + i] = Value::Number(converted);
-                        }
-                        self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, num, &ta_name);
                     }
                 }
                 Value::Undefined
@@ -802,12 +888,24 @@ impl<'gc> VM<'gc> {
                     (name, bpe)
                 };
 
-                // Convert fill value to Number (ToNumber with coercion)
+                // Convert fill value to Number/BigInt depending on TA type
                 let fill_val = args.first().cloned().unwrap_or(Value::Undefined);
-                let num = match self.extract_number_with_coercion(ctx, &fill_val) {
-                    Some(n) => n,
-                    None => return Value::Undefined,
-                };
+                let bigint_fill: Option<num_bigint::BigInt>;
+                let num: f64;
+                if is_bigint_typed_array(&ta_name) {
+                    let bi = match self.value_to_bigint(ctx, &fill_val) {
+                        Some(b) => b,
+                        None => return Value::Undefined,
+                    };
+                    bigint_fill = Some(bi);
+                    num = 0.0;
+                } else {
+                    bigint_fill = None;
+                    num = match self.extract_number_with_coercion(ctx, &fill_val) {
+                        Some(n) => n,
+                        None => return Value::Undefined,
+                    };
+                }
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
@@ -818,7 +916,6 @@ impl<'gc> VM<'gc> {
                 }
 
                 let len = arr.borrow().elements.len();
-                let converted = Self::typed_array_coerce_value(num, &ta_name);
 
                 // ToInteger for start
                 let start_raw = if let Some(s) = args.get(1) {
@@ -878,11 +975,21 @@ impl<'gc> VM<'gc> {
                 };
 
                 for i in start..end {
-                    {
-                        let mut a = arr.borrow_mut(ctx);
-                        a.elements[i] = Value::Number(converted);
+                    if let Some(ref bi) = bigint_fill {
+                        let coerced = coerce_bigint_for_ta(bi, &ta_name);
+                        {
+                            let mut a = arr.borrow_mut(ctx);
+                            a.elements[i] = Value::BigInt(Box::new(coerced));
+                        }
+                        self.sync_ta_element_to_buffer(ctx, arr, i, 0.0, &ta_name);
+                    } else {
+                        let converted = Self::typed_array_coerce_value(num, &ta_name);
+                        {
+                            let mut a = arr.borrow_mut(ctx);
+                            a.elements[i] = Value::Number(converted);
+                        }
+                        self.sync_ta_element_to_buffer(ctx, arr, i, num, &ta_name);
                     }
-                    self.sync_ta_element_to_buffer(ctx, arr, i, num, &ta_name);
                 }
                 this_val
             }
@@ -919,92 +1026,168 @@ impl<'gc> VM<'gc> {
                     (name, bpe)
                 };
 
-                let mut elements: Vec<f64> = {
-                    let a = arr.borrow();
-                    a.elements.iter().map(|v| to_number(v)).collect()
-                };
-
                 let has_custom = matches!(&comparefn, Some(v) if !matches!(v, Value::Undefined));
 
-                if has_custom {
-                    let cmp_fn = comparefn.unwrap();
-                    let mut had_error = false;
-                    elements.sort_by(|a, b| {
-                        if had_error {
-                            return std::cmp::Ordering::Equal;
-                        }
-                        let result = self.vm_call_function_value(ctx, &cmp_fn, &Value::Undefined, &[Value::Number(*a), Value::Number(*b)]);
-                        match result {
-                            Ok(v) => {
-                                // ToNumber coercion of result
-                                let n = match self.extract_number_with_coercion(ctx, &v) {
-                                    Some(n) => n,
-                                    None => {
+                if is_bigint_typed_array(&ta_name) {
+                    // BigInt sort path
+                    let mut bi_elements: Vec<num_bigint::BigInt> = {
+                        let a = arr.borrow();
+                        a.elements
+                            .iter()
+                            .map(|v| match v {
+                                Value::BigInt(bi) => (**bi).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            })
+                            .collect()
+                    };
+
+                    if has_custom {
+                        let cmp_fn = comparefn.unwrap();
+                        let mut had_error = false;
+                        bi_elements.sort_by(|a, b| {
+                            if had_error {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            let result = self.vm_call_function_value(
+                                ctx,
+                                &cmp_fn,
+                                &Value::Undefined,
+                                &[Value::BigInt(Box::new(a.clone())), Value::BigInt(Box::new(b.clone()))],
+                            );
+                            match result {
+                                Ok(v) => {
+                                    let n = match self.extract_number_with_coercion(ctx, &v) {
+                                        Some(n) => n,
+                                        None => {
+                                            had_error = true;
+                                            return std::cmp::Ordering::Equal;
+                                        }
+                                    };
+                                    if self.pending_throw.is_some() {
                                         had_error = true;
                                         return std::cmp::Ordering::Equal;
                                     }
-                                };
-                                if self.pending_throw.is_some() {
+                                    if n.is_nan() {
+                                        std::cmp::Ordering::Equal
+                                    } else if n < 0.0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0.0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                                Err(e) => {
                                     had_error = true;
-                                    return std::cmp::Ordering::Equal;
-                                }
-                                if n.is_nan() {
-                                    std::cmp::Ordering::Equal
-                                } else if n < 0.0 {
-                                    std::cmp::Ordering::Less
-                                } else if n > 0.0 {
-                                    std::cmp::Ordering::Greater
-                                } else {
+                                    self.set_pending_throw_from_error(&e);
                                     std::cmp::Ordering::Equal
                                 }
                             }
-                            Err(e) => {
-                                had_error = true;
-                                self.set_pending_throw_from_error(&e);
-                                std::cmp::Ordering::Equal
-                            }
+                        });
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
                         }
-                    });
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
+                    } else {
+                        bi_elements.sort_by(|a, b| a.cmp(b));
+                    }
+
+                    {
+                        let mut a = arr.borrow_mut(ctx);
+                        for (i, bi) in bi_elements.iter().enumerate() {
+                            let coerced = coerce_bigint_for_ta(bi, &ta_name);
+                            a.elements[i] = Value::BigInt(Box::new(coerced));
+                        }
+                    }
+                    for i in 0..bi_elements.len() {
+                        self.sync_ta_element_to_buffer(ctx, arr, i, 0.0, &ta_name);
                     }
                 } else {
-                    // Default numeric sort: NaN at end, -0 before +0
-                    elements.sort_by(|a, b| {
-                        if a.is_nan() && b.is_nan() {
-                            return std::cmp::Ordering::Equal;
-                        }
-                        if a.is_nan() {
-                            return std::cmp::Ordering::Greater;
-                        }
-                        if b.is_nan() {
-                            return std::cmp::Ordering::Less;
-                        }
-                        if *a == 0.0 && *b == 0.0 {
-                            let a_neg = a.is_sign_negative();
-                            let b_neg = b.is_sign_negative();
-                            if a_neg && !b_neg {
-                                return std::cmp::Ordering::Less;
+                    // Number sort path
+                    let mut elements: Vec<f64> = {
+                        let a = arr.borrow();
+                        a.elements.iter().map(|v| to_number(v)).collect()
+                    };
+
+                    if has_custom {
+                        let cmp_fn = comparefn.unwrap();
+                        let mut had_error = false;
+                        elements.sort_by(|a, b| {
+                            if had_error {
+                                return std::cmp::Ordering::Equal;
                             }
-                            if !a_neg && b_neg {
+                            let result =
+                                self.vm_call_function_value(ctx, &cmp_fn, &Value::Undefined, &[Value::Number(*a), Value::Number(*b)]);
+                            match result {
+                                Ok(v) => {
+                                    let n = match self.extract_number_with_coercion(ctx, &v) {
+                                        Some(n) => n,
+                                        None => {
+                                            had_error = true;
+                                            return std::cmp::Ordering::Equal;
+                                        }
+                                    };
+                                    if self.pending_throw.is_some() {
+                                        had_error = true;
+                                        return std::cmp::Ordering::Equal;
+                                    }
+                                    if n.is_nan() {
+                                        std::cmp::Ordering::Equal
+                                    } else if n < 0.0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0.0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                                Err(e) => {
+                                    had_error = true;
+                                    self.set_pending_throw_from_error(&e);
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                        });
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                    } else {
+                        // Default numeric sort: NaN at end, -0 before +0
+                        elements.sort_by(|a, b| {
+                            if a.is_nan() && b.is_nan() {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            if a.is_nan() {
                                 return std::cmp::Ordering::Greater;
                             }
-                            return std::cmp::Ordering::Equal;
-                        }
-                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                }
-
-                // Write back sorted elements and sync to buffer
-                {
-                    let mut a = arr.borrow_mut(ctx);
-                    for (i, &num) in elements.iter().enumerate() {
-                        let converted = Self::typed_array_coerce_value(num, &ta_name);
-                        a.elements[i] = Value::Number(converted);
+                            if b.is_nan() {
+                                return std::cmp::Ordering::Less;
+                            }
+                            if *a == 0.0 && *b == 0.0 {
+                                let a_neg = a.is_sign_negative();
+                                let b_neg = b.is_sign_negative();
+                                if a_neg && !b_neg {
+                                    return std::cmp::Ordering::Less;
+                                }
+                                if !a_neg && b_neg {
+                                    return std::cmp::Ordering::Greater;
+                                }
+                                return std::cmp::Ordering::Equal;
+                            }
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                     }
-                }
-                for (i, &num) in elements.iter().enumerate() {
-                    self.sync_ta_element_to_buffer(ctx, arr, i, num, &ta_name);
+
+                    // Write back sorted elements and sync to buffer
+                    {
+                        let mut a = arr.borrow_mut(ctx);
+                        for (i, &num) in elements.iter().enumerate() {
+                            let converted = Self::typed_array_coerce_value(num, &ta_name);
+                            a.elements[i] = Value::Number(converted);
+                        }
+                    }
+                    for (i, &num) in elements.iter().enumerate() {
+                        self.sync_ta_element_to_buffer(ctx, arr, i, num, &ta_name);
+                    }
                 }
                 this_val
             }
@@ -1099,12 +1282,27 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     if let Value::VmArray(res_arr) = &result {
-                        let num = to_number(&mapped);
-                        let coerced = Value::Number(Self::typed_array_coerce_value(num, &res_ta_name));
-                        if k < res_arr.borrow().elements.len() {
-                            res_arr.borrow_mut(ctx).elements[k] = coerced;
+                        if is_bigint_typed_array(&res_ta_name) {
+                            let bi = match &mapped {
+                                Value::BigInt(b) => (**b).clone(),
+                                _ => match self.value_to_bigint(ctx, &mapped) {
+                                    Some(b) => b,
+                                    None => return Value::Undefined,
+                                },
+                            };
+                            let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
+                            if k < res_arr.borrow().elements.len() {
+                                res_arr.borrow_mut(ctx).elements[k] = Value::BigInt(Box::new(coerced));
+                            }
+                            self.sync_ta_element_to_buffer(ctx, res_arr, k, 0.0, &res_ta_name);
+                        } else {
+                            let num = to_number(&mapped);
+                            let coerced = Value::Number(Self::typed_array_coerce_value(num, &res_ta_name));
+                            if k < res_arr.borrow().elements.len() {
+                                res_arr.borrow_mut(ctx).elements[k] = coerced;
+                            }
+                            self.sync_ta_element_to_buffer(ctx, res_arr, k, num, &res_ta_name);
                         }
-                        self.sync_ta_element_to_buffer(ctx, res_arr, k, num, &res_ta_name);
                     }
                 }
                 result
@@ -1136,13 +1334,27 @@ impl<'gc> VM<'gc> {
                         .get("__typedarray_name__")
                         .map(value_to_string)
                         .unwrap_or_default();
-                    for (i, v) in elements.iter().enumerate() {
-                        let num = to_number(v);
-                        let coerced = Value::Number(Self::typed_array_coerce_value(num, &ta_name));
-                        if i < res_arr.borrow().elements.len() {
-                            res_arr.borrow_mut(ctx).elements[i] = coerced.clone();
+                    if is_bigint_typed_array(&ta_name) {
+                        for (i, v) in elements.iter().enumerate() {
+                            let bi = match v {
+                                Value::BigInt(b) => (**b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                            if i < res_arr.borrow().elements.len() {
+                                res_arr.borrow_mut(ctx).elements[i] = Value::BigInt(Box::new(coerced));
+                            }
+                            self.sync_ta_element_to_buffer(ctx, res_arr, i, 0.0, &ta_name);
                         }
-                        self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &ta_name);
+                    } else {
+                        for (i, v) in elements.iter().enumerate() {
+                            let num = to_number(v);
+                            let coerced = Value::Number(Self::typed_array_coerce_value(num, &ta_name));
+                            if i < res_arr.borrow().elements.len() {
+                                res_arr.borrow_mut(ctx).elements[i] = coerced.clone();
+                            }
+                            self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &ta_name);
+                        }
                     }
                 }
                 result
@@ -1287,12 +1499,24 @@ impl<'gc> VM<'gc> {
                             vec![]
                         };
                         for (i, v) in src_elements.iter().enumerate() {
-                            let num = to_number(v);
-                            let coerced = Value::Number(Self::typed_array_coerce_value(num, &res_ta_name));
-                            if i < res_arr.borrow().elements.len() {
-                                res_arr.borrow_mut(ctx).elements[i] = coerced;
+                            if is_bigint_typed_array(&res_ta_name) {
+                                let bi = match v {
+                                    Value::BigInt(b) => (**b).clone(),
+                                    _ => num_bigint::BigInt::from(0),
+                                };
+                                let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
+                                if i < res_arr.borrow().elements.len() {
+                                    res_arr.borrow_mut(ctx).elements[i] = Value::BigInt(Box::new(coerced));
+                                }
+                                self.sync_ta_element_to_buffer(ctx, res_arr, i, 0.0, &res_ta_name);
+                            } else {
+                                let num = to_number(v);
+                                let coerced = Value::Number(Self::typed_array_coerce_value(num, &res_ta_name));
+                                if i < res_arr.borrow().elements.len() {
+                                    res_arr.borrow_mut(ctx).elements[i] = coerced;
+                                }
+                                self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &res_ta_name);
                             }
-                            self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &res_ta_name);
                         }
                     }
                 }
@@ -1430,8 +1654,14 @@ impl<'gc> VM<'gc> {
                         let mut bb = buf_bytes.borrow_mut(ctx);
                         let arr_borrow = arr.borrow();
                         for i in 0..arr_borrow.elements.len() {
-                            let num = to_number(&arr_borrow.elements[i]);
-                            Self::encode_typed_element(&mut bb.elements, byte_offset + i * bpe, bpe, &ta_name, num);
+                            if is_bigint_typed_array(&ta_name) {
+                                if let Value::BigInt(bi) = &arr_borrow.elements[i] {
+                                    Self::encode_typed_element_bigint(&mut bb.elements, byte_offset + i * bpe, &ta_name, bi);
+                                }
+                            } else {
+                                let num = to_number(&arr_borrow.elements[i]);
+                                Self::encode_typed_element(&mut bb.elements, byte_offset + i * bpe, bpe, &ta_name, num);
+                            }
                         }
                     }
                 }
@@ -1801,6 +2031,20 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Encode a BigInt value into buffer bytes for BigInt64Array/BigUint64Array.
+    pub(super) fn encode_typed_element_bigint(bytes: &mut [Value<'gc>], base: usize, ta_name: &str, bigint_val: &num_bigint::BigInt) {
+        let raw_bytes = match ta_name {
+            "BigInt64Array" => bigint_to_i64(bigint_val).to_ne_bytes(),
+            "BigUint64Array" => bigint_to_u64(bigint_val).to_ne_bytes(),
+            _ => return,
+        };
+        for (j, &b) in raw_bytes.iter().enumerate() {
+            if base + j < bytes.len() {
+                bytes[base + j] = Value::Number(b as f64);
+            }
+        }
+    }
+
     /// Decode a typed element from buffer bytes at a given base offset.
     pub(super) fn decode_typed_element(bytes: &[Value<'gc>], base: usize, _bpe: usize, ta_name: &str) -> Value<'gc> {
         match ta_name {
@@ -1837,6 +2081,16 @@ impl<'gc> VM<'gc> {
             "Float64Array" => {
                 let arr8: [u8; 8] = core::array::from_fn(|j| to_number(bytes.get(base + j).unwrap_or(&Value::Number(0.0))) as u8);
                 Value::Number(f64::from_ne_bytes(arr8))
+            }
+            "BigInt64Array" => {
+                let arr8: [u8; 8] = core::array::from_fn(|j| to_number(bytes.get(base + j).unwrap_or(&Value::Number(0.0))) as u8);
+                let val = i64::from_ne_bytes(arr8);
+                Value::BigInt(Box::new(num_bigint::BigInt::from(val)))
+            }
+            "BigUint64Array" => {
+                let arr8: [u8; 8] = core::array::from_fn(|j| to_number(bytes.get(base + j).unwrap_or(&Value::Number(0.0))) as u8);
+                let val = u64::from_ne_bytes(arr8);
+                Value::BigInt(Box::new(num_bigint::BigInt::from(val)))
             }
             _ => {
                 let b = to_number(bytes.get(base).unwrap_or(&Value::Number(0.0))) as u8;
@@ -1933,6 +2187,21 @@ impl<'gc> VM<'gc> {
                     for (j, b) in bytes.iter().enumerate() {
                         if base + j < bb.elements.len() {
                             bb.elements[base + j] = Value::Number(*b as f64);
+                        }
+                    }
+                }
+                "BigInt64Array" | "BigUint64Array" => {
+                    let bigint_val = arr.borrow().elements.get(idx).cloned();
+                    if let Some(Value::BigInt(bi)) = bigint_val {
+                        let raw_bytes = if ta_name == "BigInt64Array" {
+                            bigint_to_i64(&bi).to_ne_bytes()
+                        } else {
+                            bigint_to_u64(&bi).to_ne_bytes()
+                        };
+                        for (j, &b) in raw_bytes.iter().enumerate() {
+                            if base + j < bb.elements.len() {
+                                bb.elements[base + j] = Value::Number(b as f64);
+                            }
                         }
                     }
                 }
@@ -2040,7 +2309,7 @@ impl<'gc> VM<'gc> {
         let bytes_per_element = match id {
             BUILTIN_CTOR_INT16ARRAY | BUILTIN_CTOR_UINT16ARRAY => 2usize,
             BUILTIN_CTOR_INT32ARRAY | BUILTIN_CTOR_UINT32ARRAY | BUILTIN_CTOR_FLOAT32ARRAY => 4usize,
-            BUILTIN_CTOR_FLOAT64ARRAY => 8usize,
+            BUILTIN_CTOR_FLOAT64ARRAY | BUILTIN_CTOR_BIGINT64ARRAY | BUILTIN_CTOR_BIGUINT64ARRAY => 8usize,
             _ => 1usize,
         };
         let typedarray_name = match id {
@@ -2053,8 +2322,11 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_UINT32ARRAY => "Uint32Array",
             BUILTIN_CTOR_FLOAT32ARRAY => "Float32Array",
             BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
+            BUILTIN_CTOR_BIGINT64ARRAY => "BigInt64Array",
+            BUILTIN_CTOR_BIGUINT64ARRAY => "BigUint64Array",
             _ => "TypedArray",
         };
+        let is_bigint_ta = is_bigint_typed_array(typedarray_name);
 
         // Get prototype from constructor for __proto__ on instances
         let ta_instance_proto = self
@@ -2072,27 +2344,53 @@ impl<'gc> VM<'gc> {
         if let Some(Value::VmArray(src_arr)) = args.first()
             && src_arr.borrow().props.contains_key("__typedarray_name__")
         {
+            let src_ta_name = src_arr
+                .borrow()
+                .props
+                .get("__typedarray_name__")
+                .map(value_to_string)
+                .unwrap_or_default();
+            let src_is_bigint = is_bigint_typed_array(&src_ta_name);
+            // Mixing BigInt and non-BigInt TAs is a TypeError
+            if is_bigint_ta != src_is_bigint {
+                self.throw_type_error(ctx, "Cannot mix BigInt and other types, use explicit conversions");
+                return Value::Undefined;
+            }
             let elements_clone: Vec<Value<'gc>> = src_arr.borrow().elements.clone();
             let len = elements_clone.len();
-            // Coerce each source element to the typed numeric representation
             let mut coerced_elements = Vec::with_capacity(len);
-            let mut numeric_vals = Vec::with_capacity(len);
-            for elements_clone_i in elements_clone.iter().take(len) {
-                let v = elements_clone_i;
-                let num = match v {
-                    Value::VmObject(_) | Value::VmArray(_) => match self.extract_number_with_coercion(ctx, v) {
-                        Some(n) => n,
-                        None => {
-                            if self.pending_throw.is_some() {
-                                return Value::Undefined;
+            let mut bigint_vals: Vec<num_bigint::BigInt> = Vec::new();
+            let mut numeric_vals: Vec<f64> = Vec::new();
+            if is_bigint_ta {
+                for v in elements_clone.iter() {
+                    let bi = match self.value_to_bigint(ctx, v) {
+                        Some(b) => b,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let coerced = coerce_bigint_for_ta(&bi, typedarray_name);
+                    coerced_elements.push(Value::BigInt(Box::new(coerced)));
+                    bigint_vals.push(bi);
+                }
+            } else {
+                for v in elements_clone.iter() {
+                    let num = match v {
+                        Value::VmObject(_) | Value::VmArray(_) => match self.extract_number_with_coercion(ctx, v) {
+                            Some(n) => n,
+                            None => {
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                f64::NAN
                             }
-                            f64::NAN
-                        }
-                    },
-                    _ => to_number(v),
-                };
-                numeric_vals.push(num);
-                coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
+                        },
+                        _ => to_number(v),
+                    };
+                    numeric_vals.push(num);
+                    coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
+                }
             }
             let mut data = VmArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
@@ -2102,9 +2400,14 @@ impl<'gc> VM<'gc> {
             buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
             buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
-            for (i, &numeric_vals_i) in numeric_vals.iter().enumerate().take(len) {
-                let num = numeric_vals_i;
-                Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+            if is_bigint_ta {
+                for (i, bi) in bigint_vals.iter().enumerate() {
+                    Self::encode_typed_element_bigint(&mut bytes, i * bytes_per_element, typedarray_name, bi);
+                }
+            } else {
+                for (i, &num) in numeric_vals.iter().enumerate().take(len) {
+                    Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+                }
             }
             buf_map.insert(
                 "__buffer_bytes__".to_string(),
@@ -2191,21 +2494,37 @@ impl<'gc> VM<'gc> {
             };
             let len = elements.len();
             let mut coerced_elements = Vec::with_capacity(len);
-            let mut numeric_vals = Vec::with_capacity(len);
-            for elem in elements.iter() {
-                if elem.is_symbol_value() {
-                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                    return Value::Undefined;
+            let mut bigint_vals: Vec<num_bigint::BigInt> = Vec::new();
+            let mut numeric_vals: Vec<f64> = Vec::new();
+            if is_bigint_ta {
+                for elem in elements.iter() {
+                    let bi = match self.value_to_bigint(ctx, elem) {
+                        Some(b) => b,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let coerced = coerce_bigint_for_ta(&bi, typedarray_name);
+                    coerced_elements.push(Value::BigInt(Box::new(coerced)));
+                    bigint_vals.push(bi);
                 }
-                let num = match self.extract_number_with_coercion(ctx, elem) {
-                    Some(n) => n,
-                    None => return Value::Undefined,
-                };
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
+            } else {
+                for elem in elements.iter() {
+                    if elem.is_symbol_value() {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
+                    let num = match self.extract_number_with_coercion(ctx, elem) {
+                        Some(n) => n,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    numeric_vals.push(num);
+                    coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                 }
-                numeric_vals.push(num);
-                coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
             }
             let mut data = VmArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
@@ -2214,8 +2533,14 @@ impl<'gc> VM<'gc> {
             buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
             buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
-            for (i, &num) in numeric_vals.iter().enumerate() {
-                Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+            if is_bigint_ta {
+                for (i, bi) in bigint_vals.iter().enumerate() {
+                    Self::encode_typed_element_bigint(&mut bytes, i * bytes_per_element, typedarray_name, bi);
+                }
+            } else {
+                for (i, &num) in numeric_vals.iter().enumerate() {
+                    Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+                }
             }
             buf_map.insert(
                 "__buffer_bytes__".to_string(),
@@ -2378,6 +2703,8 @@ impl<'gc> VM<'gc> {
                         elems.push(val);
                     }
                     elems
+                } else if is_bigint_ta {
+                    vec![Value::BigInt(Box::new(num_bigint::BigInt::from(0))); initial_len]
                 } else {
                     vec![Value::Number(0.0); initial_len]
                 };
@@ -2496,21 +2823,37 @@ impl<'gc> VM<'gc> {
             let len = elements.len();
             // Coerce elements to typed numeric representation (calls valueOf/toString)
             let mut coerced_elements = Vec::with_capacity(len);
-            let mut numeric_vals = Vec::with_capacity(len);
-            for elem in elements.iter() {
-                if elem.is_symbol_value() {
-                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                    return Value::Undefined;
+            let mut bigint_vals: Vec<num_bigint::BigInt> = Vec::new();
+            let mut numeric_vals: Vec<f64> = Vec::new();
+            if is_bigint_ta {
+                for elem in elements.iter() {
+                    let bi = match self.value_to_bigint(ctx, elem) {
+                        Some(b) => b,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let coerced = coerce_bigint_for_ta(&bi, typedarray_name);
+                    coerced_elements.push(Value::BigInt(Box::new(coerced)));
+                    bigint_vals.push(bi);
                 }
-                let num = match self.extract_number_with_coercion(ctx, elem) {
-                    Some(n) => n,
-                    None => return Value::Undefined,
-                };
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
+            } else {
+                for elem in elements.iter() {
+                    if elem.is_symbol_value() {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
+                    let num = match self.extract_number_with_coercion(ctx, elem) {
+                        Some(n) => n,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    numeric_vals.push(num);
+                    coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                 }
-                numeric_vals.push(num);
-                coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
             }
             let mut data = VmArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
@@ -2520,8 +2863,14 @@ impl<'gc> VM<'gc> {
             buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
             buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
-            for (i, &num) in numeric_vals.iter().enumerate() {
-                Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+            if is_bigint_ta {
+                for (i, bi) in bigint_vals.iter().enumerate() {
+                    Self::encode_typed_element_bigint(&mut bytes, i * bytes_per_element, typedarray_name, bi);
+                }
+            } else {
+                for (i, &num) in numeric_vals.iter().enumerate() {
+                    Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+                }
             }
             buf_map.insert(
                 "__buffer_bytes__".to_string(),
@@ -2610,21 +2959,37 @@ impl<'gc> VM<'gc> {
                 };
                 let len = elements.len();
                 let mut coerced_elements = Vec::with_capacity(len);
-                let mut numeric_vals = Vec::with_capacity(len);
-                for elem in elements.iter() {
-                    if elem.is_symbol_value() {
-                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                        return Value::Undefined;
+                let mut bigint_vals: Vec<num_bigint::BigInt> = Vec::new();
+                let mut numeric_vals: Vec<f64> = Vec::new();
+                if is_bigint_ta {
+                    for elem in elements.iter() {
+                        let bi = match self.value_to_bigint(ctx, elem) {
+                            Some(b) => b,
+                            None => return Value::Undefined,
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let coerced = coerce_bigint_for_ta(&bi, typedarray_name);
+                        coerced_elements.push(Value::BigInt(Box::new(coerced)));
+                        bigint_vals.push(bi);
                     }
-                    let num = match self.extract_number_with_coercion(ctx, elem) {
-                        Some(n) => n,
-                        None => return Value::Undefined,
-                    };
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
+                } else {
+                    for elem in elements.iter() {
+                        if elem.is_symbol_value() {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                            return Value::Undefined;
+                        }
+                        let num = match self.extract_number_with_coercion(ctx, elem) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        numeric_vals.push(num);
+                        coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                     }
-                    numeric_vals.push(num);
-                    coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                 }
                 let mut data = VmArrayData::new(coerced_elements);
                 data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
@@ -2633,8 +2998,14 @@ impl<'gc> VM<'gc> {
                 buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
                 buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
                 let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
-                for (i, &num) in numeric_vals.iter().enumerate() {
-                    Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+                if is_bigint_ta {
+                    for (i, bi) in bigint_vals.iter().enumerate() {
+                        Self::encode_typed_element_bigint(&mut bytes, i * bytes_per_element, typedarray_name, bi);
+                    }
+                } else {
+                    for (i, &num) in numeric_vals.iter().enumerate() {
+                        Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
+                    }
                 }
                 buf_map.insert(
                     "__buffer_bytes__".to_string(),
@@ -2687,7 +3058,12 @@ impl<'gc> VM<'gc> {
                 }
             }
         };
-        let mut data = VmArrayData::new(vec![Value::Number(0.0); length]);
+        let default_elem = if is_bigint_ta {
+            Value::BigInt(Box::new(num_bigint::BigInt::from(0)))
+        } else {
+            Value::Number(0.0)
+        };
+        let mut data = VmArrayData::new(vec![default_elem; length]);
         data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         let mut buf_map = IndexMap::new();
@@ -2934,6 +3310,8 @@ impl<'gc> VM<'gc> {
             ("Uint32Array", BUILTIN_CTOR_UINT32ARRAY, 4.0),
             ("Float32Array", BUILTIN_CTOR_FLOAT32ARRAY, 4.0),
             ("Float64Array", BUILTIN_CTOR_FLOAT64ARRAY, 8.0),
+            ("BigInt64Array", BUILTIN_CTOR_BIGINT64ARRAY, 8.0),
+            ("BigUint64Array", BUILTIN_CTOR_BIGUINT64ARRAY, 8.0),
         ];
         for &(name, ctor_id, bpe) in ta_types {
             let mut ctor_map = IndexMap::new();
@@ -2964,44 +3342,6 @@ impl<'gc> VM<'gc> {
             ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
             let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
             // constructor backref (must point to same GC object)
-            if let Value::VmObject(p) = &per_proto_obj {
-                p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
-                p.borrow_mut(ctx)
-                    .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
-            }
-            self.globals.insert(name.to_string(), ctor_val);
-        }
-
-        // BigInt typed arrays (host-fn based)
-        for &(name, host_fn) in &[("BigInt64Array", "typedarray.bigint64"), ("BigUint64Array", "typedarray.biguint64")] {
-            let mut ctor_map = IndexMap::new();
-            ctor_map.insert("__host_fn__".to_string(), Value::from(host_fn));
-            ctor_map.insert("__constructible__".to_string(), Value::Boolean(true));
-            ctor_map.insert("name".to_string(), Value::from(name));
-            ctor_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonconfigurable_name__".to_string(), Value::Boolean(true));
-            ctor_map.insert("length".to_string(), Value::Number(0.0));
-            ctor_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonconfigurable_length__".to_string(), Value::Boolean(true));
-            ctor_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
-            ctor_map.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            let mut per_proto = IndexMap::new();
-            per_proto.insert("__proto__".to_string(), ta_proto.clone());
-            per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(8.0));
-            per_proto.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            per_proto.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            per_proto.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
-            ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
-            ctor_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
-            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
             if let Value::VmObject(p) = &per_proto_obj {
                 p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
                 p.borrow_mut(ctx)

@@ -13,6 +13,7 @@ mod uri;
 
 pub(crate) use regexp::get_or_compile_regex;
 use typedarray::coerce_typed_array_value;
+use typedarray::{coerce_bigint_for_ta, is_bigint_typed_array};
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -303,6 +304,8 @@ pub(super) const BUILTIN_CTOR_INT32ARRAY: FunctionID = 232;
 pub(super) const BUILTIN_CTOR_UINT32ARRAY: FunctionID = 233;
 pub(super) const BUILTIN_CTOR_FLOAT32ARRAY: FunctionID = 234;
 pub(super) const BUILTIN_CTOR_FLOAT64ARRAY: FunctionID = 235;
+pub(super) const BUILTIN_CTOR_BIGINT64ARRAY: FunctionID = 264;
+pub(super) const BUILTIN_CTOR_BIGUINT64ARRAY: FunctionID = 265;
 const BUILTIN_CTOR_PROMISE: FunctionID = 236;
 const BUILTIN_PROMISE_RESOLVE: FunctionID = 237;
 const BUILTIN_PROMISE_ALL: FunctionID = 238;
@@ -1649,6 +1652,8 @@ impl<'gc> VM<'gc> {
                     | BUILTIN_CTOR_UINT32ARRAY
                     | BUILTIN_CTOR_FLOAT32ARRAY
                     | BUILTIN_CTOR_FLOAT64ARRAY
+                    | BUILTIN_CTOR_BIGINT64ARRAY
+                    | BUILTIN_CTOR_BIGUINT64ARRAY
                     | BUILTIN_CTOR_PROXY
                     | BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE
             ),
@@ -2301,6 +2306,8 @@ impl<'gc> VM<'gc> {
                             | BUILTIN_CTOR_UINT32ARRAY
                             | BUILTIN_CTOR_FLOAT32ARRAY
                             | BUILTIN_CTOR_FLOAT64ARRAY
+                            | BUILTIN_CTOR_BIGINT64ARRAY
+                            | BUILTIN_CTOR_BIGUINT64ARRAY
                     )) || matches!(ctor, Value::VmObject(o)
                             if get_function_id(*o)
                                 .map(|id| matches!(
@@ -2315,6 +2322,8 @@ impl<'gc> VM<'gc> {
                                         | BUILTIN_CTOR_UINT32ARRAY
                                         | BUILTIN_CTOR_FLOAT32ARRAY
                                         | BUILTIN_CTOR_FLOAT64ARRAY
+                                        | BUILTIN_CTOR_BIGINT64ARRAY
+                                        | BUILTIN_CTOR_BIGUINT64ARRAY
                                 ))
                                 .unwrap_or(false))
                 };
@@ -5938,7 +5947,17 @@ impl<'gc> VM<'gc> {
                     if is_same {
                         // TypedArraySetElement: spec always calls ToNumber/ToBigInt,
                         // even for invalid indices (only the actual store is skipped).
-                        let _ = self.extract_number_with_coercion(ctx, &value);
+                        let ta_name = arr
+                            .borrow()
+                            .props
+                            .get("__typedarray_name__")
+                            .map(|v| value_to_string(v))
+                            .unwrap_or_default();
+                        if is_bigint_typed_array(&ta_name) {
+                            let _ = self.value_to_bigint(ctx, &value);
+                        } else {
+                            let _ = self.extract_number_with_coercion(ctx, &value);
+                        }
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
@@ -9688,6 +9707,25 @@ impl<'gc> VM<'gc> {
                     .get("__typedarray_name__")
                     .map(|v| value_to_string(v))
                     .unwrap_or_default();
+                if is_bigint_typed_array(&ta_name) {
+                    let bi = match self.value_to_bigint(ctx, val) {
+                        Some(b) => b,
+                        None => return Ok(val.clone()),
+                    };
+                    if self.pending_throw.is_some() {
+                        return Ok(val.clone());
+                    }
+                    let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                    let coerced_val = Value::BigInt(Box::new(coerced));
+                    {
+                        let mut a = arr.borrow_mut(ctx);
+                        if idx < a.elements.len() {
+                            a.elements[idx] = coerced_val.clone();
+                        }
+                    }
+                    self.sync_ta_element_to_buffer(ctx, arr, idx, 0.0, &ta_name);
+                    return Ok(coerced_val);
+                }
                 let n = match self.extract_number_with_coercion(ctx, val) {
                     Some(n) => n,
                     None => return Ok(val.clone()),
@@ -11536,7 +11574,6 @@ impl<'gc> VM<'gc> {
         math_map.insert("LOG10E".to_string(), Value::Number(std::f64::consts::LOG10_E));
         math_map.insert("SQRT2".to_string(), Value::Number(std::f64::consts::SQRT_2));
         math_map.insert("SQRT1_2".to_string(), Value::Number(std::f64::consts::FRAC_1_SQRT_2));
-        math_map.insert("@@sym:4".to_string(), Value::from("Math"));
         // Symbol.toStringTag = "Math" (@@sym:4)
         Self::insert_property_with_attributes(&mut math_map, "@@sym:4", &Value::from("Math"), false, false, true);
         for key in ["PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2"] {
@@ -11622,6 +11659,8 @@ impl<'gc> VM<'gc> {
         json_map.insert("stringify".to_string(), Value::VmNativeFunction(BUILTIN_JSON_STRINGIFY));
         json_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_JSON_PARSE));
         json_map.insert("@@sym:4".to_string(), Value::from("JSON"));
+        json_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        json_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
         json_map.insert("__nonenumerable_stringify__".to_string(), Value::Boolean(true));
         json_map.insert("__nonenumerable_parse__".to_string(), Value::Boolean(true));
         self.globals
@@ -11734,9 +11773,9 @@ impl<'gc> VM<'gc> {
             true,
         );
         reflect_map.insert("@@sym:4".to_string(), Value::from("Reflect"));
-        reflect_map.insert("@@sym:4".to_string(), Value::from("Reflect"));
         reflect_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         reflect_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        reflect_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
         let reflect_obj = Value::VmObject(new_gc_cell_ptr(ctx, reflect_map));
         self.globals.insert("Reflect".to_string(), reflect_obj.clone());
         self.global_this.borrow_mut(ctx).insert("Reflect".to_string(), reflect_obj);
@@ -15071,7 +15110,9 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_INT32ARRAY
             | BUILTIN_CTOR_UINT32ARRAY
             | BUILTIN_CTOR_FLOAT32ARRAY
-            | BUILTIN_CTOR_FLOAT64ARRAY => self.typedarray_call_builtin(ctx, id, args),
+            | BUILTIN_CTOR_FLOAT64ARRAY
+            | BUILTIN_CTOR_BIGINT64ARRAY
+            | BUILTIN_CTOR_BIGUINT64ARRAY => self.typedarray_call_builtin(ctx, id, args),
             BUILTIN_DATE_NOW | BUILTIN_DATE_PARSE => self.date_call_builtin(ctx, id, args),
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
                 let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(ctx, v)).collect();
@@ -19154,7 +19195,9 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_INT32ARRAY
             | BUILTIN_CTOR_UINT32ARRAY
             | BUILTIN_CTOR_FLOAT32ARRAY
-            | BUILTIN_CTOR_FLOAT64ARRAY => {
+            | BUILTIN_CTOR_FLOAT64ARRAY
+            | BUILTIN_CTOR_BIGINT64ARRAY
+            | BUILTIN_CTOR_BIGUINT64ARRAY => {
                 // Delegate to call_builtin which creates the VmArray
                 return self.call_builtin(ctx, id, args);
             }
@@ -23921,7 +23964,8 @@ impl<'gc> VM<'gc> {
                             let type_name = crate::unicode::utf16_to_utf8(type_name);
                             if matches!(
                                 type_name.as_str(),
-                                "Boolean"
+                                "Arguments"
+                                    | "Boolean"
                                     | "Number"
                                     | "String"
                                     | "Date"
@@ -24610,6 +24654,10 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
             return None;
         }
+        if matches!(value, Value::BigInt(_)) {
+            self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+            return None;
+        }
 
         let prim = self.try_to_primitive(ctx, value, "number");
         if self.pending_throw.is_some() {
@@ -24618,6 +24666,10 @@ impl<'gc> VM<'gc> {
 
         if prim.is_symbol_value() {
             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return None;
+        }
+        if matches!(prim, Value::BigInt(_)) {
+            self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
             return None;
         }
 
@@ -24641,6 +24693,45 @@ impl<'gc> VM<'gc> {
         match &prim {
             Value::BigInt(_) => Ok(prim),
             _ => Ok(Value::Number(to_number(&prim))),
+        }
+    }
+
+    /// ToBigInt(value): convert a value to BigInt per spec.
+    /// Returns None and sets pending_throw on error.
+    pub(super) fn value_to_bigint(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<num_bigint::BigInt> {
+        let prim = self.try_to_primitive(ctx, value, "number");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        match &prim {
+            Value::BigInt(bi) => Some((**bi).clone()),
+            Value::Boolean(b) => Some(num_bigint::BigInt::from(if *b { 1 } else { 0 })),
+            Value::String(s) => {
+                let text = crate::unicode::utf16_to_utf8(s);
+                match crate::js_bigint::parse_bigint_string(&text) {
+                    Ok(bi) => Some(bi),
+                    Err(_) => {
+                        self.throw_syntax_error(ctx, &format!("Cannot convert {} to a BigInt", text));
+                        None
+                    }
+                }
+            }
+            Value::Number(_) => {
+                self.throw_type_error(ctx, "Cannot convert a Number to a BigInt");
+                None
+            }
+            Value::Undefined | Value::Null => {
+                self.throw_type_error(ctx, "Cannot convert undefined to a BigInt");
+                None
+            }
+            _ => {
+                if prim.is_symbol_value() {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a BigInt");
+                } else {
+                    self.throw_type_error(ctx, "Cannot convert value to a BigInt");
+                }
+                None
+            }
         }
     }
 
@@ -26882,20 +26973,17 @@ impl<'gc> VM<'gc> {
                                     let ctor_val = Value::VmObject(map);
                                     let ctor_new_target = new_target.cloned().unwrap_or_else(|| ctor_val.clone());
                                     self.new_target_stack.push(ctor_new_target);
-                                    let mut out = self.call_builtin(ctx, BUILTIN_CTOR_FLOAT64ARRAY, args);
+                                    let bigint_id = if host_name == "typedarray.bigint64" {
+                                        BUILTIN_CTOR_BIGINT64ARRAY
+                                    } else {
+                                        BUILTIN_CTOR_BIGUINT64ARRAY
+                                    };
+                                    let mut out = self.call_builtin(ctx, bigint_id, args);
                                     self.new_target_stack.pop();
                                     if let Some(thrown) = self.pending_throw.take() {
                                         return Err(self.vm_error_to_js_error(ctx, &thrown));
                                     }
                                     if let Value::VmArray(arr) = &mut out {
-                                        let ta_name = if host_name == "typedarray.bigint64" {
-                                            "BigInt64Array"
-                                        } else {
-                                            "BigUint64Array"
-                                        };
-                                        arr.borrow_mut(ctx)
-                                            .props
-                                            .insert("__typedarray_name__".to_string(), Value::from(ta_name));
                                         if let Some(proto) = map.borrow().get("prototype").cloned() {
                                             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                                         }
@@ -26965,6 +27053,8 @@ impl<'gc> VM<'gc> {
                     BUILTIN_CTOR_UINT32ARRAY => "Uint32Array",
                     BUILTIN_CTOR_FLOAT32ARRAY => "Float32Array",
                     BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
+                    BUILTIN_CTOR_BIGINT64ARRAY => "BigInt64Array",
+                    BUILTIN_CTOR_BIGUINT64ARRAY => "BigUint64Array",
                     _ => "Object",
                 };
                 // DataView: spec requires argument validation BEFORE GetPrototypeFromConstructor
@@ -26985,13 +27075,16 @@ impl<'gc> VM<'gc> {
                         | BUILTIN_CTOR_UINT32ARRAY
                         | BUILTIN_CTOR_FLOAT32ARRAY
                         | BUILTIN_CTOR_FLOAT64ARRAY
+                        | BUILTIN_CTOR_BIGINT64ARRAY
+                        | BUILTIN_CTOR_BIGUINT64ARRAY
                 );
+                let is_bigint_ta_ctor = matches!(id, BUILTIN_CTOR_BIGINT64ARRAY | BUILTIN_CTOR_BIGUINT64ARRAY);
                 if is_ta_ctor && let Some(first) = args.first() {
                     let is_object = matches!(
                         first,
                         Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
                     ) && !first.is_symbol_value();
-                    if !is_object {
+                    if !is_object && !is_bigint_ta_ctor {
                         // Symbol and BigInt both throw TypeError in ToNumber
                         if first.is_symbol_value() {
                             let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
@@ -27095,6 +27188,8 @@ impl<'gc> VM<'gc> {
                         | BUILTIN_CTOR_UINT32ARRAY
                         | BUILTIN_CTOR_FLOAT32ARRAY
                         | BUILTIN_CTOR_FLOAT64ARRAY
+                        | BUILTIN_CTOR_BIGINT64ARRAY
+                        | BUILTIN_CTOR_BIGUINT64ARRAY
                 ) && let Some(proto) = ctor_prototype.clone()
                     && let Value::VmArray(arr) = &result
                 {

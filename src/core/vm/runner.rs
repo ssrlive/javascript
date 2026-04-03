@@ -1437,7 +1437,7 @@ impl<'gc> VM<'gc> {
                 // mark length as non-enumerable
                 map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
                 // Tag for Object.prototype.toString → [object Arguments]
-                map.insert("__toStringTag__".to_string(), Value::from("Arguments"));
+                map.insert("__type__".to_string(), Value::from("Arguments"));
                 // callee property
                 if let Some(&is_strict) = self.chunk.fn_strictness.get(&frame.func_ip) {
                     if is_strict {
@@ -4195,6 +4195,18 @@ impl<'gc> VM<'gc> {
                                             });
                                             Value::Number(f64::from_ne_bytes(arr8))
                                         }
+                                        "BigInt64Array" => {
+                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::BigInt(Box::new(num_bigint::BigInt::from(i64::from_ne_bytes(arr8))))
+                                        }
+                                        "BigUint64Array" => {
+                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::BigInt(Box::new(num_bigint::BigInt::from(u64::from_ne_bytes(arr8))))
+                                        }
                                         _ => {
                                             let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
                                             Value::Number(b as f64)
@@ -4278,6 +4290,18 @@ impl<'gc> VM<'gc> {
                                                 to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
                                             });
                                             Value::Number(f64::from_ne_bytes(arr8))
+                                        }
+                                        "BigInt64Array" => {
+                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::BigInt(Box::new(num_bigint::BigInt::from(i64::from_ne_bytes(arr8))))
+                                        }
+                                        "BigUint64Array" => {
+                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
+                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
+                                            });
+                                            Value::BigInt(Box::new(num_bigint::BigInt::from(u64::from_ne_bytes(arr8))))
                                         }
                                         _ => {
                                             let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;

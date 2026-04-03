@@ -778,6 +778,8 @@ pub struct VM<'gc> {
     // Temp slot: the RegExp.prototype that the currently-executing getter "belongs to".
     // Set before call_host_fn by the caller, read by regexp_handle_host_fn.
     regexp_home_proto_temp: Option<Value<'gc>>,
+    // Temp slot: the cross-realm TypeError constructor for the currently-executing getter.
+    regexp_realm_type_error_temp: Option<Value<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -911,6 +913,7 @@ impl<'gc> VM<'gc> {
             closure_fn_props: HashMap::new(),
             top_level_cells: HashMap::new(),
             regexp_home_proto_temp: None,
+            regexp_realm_type_error_temp: None,
         };
         vm.register_builtins(ctx);
         vm
@@ -2031,15 +2034,20 @@ impl<'gc> VM<'gc> {
 
                 // Deep-clone RegExp so each realm gets its own prototype (for cross-realm identity checks).
                 if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp") {
+                    let realm_type_error = realm_global.borrow().get("TypeError").cloned();
                     let mut ctor_map = regexp_ctor.borrow().clone();
                     if let Some(Value::VmObject(orig_proto)) = ctor_map.get("prototype") {
                         let mut proto_map = orig_proto.borrow().clone();
                         let new_proto = new_gc_cell_ptr(ctx, IndexMap::new());
                         // Deep-clone getter functions so each gets its own __regexp_home_proto__
+                        // and __realm_type_error__ for cross-realm TypeError identity
                         let getter_keys: Vec<String> = proto_map.keys().filter(|k| k.starts_with("__get_")).cloned().collect();
                         for k in getter_keys {
                             if let Some(Value::VmObject(getter)) = proto_map.get(&k) {
-                                let cloned_getter_map = getter.borrow().clone();
+                                let mut cloned_getter_map = getter.borrow().clone();
+                                if let Some(ref te) = realm_type_error {
+                                    cloned_getter_map.insert("__realm_type_error__".to_string(), te.clone());
+                                }
                                 let new_getter = new_gc_cell_ptr(ctx, cloned_getter_map);
                                 proto_map.insert(k, Value::VmObject(new_getter));
                             }
@@ -13629,8 +13637,10 @@ impl<'gc> VM<'gc> {
                     let host_this = borrow.get("__host_this__").cloned();
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     let regexp_home = borrow.get("__regexp_home_proto__").cloned();
+                    let realm_te = borrow.get("__realm_type_error__").cloned();
                     drop(borrow);
                     self.regexp_home_proto_temp = regexp_home;
+                    self.regexp_realm_type_error_temp = realm_te;
                     let receiver = host_this.as_ref().unwrap_or(this_arg);
                     Ok(self.call_host_fn(ctx, &host_name, Some(receiver), args))
                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
@@ -24578,11 +24588,15 @@ impl<'gc> VM<'gc> {
     }
 
     fn make_type_error_object(&self, ctx: &GcContext<'gc>, message: &str) -> Value<'gc> {
+        self.make_type_error_with_ctor(ctx, message, self.globals.get("TypeError").cloned())
+    }
+
+    fn make_type_error_with_ctor(&self, ctx: &GcContext<'gc>, message: &str, ctor_opt: Option<Value<'gc>>) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__type__".to_string(), Value::from("TypeError"));
         map.insert("name".to_string(), Value::from("TypeError"));
         map.insert("message".to_string(), Value::from(message));
-        if let Some(ctor) = self.globals.get("TypeError").cloned() {
+        if let Some(ctor) = ctor_opt {
             map.insert("constructor".to_string(), ctor.clone());
             if let Value::VmObject(ctor_obj) = ctor
                 && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()

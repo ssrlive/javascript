@@ -125,6 +125,14 @@ impl<'gc> VM<'gc> {
         false
     }
 
+    /// Throw a TypeError using the cross-realm TypeError constructor if available,
+    /// otherwise fall back to the primary realm's TypeError.
+    fn throw_regexp_realm_type_error(&mut self, ctx: &GcContext<'gc>, message: &str) {
+        let realm_te = self.regexp_realm_type_error_temp.take();
+        let err = self.make_type_error_with_ctor(ctx, message, realm_te.or_else(|| self.globals.get("TypeError").cloned()));
+        self.pending_throw = Some(err);
+    }
+
     pub(super) fn regexp_handle_host_fn(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -136,7 +144,7 @@ impl<'gc> VM<'gc> {
             "regexp.toString" => match receiver {
                 Some(Value::VmObject(re_obj)) => Value::from(&self.regex_to_string(re_obj)),
                 _ => {
-                    self.throw_type_error(ctx, "RegExp.prototype.toString called on incompatible receiver");
+                    self.throw_regexp_realm_type_error(ctx, "RegExp.prototype.toString called on incompatible receiver");
                     Value::Undefined
                 }
             },
@@ -170,12 +178,12 @@ impl<'gc> VM<'gc> {
                             Value::from("(?:)")
                         } else {
                             drop(borrow);
-                            self.throw_type_error(ctx, "RegExp.prototype.source getter called on incompatible receiver");
+                            self.throw_regexp_realm_type_error(ctx, "RegExp.prototype.source getter called on incompatible receiver");
                             Value::Undefined
                         }
                     }
                     _ => {
-                        self.throw_type_error(ctx, "RegExp.prototype.source getter called on incompatible receiver");
+                        self.throw_regexp_realm_type_error(ctx, "RegExp.prototype.source getter called on incompatible receiver");
                         Value::Undefined
                     }
                 }
@@ -210,7 +218,7 @@ impl<'gc> VM<'gc> {
                             Value::Undefined
                         } else {
                             drop(borrow);
-                            self.throw_type_error(
+                            self.throw_regexp_realm_type_error(
                                 ctx,
                                 &format!("RegExp.prototype.{} getter called on incompatible receiver", prop_name),
                             );
@@ -218,7 +226,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     _ => {
-                        self.throw_type_error(
+                        self.throw_regexp_realm_type_error(
                             ctx,
                             &format!("RegExp.prototype.{} getter called on incompatible receiver", prop_name),
                         );
@@ -233,7 +241,7 @@ impl<'gc> VM<'gc> {
                         if let Value::VmObject(obj) = recv
                             && matches!(obj.borrow().get("__vm_symbol__"), Some(Value::Boolean(true)))
                         {
-                            self.throw_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
+                            self.throw_regexp_realm_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
                             return Value::Undefined;
                         }
                         let recv = recv.clone();
@@ -297,7 +305,7 @@ impl<'gc> VM<'gc> {
                         Value::from(&result)
                     }
                     _ => {
-                        self.throw_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
+                        self.throw_regexp_realm_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
                         Value::Undefined
                     }
                 }

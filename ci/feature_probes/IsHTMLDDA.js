@@ -6,4 +6,5 @@ try {
   if (result === null) console.log("OK");
 } catch (e) {
   // not supported
+  console.log("NO. Reason: " + e);
 }

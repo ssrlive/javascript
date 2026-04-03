@@ -3118,6 +3118,7 @@ impl<'gc> Compiler<'gc> {
             // Prefix increment: ++x
             Expr::Increment(inner) => {
                 self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::ToNumeric);
                 self.chunk.write_opcode(Opcode::Increment);
                 // Write back
                 self.compile_store(inner)?;
@@ -3125,6 +3126,7 @@ impl<'gc> Compiler<'gc> {
             // Prefix decrement: --x
             Expr::Decrement(inner) => {
                 self.compile_expr(inner)?;
+                self.chunk.write_opcode(Opcode::ToNumeric);
                 self.chunk.write_opcode(Opcode::Decrement);
                 self.compile_store(inner)?;
             }
@@ -3132,7 +3134,7 @@ impl<'gc> Compiler<'gc> {
             // Returns ToNumber(old_value), stores ToNumber(old_value)+1
             Expr::PostIncrement(inner) => {
                 self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::ToNumber);
+                self.chunk.write_opcode(Opcode::ToNumeric);
                 self.chunk.write_opcode(Opcode::Dup);
                 self.chunk.write_opcode(Opcode::Increment);
                 self.compile_store(inner)?;
@@ -3141,7 +3143,7 @@ impl<'gc> Compiler<'gc> {
             // Postfix decrement: x--
             Expr::PostDecrement(inner) => {
                 self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::ToNumber);
+                self.chunk.write_opcode(Opcode::ToNumeric);
                 self.chunk.write_opcode(Opcode::Dup);
                 self.chunk.write_opcode(Opcode::Decrement);
                 self.compile_store(inner)?;

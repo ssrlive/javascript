@@ -326,6 +326,9 @@ const BUILTIN_REFLECT_APPLY: FunctionID = 255;
 const BUILTIN_DATE_GETUTCDAY: FunctionID = 256;
 const BUILTIN_DATE_GETUTCMILLISECONDS: FunctionID = 257;
 const BUILTIN_DATE_TOUTCSTRING: FunctionID = 258;
+const BUILTIN_BIGINT_TOSTRING: FunctionID = 261;
+const BUILTIN_BIGINT_VALUEOF: FunctionID = 262;
+const BUILTIN_BIGINT_TOLOCALESTRING: FunctionID = 263;
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -1432,6 +1435,11 @@ impl<'gc> VM<'gc> {
             BUILTIN_NUM_TOSTRING => "toString",
             BUILTIN_NUM_TOLOCALESTRING => "toLocaleString",
             BUILTIN_NUM_VALUEOF => "valueOf",
+            BUILTIN_BIGINT_ASINTN => "asIntN",
+            BUILTIN_BIGINT_ASUINTN => "asUintN",
+            BUILTIN_BIGINT_TOSTRING => "toString",
+            BUILTIN_BIGINT_VALUEOF => "valueOf",
+            BUILTIN_BIGINT_TOLOCALESTRING => "toLocaleString",
             _ => "",
         }
     }
@@ -1524,10 +1532,10 @@ impl<'gc> VM<'gc> {
             BUILTIN_MATH_RANDOM => 0.0,
             BUILTIN_MATH_LOG2 | BUILTIN_MATH_LOG10 => 1.0,
             // Number methods
-            BUILTIN_NUM_VALUEOF | BUILTIN_NUM_TOLOCALESTRING => 0.0,
+            BUILTIN_NUM_VALUEOF | BUILTIN_NUM_TOLOCALESTRING | BUILTIN_BIGINT_VALUEOF | BUILTIN_BIGINT_TOLOCALESTRING | BUILTIN_BIGINT_TOSTRING => 0.0,
             BUILTIN_NUM_TOSTRING | BUILTIN_NUM_TOFIXED | BUILTIN_NUM_TOEXPONENTIAL | BUILTIN_NUM_TOPRECISION => 1.0,
             // parseInt/parseFloat
-            BUILTIN_PARSEINT => 2.0,
+            BUILTIN_PARSEINT | BUILTIN_BIGINT_ASINTN | BUILTIN_BIGINT_ASUINTN => 2.0,
             BUILTIN_PARSEFLOAT => 1.0,
             _ => 1.0,
         }
@@ -5241,7 +5249,9 @@ impl<'gc> VM<'gc> {
                 let base = receiver.map(value_to_string).unwrap_or_default();
                 let mut out = base;
                 for a in args {
-                    out.push_str(&value_to_string(a));
+                    let prim = self.try_to_primitive(ctx, a, "string");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    out.push_str(&value_to_string(&prim));
                 }
                 Value::from(&out)
             }
@@ -10625,9 +10635,22 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Some("BigInt") => {
+                                // Check if BigInt.prototype has a getter override (e.g. Object.defineProperty)
+                                if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
+                                    && let Some(Value::VmObject(bi_proto)) = bi_ctor.borrow().get("prototype").cloned()
+                                {
+                                    let getter_key = format!("__get_{}", key);
+                                    let bp = bi_proto.borrow();
+                                    if bp.contains_key(&getter_key) || bp.contains_key(key) {
+                                        drop(bp);
+                                        drop(borrow);
+                                        return self.read_named_property(ctx, &Value::VmObject(bi_proto), key);
+                                    }
+                                }
                                 let resolved = match key {
-                                    "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                    "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                    "toString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING)),
+                                    "toLocaleString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING)),
+                                    "valueOf" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF)),
                                     "constructor" => {
                                         drop(borrow);
                                         return self.globals.get("BigInt").cloned().unwrap_or(Value::Undefined);
@@ -11508,7 +11531,7 @@ impl<'gc> VM<'gc> {
         math_map.insert("LOG10E".to_string(), Value::Number(std::f64::consts::LOG10_E));
         math_map.insert("SQRT2".to_string(), Value::Number(std::f64::consts::SQRT_2));
         math_map.insert("SQRT1_2".to_string(), Value::Number(std::f64::consts::FRAC_1_SQRT_2));
-        math_map.insert("__toStringTag__".to_string(), Value::from("Math"));
+        math_map.insert("@@sym:4".to_string(), Value::from("Math"));
         // Symbol.toStringTag = "Math" (@@sym:4)
         Self::insert_property_with_attributes(&mut math_map, "@@sym:4", &Value::from("Math"), false, false, true);
         for key in ["PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2"] {
@@ -11593,7 +11616,7 @@ impl<'gc> VM<'gc> {
         let mut json_map = IndexMap::new();
         json_map.insert("stringify".to_string(), Value::VmNativeFunction(BUILTIN_JSON_STRINGIFY));
         json_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_JSON_PARSE));
-        json_map.insert("__toStringTag__".to_string(), Value::from("JSON"));
+        json_map.insert("@@sym:4".to_string(), Value::from("JSON"));
         json_map.insert("__nonenumerable_stringify__".to_string(), Value::Boolean(true));
         json_map.insert("__nonenumerable_parse__".to_string(), Value::Boolean(true));
         self.globals
@@ -11705,7 +11728,7 @@ impl<'gc> VM<'gc> {
             false,
             true,
         );
-        reflect_map.insert("__toStringTag__".to_string(), Value::from("Reflect"));
+        reflect_map.insert("@@sym:4".to_string(), Value::from("Reflect"));
         reflect_map.insert("@@sym:4".to_string(), Value::from("Reflect"));
         reflect_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         reflect_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
@@ -12794,13 +12817,32 @@ impl<'gc> VM<'gc> {
         {
             let mut bigint_map = IndexMap::new();
             bigint_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_BIGINT as f64));
+            Self::insert_property_with_attributes(&mut bigint_map, "name", &Value::from("BigInt"), false, false, true);
+            Self::insert_property_with_attributes(&mut bigint_map, "length", &Value::Number(1.0), false, false, true);
             bigint_map.insert("asUintN".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_ASUINTN));
             bigint_map.insert("asIntN".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_ASINTN));
+            Self::set_property_attributes(&mut bigint_map, "asUintN", true, false, true);
+            Self::set_property_attributes(&mut bigint_map, "asIntN", true, false, true);
             let mut bigint_proto = IndexMap::new();
+            bigint_proto.insert("__type__".to_string(), Value::from("BigInt"));
             bigint_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
-            bigint_map.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bigint_proto)));
+            bigint_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING));
+            bigint_proto.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF));
+            bigint_proto.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING));
+            Self::set_property_attributes(&mut bigint_proto, "toString", true, false, true);
+            Self::set_property_attributes(&mut bigint_proto, "valueOf", true, false, true);
+            Self::set_property_attributes(&mut bigint_proto, "toLocaleString", true, false, true);
+            // Symbol.toStringTag = "BigInt"
+            Self::insert_property_with_attributes(&mut bigint_proto, "@@sym:4", &Value::from("BigInt"), false, false, true);
+            let bigint_proto_ptr = new_gc_cell_ptr(ctx, bigint_proto);
+            bigint_map.insert("prototype".to_string(), Value::VmObject(bigint_proto_ptr));
+            Self::set_property_attributes(&mut bigint_map, "prototype", false, false, false);
+            let bigint_ctor = Value::VmObject(new_gc_cell_ptr(ctx, bigint_map));
+            // Add constructor back-reference on prototype
+            bigint_proto_ptr.borrow_mut(ctx).insert("constructor".to_string(), bigint_ctor.clone());
+            Self::set_property_attributes(&mut bigint_proto_ptr.borrow_mut(ctx), "constructor", true, false, true);
             self.globals
-                .insert("BigInt".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bigint_map)));
+                .insert("BigInt".to_string(), bigint_ctor);
         }
         self.regexp_init_prototype(ctx);
 
@@ -12851,6 +12893,7 @@ impl<'gc> VM<'gc> {
                 "URIError",
                 "Math",
                 "JSON",
+                "BigInt",
                 "__createRealm__",
             ] {
                 if let Some(v) = self.globals.get(name).cloned() {
@@ -13171,7 +13214,7 @@ impl<'gc> VM<'gc> {
             })
             .unwrap_or(Value::Undefined);
         if !matches!(function_proto, Value::Undefined) {
-            for ctor_name in ["Boolean", "Number", "String"] {
+            for ctor_name in ["Boolean", "Number", "String", "BigInt"] {
                 if let Some(Value::VmObject(ctor)) = self.globals.get(ctor_name).cloned() {
                     ctor.borrow_mut(ctx).insert("__proto__".to_string(), function_proto.clone());
                 }
@@ -16278,7 +16321,13 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                Value::Number(to_number(&coerced))
+                match &coerced {
+                    Value::BigInt(b) => {
+                        use num_traits::ToPrimitive;
+                        Value::Number(b.to_f64().unwrap_or(f64::NAN))
+                    }
+                    _ => Value::Number(to_number(&coerced)),
+                }
             }
             // String() as function: convert argument to string
             BUILTIN_CTOR_STRING => {
@@ -16312,133 +16361,101 @@ impl<'gc> VM<'gc> {
                 Value::String(result)
             }
             BUILTIN_BIGINT => {
-                // BigInt(value) — convert a number or string to BigInt
-                match args.first() {
-                    Some(Value::Number(n)) => {
-                        let i = *n as i64;
-                        Value::BigInt(Box::new(num_bigint::BigInt::from(i)))
-                    }
-                    Some(Value::String(s)) => {
+                // BigInt(value) — convert a value to BigInt via ToPrimitive + type dispatch
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &arg, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                match &prim {
+                    Value::BigInt(bi) => Value::BigInt(bi.clone()),
+                    Value::Boolean(b) => Value::BigInt(Box::new(num_bigint::BigInt::from(if *b { 1 } else { 0 }))),
+                    Value::String(s) => {
                         let text = crate::unicode::utf16_to_utf8(s);
                         match crate::js_bigint::parse_bigint_string(&text) {
                             Ok(bi) => Value::BigInt(Box::new(bi)),
-                            Err(_) => Value::Undefined,
+                            Err(_) => {
+                                self.throw_syntax_error(ctx, &format!("Cannot convert {} to a BigInt", text));
+                                Value::Undefined
+                            }
                         }
                     }
-                    Some(Value::BigInt(bi)) => Value::BigInt(bi.clone()),
-                    _ => Value::Undefined,
+                    Value::Number(n) => {
+                        if n.is_finite() && *n == n.trunc() {
+                            Value::BigInt(Box::new(num_bigint::BigInt::from(*n as i64)))
+                        } else {
+                            self.throw_range_error_object(ctx, "The number is not safe to convert to a BigInt because it is not an integer");
+                            Value::Undefined
+                        }
+                    }
+                    Value::Undefined | Value::Null => {
+                        self.throw_type_error(ctx, "Cannot convert undefined to a BigInt");
+                        Value::Undefined
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "Cannot convert value to a BigInt");
+                        Value::Undefined
+                    }
                 }
             }
             BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {
-                let bits_num = args.first().map(to_number).unwrap_or(0.0);
-                let bits = if bits_num.is_finite() && bits_num > 0.0 {
-                    bits_num.trunc() as usize
+                // Step 1: ToIndex(bits) — must be done BEFORE ToBigInt(bigint)
+                let bits_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let bits: usize;
+                if matches!(bits_arg, Value::Undefined) {
+                    bits = 0;
                 } else {
-                    0usize
+                    // ToIndex: ToPrimitive first, then reject BigInt/Symbol, then ToIntegerOrInfinity
+                    let prim = self.try_to_primitive(ctx, &bits_arg, "number");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if matches!(prim, Value::BigInt(_)) {
+                        self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                        return Value::Undefined;
+                    }
+                    if Self::is_symbol_value(&prim) {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
+                    let bits_num = to_number(&prim);
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    let integer_index = if bits_num.is_nan() { 0.0 } else { bits_num.trunc() };
+                    if integer_index < 0.0 || integer_index > 9007199254740991.0 || integer_index.is_infinite() {
+                        self.throw_range_error_object(ctx, "Invalid index");
+                        return Value::Undefined;
+                    }
+                    bits = integer_index as usize;
+                }
+
+                // Step 2: ToBigInt(bigint)
+                let bigint_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let bigint_prim = self.try_to_primitive(ctx, &bigint_arg, "number");
+                if self.pending_throw.is_some() { return Value::Undefined; }
+                let as_bigint = match &bigint_prim {
+                    Value::BigInt(bi) => (**bi).clone(),
+                    Value::Boolean(b) => num_bigint::BigInt::from(if *b { 1 } else { 0 }),
+                    Value::String(s) => {
+                        let text = crate::unicode::utf16_to_utf8(s);
+                        match crate::js_bigint::parse_bigint_string(&text) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                self.throw_syntax_error(ctx, &format!("Cannot convert {} to a BigInt", text));
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    Value::Number(_) => {
+                        self.throw_type_error(ctx, "Cannot convert a Number to a BigInt");
+                        return Value::Undefined;
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "Cannot convert value to a BigInt");
+                        return Value::Undefined;
+                    }
                 };
 
                 if bits == 0 {
                     return Value::BigInt(Box::new(num_bigint::BigInt::from(0)));
                 }
-
-                let as_bigint = match args.get(1).cloned().unwrap_or(Value::Undefined) {
-                    Value::BigInt(bi) => (*bi).clone(),
-                    Value::String(s) => {
-                        let text = crate::unicode::utf16_to_utf8(&s);
-                        match crate::js_bigint::parse_bigint_string(&text) {
-                            Ok(v) => v,
-                            Err(_) => {
-                                let mut err_map = IndexMap::new();
-                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                                err_map.insert("message".to_string(), Value::from("Cannot convert value to BigInt"));
-                                self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                                return Value::Undefined;
-                            }
-                        }
-                    }
-                    Value::Boolean(b) => num_bigint::BigInt::from(if b { 1 } else { 0 }),
-                    Value::VmObject(obj) => {
-                        let borrow = obj.borrow();
-                        if borrow.get("__type__").map(value_to_string).as_deref() == Some("BigInt") {
-                            if let Some(Value::BigInt(inner)) = borrow.get("__value__") {
-                                (**inner).clone()
-                            } else {
-                                num_bigint::BigInt::from(0)
-                            }
-                        } else {
-                            let value_of = borrow.get("valueOf").cloned();
-                            drop(borrow);
-                            if let Some(value_of) = value_of {
-                                let out = match value_of {
-                                    Value::VmFunction(ip, _) => match self.call_vm_function_result(ctx, ip, &[], None, &[]) {
-                                        Ok(v) => v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    },
-                                    Value::VmClosure(ip, _, uv) => match self.call_vm_function_result(ctx, ip, &[], None, &uv) {
-                                        Ok(v) => v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    },
-                                    Value::VmNativeFunction(id) => self.call_method_builtin(ctx, id, &Value::VmObject(obj), &[]),
-                                    _ => Value::Undefined,
-                                };
-                                match out {
-                                    Value::BigInt(inner) => (*inner).clone(),
-                                    Value::Boolean(b) => num_bigint::BigInt::from(if b { 1 } else { 0 }),
-                                    Value::String(s) => {
-                                        let text = crate::unicode::utf16_to_utf8(&s);
-                                        match crate::js_bigint::parse_bigint_string(&text) {
-                                            Ok(v) => v,
-                                            Err(_) => {
-                                                let mut err_map = IndexMap::new();
-                                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                                                err_map.insert("message".to_string(), Value::from("Cannot convert value to BigInt"));
-                                                self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                                                return Value::Undefined;
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        let mut err_map = IndexMap::new();
-                                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                                        err_map.insert("message".to_string(), Value::from("Cannot convert value to BigInt"));
-                                        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                                        return Value::Undefined;
-                                    }
-                                }
-                            } else {
-                                let mut err_map = IndexMap::new();
-                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                                err_map.insert("message".to_string(), Value::from("Cannot convert value to BigInt"));
-                                self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                                return Value::Undefined;
-                            }
-                        }
-                    }
-                    Value::Number(n) => {
-                        if n.is_finite() && n < 0.0 && n == n.trunc() {
-                            num_bigint::BigInt::from(n as i64)
-                        } else {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert Number to BigInt"));
-                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                    }
-                    _ => {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        err_map.insert("message".to_string(), Value::from("Cannot convert value to BigInt"));
-                        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                        return Value::Undefined;
-                    }
-                };
 
                 let modulus = num_bigint::BigInt::from(1u8) << bits;
                 let mut uint = as_bigint % &modulus;
@@ -17589,7 +17606,13 @@ impl<'gc> VM<'gc> {
                 let desc_val = args.get(2).cloned().unwrap_or(Value::Undefined);
                 if matches!(
                     desc_val,
-                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
+                    Value::Undefined
+                        | Value::Null
+                        | Value::Number(_)
+                        | Value::Boolean(_)
+                        | Value::String(_)
+                        | Value::Symbol(_)
+                        | Value::BigInt(_)
                 ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                 {
                     self.throw_type_error(ctx, "Property description must be an object");
@@ -18307,7 +18330,13 @@ impl<'gc> VM<'gc> {
                     }
                     if matches!(
                         desc_val,
-                        Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
+                        Value::Undefined
+                            | Value::Null
+                            | Value::Number(_)
+                            | Value::Boolean(_)
+                            | Value::String(_)
+                            | Value::Symbol(_)
+                            | Value::BigInt(_)
                     ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                     {
                         self.throw_type_error(ctx, "Property description must be an object");
@@ -22722,7 +22751,7 @@ impl<'gc> VM<'gc> {
                 }
                 _ => None,
             };
-            let bigint = match &receiver {
+            let _bigint = match &receiver {
                 Value::BigInt(b) => Some((**b).clone()),
                 Value::VmObject(map) => {
                     let b = map.borrow();
@@ -22888,24 +22917,55 @@ impl<'gc> VM<'gc> {
                     _ => {}
                 }
             }
-            if let Some(ref bi) = bigint {
-                match id {
-                    BUILTIN_NUM_TOSTRING => {
-                        let radix = args.first().map(|v| to_number(v) as u32).unwrap_or(10);
-                        let s = match radix {
-                            2 => bi.to_str_radix(2),
-                            8 => bi.to_str_radix(8),
-                            10 => bi.to_string(),
-                            16 => bi.to_str_radix(16),
-                            _ => bi.to_string(),
-                        };
-                        return Value::from(&s);
+            // BigInt.prototype.toString / valueOf / toLocaleString
+            if matches!(id, BUILTIN_BIGINT_TOSTRING | BUILTIN_BIGINT_TOLOCALESTRING | BUILTIN_BIGINT_VALUEOF) {
+                let bi_val = match &receiver {
+                    Value::BigInt(b) => Some((**b).clone()),
+                    Value::VmObject(map) => {
+                        let b = map.borrow();
+                        if b.get("__type__").map(|v| value_to_string(v)).as_deref() == Some("BigInt") {
+                            match b.get("__value__") {
+                                Some(Value::BigInt(inner)) => Some((**inner).clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
                     }
-                    BUILTIN_NUM_VALUEOF => {
-                        return Value::BigInt(Box::new(bi.clone()));
+                    _ => None,
+                };
+                if let Some(bi) = bi_val {
+                    if id == BUILTIN_BIGINT_VALUEOF {
+                        return Value::BigInt(Box::new(bi));
                     }
-                    _ => {}
+                    // toString
+                    let radix = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                        10u32
+                    } else {
+                        // Radix must be coerced via ToIntegerOrInfinity — reject BigInt/Symbol
+                        let radix_arg = args.first().unwrap();
+                        if matches!(radix_arg, Value::BigInt(_)) {
+                            self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                            return Value::Undefined;
+                        }
+                        if Self::is_symbol_value(radix_arg) {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                            return Value::Undefined;
+                        }
+                        match self.extract_number_with_coercion(ctx, radix_arg) {
+                            Some(v) => v as u32,
+                            None => return Value::Undefined,
+                        }
+                    };
+                    if !(2..=36).contains(&radix) {
+                        let err = self.make_range_error_object(ctx, "toString() radix must be between 2 and 36");
+                        self.pending_throw = Some(err);
+                        return Value::Undefined;
+                    }
+                    return Value::from(&bi.to_str_radix(radix));
                 }
+                self.throw_type_error(ctx, "BigInt.prototype method called on incompatible receiver");
+                return Value::Undefined;
             }
             // TypeError if Number method called on non-Number receiver
             if matches!(
@@ -22917,7 +22977,6 @@ impl<'gc> VM<'gc> {
                     | BUILTIN_NUM_TOEXPONENTIAL
                     | BUILTIN_NUM_TOPRECISION
             ) && num.is_none()
-                && bigint.is_none()
             {
                 self.throw_type_error(ctx, "Number.prototype method called on incompatible receiver");
                 return Value::Undefined;
@@ -23662,6 +23721,20 @@ impl<'gc> VM<'gc> {
             let tag = match &receiver {
                 Value::Undefined => "Undefined",
                 Value::Null => "Null",
+                Value::BigInt(_) => {
+                    // Wrap primitive BigInt → check Symbol.toStringTag on BigInt.prototype
+                    if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
+                        && let Some(proto) = bi_ctor.borrow().get("prototype").cloned()
+                    {
+                        let tag = self.read_named_property(ctx, &proto, "@@sym:4");
+                        if let Value::String(s) = tag {
+                            let tag_str = crate::unicode::utf16_to_utf8(&s);
+                            return Value::from(&format!("[object {}]", tag_str));
+                        }
+                    }
+                    // No valid string tag → builtinTag is "Object" per spec
+                    return Value::from("[object Object]");
+                }
                 Value::VmArray(_) => "Array",
                 Value::VmMap(m) => {
                     let ctor_name = if m.borrow().is_weak { "WeakMap" } else { "Map" };
@@ -23808,13 +23881,6 @@ impl<'gc> VM<'gc> {
                         }
                         "Object"
                     } else {
-                        let builtin_object_tag = b.get("__toStringTag__").and_then(|v| {
-                            if let Value::String(s) = v {
-                                Some(crate::unicode::utf16_to_utf8(s))
-                            } else {
-                                None
-                            }
-                        });
                         let builtin_type_tag = b.get("__type__").and_then(|v| {
                             let Value::String(type_name) = v else {
                                 return None;
@@ -23825,8 +23891,6 @@ impl<'gc> VM<'gc> {
                                 "Boolean"
                                     | "Number"
                                     | "String"
-                                    | "BigInt"
-                                    | "Symbol"
                                     | "Date"
                                     | "Error"
                                     | "RegExp"
@@ -23844,23 +23908,27 @@ impl<'gc> VM<'gc> {
                                 None
                             }
                         });
-                        let proto = b.get("__proto__").cloned();
                         let callable_like =
                             b.contains_key("__native_id__") || b.contains_key("__fn_body__") || b.contains_key("__bound_target__");
-                        let has_own_to_string_tag = b.contains_key("@@sym:4") || b.contains_key("Symbol(Symbol.toStringTag)");
                         drop(b);
-                        let _ = proto;
-                        if let Some(type_tag) = builtin_type_tag
-                            && !has_own_to_string_tag
-                        {
-                            return Value::from(&format!("[object {}]", type_tag));
+                        // Per spec: determine builtinTag, then check @@toStringTag
+                        let builtin_tag = if let Some(type_tag) = builtin_type_tag {
+                            type_tag
+                        } else if callable_like {
+                            "Function".to_string()
+                        } else {
+                            "Object".to_string()
+                        };
+                        // Check @@toStringTag on the object (including prototype chain)
+                        let sym_tag = self.read_named_property(ctx, receiver, "@@sym:4");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
                         }
-                        if let Some(tag_str) = builtin_object_tag
-                            && !has_own_to_string_tag
-                        {
+                        if let Value::String(tag) = sym_tag {
+                            let tag_str = crate::unicode::utf16_to_utf8(&tag);
                             return Value::from(&format!("[object {}]", tag_str));
                         }
-                        if callable_like { "Function" } else { "Object" }
+                        return Value::from(&format!("[object {}]", builtin_tag));
                     }
                 }
                 _ => "Object",
@@ -24529,6 +24597,26 @@ impl<'gc> VM<'gc> {
         }
 
         Some(to_number(&prim))
+    }
+
+    /// ToNumeric(value): returns Value::BigInt or Value::Number after ToPrimitive coercion.
+    fn to_numeric(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+        if Self::is_symbol_value(value) {
+            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return Ok(Value::Number(f64::NAN));
+        }
+        let prim = self.try_to_primitive(ctx, value, "number");
+        if self.pending_throw.is_some() {
+            return Ok(Value::Number(f64::NAN));
+        }
+        if Self::is_symbol_value(&prim) {
+            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return Ok(Value::Number(f64::NAN));
+        }
+        match &prim {
+            Value::BigInt(_) => Ok(prim),
+            _ => Ok(Value::Number(to_number(&prim))),
+        }
     }
 
     fn is_value_callable(&self, value: &Value<'gc>) -> bool {

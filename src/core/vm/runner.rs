@@ -132,6 +132,7 @@ impl<'gc> VM<'gc> {
                 Opcode::Dup => self.run_opcode_dup(ctx)?,
                 Opcode::Swap => self.run_opcode_swap(ctx)?,
                 Opcode::ToNumber => self.run_opcode_to_number(ctx)?,
+                Opcode::ToNumeric => self.run_opcode_to_numeric(ctx)?,
                 Opcode::CollectRest => self.run_opcode_collect_rest(ctx)?,
                 Opcode::In => self.run_opcode_in(ctx)?,
                 Opcode::InstanceOf => self.run_opcode_instanceof(ctx)?,
@@ -1589,7 +1590,9 @@ impl<'gc> VM<'gc> {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() + (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in +"));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in +");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             (Value::Number(a_num), Value::Number(b_num)) => {
                 self.stack.push(Value::Number(a_num + b_num));
@@ -1612,15 +1615,20 @@ impl<'gc> VM<'gc> {
 
     // Opcode::Sub
     fn run_opcode_sub(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
-        let b = self.stack.pop().expect("VM Stack underflow on Sub (b)");
-        let a = self.stack.pop().expect("VM Stack underflow on Sub (a)");
+        let b_raw = self.stack.pop().expect("VM Stack underflow on Sub (b)");
+        let a_raw = self.stack.pop().expect("VM Stack underflow on Sub (a)");
+        let a = self.to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let b = self.to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() - (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in -"));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in -");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             _ => {
                 let a_num = to_number(&a);
@@ -1633,15 +1641,20 @@ impl<'gc> VM<'gc> {
 
     // Opcode::Mul
     fn run_opcode_mul(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
-        let b = self.stack.pop().expect("VM Stack underflow on Mul (b)");
-        let a = self.stack.pop().expect("VM Stack underflow on Mul (a)");
+        let b_raw = self.stack.pop().expect("VM Stack underflow on Mul (b)");
+        let a_raw = self.stack.pop().expect("VM Stack underflow on Mul (a)");
+        let a = self.to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let b = self.to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() * (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in *"));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in *");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             _ => self.stack.push(Value::Number(to_number(&a) * to_number(&b))),
         }
@@ -1650,15 +1663,20 @@ impl<'gc> VM<'gc> {
 
     // Opcode::Div
     fn run_opcode_div(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
-        let b = self.stack.pop().expect("VM Stack underflow on Div (b)");
-        let a = self.stack.pop().expect("VM Stack underflow on Div (a)");
+        let b_raw = self.stack.pop().expect("VM Stack underflow on Div (b)");
+        let a_raw = self.stack.pop().expect("VM Stack underflow on Div (a)");
+        let a = self.to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let b = self.to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() / (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in /"));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in /");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             _ => self.stack.push(Value::Number(to_number(&a) / to_number(&b))),
         }
@@ -1831,15 +1849,20 @@ impl<'gc> VM<'gc> {
 
     // Opcode::Mod
     fn run_opcode_mod(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
-        let b = self.stack.pop().expect("VM Stack underflow");
-        let a = self.stack.pop().expect("VM Stack underflow");
+        let b_raw = self.stack.pop().expect("VM Stack underflow");
+        let a_raw = self.stack.pop().expect("VM Stack underflow");
+        let a = self.to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let b = self.to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() % (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in %"));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in %");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             _ => self.stack.push(Value::Number(to_number(&a) % to_number(&b))),
         }
@@ -1848,22 +1871,29 @@ impl<'gc> VM<'gc> {
 
     // Opcode::Pow
     fn run_opcode_pow(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
-        let b = self.stack.pop().expect("VM Stack underflow");
-        let a = self.stack.pop().expect("VM Stack underflow");
+        let b_raw = self.stack.pop().expect("VM Stack underflow");
+        let a_raw = self.stack.pop().expect("VM Stack underflow");
+        let a = self.to_numeric(ctx, &a_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let b = self.to_numeric(ctx, &b_raw)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 let exp_opt = (**b_bi).clone().try_into().ok();
                 let exp: u32 = match exp_opt {
                     Some(v) => v,
                     None => {
-                        return Err(crate::raise_range_error!("Exponent must be a non-negative BigInt"));
+                        let err = self.make_range_error_object(ctx, "Exponent must be a non-negative BigInt");
+                        self.handle_throw(ctx, &err)?;
+                        return Ok(OpcodeAction::Continue);
                     }
                 };
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone().pow(exp))));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in **"));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in **");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             _ => self.stack.push(Value::Number(to_number(&a).powf(to_number(&b)))),
         }
@@ -1874,40 +1904,23 @@ impl<'gc> VM<'gc> {
     fn run_opcode_bitwise_and(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
+        let lnum = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let rnum = self.to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() & (**b_bi).clone())));
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in &"));
+            (Value::Number(ln), Value::Number(rn)) => {
+                let lhs = to_int32(*ln);
+                let rhs = to_int32(*rn);
+                self.stack.push(Value::Number((lhs & rhs) as f64));
             }
             _ => {
-                // Spec: evaluate lhs ToNumeric first, then rhs (left-to-right valueOf order)
-                let lnum = match self.extract_number_with_coercion(ctx, &a) {
-                    Some(n) => n,
-                    None => {
-                        self.stack.push(Value::Number(f64::NAN));
-                        return Ok(OpcodeAction::Continue);
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    self.stack.push(Value::Number(f64::NAN));
-                    return Ok(OpcodeAction::Continue);
-                }
-                let rnum = match self.extract_number_with_coercion(ctx, &b) {
-                    Some(n) => n,
-                    None => {
-                        self.stack.push(Value::Number(f64::NAN));
-                        return Ok(OpcodeAction::Continue);
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    self.stack.push(Value::Number(f64::NAN));
-                    return Ok(OpcodeAction::Continue);
-                }
-                let lhs = to_int32(lnum);
-                let rhs = to_int32(rnum);
-                self.stack.push(Value::Number((lhs & rhs) as f64));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in &");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
         }
         Ok(OpcodeAction::Continue)
@@ -1917,39 +1930,23 @@ impl<'gc> VM<'gc> {
     fn run_opcode_bitwise_or(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
+        let lnum = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let rnum = self.to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() | (**b_bi).clone())));
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in |"));
+            (Value::Number(ln), Value::Number(rn)) => {
+                let lhs = to_int32(*ln);
+                let rhs = to_int32(*rn);
+                self.stack.push(Value::Number((lhs | rhs) as f64));
             }
             _ => {
-                let lnum = match self.extract_number_with_coercion(ctx, &a) {
-                    Some(n) => n,
-                    None => {
-                        self.stack.push(Value::Number(f64::NAN));
-                        return Ok(OpcodeAction::Continue);
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    self.stack.push(Value::Number(f64::NAN));
-                    return Ok(OpcodeAction::Continue);
-                }
-                let rnum = match self.extract_number_with_coercion(ctx, &b) {
-                    Some(n) => n,
-                    None => {
-                        self.stack.push(Value::Number(f64::NAN));
-                        return Ok(OpcodeAction::Continue);
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    self.stack.push(Value::Number(f64::NAN));
-                    return Ok(OpcodeAction::Continue);
-                }
-                let lhs = to_int32(lnum);
-                let rhs = to_int32(rnum);
-                self.stack.push(Value::Number((lhs | rhs) as f64));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in |");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
         }
         Ok(OpcodeAction::Continue)
@@ -1959,39 +1956,23 @@ impl<'gc> VM<'gc> {
     fn run_opcode_bitwise_xor(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
+        let lnum = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let rnum = self.to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() ^ (**b_bi).clone())));
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in ^"));
+            (Value::Number(ln), Value::Number(rn)) => {
+                let lhs = to_int32(*ln);
+                let rhs = to_int32(*rn);
+                self.stack.push(Value::Number((lhs ^ rhs) as f64));
             }
             _ => {
-                let lnum = match self.extract_number_with_coercion(ctx, &a) {
-                    Some(n) => n,
-                    None => {
-                        self.stack.push(Value::Number(f64::NAN));
-                        return Ok(OpcodeAction::Continue);
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    self.stack.push(Value::Number(f64::NAN));
-                    return Ok(OpcodeAction::Continue);
-                }
-                let rnum = match self.extract_number_with_coercion(ctx, &b) {
-                    Some(n) => n,
-                    None => {
-                        self.stack.push(Value::Number(f64::NAN));
-                        return Ok(OpcodeAction::Continue);
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    self.stack.push(Value::Number(f64::NAN));
-                    return Ok(OpcodeAction::Continue);
-                }
-                let lhs = to_int32(lnum);
-                let rhs = to_int32(rnum);
-                self.stack.push(Value::Number((lhs ^ rhs) as f64));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in ^");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
         }
         Ok(OpcodeAction::Continue)
@@ -1999,10 +1980,13 @@ impl<'gc> VM<'gc> {
 
     // Opcode::ShiftLeft
     fn run_opcode_shift_left(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
+        let lnum = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let rnum = self.to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 let shift: usize = match (**b_bi).clone().try_into() {
                     Ok(v) => v,
@@ -2013,13 +1997,15 @@ impl<'gc> VM<'gc> {
                 let result = (**a_bi).clone() << shift;
                 self.stack.push(Value::BigInt(Box::new(result)));
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in <<"));
+            (Value::Number(ln), Value::Number(rn)) => {
+                let lhs = to_int32(*ln);
+                let shift = to_uint32(*rn) & 0x1f;
+                self.stack.push(Value::Number((lhs << shift) as f64));
             }
             _ => {
-                let lhs = to_int32(to_number(&a));
-                let shift = to_uint32(to_number(&b)) & 0x1f;
-                self.stack.push(Value::Number((lhs << shift) as f64));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in <<");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
         }
         Ok(OpcodeAction::Continue)
@@ -2027,10 +2013,13 @@ impl<'gc> VM<'gc> {
 
     // Opcode::ShiftRight
     fn run_opcode_shift_right(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
+        let lnum = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let rnum = self.to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
                 let shift: usize = match (**b_bi).clone().try_into() {
                     Ok(v) => v,
@@ -2041,13 +2030,15 @@ impl<'gc> VM<'gc> {
                 let result = (**a_bi).clone() >> shift;
                 self.stack.push(Value::BigInt(Box::new(result)));
             }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Cannot mix BigInt and other types in >>"));
+            (Value::Number(ln), Value::Number(rn)) => {
+                let lhs = to_int32(*ln);
+                let shift = to_uint32(*rn) & 0x1f;
+                self.stack.push(Value::Number((lhs >> shift) as f64));
             }
             _ => {
-                let lhs = to_int32(to_number(&a));
-                let shift = to_uint32(to_number(&b)) & 0x1f;
-                self.stack.push(Value::Number((lhs >> shift) as f64));
+                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in >>");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
         }
         Ok(OpcodeAction::Continue)
@@ -2055,16 +2046,21 @@ impl<'gc> VM<'gc> {
 
     // Opcode::UnsignedShiftRight
     fn run_opcode_unsigned_shift_right(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        match (&a, &b) {
+        let lnum = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        let rnum = self.to_numeric(ctx, &b)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match (&lnum, &rnum) {
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                return Err(crate::raise_type_error!("Unsigned right shift is not allowed for BigInt"));
+                let err = self.make_type_error_object(ctx, "Unsigned right shift is not allowed for BigInt");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
             }
             _ => {
-                let lhs = to_uint32(to_number(&a));
-                let shift = to_uint32(to_number(&b)) & 0x1f;
+                let lhs = to_uint32(to_number(&lnum));
+                let shift = to_uint32(to_number(&rnum)) & 0x1f;
                 self.stack.push(Value::Number((lhs >> shift) as f64));
             }
         }
@@ -2074,22 +2070,16 @@ impl<'gc> VM<'gc> {
     // Opcode::BitwiseNot
     fn run_opcode_bitwise_not(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let a = self.stack.pop().expect("VM Stack underflow");
-        if let Value::BigInt(bi) = &a {
-            self.stack.push(Value::BigInt(Box::new(-((**bi).clone()) - 1)));
-            return Ok(OpcodeAction::Continue);
-        }
-        let num = match self.extract_number_with_coercion(ctx, &a) {
-            Some(n) => n,
-            None => {
-                self.stack.push(Value::Number(f64::NAN));
-                return Ok(OpcodeAction::Continue);
+        let num = self.to_numeric(ctx, &a)?;
+        if let Some(thrown) = self.pending_throw.take() { self.handle_throw(ctx, &thrown)?; return Ok(OpcodeAction::Continue); }
+        match &num {
+            Value::BigInt(bi) => {
+                self.stack.push(Value::BigInt(Box::new(-((**bi).clone()) - 1)));
             }
-        };
-        if self.pending_throw.is_some() {
-            self.stack.push(Value::Number(f64::NAN));
-            return Ok(OpcodeAction::Continue);
+            _ => {
+                self.stack.push(Value::Number((!to_int32(to_number(&num))) as f64));
+            }
         }
-        self.stack.push(Value::Number((!to_int32(num)) as f64));
         Ok(OpcodeAction::Continue)
     }
 
@@ -3276,9 +3266,15 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Some("BigInt") => match key.as_str() {
-                                "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
-                                "constructor" => self.globals.get("BigInt").cloned(),
+                                "toString" | "valueOf" | "toLocaleString" | "constructor" => {
+                                    if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
+                                        && let Some(Value::VmObject(bi_proto)) = bi_ctor.borrow().get("prototype").cloned()
+                                    {
+                                        bi_proto.borrow().get(&key).cloned()
+                                    } else {
+                                        None
+                                    }
+                                }
                                 _ => None,
                             },
                             Some("String") => match key.as_str() {
@@ -4726,6 +4722,7 @@ impl<'gc> VM<'gc> {
         let a = self.stack.pop().expect("VM Stack underflow on Increment");
         match a {
             Value::Number(n) => self.stack.push(Value::Number(n + 1.0)),
+            Value::BigInt(b) => self.stack.push(Value::BigInt(Box::new(&*b + 1))),
             _ => self.stack.push(Value::Number(f64::NAN)),
         }
         Ok(OpcodeAction::Continue)
@@ -4737,6 +4734,7 @@ impl<'gc> VM<'gc> {
         let a = self.stack.pop().expect("VM Stack underflow on Decrement");
         match a {
             Value::Number(n) => self.stack.push(Value::Number(n - 1.0)),
+            Value::BigInt(b) => self.stack.push(Value::BigInt(Box::new(&*b - 1))),
             _ => self.stack.push(Value::Number(f64::NAN)),
         }
         Ok(OpcodeAction::Continue)
@@ -5158,10 +5156,34 @@ impl<'gc> VM<'gc> {
                                 }
                                 _ => None,
                             },
-                            Some("BigInt") => match key.as_str() {
-                                "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
-                                _ => None,
+                            Some("BigInt") => {
+                                // Check if BigInt.prototype has a getter override
+                                if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
+                                    && let Some(Value::VmObject(bi_proto)) = bi_ctor.borrow().get("prototype").cloned()
+                                {
+                                    let getter_key = format!("__get_{}", key);
+                                    let bp = bi_proto.borrow();
+                                    if bp.contains_key(&getter_key) || bp.contains_key(&key) {
+                                        drop(bp);
+                                        let val = self.read_named_property(ctx, &Value::VmObject(bi_proto), &key);
+                                        Some(val)
+                                    } else {
+                                        match key.as_str() {
+                                            "toString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING)),
+                                            "toLocaleString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING)),
+                                            "valueOf" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF)),
+                                            "constructor" => bp.get(&key).cloned(),
+                                            _ => None,
+                                        }
+                                    }
+                                } else {
+                                    match key.as_str() {
+                                        "toString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING)),
+                                        "toLocaleString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING)),
+                                        "valueOf" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF)),
+                                        _ => None,
+                                    }
+                                }
                             },
                             Some("String") => match key.as_str() {
                                 "toString" | "valueOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_VALUEOF)),
@@ -5285,6 +5307,15 @@ impl<'gc> VM<'gc> {
             Value::Boolean(_) => match key.as_str() {
                 "toString" => Self::make_host_fn(ctx, "boolean.toString"),
                 "valueOf" => Self::make_host_fn(ctx, "boolean.valueOf"),
+                _ => {
+                    let wrapped = self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&obj));
+                    self.read_named_property_with_receiver(ctx, &wrapped, &key, &obj)
+                }
+            },
+            Value::BigInt(_) => match key.as_str() {
+                "toString" => Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING),
+                "valueOf" => Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF),
+                "toLocaleString" => Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING),
                 _ => {
                     let wrapped = self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&obj));
                     self.read_named_property_with_receiver(ctx, &wrapped, &key, &obj)
@@ -5477,6 +5508,33 @@ impl<'gc> VM<'gc> {
             Value::BigInt(_) => {
                 self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                 self.stack.push(Value::Number(f64::NAN));
+            }
+            Value::Symbol(_) => {
+                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                self.stack.push(Value::Number(f64::NAN));
+            }
+            _ => self.stack.push(Value::Number(to_number(&val))),
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::ToNumeric — like ToNumber but preserves BigInt values
+    fn run_opcode_to_numeric(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let val = self.stack.pop().expect("VM Stack underflow on ToNumeric");
+        match &val {
+            Value::Number(_) | Value::BigInt(_) => {
+                self.stack.push(val);
+            }
+            Value::VmObject(_) | Value::VmArray(_) => {
+                let prim = self.try_to_primitive(ctx, &val, "number");
+                if self.pending_throw.is_some() {
+                    self.stack.push(Value::Number(f64::NAN));
+                } else {
+                    match &prim {
+                        Value::BigInt(_) => self.stack.push(prim),
+                        _ => self.stack.push(Value::Number(to_number(&prim))),
+                    }
+                }
             }
             Value::Symbol(_) => {
                 self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");

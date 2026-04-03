@@ -100,6 +100,7 @@ pub enum Opcode {
     IteratorClose = 94,            // pop iterator from stack; call .return() if callable
     AssertIterResult = 95,         // throw TypeError if TOS is not an object (IteratorResult check)
     BoxLocal = 96,                 // create a shared upvalue cell for a local (for class name heritage scope)
+    ToNumeric = 97,                // ToNumeric: like ToNumber but preserves BigInt values
 }
 
 impl TryFrom<u8> for Opcode {
@@ -204,6 +205,7 @@ impl TryFrom<u8> for Opcode {
             94 => Opcode::IteratorClose,
             95 => Opcode::AssertIterResult,
             96 => Opcode::BoxLocal,
+            97 => Opcode::ToNumeric,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

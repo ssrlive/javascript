@@ -3259,15 +3259,22 @@ impl<'gc> VM<'gc> {
                             proto = Some(fn_proto);
                         }
                         let resolved = match type_name.as_deref() {
-                            Some("Number") => match key.as_str() {
-                                "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
-                                "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
-                                "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
-                                "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
-                                "constructor" => self.globals.get("Number").cloned(),
-                                _ => None,
-                            },
+                            Some("Number") => {
+                                match key.as_str() {
+                                    "toFixed" | "toExponential" | "toPrecision" | "toString" | "toLocaleString" | "valueOf"
+                                    | "constructor" => {
+                                        // Check Number.prototype for the actual value (may be overridden)
+                                        if let Some(Value::VmObject(num_ctor)) = self.globals.get("Number")
+                                            && let Some(Value::VmObject(num_proto)) = num_ctor.borrow().get("prototype").cloned()
+                                        {
+                                            num_proto.borrow().get(&key).cloned()
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            }
                             Some("BigInt") => match key.as_str() {
                                 "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
                                 "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
@@ -5140,11 +5147,15 @@ impl<'gc> VM<'gc> {
                     } else {
                         let typed_result = match type_name.as_deref() {
                             Some("Number") => match key.as_str() {
-                                "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
-                                "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
-                                "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
-                                "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
+                                "toFixed" | "toExponential" | "toPrecision" | "toString" | "toLocaleString" | "valueOf" | "constructor" => {
+                                    if let Some(Value::VmObject(num_ctor)) = self.globals.get("Number")
+                                        && let Some(Value::VmObject(num_proto)) = num_ctor.borrow().get("prototype").cloned()
+                                    {
+                                        num_proto.borrow().get(&key).cloned()
+                                    } else {
+                                        None
+                                    }
+                                }
                                 _ => None,
                             },
                             Some("BigInt") => match key.as_str() {

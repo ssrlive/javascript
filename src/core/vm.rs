@@ -141,6 +141,7 @@ const BUILTIN_NUM_TOEXPONENTIAL: FunctionID = 78;
 const BUILTIN_NUM_TOPRECISION: FunctionID = 79;
 const BUILTIN_NUM_TOSTRING: FunctionID = 80;
 const BUILTIN_NUM_VALUEOF: FunctionID = 81;
+const BUILTIN_NUM_TOLOCALESTRING: FunctionID = 259;
 // Map methods
 const BUILTIN_MAP_SET: FunctionID = 82;
 const BUILTIN_MAP_GET: FunctionID = 83;
@@ -376,6 +377,21 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
             if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
                 return u64::from_str_radix(oct, 8).map(|n| n as f64).unwrap_or(f64::NAN);
             }
+            // Rust's f64 parser accepts "infinity" case-insensitively; JS only accepts "Infinity"
+            if trimmed.eq_ignore_ascii_case("infinity")
+                || trimmed.eq_ignore_ascii_case("+infinity")
+                || trimmed.eq_ignore_ascii_case("-infinity")
+            {
+                return match trimmed.as_bytes()[0] {
+                    b'-' if trimmed == "-Infinity" => f64::NEG_INFINITY,
+                    b'+' if &trimmed[1..] == "Infinity" => f64::INFINITY,
+                    b'I' if trimmed == "Infinity" => f64::INFINITY,
+                    _ => f64::NAN,
+                };
+            }
+            if trimmed.eq_ignore_ascii_case("nan") {
+                return f64::NAN;
+            }
             trimmed.parse::<f64>().unwrap_or(f64::NAN)
         }
         _ => f64::NAN,
@@ -394,6 +410,54 @@ fn to_uint32(n: f64) -> u32 {
 // JS ToInt32 derived from ToUint32.
 fn to_int32(n: f64) -> i32 {
     to_uint32(n) as i32
+}
+
+/// Convert a Number to a string in a given radix (2-36).
+/// Handles negative numbers, integer and fractional parts.
+fn number_to_string_radix(value: f64, radix: u32) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let negative = value < 0.0;
+    let mut n = value.abs();
+    let int_part = n.trunc() as u64;
+    let frac_part = n - (int_part as f64);
+
+    // Integer part
+    let mut int_str = String::new();
+    if int_part == 0 {
+        int_str.push('0');
+    } else {
+        let mut v = int_part;
+        while v > 0 {
+            int_str.push(DIGITS[(v % radix as u64) as usize] as char);
+            v /= radix as u64;
+        }
+        int_str = int_str.chars().rev().collect();
+    }
+
+    let mut result = if negative { format!("-{}", int_str) } else { int_str };
+
+    // Fractional part
+    if frac_part > 0.0 {
+        result.push('.');
+        n = frac_part;
+        // Limit to ~50 digits to avoid infinite loops
+        for _ in 0..50 {
+            n *= radix as f64;
+            let digit = n.trunc() as u64;
+            result.push(DIGITS[(digit % radix as u64) as usize] as char);
+            n -= digit as f64;
+            if n <= f64::EPSILON * radix as f64 {
+                break;
+            }
+        }
+        // Strip trailing zeros
+        if result.contains('.') {
+            result = result.trim_end_matches('0').to_string();
+            result = result.trim_end_matches('.').to_string();
+        }
+    }
+
+    result
 }
 
 fn bigint_from_integral_number(n: f64) -> Option<num_bigint::BigInt> {
@@ -458,6 +522,99 @@ fn compare_bigint_number(a: &num_bigint::BigInt, b: f64) -> Option<std::cmp::Ord
 }
 
 /// Convert Rust exponential format (e.g. "7.71234e1") to JS format ("7.71234e+1")
+/// Format a non-negative finite number in exponential notation per the ES spec.
+/// If `frac_digits` is Some(n), exactly `n` digits appear after the decimal point.
+/// If None, the minimum number of significant digits is used (trailing zeros removed).
+/// Uses "round half up" per spec (if there are two equally close n, pick the larger).
+fn format_exponential(x: f64, frac_digits: Option<usize>) -> String {
+    if x == 0.0 {
+        return match frac_digits {
+            Some(0) | None => "0e+0".to_string(),
+            Some(d) => format!("0.{}e+0", "0".repeat(d)),
+        };
+    }
+    match frac_digits {
+        Some(d) => {
+            // Use Rust's format which does round-half-to-even.
+            let s = format!("{:.prec$e}", x, prec = d);
+            let parts: Vec<&str> = s.split('e').collect();
+            let mantissa_str = parts[0];
+            let exp: i32 = parts[1].parse().unwrap_or(0);
+
+            // Check if we need to adjust for round-half-up vs round-half-to-even.
+            // This only matters when the value is EXACTLY at the midpoint.
+            // Format with one extra digit to detect this case.
+            let s_extra = format!("{:.prec$e}", x, prec = d + 1);
+            let extra_parts: Vec<&str> = s_extra.split('e').collect();
+            let extra_mantissa = extra_parts[0];
+            let extra_digits: Vec<u8> = extra_mantissa.bytes().filter(|b| b.is_ascii_digit()).map(|b| b - b'0').collect();
+            // The last digit of extra format is the (d+1)th fraction digit
+            let last_digit = extra_digits.last().copied().unwrap_or(0);
+            // If the extra digit is exactly 5 and the (d)th digit from Rust's format is even,
+            // Rust rounded down (to even) but JS wants round up.
+            if last_digit == 5 {
+                // Check if all digits beyond d+1 are zero (exact midpoint)
+                // by formatting with even more precision
+                let s_check = format!("{:.prec$e}", x, prec = d + 5);
+                let check_parts: Vec<&str> = s_check.split('e').collect();
+                let check_digits: Vec<u8> = check_parts[0].bytes().filter(|b| b.is_ascii_digit()).map(|b| b - b'0').collect();
+                // Digits beyond position d+1 should all be 0 for exact midpoint
+                let is_exact_midpoint = check_digits.iter().skip(d + 2).all(|&d| d == 0);
+                if is_exact_midpoint {
+                    // Check if Rust's result digit at position d is even (Rust rounded down)
+                    let main_digits: Vec<u8> = mantissa_str.bytes().filter(|b| b.is_ascii_digit()).map(|b| b - b'0').collect();
+                    let last_main = main_digits.last().copied().unwrap_or(0);
+                    if last_main % 2 == 0 {
+                        // Rust rounded down to even, but JS wants round up
+                        // Increment the last digit
+                        let mut result_digits = main_digits.clone();
+                        let mut carry = true;
+                        for digit in result_digits.iter_mut().rev() {
+                            if carry {
+                                *digit += 1;
+                                if *digit >= 10 {
+                                    *digit = 0;
+                                } else {
+                                    carry = false;
+                                }
+                            }
+                        }
+                        let (result_exp, result_digits) = if carry {
+                            result_digits.insert(0, 1);
+                            result_digits.truncate(d + 1);
+                            (exp + 1, result_digits)
+                        } else {
+                            (exp, result_digits)
+                        };
+                        let mantissa = if d == 0 {
+                            format!("{}", result_digits[0])
+                        } else {
+                            let frac: String = result_digits[1..].iter().map(|d| (d + b'0') as char).collect();
+                            format!("{}.{}", result_digits[0], frac)
+                        };
+                        return if result_exp >= 0 {
+                            format!("{}e+{}", mantissa, result_exp)
+                        } else {
+                            format!("{}e{}", mantissa, result_exp)
+                        };
+                    }
+                }
+            }
+            // Standard case: Rust's rounding is correct
+            if exp >= 0 {
+                format!("{}e+{}", mantissa_str, exp)
+            } else {
+                format!("{}e{}", mantissa_str, exp)
+            }
+        }
+        None => {
+            // No explicit fractionDigits: use shortest representation
+            let s = format!("{:e}", x);
+            js_exponential_format(&s)
+        }
+    }
+}
+
 fn js_exponential_format(s: &str) -> String {
     // Rust uses "e" without sign for positive exponents; JS uses "e+"
     if let Some(idx) = s.find('e') {
@@ -1224,6 +1381,57 @@ impl<'gc> VM<'gc> {
             BUILTIN_DATE_SETMINUTES => "setMinutes",
             BUILTIN_DATE_NOW => "now",
             BUILTIN_DATE_PARSE => "parse",
+            // Math methods
+            BUILTIN_MATH_FLOOR => "floor",
+            BUILTIN_MATH_CEIL => "ceil",
+            BUILTIN_MATH_ROUND => "round",
+            BUILTIN_MATH_ABS => "abs",
+            BUILTIN_MATH_SQRT => "sqrt",
+            BUILTIN_MATH_MAX => "max",
+            BUILTIN_MATH_MIN => "min",
+            BUILTIN_MATH_SIN => "sin",
+            BUILTIN_MATH_COS => "cos",
+            BUILTIN_MATH_TAN => "tan",
+            BUILTIN_MATH_ASIN => "asin",
+            BUILTIN_MATH_ACOS => "acos",
+            BUILTIN_MATH_ATAN => "atan",
+            BUILTIN_MATH_ATAN2 => "atan2",
+            BUILTIN_MATH_SINH => "sinh",
+            BUILTIN_MATH_COSH => "cosh",
+            BUILTIN_MATH_TANH => "tanh",
+            BUILTIN_MATH_ASINH => "asinh",
+            BUILTIN_MATH_ACOSH => "acosh",
+            BUILTIN_MATH_ATANH => "atanh",
+            BUILTIN_MATH_EXP => "exp",
+            BUILTIN_MATH_EXPM1 => "expm1",
+            BUILTIN_MATH_LOG => "log",
+            BUILTIN_MATH_LOG10 => "log10",
+            BUILTIN_MATH_LOG1P => "log1p",
+            BUILTIN_MATH_LOG2 => "log2",
+            BUILTIN_MATH_FROUND => "fround",
+            BUILTIN_MATH_TRUNC => "trunc",
+            BUILTIN_MATH_CBRT => "cbrt",
+            BUILTIN_MATH_HYPOT => "hypot",
+            BUILTIN_MATH_SIGN => "sign",
+            BUILTIN_MATH_POW => "pow",
+            BUILTIN_MATH_RANDOM => "random",
+            BUILTIN_MATH_CLZ32 => "clz32",
+            BUILTIN_MATH_IMUL => "imul",
+            // Global functions
+            BUILTIN_ISNAN => "isNaN",
+            BUILTIN_PARSEINT => "parseInt",
+            BUILTIN_PARSEFLOAT => "parseFloat",
+            // Number methods
+            BUILTIN_NUMBER_ISNAN => "isNaN",
+            BUILTIN_NUMBER_ISFINITE => "isFinite",
+            BUILTIN_NUMBER_ISINTEGER => "isInteger",
+            BUILTIN_NUMBER_ISSAFEINTEGER => "isSafeInteger",
+            BUILTIN_NUM_TOFIXED => "toFixed",
+            BUILTIN_NUM_TOEXPONENTIAL => "toExponential",
+            BUILTIN_NUM_TOPRECISION => "toPrecision",
+            BUILTIN_NUM_TOSTRING => "toString",
+            BUILTIN_NUM_TOLOCALESTRING => "toLocaleString",
+            BUILTIN_NUM_VALUEOF => "valueOf",
             _ => "",
         }
     }
@@ -1310,6 +1518,17 @@ impl<'gc> VM<'gc> {
             BUILTIN_DATE_SETHOURS => 4.0,
             BUILTIN_DATE_SETMINUTES => 3.0,
             BUILTIN_DATE_PARSE => 1.0,
+            // Math methods with non-default lengths
+            BUILTIN_MATH_ATAN2 | BUILTIN_MATH_POW | BUILTIN_MATH_IMUL => 2.0,
+            BUILTIN_MATH_HYPOT | BUILTIN_MATH_MAX | BUILTIN_MATH_MIN => 2.0,
+            BUILTIN_MATH_RANDOM => 0.0,
+            BUILTIN_MATH_LOG2 | BUILTIN_MATH_LOG10 => 1.0,
+            // Number methods
+            BUILTIN_NUM_VALUEOF | BUILTIN_NUM_TOLOCALESTRING => 0.0,
+            BUILTIN_NUM_TOSTRING | BUILTIN_NUM_TOFIXED | BUILTIN_NUM_TOEXPONENTIAL | BUILTIN_NUM_TOPRECISION => 1.0,
+            // parseInt/parseFloat
+            BUILTIN_PARSEINT => 2.0,
+            BUILTIN_PARSEFLOAT => 1.0,
             _ => 1.0,
         }
     }
@@ -10397,20 +10616,18 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Some("Number") => {
-                                let resolved = match key {
-                                    "toFixed" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOFIXED)),
-                                    "toExponential" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL)),
-                                    "toPrecision" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION)),
-                                    "toString" => Some(Value::VmNativeFunction(BUILTIN_NUM_TOSTRING)),
-                                    "valueOf" => Some(Value::VmNativeFunction(BUILTIN_NUM_VALUEOF)),
-                                    "constructor" => {
-                                        drop(borrow);
-                                        return self.globals.get("Number").cloned().unwrap_or(Value::Undefined);
+                                match key {
+                                    "toFixed" | "toExponential" | "toPrecision" | "toString" | "toLocaleString" | "valueOf"
+                                    | "constructor" => {
+                                        // Return whatever Number.prototype actually has (respects overrides and deletes)
+                                        if let Some(Value::VmObject(num_ctor)) = self.globals.get("Number")
+                                            && let Some(Value::VmObject(num_proto)) = num_ctor.borrow().get("prototype").cloned()
+                                            && let Some(v) = num_proto.borrow().get(key).cloned()
+                                        {
+                                            return v;
+                                        }
                                     }
-                                    _ => None,
-                                };
-                                if let Some(v) = resolved {
-                                    return v;
+                                    _ => {}
                                 }
                             }
                             Some("BigInt") => {
@@ -11298,6 +11515,8 @@ impl<'gc> VM<'gc> {
         math_map.insert("SQRT2".to_string(), Value::Number(std::f64::consts::SQRT_2));
         math_map.insert("SQRT1_2".to_string(), Value::Number(std::f64::consts::FRAC_1_SQRT_2));
         math_map.insert("__toStringTag__".to_string(), Value::from("Math"));
+        // Symbol.toStringTag = "Math" (@@sym:4)
+        Self::insert_property_with_attributes(&mut math_map, "@@sym:4", &Value::from("Math"), false, false, true);
         for key in ["PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2"] {
             math_map.insert(format!("__readonly_{}__", key), Value::Boolean(true));
             math_map.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
@@ -11711,7 +11930,8 @@ impl<'gc> VM<'gc> {
 
                 let mut ctor = IndexMap::new();
                 ctor.insert("__native_id__".to_string(), Value::Number(id as f64));
-                Self::insert_property_with_attributes(&mut ctor, "name", &Value::from(name), true, false, false);
+                Self::insert_property_with_attributes(&mut ctor, "name", &Value::from(name), false, false, true);
+                Self::insert_property_with_attributes(&mut ctor, "length", &Value::Number(1.0), false, false, true);
                 Self::insert_prototype_property(&mut ctor, &proto_obj.clone());
                 let ctor_obj = Value::VmObject(new_gc_cell_ptr(ctx, ctor));
 
@@ -12261,7 +12481,6 @@ impl<'gc> VM<'gc> {
         // Number object with constants and static methods
         let mut number_map = IndexMap::new();
         Self::init_native_ctor_header(&mut number_map, BUILTIN_CTOR_NUMBER, "Number", 1.0);
-        number_map.insert("__frozen__".to_string(), Value::Boolean(true));
         number_map.insert("MAX_VALUE".to_string(), Value::Number(f64::MAX));
         number_map.insert("MIN_VALUE".to_string(), Value::Number(5e-324));
         number_map.insert("NaN".to_string(), Value::Number(f64::NAN));
@@ -12278,11 +12497,14 @@ impl<'gc> VM<'gc> {
         number_map.insert("parseInt".to_string(), Value::VmNativeFunction(BUILTIN_PARSEINT));
         // Number.prototype stubs for test compatibility
         let mut num_proto = IndexMap::new();
+        // Number.prototype is itself a Number object with value +0
+        num_proto.insert("__type__".to_string(), Value::from("Number"));
+        num_proto.insert("__value__".to_string(), Value::Number(0.0));
         num_proto.insert("toFixed".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOFIXED));
         num_proto.insert("toExponential".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOEXPONENTIAL));
         num_proto.insert("toPrecision".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOPRECISION));
         num_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOSTRING));
-        num_proto.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOSTRING));
+        num_proto.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_NUM_TOLOCALESTRING));
         num_proto.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_NUM_VALUEOF));
         num_proto.insert("__nonenumerable_toFixed__".to_string(), Value::Boolean(true));
         num_proto.insert("__nonenumerable_toExponential__".to_string(), Value::Boolean(true));
@@ -14799,256 +15021,230 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_MATH_FLOOR => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.floor())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.floor())
             }
             BUILTIN_MATH_CEIL => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.ceil())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.ceil())
             }
             BUILTIN_MATH_ROUND => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.round())
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                if n.is_nan() || n.is_infinite() || n == 0.0 {
+                    Value::Number(n)
+                } else if n > 0.0 && n < 0.5 {
+                    Value::Number(0.0)
+                } else if (-0.5..0.0).contains(&n) {
+                    Value::Number(-0.0)
                 } else {
-                    Value::Number(f64::NAN)
+                    let frac = n - n.trunc();
+                    if frac == 0.0 {
+                        Value::Number(n)
+                    } else {
+                        Value::Number((n + 0.5).floor())
+                    }
                 }
             }
             BUILTIN_MATH_ABS => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.abs())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.abs())
             }
             BUILTIN_MATH_SQRT => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.sqrt())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.sqrt())
             }
             BUILTIN_MATH_MAX => {
-                let mut result = f64::NEG_INFINITY;
+                // ToNumber coercion for all args first (left-to-right order)
+                let mut nums = Vec::with_capacity(args.len());
                 for a in args {
-                    if let Value::Number(n) = a {
-                        if n.is_nan() {
-                            return Value::Number(f64::NAN);
-                        }
-                        if n > &result {
-                            result = *n;
-                        }
-                    } else {
+                    let n = match a {
+                        Value::Number(n) => *n,
+                        _ => match self.extract_number_with_coercion(ctx, a) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    nums.push(n);
+                }
+                let mut result = f64::NEG_INFINITY;
+                for n in nums {
+                    if n.is_nan() {
                         return Value::Number(f64::NAN);
+                    }
+                    if n > result || (n == 0.0 && result == 0.0 && result.is_sign_negative() && !n.is_sign_negative()) {
+                        result = n;
                     }
                 }
                 Value::Number(result)
             }
             BUILTIN_MATH_MIN => {
-                let mut result = f64::INFINITY;
+                let mut nums = Vec::with_capacity(args.len());
                 for a in args {
-                    if let Value::Number(n) = a {
-                        if n.is_nan() {
-                            return Value::Number(f64::NAN);
-                        }
-                        if n < &result {
-                            result = *n;
-                        }
-                    } else {
+                    let n = match a {
+                        Value::Number(n) => *n,
+                        _ => match self.extract_number_with_coercion(ctx, a) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    nums.push(n);
+                }
+                let mut result = f64::INFINITY;
+                for n in nums {
+                    if n.is_nan() {
                         return Value::Number(f64::NAN);
+                    }
+                    if n < result || (n == 0.0 && result == 0.0 && !result.is_sign_negative() && n.is_sign_negative()) {
+                        result = n;
                     }
                 }
                 Value::Number(result)
             }
             BUILTIN_MATH_SIN => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.sin())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.sin())
             }
             BUILTIN_MATH_COS => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.cos())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.cos())
             }
             BUILTIN_MATH_TAN => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.tan())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.tan())
             }
             BUILTIN_MATH_ASIN => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.asin())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.asin())
             }
             BUILTIN_MATH_ACOS => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.acos())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.acos())
             }
             BUILTIN_MATH_ATAN => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.atan())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.atan())
             }
             BUILTIN_MATH_ATAN2 => {
-                let y = if let Some(Value::Number(n)) = args.first() { *n } else { f64::NAN };
-                let x = if let Some(Value::Number(n)) = args.get(1) { *n } else { f64::NAN };
+                let y = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                let x = args.get(1).map(|v| to_number(v)).unwrap_or(f64::NAN);
                 Value::Number(y.atan2(x))
             }
             BUILTIN_MATH_SINH => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.sinh())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.sinh())
             }
             BUILTIN_MATH_COSH => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.cosh())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.cosh())
             }
             BUILTIN_MATH_TANH => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.tanh())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.tanh())
             }
             BUILTIN_MATH_ASINH => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.asinh())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.asinh())
             }
             BUILTIN_MATH_ACOSH => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.acosh())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.acosh())
             }
             BUILTIN_MATH_ATANH => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.atanh())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.atanh())
             }
             BUILTIN_MATH_EXP => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.exp())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.exp())
             }
             BUILTIN_MATH_EXPM1 => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.exp_m1())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.exp_m1())
             }
             BUILTIN_MATH_LOG => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.ln())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.ln())
             }
             BUILTIN_MATH_LOG10 => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.log10())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.log10())
             }
             BUILTIN_MATH_LOG1P => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.ln_1p())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.ln_1p())
             }
             BUILTIN_MATH_LOG2 => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.log2())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.log2())
             }
             BUILTIN_MATH_FROUND => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number((*n as f32) as f64)
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number((n as f32) as f64)
             }
             BUILTIN_MATH_TRUNC => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.trunc())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.trunc())
             }
             BUILTIN_MATH_CBRT => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(n.cbrt())
-                } else {
-                    Value::Number(f64::NAN)
-                }
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.cbrt())
             }
             BUILTIN_MATH_HYPOT => {
-                let mut sum = 0.0_f64;
+                if args.is_empty() {
+                    return Value::Number(0.0); // +0
+                }
+                // Spec: First coerce all arguments to numbers (left-to-right), then compute
+                let mut coerced_nums = Vec::new();
                 for a in args {
-                    if let Value::Number(n) = a {
-                        sum += n * n;
-                    } else {
-                        return Value::Number(f64::NAN);
+                    match self.extract_number_with_coercion(ctx, a) {
+                        Some(n) => coerced_nums.push(n),
+                        None => return Value::Undefined, // TypeError propagated
                     }
                 }
+                // If any argument is ±Infinity, return +Infinity (even if others are NaN)
+                if coerced_nums.iter().any(|n| n.is_infinite()) {
+                    return Value::Number(f64::INFINITY);
+                }
+                if coerced_nums.iter().any(|n| n.is_nan()) {
+                    return Value::Number(f64::NAN);
+                }
+                let sum: f64 = coerced_nums.iter().map(|n| n * n).sum();
                 Value::Number(sum.sqrt())
             }
             BUILTIN_MATH_SIGN => {
-                if let Some(Value::Number(n)) = args.first() {
-                    if n.is_nan() {
-                        Value::Number(f64::NAN)
-                    } else if *n == 0.0 {
-                        Value::Number(*n)
-                    }
-                    // preserves -0
-                    else if *n > 0.0 {
-                        Value::Number(1.0)
-                    } else {
-                        Value::Number(-1.0)
-                    }
-                } else {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                if n.is_nan() {
                     Value::Number(f64::NAN)
+                } else if n == 0.0 {
+                    Value::Number(n) // preserves -0
+                } else if n > 0.0 {
+                    Value::Number(1.0)
+                } else {
+                    Value::Number(-1.0)
                 }
             }
             BUILTIN_MATH_POW => {
                 let base = if let Some(Value::Number(n)) = args.first() { *n } else { f64::NAN };
                 let exp = if let Some(Value::Number(n)) = args.get(1) { *n } else { f64::NAN };
-                Value::Number(base.powf(exp))
+                // Spec special cases
+                #[allow(clippy::if_same_then_else)]
+                if exp.is_nan() {
+                    Value::Number(f64::NAN)
+                } else if exp == 0.0 {
+                    Value::Number(1.0)
+                } else if base.is_nan() {
+                    Value::Number(f64::NAN)
+                } else if base.abs() == 1.0 && exp.is_infinite() {
+                    Value::Number(f64::NAN)
+                } else {
+                    Value::Number(base.powf(exp))
+                }
             }
             BUILTIN_MATH_RANDOM => {
                 // Simple pseudo-random using system time
@@ -15065,14 +15261,14 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_MATH_CLZ32 => {
                 if let Some(Value::Number(n)) = args.first() {
-                    Value::Number((*n as i32 as u32).leading_zeros() as f64)
+                    Value::Number(to_uint32(*n).leading_zeros() as f64)
                 } else {
                     Value::Number(32.0)
                 }
             }
             BUILTIN_MATH_IMUL => {
-                let a = if let Some(Value::Number(n)) = args.first() { *n as i32 } else { 0 };
-                let b = if let Some(Value::Number(n)) = args.get(1) { *n as i32 } else { 0 };
+                let a = args.first().map(|v| to_int32(to_number(v))).unwrap_or(0);
+                let b = args.get(1).map(|v| to_int32(to_number(v))).unwrap_or(0);
                 Value::Number((a.wrapping_mul(b)) as f64)
             }
             BUILTIN_ISNAN => match args.first() {
@@ -15081,44 +15277,155 @@ impl<'gc> VM<'gc> {
                 _ => Value::Boolean(false),
             },
             BUILTIN_PARSEINT => {
-                let s = args.first().map(value_to_string).unwrap_or_default();
+                let raw_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &raw_arg, "string");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let s = value_to_string(&prim);
                 let trimmed = s.trim();
-                let radix = args.get(1).map(|v| to_number(v) as u32).unwrap_or(0);
+                if trimmed.is_empty() {
+                    return Value::Number(f64::NAN);
+                }
+                // Radix: ToInt32 coercion (handles NaN, Infinity, wrapper objects)
+                let radix_raw = if let Some(radix_val) = args.get(1) {
+                    let prim_r = self.try_to_primitive(ctx, radix_val, "number");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    to_int32(to_number(&prim_r))
+                } else {
+                    0
+                };
+                // Strip sign
+                let (negative, rest) = if let Some(stripped) = trimmed.strip_prefix('-') {
+                    (true, stripped)
+                } else if let Some(stripped) = trimmed.strip_prefix('+') {
+                    (false, stripped)
+                } else {
+                    (false, trimmed)
+                };
                 // Determine effective radix
-                let effective_radix = if radix == 0 {
-                    if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                let mut strip_prefix = true;
+                let effective_radix = if radix_raw != 0 {
+                    if !(2..=36).contains(&radix_raw) {
+                        return Value::Number(f64::NAN);
+                    }
+                    if radix_raw != 16 {
+                        strip_prefix = false;
+                    }
+                    radix_raw as u32
+                } else {
+                    if rest.starts_with("0x") || rest.starts_with("0X") {
                         16
                     } else {
+                        strip_prefix = false;
                         10
                     }
-                } else {
-                    radix
                 };
-                let parse_str = if effective_radix == 16 {
-                    trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed)
+                let parse_str = if strip_prefix && effective_radix == 16 {
+                    rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")).unwrap_or(rest)
                 } else {
-                    trimmed
+                    rest
                 };
-                match i64::from_str_radix(parse_str, effective_radix) {
-                    Ok(n) => Value::Number(n as f64),
-                    Err(_) => {
-                        // Try parsing as float for radix 10
-                        if effective_radix == 10 {
-                            match trimmed.parse::<f64>() {
-                                Ok(n) => Value::Number(n.trunc()),
-                                Err(_) => Value::Number(f64::NAN),
-                            }
-                        } else {
-                            Value::Number(f64::NAN)
-                        }
+                // Parse longest valid prefix in given radix
+                let mut end = 0;
+                for (i, ch) in parse_str.char_indices() {
+                    let digit_val = match ch {
+                        '0'..='9' => ch as u32 - '0' as u32,
+                        'a'..='z' => ch as u32 - 'a' as u32 + 10,
+                        'A'..='Z' => ch as u32 - 'A' as u32 + 10,
+                        _ => break,
+                    };
+                    if digit_val >= effective_radix {
+                        break;
                     }
+                    end = i + ch.len_utf8();
                 }
+                if end == 0 {
+                    return Value::Number(f64::NAN);
+                }
+                // Parse the valid prefix; use f64 accumulation for large numbers
+                let mut result = 0.0_f64;
+                for ch in parse_str[..end].chars() {
+                    let digit_val = match ch {
+                        '0'..='9' => ch as u32 - '0' as u32,
+                        'a'..='z' => ch as u32 - 'a' as u32 + 10,
+                        'A'..='Z' => ch as u32 - 'A' as u32 + 10,
+                        _ => unreachable!(),
+                    };
+                    result = result * effective_radix as f64 + digit_val as f64;
+                }
+                if negative {
+                    result = -result;
+                }
+                Value::Number(result)
             }
             BUILTIN_PARSEFLOAT => {
-                let s = args.first().map(value_to_string).unwrap_or_default();
-                match s.trim().parse::<f64>() {
-                    Ok(n) => Value::Number(n),
-                    Err(_) => Value::Number(f64::NAN),
+                let raw_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let prim = self.try_to_primitive(ctx, &raw_arg, "string");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let s = value_to_string(&prim);
+                let trimmed = s.trim_start();
+                // Parse longest valid numeric prefix (spec: parseFloat parses a prefix)
+                if trimmed.is_empty() {
+                    Value::Number(f64::NAN)
+                } else if trimmed.starts_with("Infinity") || trimmed.starts_with("+Infinity") {
+                    Value::Number(f64::INFINITY)
+                } else if trimmed.starts_with("-Infinity") {
+                    Value::Number(f64::NEG_INFINITY)
+                } else {
+                    // Find longest valid numeric prefix
+                    let mut best_len = 0;
+                    let mut best_val = f64::NAN;
+                    let bytes = trimmed.as_bytes();
+                    let mut i = 0;
+                    // optional sign
+                    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                        i += 1;
+                    }
+                    // digits before decimal
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    // decimal point
+                    if i < bytes.len() && bytes[i] == b'.' {
+                        i += 1;
+                        while i < bytes.len() && bytes[i].is_ascii_digit() {
+                            i += 1;
+                        }
+                    }
+                    if i > 0
+                        && !(i == 1 && (bytes[0] == b'+' || bytes[0] == b'-' || bytes[0] == b'.'))
+                        && let Ok(n) = trimmed[..i].parse::<f64>()
+                    {
+                        best_len = i;
+                        best_val = n;
+                    }
+                    // exponent
+                    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+                        let mut j = i + 1;
+                        if j < bytes.len() && (bytes[j] == b'+' || bytes[j] == b'-') {
+                            j += 1;
+                        }
+                        let exp_start = j;
+                        while j < bytes.len() && bytes[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                        if j > exp_start
+                            && let Ok(n) = trimmed[..j].parse::<f64>()
+                        {
+                            best_len = j;
+                            best_val = n;
+                        }
+                    }
+                    if best_len > 0 {
+                        Value::Number(best_val)
+                    } else {
+                        Value::Number(f64::NAN)
+                    }
                 }
             }
             BUILTIN_ARRAY_PUSH => Value::Undefined,
@@ -15969,7 +16276,14 @@ impl<'gc> VM<'gc> {
             // Number() as function: convert argument to number
             BUILTIN_CTOR_NUMBER => {
                 let arg = args.first().cloned().unwrap_or(Value::Number(0.0));
+                if Self::is_symbol_value(&arg) {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                }
                 let coerced = self.try_to_primitive(ctx, &arg, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 Value::Number(to_number(&coerced))
             }
             // String() as function: convert argument to string
@@ -16214,7 +16528,20 @@ impl<'gc> VM<'gc> {
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from(type_name.as_str()));
                 if let Some(message) = args.first().filter(|value| !matches!(value, Value::Undefined)) {
-                    let msg = self.vm_to_string(ctx, message);
+                    // ToString(message) per spec — must throw TypeError for Symbols
+                    if Self::is_symbol_value(message) {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                        return Value::Undefined;
+                    }
+                    let prim = self.try_to_primitive(ctx, message, "string");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if Self::is_symbol_value(&prim) {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                        return Value::Undefined;
+                    }
+                    let msg = value_to_string(&prim);
                     Self::insert_property_with_attributes(&mut map, "message", &Value::from(msg.as_str()), true, false, true);
                 }
                 // Set constructor and __proto__ from the global constructor object
@@ -18598,7 +18925,14 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_NUMBER => {
                 if let Value::VmObject(obj) = receiver {
                     let arg = args.first().cloned().unwrap_or(Value::Number(0.0));
+                    if Self::is_symbol_value(&arg) {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
                     let coerced = self.try_to_primitive(ctx, &arg, "number");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     let num = Value::Number(to_number(&coerced));
                     let mut borrow = obj.borrow_mut(ctx);
                     borrow.insert("__type__".to_string(), Value::from("Number"));
@@ -18658,7 +18992,21 @@ impl<'gc> VM<'gc> {
                     borrow.shift_remove("name");
                     borrow.shift_remove("constructor");
                     if let Some(message) = args.first().filter(|value| !matches!(value, Value::Undefined)) {
-                        let msg = self.vm_to_string(ctx, message);
+                        if Self::is_symbol_value(message) {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                            return Value::Undefined;
+                        }
+                        drop(borrow);
+                        let prim = self.try_to_primitive(ctx, message, "string");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if Self::is_symbol_value(&prim) {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                            return Value::Undefined;
+                        }
+                        let msg = value_to_string(&prim);
+                        let mut borrow = obj.borrow_mut(ctx);
                         Self::insert_property_with_attributes(&mut borrow, "message", &Value::from(msg.as_str()), true, false, true);
                     } else {
                         borrow.shift_remove("message");
@@ -22398,43 +22746,108 @@ impl<'gc> VM<'gc> {
             if let Some(n) = num {
                 match id {
                     BUILTIN_NUM_TOFIXED => {
-                        let digits = args.first().map(|v| to_number(v) as usize).unwrap_or(0);
-                        return Value::from(&format!("{:.prec$}", n, prec = digits));
-                    }
-                    BUILTIN_NUM_TOEXPONENTIAL => {
-                        let has_arg = !args.is_empty() && !matches!(args.first(), Some(Value::Undefined));
-                        if has_arg {
-                            let digits = to_number(args.first().unwrap()) as usize;
-                            let s = format!("{:.prec$e}", n, prec = digits);
-                            return Value::from(&js_exponential_format(&s));
+                        // Step 1: ToIntegerOrInfinity(fractionDigits) — must call ToNumber first
+                        let digits_raw = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                            0.0
                         } else {
-                            // No argument: show all significant digits
-                            // Use enough precision then strip trailing zeros
-                            let s = format!("{:e}", n);
-                            return Value::from(&js_exponential_format(&s));
-                        }
-                    }
-                    BUILTIN_NUM_TOPRECISION => {
-                        let has_arg = !args.is_empty() && !matches!(args.first(), Some(Value::Undefined));
-                        if !has_arg {
-                            // No argument: same as toString()
-                            return Value::from(&value_to_string(&Value::Number(n)));
-                        }
-                        let prec = to_number(args.first().unwrap()) as usize;
-                        if prec == 0 {
+                            match self.extract_number_with_coercion(ctx, args.first().unwrap()) {
+                                Some(v) => {
+                                    if v.is_nan() {
+                                        0.0
+                                    } else {
+                                        v.trunc()
+                                    }
+                                }
+                                None => return Value::Undefined, // TypeError propagated
+                            }
+                        };
+                        if !(0.0..=100.0).contains(&digits_raw) {
+                            let err = self.make_range_error_object(ctx, "toFixed() digits argument must be between 0 and 100");
+                            self.pending_throw = Some(err);
                             return Value::Undefined;
                         }
-
+                        // Step 2: Handle NaN and Infinity
                         if n.is_nan() {
                             return Value::from("NaN");
                         }
                         if n.is_infinite() {
                             return Value::from(if n > 0.0 { "Infinity" } else { "-Infinity" });
                         }
+                        let digits = digits_raw as usize;
+                        // Step 9: If |x| >= 10^21, return ToString(x)
+                        if n.abs() >= 1e21 {
+                            return Value::from(&value_to_string(&Value::Number(n)));
+                        }
+                        return Value::from(&format!("{:.prec$}", n, prec = digits));
+                    }
+                    BUILTIN_NUM_TOEXPONENTIAL => {
+                        // Step 1: ToIntegerOrInfinity(fractionDigits)
+                        let has_arg = !args.is_empty() && !matches!(args.first(), Some(Value::Undefined));
+                        let frac_digits = if has_arg {
+                            match self.extract_number_with_coercion(ctx, args.first().unwrap()) {
+                                Some(v) => {
+                                    // ToIntegerOrInfinity: NaN → 0, truncate toward zero
+                                    let v = if v.is_nan() { 0.0 } else { v.trunc() };
+                                    Some(v)
+                                }
+                                None => return Value::Undefined, // TypeError propagated
+                            }
+                        } else {
+                            None
+                        };
+                        // Step 2: Handle NaN and Infinity
+                        if n.is_nan() {
+                            return Value::from("NaN");
+                        }
+                        if n.is_infinite() {
+                            return Value::from(if n > 0.0 { "Infinity" } else { "-Infinity" });
+                        }
+                        // Step 3: Validate range (after NaN/Infinity check per spec)
+                        if let Some(fd) = frac_digits
+                            && !(0.0..=100.0).contains(&fd)
+                        {
+                            let err = self.make_range_error_object(ctx, "toExponential() argument must be between 0 and 100");
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        // Handle sign (note: -0 is NOT < 0, so no sign prefix)
+                        let (sign, x) = if n < 0.0 { ("-", -n) } else { ("", n.abs()) }; // abs handles -0 → +0
+                        // Use manual exponential formatting for correct rounding
+                        let result = if let Some(fd) = frac_digits {
+                            let digits = fd as usize;
+                            format_exponential(x, Some(digits))
+                        } else {
+                            format_exponential(x, None)
+                        };
+                        return Value::from(&format!("{}{}", sign, result));
+                    }
+                    BUILTIN_NUM_TOPRECISION => {
+                        let has_arg = !args.is_empty() && !matches!(args.first(), Some(Value::Undefined));
+                        if !has_arg {
+                            return Value::from(&value_to_string(&Value::Number(n)));
+                        }
+                        // Step 1: ToIntegerOrInfinity(precision) — must call ToNumber first
+                        let prec_raw = match self.extract_number_with_coercion(ctx, args.first().unwrap()) {
+                            Some(v) => v,
+                            None => return Value::Undefined, // TypeError propagated
+                        };
+                        // Step 2: Handle NaN and Infinity (after ToNumber but before range check)
+                        if n.is_nan() {
+                            return Value::from("NaN");
+                        }
+                        if n.is_infinite() {
+                            return Value::from(if n > 0.0 { "Infinity" } else { "-Infinity" });
+                        }
+                        // Step 3: Validate range
+                        let prec = prec_raw as i64;
+                        if !(1..=100).contains(&prec) {
+                            let err = self.make_range_error_object(ctx, "toPrecision() argument must be between 1 and 100");
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        let prec = prec as usize;
 
-                        // Format with exponential to get significant digits
                         let s = format!("{:.prec$e}", n, prec = prec.saturating_sub(1));
-                        // Parse the exponent
                         let parts: Vec<&str> = s.split('e').collect();
                         if parts.len() != 2 {
                             return Value::from(&s);
@@ -22443,38 +22856,45 @@ impl<'gc> VM<'gc> {
                         let exp: i32 = parts[1].parse().unwrap_or(0);
 
                         if exp < -6 || exp >= prec as i32 {
-                            // Use exponential notation
                             return Value::from(&js_exponential_format(&s));
                         }
 
-                        // Fixed notation
                         let decimal_places = (prec as i32 - 1 - exp).max(0) as usize;
                         let neg = if n < 0.0 { "-" } else { "" };
                         let abs_n = n.abs();
                         return Value::from(&format!("{}{:.prec$}", neg, abs_n, prec = decimal_places));
                     }
                     BUILTIN_NUM_TOSTRING => {
-                        let radix = args.first().map(|v| to_number(v) as u32).unwrap_or(10);
-                        if radix == 10 {
+                        // Step 1: ToIntegerOrInfinity(radix) — must call ToNumber first
+                        let radix = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                            10u32
+                        } else {
+                            match self.extract_number_with_coercion(ctx, args.first().unwrap()) {
+                                Some(v) => v as u32,
+                                None => return Value::Undefined, // TypeError propagated
+                            }
+                        };
+                        if !(2..=36).contains(&radix) {
+                            let err = self.make_range_error_object(ctx, "toString() radix must be between 2 and 36");
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        if radix == 10 || n.is_nan() || n.is_infinite() || n == 0.0 {
                             return Value::from(&value_to_string(&Value::Number(n)));
                         }
-                        // Integer-only for non-10 radixes
-                        let i = n as i64;
-                        let s = match radix {
-                            2 => format!("{:b}", i),
-                            8 => format!("{:o}", i),
-                            16 => format!("{:x}", i),
-                            _ => format!("{}", i),
-                        };
-                        return Value::from(&s);
+                        return Value::from(&number_to_string_radix(n, radix));
                     }
-                    BUILTIN_NUM_VALUEOF => {
-                        return Value::Number(n);
+                    BUILTIN_NUM_TOLOCALESTRING | BUILTIN_NUM_VALUEOF => {
+                        if id == BUILTIN_NUM_VALUEOF {
+                            return Value::Number(n);
+                        }
+                        // toLocaleString: same as toString(10)
+                        return Value::from(&value_to_string(&Value::Number(n)));
                     }
                     _ => {}
                 }
             }
-            if let Some(bi) = bigint {
+            if let Some(ref bi) = bigint {
                 match id {
                     BUILTIN_NUM_TOSTRING => {
                         let radix = args.first().map(|v| to_number(v) as u32).unwrap_or(10);
@@ -22488,14 +22908,27 @@ impl<'gc> VM<'gc> {
                         return Value::from(&s);
                     }
                     BUILTIN_NUM_VALUEOF => {
-                        return Value::BigInt(Box::new(bi));
+                        return Value::BigInt(Box::new(bi.clone()));
                     }
                     _ => {}
                 }
             }
+            // TypeError if Number method called on non-Number receiver
+            if matches!(
+                id,
+                BUILTIN_NUM_TOSTRING
+                    | BUILTIN_NUM_TOLOCALESTRING
+                    | BUILTIN_NUM_VALUEOF
+                    | BUILTIN_NUM_TOFIXED
+                    | BUILTIN_NUM_TOEXPONENTIAL
+                    | BUILTIN_NUM_TOPRECISION
+            ) && num.is_none()
+                && bigint.is_none()
+            {
+                self.throw_type_error(ctx, "Number.prototype method called on incompatible receiver");
+                return Value::Undefined;
+            }
         }
-
-        // Map methods
         let receiver_map = match receiver {
             Value::VmMap(m) => Some(*m),
             Value::VmObject(obj) => match obj.borrow().get("__map_data__").cloned() {
@@ -23402,16 +23835,17 @@ impl<'gc> VM<'gc> {
                                     | "Symbol"
                                     | "Date"
                                     | "Error"
-                                    | "TypeError"
-                                    | "SyntaxError"
-                                    | "ReferenceError"
-                                    | "RangeError"
                                     | "RegExp"
                                     | "Function"
                                     | "GeneratorFunction"
                                     | "AsyncFunction"
                             ) {
                                 Some(type_name)
+                            } else if matches!(
+                                type_name.as_str(),
+                                "TypeError" | "SyntaxError" | "ReferenceError" | "RangeError" | "EvalError" | "URIError"
+                            ) {
+                                Some("Error".to_string())
                             } else {
                                 None
                             }

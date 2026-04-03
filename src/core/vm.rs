@@ -4,6 +4,7 @@ use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use indexmap::IndexMap;
 
+mod bigint;
 mod dataview;
 mod date;
 mod regexp;
@@ -11,6 +12,7 @@ mod runner;
 mod typedarray;
 mod uri;
 
+pub(crate) use bigint::{compare_bigint_number, parse_bigint_string};
 pub(crate) use regexp::get_or_compile_regex;
 use typedarray::coerce_typed_array_value;
 use typedarray::{coerce_bigint_for_ta, is_bigint_typed_array};
@@ -464,67 +466,6 @@ fn number_to_string_radix(value: f64, radix: u32) -> String {
     }
 
     result
-}
-
-fn bigint_from_integral_number(n: f64) -> Option<num_bigint::BigInt> {
-    if !n.is_finite() || n != n.trunc() {
-        return None;
-    }
-    if n == 0.0 {
-        return Some(num_bigint::BigInt::from(0));
-    }
-
-    let bits = n.to_bits();
-    let sign_negative = (bits >> 63) != 0;
-    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
-    let frac_bits = bits & ((1u64 << 52) - 1);
-
-    // Subnormal non-zero values are not integral.
-    if exp_bits == 0 {
-        return None;
-    }
-
-    let exponent = exp_bits - 1023;
-    let mut sig = num_bigint::BigInt::from((1u64 << 52) | frac_bits);
-    if exponent >= 52 {
-        sig <<= (exponent - 52) as usize;
-    } else {
-        let rshift = (52 - exponent) as u32;
-        let mask = (1u64 << rshift) - 1;
-        if frac_bits & mask != 0 {
-            return None;
-        }
-        sig >>= rshift as usize;
-    }
-
-    if sign_negative {
-        sig = -sig;
-    }
-    Some(sig)
-}
-
-fn compare_bigint_number(a: &num_bigint::BigInt, b: f64) -> Option<std::cmp::Ordering> {
-    if b.is_nan() {
-        return None;
-    }
-    if b == f64::INFINITY {
-        return Some(std::cmp::Ordering::Less);
-    }
-    if b == f64::NEG_INFINITY {
-        return Some(std::cmp::Ordering::Greater);
-    }
-
-    if let Some(bi) = bigint_from_integral_number(b) {
-        return Some(a.cmp(&bi));
-    }
-
-    // For finite non-integer Number, BigInt is always strictly less-or-greater.
-    let floor_bi = bigint_from_integral_number(b.floor())?;
-    if a <= &floor_bi {
-        Some(std::cmp::Ordering::Less)
-    } else {
-        Some(std::cmp::Ordering::Greater)
-    }
 }
 
 /// Convert Rust exponential format (e.g. "7.71234e1") to JS format ("7.71234e+1")
@@ -13168,37 +13109,7 @@ impl<'gc> VM<'gc> {
             b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
             b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
         }
-        {
-            let mut bigint_map = IndexMap::new();
-            bigint_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_BIGINT as f64));
-            Self::insert_property_with_attributes(&mut bigint_map, "name", &Value::from("BigInt"), false, false, true);
-            Self::insert_property_with_attributes(&mut bigint_map, "length", &Value::Number(1.0), false, false, true);
-            bigint_map.insert("asUintN".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_ASUINTN));
-            bigint_map.insert("asIntN".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_ASINTN));
-            Self::set_property_attributes(&mut bigint_map, "asUintN", true, false, true);
-            Self::set_property_attributes(&mut bigint_map, "asIntN", true, false, true);
-            let mut bigint_proto = IndexMap::new();
-            bigint_proto.insert("__type__".to_string(), Value::from("BigInt"));
-            bigint_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
-            bigint_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING));
-            bigint_proto.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF));
-            bigint_proto.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING));
-            Self::set_property_attributes(&mut bigint_proto, "toString", true, false, true);
-            Self::set_property_attributes(&mut bigint_proto, "valueOf", true, false, true);
-            Self::set_property_attributes(&mut bigint_proto, "toLocaleString", true, false, true);
-            // Symbol.toStringTag = "BigInt"
-            Self::insert_property_with_attributes(&mut bigint_proto, "@@sym:4", &Value::from("BigInt"), false, false, true);
-            let bigint_proto_ptr = new_gc_cell_ptr(ctx, bigint_proto);
-            bigint_map.insert("prototype".to_string(), Value::VmObject(bigint_proto_ptr));
-            Self::set_property_attributes(&mut bigint_map, "prototype", false, false, false);
-            let bigint_ctor = Value::VmObject(new_gc_cell_ptr(ctx, bigint_map));
-            // Add constructor back-reference on prototype
-            bigint_proto_ptr
-                .borrow_mut(ctx)
-                .insert("constructor".to_string(), bigint_ctor.clone());
-            Self::set_property_attributes(&mut bigint_proto_ptr.borrow_mut(ctx), "constructor", true, false, true);
-            self.globals.insert("BigInt".to_string(), bigint_ctor);
-        }
+        self.bigint_init_prototype(ctx);
         self.regexp_init_prototype(ctx);
 
         // globalThis — refers to the global this object
@@ -16880,126 +16791,11 @@ impl<'gc> VM<'gc> {
                 }
                 Value::String(result)
             }
-            BUILTIN_BIGINT => {
-                // BigInt(value) — convert a value to BigInt via ToPrimitive + type dispatch
-                let arg = args.first().cloned().unwrap_or(Value::Undefined);
-                let prim = self.try_to_primitive(ctx, &arg, "number");
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
+            BUILTIN_BIGINT | BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {
+                if let Some(v) = self.bigint_call_builtin(ctx, id, args) {
+                    return v;
                 }
-                match &prim {
-                    Value::BigInt(bi) => Value::BigInt(bi.clone()),
-                    Value::Boolean(b) => Value::BigInt(Box::new(num_bigint::BigInt::from(if *b { 1 } else { 0 }))),
-                    Value::String(s) => {
-                        let text = crate::unicode::utf16_to_utf8(s);
-                        match crate::js_bigint::parse_bigint_string(&text) {
-                            Ok(bi) => Value::BigInt(Box::new(bi)),
-                            Err(_) => {
-                                self.throw_syntax_error(ctx, &format!("Cannot convert {} to a BigInt", text));
-                                Value::Undefined
-                            }
-                        }
-                    }
-                    Value::Number(n) => {
-                        if n.is_finite() && *n == n.trunc() {
-                            Value::BigInt(Box::new(num_bigint::BigInt::from(*n as i64)))
-                        } else {
-                            self.throw_range_error_object(
-                                ctx,
-                                "The number is not safe to convert to a BigInt because it is not an integer",
-                            );
-                            Value::Undefined
-                        }
-                    }
-                    Value::Undefined | Value::Null => {
-                        self.throw_type_error(ctx, "Cannot convert undefined to a BigInt");
-                        Value::Undefined
-                    }
-                    _ => {
-                        self.throw_type_error(ctx, "Cannot convert value to a BigInt");
-                        Value::Undefined
-                    }
-                }
-            }
-            BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {
-                // Step 1: ToIndex(bits) — must be done BEFORE ToBigInt(bigint)
-                let bits_arg = args.first().cloned().unwrap_or(Value::Undefined);
-                let bits: usize = if matches!(bits_arg, Value::Undefined) {
-                    0
-                } else {
-                    // ToIndex: ToPrimitive first, then reject BigInt/Symbol, then ToIntegerOrInfinity
-                    let prim = self.try_to_primitive(ctx, &bits_arg, "number");
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    if matches!(prim, Value::BigInt(_)) {
-                        self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
-                        return Value::Undefined;
-                    }
-                    if prim.is_symbol_value() {
-                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                        return Value::Undefined;
-                    }
-                    let bits_num = to_number(&prim);
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    let integer_index = if bits_num.is_nan() { 0.0 } else { bits_num.trunc() };
-                    if !(0.0..=9007199254740991.0).contains(&integer_index) || integer_index.is_infinite() {
-                        self.throw_range_error_object(ctx, "Invalid index");
-                        return Value::Undefined;
-                    }
-                    integer_index as usize
-                };
-
-                // Step 2: ToBigInt(bigint)
-                let bigint_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let bigint_prim = self.try_to_primitive(ctx, &bigint_arg, "number");
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                let as_bigint = match &bigint_prim {
-                    Value::BigInt(bi) => (**bi).clone(),
-                    Value::Boolean(b) => num_bigint::BigInt::from(if *b { 1 } else { 0 }),
-                    Value::String(s) => {
-                        let text = crate::unicode::utf16_to_utf8(s);
-                        match crate::js_bigint::parse_bigint_string(&text) {
-                            Ok(v) => v,
-                            Err(_) => {
-                                self.throw_syntax_error(ctx, &format!("Cannot convert {} to a BigInt", text));
-                                return Value::Undefined;
-                            }
-                        }
-                    }
-                    Value::Number(_) => {
-                        self.throw_type_error(ctx, "Cannot convert a Number to a BigInt");
-                        return Value::Undefined;
-                    }
-                    _ => {
-                        self.throw_type_error(ctx, "Cannot convert value to a BigInt");
-                        return Value::Undefined;
-                    }
-                };
-
-                if bits == 0 {
-                    return Value::BigInt(Box::new(num_bigint::BigInt::from(0)));
-                }
-
-                let modulus = num_bigint::BigInt::from(1u8) << bits;
-                let mut uint = as_bigint % &modulus;
-                if uint < num_bigint::BigInt::from(0) {
-                    uint += &modulus;
-                }
-                if id == BUILTIN_BIGINT_ASUINTN {
-                    Value::BigInt(Box::new(uint))
-                } else {
-                    let sign_bit = num_bigint::BigInt::from(1u8) << (bits - 1);
-                    if uint >= sign_bit {
-                        Value::BigInt(Box::new(uint - modulus))
-                    } else {
-                        Value::BigInt(Box::new(uint))
-                    }
-                }
+                Value::Undefined
             }
             BUILTIN_CTOR_ARRAY => {
                 // Array(a, b, c) → creates array from args
@@ -23473,55 +23269,8 @@ impl<'gc> VM<'gc> {
                     _ => {}
                 }
             }
-            // BigInt.prototype.toString / valueOf / toLocaleString
-            if matches!(id, BUILTIN_BIGINT_TOSTRING | BUILTIN_BIGINT_TOLOCALESTRING | BUILTIN_BIGINT_VALUEOF) {
-                let bi_val = match &receiver {
-                    Value::BigInt(b) => Some((**b).clone()),
-                    Value::VmObject(map) => {
-                        let b = map.borrow();
-                        if b.get("__type__").map(|v| value_to_string(v)).as_deref() == Some("BigInt") {
-                            match b.get("__value__") {
-                                Some(Value::BigInt(inner)) => Some((**inner).clone()),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(bi) = bi_val {
-                    if id == BUILTIN_BIGINT_VALUEOF {
-                        return Value::BigInt(Box::new(bi));
-                    }
-                    // toString
-                    let radix = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-                        10u32
-                    } else {
-                        // Radix must be coerced via ToIntegerOrInfinity — reject BigInt/Symbol
-                        let radix_arg = args.first().unwrap();
-                        if matches!(radix_arg, Value::BigInt(_)) {
-                            self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
-                            return Value::Undefined;
-                        }
-                        if radix_arg.is_symbol_value() {
-                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                            return Value::Undefined;
-                        }
-                        match self.extract_number_with_coercion(ctx, radix_arg) {
-                            Some(v) => v as u32,
-                            None => return Value::Undefined,
-                        }
-                    };
-                    if !(2..=36).contains(&radix) {
-                        let err = self.make_range_error_object(ctx, "toString() radix must be between 2 and 36");
-                        self.pending_throw = Some(err);
-                        return Value::Undefined;
-                    }
-                    return Value::from(&bi.to_str_radix(radix));
-                }
-                self.throw_type_error(ctx, "BigInt.prototype method called on incompatible receiver");
-                return Value::Undefined;
+            if let Some(v) = self.bigint_call_method_builtin(ctx, id, receiver, args) {
+                return v;
             }
             // TypeError if Number method called on non-Number receiver
             if matches!(
@@ -25173,45 +24922,6 @@ impl<'gc> VM<'gc> {
         match &prim {
             Value::BigInt(_) => Ok(prim),
             _ => Ok(Value::Number(to_number(&prim))),
-        }
-    }
-
-    /// ToBigInt(value): convert a value to BigInt per spec.
-    /// Returns None and sets pending_throw on error.
-    pub(super) fn value_to_bigint(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<num_bigint::BigInt> {
-        let prim = self.try_to_primitive(ctx, value, "number");
-        if self.pending_throw.is_some() {
-            return None;
-        }
-        match &prim {
-            Value::BigInt(bi) => Some((**bi).clone()),
-            Value::Boolean(b) => Some(num_bigint::BigInt::from(if *b { 1 } else { 0 })),
-            Value::String(s) => {
-                let text = crate::unicode::utf16_to_utf8(s);
-                match crate::js_bigint::parse_bigint_string(&text) {
-                    Ok(bi) => Some(bi),
-                    Err(_) => {
-                        self.throw_syntax_error(ctx, &format!("Cannot convert {} to a BigInt", text));
-                        None
-                    }
-                }
-            }
-            Value::Number(_) => {
-                self.throw_type_error(ctx, "Cannot convert a Number to a BigInt");
-                None
-            }
-            Value::Undefined | Value::Null => {
-                self.throw_type_error(ctx, "Cannot convert undefined to a BigInt");
-                None
-            }
-            _ => {
-                if prim.is_symbol_value() {
-                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a BigInt");
-                } else {
-                    self.throw_type_error(ctx, "Cannot convert value to a BigInt");
-                }
-                None
-            }
         }
     }
 

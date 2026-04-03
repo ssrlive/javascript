@@ -2439,7 +2439,7 @@ impl<'gc> Compiler<'gc> {
             }
             Expr::BigInt(chars) => {
                 let s = crate::unicode::utf16_to_utf8(chars);
-                let bi = crate::js_bigint::parse_bigint_string(&s)?;
+                let bi = crate::core::vm::parse_bigint_string(&s)?;
                 let idx = self.chunk.add_constant(Value::BigInt(Box::new(bi)));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(idx);

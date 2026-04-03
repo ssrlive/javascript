@@ -5,7 +5,6 @@ pub(crate) mod core;
 #[macro_use]
 pub(crate) mod error;
 pub(crate) mod js_agent;
-pub(crate) mod js_bigint;
 #[cfg(feature = "std")]
 pub(crate) mod js_std;
 pub(crate) mod repl;

@@ -360,6 +360,38 @@ impl<'gc> VM<'gc> {
         let callee = self.stack[callee_idx].clone();
         match callee {
             Value::VmFunction(target_ip, arity) => {
+                if let Some(&realm_id) = self.fn_realm.get(&target_ip)
+                    && realm_id < self.child_realms.len()
+                    && let Some(mut child) = self.child_realms[realm_id].take()
+                {
+                    self.sync_runtime_to_child(&mut child);
+                    let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
+                    let receiver = if is_method {
+                        self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    };
+                    let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
+                    self.stack.truncate(base);
+                    let local_callee = self.localize_cross_realm_callable(&callee, realm_id);
+                    let result = match child.vm_call_function_value(ctx, &local_callee, &receiver, &args_vec) {
+                        Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
+                        Err(err) => {
+                            let _ = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[realm_id] = Some(child);
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                                return Ok(OpcodeAction::Continue);
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    };
+                    self.sync_runtime_from_child(&child);
+                    self.child_realms[realm_id] = Some(child);
+                    self.stack.push(result);
+                    return Ok(OpcodeAction::Continue);
+                }
                 if self.chunk.async_function_ips.contains(&target_ip) && !self.chunk.generator_function_ips.contains(&target_ip) {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let receiver = if is_method {
@@ -517,6 +549,38 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::VmClosure(target_ip, arity, ref upvals) => {
+                if let Some(&realm_id) = self.fn_realm.get(&target_ip)
+                    && realm_id < self.child_realms.len()
+                    && let Some(mut child) = self.child_realms[realm_id].take()
+                {
+                    self.sync_runtime_to_child(&mut child);
+                    let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
+                    let receiver = if is_method {
+                        self.stack.get(callee_idx.saturating_sub(1)).cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    };
+                    let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
+                    self.stack.truncate(base);
+                    let local_callee = self.localize_cross_realm_callable(&callee, realm_id);
+                    let result = match child.vm_call_function_value(ctx, &local_callee, &receiver, &args_vec) {
+                        Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
+                        Err(err) => {
+                            let _ = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[realm_id] = Some(child);
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                                return Ok(OpcodeAction::Continue);
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    };
+                    self.sync_runtime_from_child(&child);
+                    self.child_realms[realm_id] = Some(child);
+                    self.stack.push(result);
+                    return Ok(OpcodeAction::Continue);
+                }
                 if self.chunk.async_function_ips.contains(&target_ip) && !self.chunk.generator_function_ips.contains(&target_ip) {
                     let args_vec: Vec<Value<'gc>> = self.stack[callee_idx + 1..callee_idx + 1 + arg_count].to_vec();
                     let receiver = if is_method {
@@ -768,6 +832,11 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     let bound_this = borrow.get("__host_this__").cloned();
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
+                    let regexp_home = borrow.get("__regexp_home_proto__").cloned();
                     drop(borrow);
                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                     self.stack.pop(); // pop callee
@@ -777,7 +846,26 @@ impl<'gc> VM<'gc> {
                     } else {
                         bound_this
                     };
-                    let result = self.call_host_fn(ctx, &host_name, recv.as_ref(), &args_collected);
+                    self.regexp_home_proto_temp = regexp_home;
+                    // Cross-realm dispatch: run host function on child VM
+                    let result = if let Some(rid) = realm_id
+                        && rid < self.child_realms.len()
+                        && let Some(mut child) = self.child_realms[rid].take()
+                    {
+                        self.sync_runtime_to_child(&mut child);
+                        child.regexp_home_proto_temp = self.regexp_home_proto_temp.take();
+                        let r = child.call_host_fn(ctx, &host_name, recv.as_ref(), &args_collected);
+                        if let Some(thrown) = child.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                        }
+                        let r = self.register_cross_realm_fn(ctx, &mut child, r, rid);
+                        self.sync_runtime_from_child(&child);
+                        self.child_realms[rid] = Some(child);
+                        r
+                    } else {
+                        let receiver = recv.as_ref();
+                        self.call_host_fn(ctx, &host_name, receiver, &args_collected)
+                    };
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
                         self.handle_throw(ctx, &thrown)?;
@@ -1001,6 +1089,10 @@ impl<'gc> VM<'gc> {
                     }
                 } else if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
                     let body = crate::unicode::utf16_to_utf8(body_u16);
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
                     let repl_persistent_name = if matches!(borrow.get("__repl_persistent_fn__"), Some(Value::Boolean(true))) {
                         borrow.get("name").map(value_to_string)
                     } else {
@@ -1016,6 +1108,7 @@ impl<'gc> VM<'gc> {
                         .unwrap_or_default();
                     let is_dynamic_generator = matches!(borrow.get("__dynamic_generator_function__"), Some(Value::Boolean(true)));
                     let is_async_dynamic_gen = matches!(borrow.get("__async_dynamic_generator_function__"), Some(Value::Boolean(true)));
+                    let dynamic_generator_prototype = borrow.get("prototype").cloned();
                     drop(borrow);
                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                     self.stack.pop(); // pop callee
@@ -1028,6 +1121,18 @@ impl<'gc> VM<'gc> {
                     } else {
                         Value::VmObject(self.global_this)
                     };
+                    if realm_id.is_some() && !is_async_dynamic_gen {
+                        match self.vm_call_function_value(ctx, &callee, &this_val, &args_collected) {
+                            Ok(result) => {
+                                self.stack.push(result);
+                            }
+                            Err(err) => {
+                                let thrown = self.vm_value_from_error(ctx, &err);
+                                self.handle_throw(ctx, &thrown)?;
+                            }
+                        }
+                        return Ok(OpcodeAction::Continue);
+                    }
                     if is_async_dynamic_gen {
                         let _ = params_src;
                         let _ = args_collected;
@@ -1065,7 +1170,18 @@ impl<'gc> VM<'gc> {
                                 ab.props.insert("__async_gen_pending_body__".to_string(), Value::from(&body));
                                 ab.props.insert("__async_gen_pending_executed__".to_string(), Value::Boolean(false));
                             }
-                            if let Some(async_gen_proto) = self.globals.get("__async_generator_prototype").cloned() {
+                            if matches!(
+                                dynamic_generator_prototype,
+                                Some(Value::VmObject(_))
+                                    | Some(Value::VmArray(_))
+                                    | Some(Value::VmFunction(..))
+                                    | Some(Value::VmClosure(..))
+                                    | Some(Value::VmNativeFunction(_))
+                            ) {
+                                if let Some(proto) = dynamic_generator_prototype.clone() {
+                                    ab.props.insert("__proto__".to_string(), proto);
+                                }
+                            } else if let Some(async_gen_proto) = self.globals.get("__async_generator_prototype").cloned() {
                                 ab.props.insert("__proto__".to_string(), async_gen_proto);
                             }
                         }
@@ -6326,6 +6442,28 @@ impl<'gc> VM<'gc> {
         }
         match callee {
             Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
+                if self.fn_realm.contains_key(&target_ip) {
+                    let args: Vec<Value<'gc>> = (0..arg_count)
+                        .map(|_| self.stack.pop().expect("VM Stack underflow"))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    self.stack.pop(); // pop constructor
+                    match self.construct_value(ctx, &callee, &args, Some(&callee)) {
+                        Ok(result) => self.stack.push(result),
+                        Err(err) => {
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                            } else {
+                                let thrown = self.vm_value_from_error(ctx, &err);
+                                self.handle_throw(ctx, &thrown)?;
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    }
+                    return Ok(OpcodeAction::Continue);
+                }
                 if self.chunk.async_function_ips.contains(&target_ip) {
                     let callee_name = self.resolve_callee_name(callee_idx);
                     for _ in 0..arg_count {

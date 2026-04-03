@@ -12820,6 +12820,24 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("FinalizationRegistry".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FR));
         {
+            let mut fr_proto = IndexMap::new();
+            fr_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
+            fr_proto.insert("@@sym:4".to_string(), Value::from("FinalizationRegistry"));
+            fr_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+            fr_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+            fr_proto.insert("register".to_string(), Value::VmNativeFunction(BUILTIN_FR_REGISTER));
+            fr_proto.insert("__nonenumerable_register__".to_string(), Value::Boolean(true));
+            fr_proto.insert("unregister".to_string(), Value::VmNativeFunction(BUILTIN_FR_UNREGISTER));
+            fr_proto.insert("__nonenumerable_unregister__".to_string(), Value::Boolean(true));
+            let fr_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, fr_proto));
+            let props = self.get_native_fn_props(ctx, BUILTIN_CTOR_FR);
+            let mut b = props.borrow_mut(ctx);
+            b.insert("prototype".to_string(), fr_proto_val);
+            b.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        }
+        {
             let mut bigint_map = IndexMap::new();
             bigint_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_BIGINT as f64));
             Self::insert_property_with_attributes(&mut bigint_map, "name", &Value::from("BigInt"), false, false, true);

@@ -6510,8 +6510,13 @@ impl<'gc> VM<'gc> {
                             let mut m = IndexMap::new();
                             m.insert("__weakref__".to_string(), Value::Boolean(true));
                             m.insert("__target__".to_string(), target);
-                            m.insert("__toStringTag__".to_string(), Value::from("WeakRef"));
                             m.insert("__type__".to_string(), Value::from("WeakRef"));
+                            if let Some(wr_ctor) = self.globals.get("WeakRef").cloned() {
+                                let proto = self.read_named_property(ctx, &wr_ctor, "prototype");
+                                if !matches!(proto, Value::Undefined) {
+                                    m.insert("__proto__".to_string(), proto);
+                                }
+                            }
                             self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
                         } else {
                             let mut err_map = IndexMap::new();
@@ -6544,9 +6549,12 @@ impl<'gc> VM<'gc> {
                             m.insert("__fr_callback__".to_string(), callback);
                             m.insert("__fr_count__".to_string(), Value::Number(0.0));
                             m.insert("__type__".to_string(), Value::from("FinalizationRegistry"));
-                            m.insert("__toStringTag__".to_string(), Value::from("FinalizationRegistry"));
-                            m.insert("register".to_string(), Value::VmNativeFunction(BUILTIN_FR_REGISTER));
-                            m.insert("unregister".to_string(), Value::VmNativeFunction(BUILTIN_FR_UNREGISTER));
+                            if let Some(fr_ctor) = self.globals.get("FinalizationRegistry").cloned() {
+                                let proto = self.read_named_property(ctx, &fr_ctor, "prototype");
+                                if !matches!(proto, Value::Undefined) {
+                                    m.insert("__proto__".to_string(), proto);
+                                }
+                            }
                             self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
                         }
                     }

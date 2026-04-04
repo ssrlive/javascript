@@ -377,7 +377,9 @@ impl<'gc> Compiler<'gc> {
             self.chunk.declared_globals.insert(name.clone());
             let name_u16 = crate::unicode::utf8_to_utf16(&name);
             let name_idx = self.chunk.add_constant(Value::String(name_u16));
-            self.chunk.write_opcode(Opcode::DefineGlobal);
+            // Use DefineGlobalSoft: only initialize to undefined if the
+            // binding doesn't exist yet (per CreateGlobalVarBinding spec).
+            self.chunk.write_opcode(Opcode::DefineGlobalSoft);
             self.chunk.write_u16(name_idx);
         }
     }
@@ -1643,6 +1645,7 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::FunctionDeclaration(name, params, body, is_gen, is_async) => {
+                self.chunk.fn_declared_globals.insert(name.clone());
                 if *is_gen && !*is_async {
                     let func_ip = self.compile_generator_function_body(Some(name.as_str()), params, body)?;
                     self.chunk.fn_names.insert(func_ip, name.clone());

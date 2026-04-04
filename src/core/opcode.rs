@@ -104,6 +104,7 @@ pub enum Opcode {
     SetSuperPropertyComputed = 98, // assign to super[expr] using current this as receiver
     DefineComputedMethod = 99,     // like SetIndex but also marks non-enumerable (for class methods)
     IteratorCloseAbrupt = 100,     // best-effort iterator close for throw completions; never throws
+    DefineGlobalSoft = 101,        // like DefineGlobal but only defines if key doesn't already exist (for var hoisting)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -212,6 +213,7 @@ impl TryFrom<u8> for Opcode {
             98 => Opcode::SetSuperPropertyComputed,
             99 => Opcode::DefineComputedMethod,
             100 => Opcode::IteratorCloseAbrupt,
+            101 => Opcode::DefineGlobalSoft,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -266,11 +268,18 @@ pub struct Chunk<'gc> {
     /// Top-level lexical declaration names (`let`/`const`/`class`) in this chunk.
     /// Eval writeback must never leak these to the caller/global object.
     pub lexical_declared_globals: std::collections::HashSet<String>,
+    /// Top-level function declaration names in this chunk.
+    /// Used by eval writeback to apply CreateGlobalFunctionBinding semantics.
+    pub fn_declared_globals: std::collections::HashSet<String>,
     /// Mapping from block-alias key (`__top_block_alias_N__`) to the original
     /// variable name it shadows.  Used at runtime so that direct eval inside a
     /// block can resolve block-scoped variables, while indirect eval sees the
     /// unmodified global value.
     pub block_alias_to_original: std::collections::HashMap<String, String>,
+    /// True when this chunk was compiled for eval() code (not a main script).
+    /// Affects property descriptor semantics (e.g. var bindings are configurable
+    /// in eval but non-configurable in scripts).
+    pub is_eval_code: bool,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

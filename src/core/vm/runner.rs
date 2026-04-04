@@ -61,6 +61,7 @@ impl<'gc> VM<'gc> {
                 Opcode::Constant => self.run_opcode_constant(ctx)?,
                 Opcode::Pop => self.run_opcode_pop(ctx)?,
                 Opcode::DefineGlobal => self.run_opcode_define_global(ctx)?,
+                Opcode::DefineGlobalSoft => self.run_opcode_define_global_soft(ctx)?,
                 Opcode::DefineGlobalConst => self.run_opcode_define_global_const(ctx)?,
                 Opcode::GetNewTarget => self.run_opcode_get_new_target(ctx)?,
                 Opcode::GetGlobal => self.run_opcode_get_global(ctx)?,
@@ -1472,7 +1473,20 @@ impl<'gc> VM<'gc> {
             let name_str = crate::unicode::utf16_to_utf8(s);
             let val = self.stack.pop().unwrap_or(Value::Undefined);
             self.globals.insert(name_str.clone(), val.clone());
-            self.global_this.borrow_mut(ctx).insert(name_str, val);
+            // Per spec, script-level var/function declarations create
+            // non-configurable properties on the global object.
+            // Eval-level declarations are configurable (D=true).
+            let is_var_binding = !self.chunk.is_eval_code
+                && self.chunk.declared_globals.contains(&name_str)
+                && !self.chunk.lexical_declared_globals.contains(&name_str);
+            if is_var_binding {
+                let nc_key = format!("__nonconfigurable_{}__", name_str);
+                let mut gt = self.global_this.borrow_mut(ctx);
+                gt.insert(name_str, val);
+                gt.insert(nc_key, Value::Boolean(true));
+            } else {
+                self.global_this.borrow_mut(ctx).insert(name_str, val);
+            }
         }
         Ok(OpcodeAction::Continue)
     }
@@ -1487,6 +1501,25 @@ impl<'gc> VM<'gc> {
             let val = self.stack.pop().unwrap_or(Value::Undefined);
             self.globals.insert(name_str.clone(), val);
             self.const_globals.insert(name_str);
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::DefineGlobalSoft — like DefineGlobal but only initializes if
+    // the binding doesn't already exist.  Used for hoisted `var` declarations
+    // to implement CreateGlobalVarBinding semantics (no-op when hasProperty).
+    fn run_opcode_define_global_soft(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let name_idx = self.read_u16() as usize;
+        let name_val = &self.chunk.constants[name_idx];
+        if let Value::String(s) = name_val {
+            let name_str = crate::unicode::utf16_to_utf8(s);
+            let val = self.stack.pop().unwrap_or(Value::Undefined);
+            if !self.globals.contains_key(&name_str) {
+                self.globals.insert(name_str.clone(), val.clone());
+                self.global_this.borrow_mut(ctx).insert(name_str, val);
+            }
+        } else {
+            self.stack.pop();
         }
         Ok(OpcodeAction::Continue)
     }

@@ -11515,6 +11515,7 @@ impl<'gc> VM<'gc> {
                 Ok(
                     Opcode::Constant
                     | Opcode::DefineGlobal
+                    | Opcode::DefineGlobalSoft
                     | Opcode::DefineGlobalConst
                     | Opcode::GetGlobal
                     | Opcode::SetGlobal
@@ -16239,11 +16240,17 @@ impl<'gc> VM<'gc> {
                                 let (in_function, in_method, in_constructor) = match this_env_frame {
                                     Some(f) => {
                                         let eval_ctx = self.chunk.fn_eval_context.get(&f.func_ip).copied().unwrap_or(0);
-                                        let in_method = eval_ctx & 0x02 != 0 || self.fn_home_objects.contains_key(&f.func_ip);
+                                        let in_field = eval_ctx & 0x01 != 0 || self.in_field_init;
+                                        let in_method = eval_ctx & 0x02 != 0 || self.fn_home_objects.contains_key(&f.func_ip) || in_field;
                                         let in_constructor = eval_ctx & 0x04 != 0 || self.chunk.class_constructor_ips.contains(&f.func_ip);
                                         (true, in_method, in_constructor)
                                     }
-                                    None => (false, false, false),
+                                    None => {
+                                        // No enclosing function frame — check if we're in a
+                                        // field initializer at the top level (arrow in field).
+                                        let in_field = self.in_field_init;
+                                        (in_field, in_field, false)
+                                    }
                                 };
 
                                 if found & SCAN_NEW_TARGET != 0 && !in_function {
@@ -16335,7 +16342,16 @@ impl<'gc> VM<'gc> {
                     if let Some(ref ctx) = privns_context {
                         compiler.set_private_name_context(ctx.clone());
                     }
-                    let chunk = compiler.compile(&statements)?;
+                    let mut chunk = compiler.compile(&statements)?;
+                    chunk.is_eval_code = true;
+                    // Per spec §18.2.1.1 step 6: for indirect eval, strictEval
+                    // is true only when the eval code ITSELF has "use strict".
+                    // Our engine always parses as strict, but for indirect eval
+                    // writeback we need to know if the source explicitly opted in.
+                    let eval_code_explicit_strict = {
+                        let trimmed = code.trim();
+                        trimmed.starts_with("'use strict'") || trimmed.starts_with("\"use strict\"")
+                    };
                     // Non-configurable global names (can't be redefined by eval)
                     let non_configurable: [&str; 3] = ["NaN", "Infinity", "undefined"];
                     // Pre-check: scan chunk for DefineGlobal opcodes that would define functions overriding non-configurable globals
@@ -16346,7 +16362,11 @@ impl<'gc> VM<'gc> {
                         while pc < code.len() {
                             let op = code[pc];
                             pc += 1;
-                            if (op == Opcode::DefineGlobal as u8 || op == Opcode::DefineGlobalConst as u8) && pc + 1 < code.len() {
+                            if (op == Opcode::DefineGlobal as u8
+                                || op == Opcode::DefineGlobalSoft as u8
+                                || op == Opcode::DefineGlobalConst as u8)
+                                && pc + 1 < code.len()
+                            {
                                 let idx = (code[pc] as u16 | (code[pc + 1] as u16) << 8) as usize;
                                 if idx < constants.len()
                                     && let Value::String(s) = &constants[idx]
@@ -16363,6 +16383,7 @@ impl<'gc> VM<'gc> {
                                     Ok(
                                         Opcode::Constant
                                         | Opcode::DefineGlobal
+                                        | Opcode::DefineGlobalSoft
                                         | Opcode::DefineGlobalConst
                                         | Opcode::GetGlobal
                                         | Opcode::SetGlobal
@@ -16647,8 +16668,12 @@ impl<'gc> VM<'gc> {
                             if !self.repl_lexical_persist && chunk.lexical_declared_globals.contains(k) {
                                 continue;
                             }
-                            // In strict mode, skip new globals and var/function/class declarations in eval.
-                            if is_strict && (!self.globals.contains_key(k) || chunk.declared_globals.contains(k)) {
+                            // In strict mode, skip new globals and var/function declarations
+                            // (they stay scoped).  For INDIRECT eval, per spec §18.2.1.1
+                            // step 4, strictCaller = false; declarations go to global scope
+                            // UNLESS the eval code itself has "use strict".
+                            let strict_scoped = if self.direct_eval { is_strict } else { eval_code_explicit_strict };
+                            if strict_scoped && (!self.globals.contains_key(k) || chunk.declared_globals.contains(k)) {
                                 continue;
                             }
                             // For direct eval, skip variables that are locals in caller frames;
@@ -16681,8 +16706,28 @@ impl<'gc> VM<'gc> {
                             }
                             let adjusted = self.adjust_value_ips(ctx, v, code_offset, &eval_fn_ips);
                             self.globals.insert(k.clone(), adjusted.clone());
-                            // Also mirror onto globalThis so `this.x` sees eval-declared vars
-                            self.global_this.borrow_mut(ctx).insert(k.clone(), adjusted);
+                            // CreateGlobalFunctionBinding semantics (§8.1.1.4.18)
+                            // For eval function declarations, update property descriptors:
+                            // if existing property is configurable, set writable + enumerable
+                            if chunk.fn_declared_globals.contains(k) {
+                                let mut gt = self.global_this.borrow_mut(ctx);
+                                gt.insert(k.clone(), adjusted);
+                            } else {
+                                // Normal variable: just mirror onto globalThis
+                                self.global_this.borrow_mut(ctx).insert(k.clone(), adjusted);
+                            }
+                        }
+                    }
+                    // CreateGlobalFunctionBinding (§8.1.1.4.18): after writeback,
+                    // update property descriptors for eval function declarations.
+                    for fn_name in &chunk.fn_declared_globals {
+                        let nc_key = format!("__nonconfigurable_{}__", fn_name);
+                        let ro_key = format!("__readonly_{}__", fn_name);
+                        let ne_key = format!("__nonenumerable_{}__", fn_name);
+                        let mut gt = self.global_this.borrow_mut(ctx);
+                        if !gt.contains_key(&nc_key) {
+                            gt.shift_remove(&ro_key);
+                            gt.shift_remove(&ne_key);
                         }
                     }
                     // For direct eval, write back modified local variables to caller's stack

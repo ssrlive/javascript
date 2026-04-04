@@ -704,7 +704,7 @@ fn scan_expr(expr: &Expr, mask: u8, found: &mut u8) {
         }
         // Leaves with no sub-expressions
         _ => {
-            log::error!("Unhandled expression in scan_expr: {:?}", expr);
+            log::warn!("Unhandled expression in scan_expr: {:?}", expr);
         }
     }
 }

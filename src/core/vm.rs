@@ -10878,8 +10878,7 @@ impl<'gc> VM<'gc> {
                                     && let Some(Value::String(str_val)) = borrow.get("__value__")
                                     && idx < str_val.len()
                                 {
-                                    let ch = String::from_utf16_lossy(&[str_val[idx]]);
-                                    return Value::from(&ch);
+                                    return Value::String(vec![str_val[idx]]);
                                 }
                             }
                             Some("Number") => {
@@ -16392,6 +16391,19 @@ impl<'gc> VM<'gc> {
                             && let Some(home) = self.fn_home_objects.get(&caller_frame.func_ip)
                         {
                             eval_vm.eval_home_object = Some(home.clone());
+                        } else {
+                            // Field initializer direct eval may execute in helper frames that
+                            // don't carry fn_home_objects; derive a usable home from lexical this.
+                            let caller_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
+                            let derived_home = match caller_this {
+                                Value::VmObject(map) => map.borrow().get("__proto__").cloned(),
+                                Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned(),
+                                Value::VmFunction(..) | Value::VmClosure(..) => Some(caller_this),
+                                _ => None,
+                            };
+                            if let Some(home) = derived_home {
+                                eval_vm.eval_home_object = Some(home);
+                            }
                         }
                         // Inherit new.target stack for direct eval
                         // In field initializers, new.target is undefined per spec
@@ -18181,8 +18193,7 @@ impl<'gc> VM<'gc> {
                     if let Ok(idx) = key.parse::<usize>()
                         && idx < s.len()
                     {
-                        let ch = String::from_utf16_lossy(&[s[idx]]);
-                        return self.make_data_descriptor_object(ctx, &Value::from(&ch), false, true, false);
+                        return self.make_data_descriptor_object(ctx, &Value::String(vec![s[idx]]), false, true, false);
                     }
                     return Value::Undefined;
                 }
@@ -18318,8 +18329,7 @@ impl<'gc> VM<'gc> {
                             if let Ok(idx) = key.parse::<usize>()
                                 && idx < str_u16.len()
                             {
-                                let ch = String::from_utf16_lossy(&[str_u16[idx]]);
-                                return self.make_data_descriptor_object(ctx, &Value::from(&ch), false, true, false);
+                                return self.make_data_descriptor_object(ctx, &Value::String(vec![str_u16[idx]]), false, true, false);
                             }
                         }
                         let (writable, enumerable, configurable) = Self::property_attributes(&borrow, &key);
@@ -25448,8 +25458,7 @@ impl<'gc> VM<'gc> {
                     && let Ok(idx) = key.parse::<usize>()
                     && idx < str_u16.len()
                 {
-                    let ch = String::from_utf16_lossy(&[str_u16[idx]]);
-                    Some((true, false, Value::from(&ch)))
+                    Some((true, false, Value::String(vec![str_u16[idx]])))
                 } else {
                     None
                 }

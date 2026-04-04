@@ -1475,7 +1475,9 @@ impl<'gc> VM<'gc> {
         let _ = ctx;
         let val = if let Some(frame) = self.frames.last() {
             if self.chunk.arrow_function_ips.contains(&frame.func_ip) && !frame.upvalues.is_empty() {
-                if frame.upvalues.len() >= 2 {
+                if frame.upvalues.len() >= 3 {
+                    frame.upvalues[frame.upvalues.len() - 2].borrow().clone()
+                } else if frame.upvalues.len() >= 2 {
                     frame.upvalues[frame.upvalues.len() - 1].borrow().clone()
                 } else {
                     self.new_target_stack.last().cloned().unwrap_or(Value::Undefined)
@@ -3043,13 +3045,24 @@ impl<'gc> VM<'gc> {
                 captures.push(cell);
             }
         }
-        // Arrow functions capture the current lexical `this` as an extra
-        // hidden upvalue(s) at the end so GetThis/GetNewTarget can resolve lexically.
+        // Arrow functions capture lexical this/new.target/super-base as hidden upvalues.
         if self.chunk.arrow_function_ips.contains(&ip) {
-            let current_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-            captures.push(new_gc_cell_ptr(ctx, current_this));
+            // Capture lexical this via GetThis semantics (including captured lexical this
+            // of outer arrows), not raw this_stack dynamic receiver.
+            let current_this = if let Some(frame) = self.frames.last() {
+                if self.chunk.arrow_function_ips.contains(&frame.func_ip) && frame.upvalues.len() >= 3 {
+                    frame.upvalues[frame.upvalues.len() - 3].borrow().clone()
+                } else {
+                    self.this_stack.last().cloned().unwrap_or(Value::Undefined)
+                }
+            } else {
+                self.this_stack.last().cloned().unwrap_or(Value::Undefined)
+            };
+            captures.push(new_gc_cell_ptr(ctx, current_this.clone()));
             let current_new_target = self.new_target_stack.last().cloned().unwrap_or(Value::Undefined);
             captures.push(new_gc_cell_ptr(ctx, current_new_target));
+            let current_super_base = self.resolve_super_base(ctx, &current_this).unwrap_or(Value::Undefined);
+            captures.push(new_gc_cell_ptr(ctx, current_super_base));
         }
         let closure_value = Value::VmClosure(ip, arity, Gc::new(ctx, captures));
         let props = self.get_fn_props(ctx, ip, arity);
@@ -4089,6 +4102,9 @@ impl<'gc> VM<'gc> {
                 } else {
                     borrow.insert(key, val.clone());
                 }
+                if let Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) = &val {
+                    self.fn_home_objects.insert(*ip, obj.clone());
+                }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 // For closures with a per-evaluation overlay (class constructors after
@@ -4136,6 +4152,9 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(&nonenumerable_key);
                 borrow.shift_remove(&nonconfigurable_key);
                 borrow.insert(key, val.clone());
+                if let Value::VmFunction(fn_ip, _) | Value::VmClosure(fn_ip, _, _) = &val {
+                    self.fn_home_objects.insert(*fn_ip, obj.clone());
+                }
             }
             _ => {
                 let _ = self.assign_named_property(ctx, &obj, &key, &val, None)?;
@@ -4156,7 +4175,18 @@ impl<'gc> VM<'gc> {
         };
         let val = self.stack.pop().expect("VM Stack underflow on SetSuperProperty (val)");
         let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-        let Some(super_base) = self.ensure_super_base(ctx, &receiver) else {
+        let super_base_for_arrow = self
+            .frames
+            .last()
+            .and_then(|frame| {
+                if self.chunk.arrow_function_ips.contains(&frame.func_ip) && frame.upvalues.len() >= 3 {
+                    Some(frame.upvalues[frame.upvalues.len() - 1].borrow().clone())
+                } else {
+                    None
+                }
+            })
+            .filter(|v| !matches!(v, Value::Undefined | Value::Null));
+        let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
         };
         let result = self.assign_named_property(ctx, &super_base, &key, &val, Some(&receiver))?;
@@ -4180,7 +4210,18 @@ impl<'gc> VM<'gc> {
             }
         };
         let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-        let Some(super_base) = self.ensure_super_base(ctx, &receiver) else {
+        let super_base_for_arrow = self
+            .frames
+            .last()
+            .and_then(|frame| {
+                if self.chunk.arrow_function_ips.contains(&frame.func_ip) && frame.upvalues.len() >= 3 {
+                    Some(frame.upvalues[frame.upvalues.len() - 1].borrow().clone())
+                } else {
+                    None
+                }
+            })
+            .filter(|v| !matches!(v, Value::Undefined | Value::Null));
+        let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
         };
         let result = self.assign_named_property(ctx, &super_base, &key, &val, Some(&receiver))?;
@@ -4198,7 +4239,18 @@ impl<'gc> VM<'gc> {
             value_to_string(name_val)
         };
         let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-        let Some(super_base) = self.ensure_super_base(ctx, &receiver) else {
+        let super_base_for_arrow = self
+            .frames
+            .last()
+            .and_then(|frame| {
+                if self.chunk.arrow_function_ips.contains(&frame.func_ip) && frame.upvalues.len() >= 3 {
+                    Some(frame.upvalues[frame.upvalues.len() - 1].borrow().clone())
+                } else {
+                    None
+                }
+            })
+            .filter(|v| !matches!(v, Value::Undefined | Value::Null));
+        let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
         };
         let value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
@@ -4221,7 +4273,18 @@ impl<'gc> VM<'gc> {
             }
         };
         let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-        let Some(super_base) = self.ensure_super_base(ctx, &receiver) else {
+        let super_base_for_arrow = self
+            .frames
+            .last()
+            .and_then(|frame| {
+                if self.chunk.arrow_function_ips.contains(&frame.func_ip) && frame.upvalues.len() >= 3 {
+                    Some(frame.upvalues[frame.upvalues.len() - 1].borrow().clone())
+                } else {
+                    None
+                }
+            })
+            .filter(|v| !matches!(v, Value::Undefined | Value::Null));
+        let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
         };
         let value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
@@ -5112,7 +5175,11 @@ impl<'gc> VM<'gc> {
             && self.chunk.arrow_function_ips.contains(&frame.func_ip)
             && !frame.upvalues.is_empty()
         {
-            let captured_idx = frame.upvalues.len().saturating_sub(2);
+            let captured_idx = if frame.upvalues.len() >= 3 {
+                frame.upvalues.len() - 3
+            } else {
+                frame.upvalues.len().saturating_sub(2)
+            };
             let captured = frame.upvalues[captured_idx].borrow().clone();
             self.stack.push(captured);
             return Ok(OpcodeAction::Continue);

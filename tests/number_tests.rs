@@ -259,20 +259,11 @@ mod number_tests {
             other => panic!("Expected EvaluationError for huge BigInt shift, got {:?}", other),
         }
 
-        // Negative BigInt shift (e.g. -1n) should also error when converting to usize
-        let res = evaluate_script_with_vm("let a = 1n; a <<= -1n", false, None::<&std::path::Path>);
+        // Negative BigInt shift: 1n << -1n is equivalent to 1n >> 1n = 0n (per spec)
+        let res = evaluate_script_with_vm("let a = 1n; a <<= -1n; a", false, None::<&std::path::Path>);
         match res {
-            Err(err) => match err.kind() {
-                javascript::JSErrorKind::EvaluationError { message, .. } => {
-                    assert!(
-                        message.contains("invalid bigint shift") || message.contains("invalid bigint"),
-                        "message={}",
-                        message
-                    )
-                }
-                _ => panic!("Expected EvaluationError for negative BigInt shift, got {:?}", err),
-            },
-            other => panic!("Expected EvaluationError for negative BigInt shift, got {:?}", other),
+            Ok(v) => assert_eq!(v, "0", "1n << -1n should equal 0n"),
+            Err(err) => panic!("Negative BigInt shift should succeed, got error: {:?}", err),
         }
 
         // Mixing BigInt and Number in bitwise XOR should throw TypeError

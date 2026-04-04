@@ -2259,13 +2259,31 @@ impl<'gc> VM<'gc> {
         }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
-                let shift: usize = match (**b_bi).clone().try_into() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return Err(crate::raise_eval_error!("invalid bigint shift"));
-                    }
+                use num_bigint::Sign;
+                let result = if b_bi.sign() == Sign::Minus {
+                    // Negative shift: x << -y is x >> y (arithmetic right shift)
+                    let abs_shift: usize = match (-(**b_bi).clone()).try_into() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // Shift too large: result is 0 for non-negative, -1 for negative
+                            if a_bi.sign() == Sign::Minus {
+                                self.stack.push(Value::BigInt(Box::new(num_bigint::BigInt::from(-1))));
+                            } else {
+                                self.stack.push(Value::BigInt(Box::new(num_bigint::BigInt::from(0))));
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    };
+                    (**a_bi).clone() >> abs_shift
+                } else {
+                    let shift: usize = match (**b_bi).clone().try_into() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Err(crate::raise_eval_error!("invalid bigint shift"));
+                        }
+                    };
+                    (**a_bi).clone() << shift
                 };
-                let result = (**a_bi).clone() << shift;
                 self.stack.push(Value::BigInt(Box::new(result)));
             }
             (Value::Number(ln), Value::Number(rn)) => {
@@ -2298,13 +2316,31 @@ impl<'gc> VM<'gc> {
         }
         match (&lnum, &rnum) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
-                let shift: usize = match (**b_bi).clone().try_into() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return Err(crate::raise_eval_error!("invalid bigint shift"));
-                    }
+                use num_bigint::Sign;
+                let result = if b_bi.sign() == Sign::Minus {
+                    // Negative shift: x >> -y is x << y
+                    let abs_shift: usize = match (-(**b_bi).clone()).try_into() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Err(crate::raise_eval_error!("invalid bigint shift"));
+                        }
+                    };
+                    (**a_bi).clone() << abs_shift
+                } else {
+                    let shift: usize = match (**b_bi).clone().try_into() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // Shift too large: result is 0 for non-negative, -1 for negative
+                            if a_bi.sign() == Sign::Minus {
+                                self.stack.push(Value::BigInt(Box::new(num_bigint::BigInt::from(-1))));
+                            } else {
+                                self.stack.push(Value::BigInt(Box::new(num_bigint::BigInt::from(0))));
+                            }
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    };
+                    (**a_bi).clone() >> shift
                 };
-                let result = (**a_bi).clone() >> shift;
                 self.stack.push(Value::BigInt(Box::new(result)));
             }
             (Value::Number(ln), Value::Number(rn)) => {
@@ -6138,6 +6174,20 @@ impl<'gc> VM<'gc> {
             std::mem::swap(&mut obj, &mut key_val);
         }
 
+        // Per spec §13.10.1: if RHS is not an object, throw TypeError
+        if !is_object_like(&obj) {
+            let err = self.make_type_error_object(
+                ctx,
+                &format!(
+                    "Cannot use 'in' operator to search for '{}' in {}",
+                    value_to_string(&key_val),
+                    value_to_string(&obj)
+                ),
+            );
+            self.handle_throw(ctx, &err)?;
+            return Ok(OpcodeAction::Continue);
+        }
+
         let key = match self.as_property_key_string(ctx, &key_val) {
             Ok(key) => key,
             Err(err) => {
@@ -6376,6 +6426,17 @@ impl<'gc> VM<'gc> {
         let rhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (rhs)");
         let lhs = self.stack.pop().expect("VM Stack underflow on InstanceOf (lhs)");
 
+        // Per spec §13.10.2 step 3: RHS must be an object (callable check comes after @@hasInstance)
+        let is_object_like = matches!(
+            &rhs,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        );
+        if !is_object_like {
+            let err = self.make_type_error_object(ctx, "Right-hand side of instanceof is not an object");
+            self.handle_throw(ctx, &err)?;
+            return Ok(OpcodeAction::Continue);
+        }
+
         // Check Symbol.hasInstance (@@sym:2) on rhs first
         let has_instance_fn = match &rhs {
             Value::VmObject(map) => map.borrow().get("@@sym:2").cloned(),
@@ -6421,10 +6482,31 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
 
-        // Try prototype-chain based instanceof first (works for user-defined classes)
+        // Per spec §13.10.2 step 4: if IsCallable(rhs) is false, throw TypeError
+        let is_callable = matches!(&rhs, Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_))
+            || matches!(&rhs, Value::VmObject(map) if {
+                let b = map.borrow();
+                b.contains_key("__host_fn__") || b.contains_key("__native_id__") || b.contains_key("__fn_body__")
+            });
+        if !is_callable {
+            let err = self.make_type_error_object(ctx, "Right-hand side of instanceof is not callable");
+            self.handle_throw(ctx, &err)?;
+            return Ok(OpcodeAction::Continue);
+        }
+
+        // OrdinaryHasInstance: get rhs.prototype for prototype chain walking
         let mut proto_chain_result: Option<bool> = None;
 
-        // Get rhs.prototype for prototype chain walking
+        // Per spec §7.3.21 OrdinaryHasInstance step 3: if Type(O) is not Object, return false
+        let lhs_is_object = matches!(
+            &lhs,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        );
+        if !lhs_is_object {
+            self.stack.push(Value::Boolean(false));
+            return Ok(OpcodeAction::Continue);
+        }
+
         let rhs_proto = match &rhs {
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 let fn_props = self
@@ -6439,6 +6521,19 @@ impl<'gc> VM<'gc> {
             }
             _ => None,
         };
+
+        // Per spec §7.3.21 OrdinaryHasInstance step 5: if rhs.prototype is not an object, throw TypeError
+        if let Some(ref target_proto) = rhs_proto {
+            let proto_is_object = matches!(
+                target_proto,
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            );
+            if !proto_is_object {
+                let err = self.make_type_error_object(ctx, "Function has non-object prototype in instanceof check");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
+        }
 
         if let Some(target_proto) = &rhs_proto {
             // Walk __proto__ chain of lhs looking for target_proto
@@ -6485,6 +6580,14 @@ impl<'gc> VM<'gc> {
                         let proto = self.read_named_property(ctx, &ctor, "prototype");
                         if matches!(proto, Value::Undefined) { None } else { Some(proto) }
                     })
+                }
+                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+                    // Functions inherit from Function.prototype
+                    if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
+                        function_ctor.borrow().get("prototype").cloned()
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };

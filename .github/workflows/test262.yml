@@ -130,7 +130,7 @@ jobs:
               RUN_TESTS='true'
               ;;
             10)
-              TITLE='"dynamic-import,module-code,import,eval-code,export"'
+              TITLE='"language/expressions/dynamic-import" - "language/export"'
               FOCUS='language/expressions/dynamic-import,language/module-code,language/import,language/eval-code,language/export'
               RUN_TESTS='true'
               ;;

@@ -24879,13 +24879,13 @@ impl<'gc> VM<'gc> {
         }
         // Handle hex, binary, octal prefixes
         if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-            return num_bigint::BigInt::parse_bytes(trimmed[2..].as_bytes(), 16);
+            return num_bigint::BigInt::parse_bytes(&trimmed.as_bytes()[2..], 16);
         }
         if trimmed.starts_with("0b") || trimmed.starts_with("0B") {
-            return num_bigint::BigInt::parse_bytes(trimmed[2..].as_bytes(), 2);
+            return num_bigint::BigInt::parse_bytes(&trimmed.as_bytes()[2..], 2);
         }
         if trimmed.starts_with("0o") || trimmed.starts_with("0O") {
-            return num_bigint::BigInt::parse_bytes(trimmed[2..].as_bytes(), 8);
+            return num_bigint::BigInt::parse_bytes(&trimmed.as_bytes()[2..], 8);
         }
         trimmed.parse::<num_bigint::BigInt>().ok()
     }

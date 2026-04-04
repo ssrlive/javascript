@@ -3294,37 +3294,52 @@ impl<'gc> Compiler<'gc> {
             }
             // Prefix increment: ++x
             Expr::Increment(inner) => {
-                self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::ToNumeric);
-                self.chunk.write_opcode(Opcode::Increment);
-                // Write back
-                self.compile_store(inner)?;
+                if let Expr::Index(obj, idx_expr) = &**inner {
+                    self.compile_update_index(obj, idx_expr, Opcode::Increment, false)?;
+                } else {
+                    self.compile_expr(inner)?;
+                    self.chunk.write_opcode(Opcode::ToNumeric);
+                    self.chunk.write_opcode(Opcode::Increment);
+                    self.compile_store(inner)?;
+                }
             }
             // Prefix decrement: --x
             Expr::Decrement(inner) => {
-                self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::ToNumeric);
-                self.chunk.write_opcode(Opcode::Decrement);
-                self.compile_store(inner)?;
+                if let Expr::Index(obj, idx_expr) = &**inner {
+                    self.compile_update_index(obj, idx_expr, Opcode::Decrement, false)?;
+                } else {
+                    self.compile_expr(inner)?;
+                    self.chunk.write_opcode(Opcode::ToNumeric);
+                    self.chunk.write_opcode(Opcode::Decrement);
+                    self.compile_store(inner)?;
+                }
             }
             // Postfix increment: x++
             // Returns ToNumber(old_value), stores ToNumber(old_value)+1
             Expr::PostIncrement(inner) => {
-                self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::ToNumeric);
-                self.chunk.write_opcode(Opcode::Dup);
-                self.chunk.write_opcode(Opcode::Increment);
-                self.compile_store(inner)?;
-                self.chunk.write_opcode(Opcode::Pop);
+                if let Expr::Index(obj, idx_expr) = &**inner {
+                    self.compile_update_index(obj, idx_expr, Opcode::Increment, true)?;
+                } else {
+                    self.compile_expr(inner)?;
+                    self.chunk.write_opcode(Opcode::ToNumeric);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.chunk.write_opcode(Opcode::Increment);
+                    self.compile_store(inner)?;
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
             }
             // Postfix decrement: x--
             Expr::PostDecrement(inner) => {
-                self.compile_expr(inner)?;
-                self.chunk.write_opcode(Opcode::ToNumeric);
-                self.chunk.write_opcode(Opcode::Dup);
-                self.chunk.write_opcode(Opcode::Decrement);
-                self.compile_store(inner)?;
-                self.chunk.write_opcode(Opcode::Pop);
+                if let Expr::Index(obj, idx_expr) = &**inner {
+                    self.compile_update_index(obj, idx_expr, Opcode::Decrement, true)?;
+                } else {
+                    self.compile_expr(inner)?;
+                    self.chunk.write_opcode(Opcode::ToNumeric);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.chunk.write_opcode(Opcode::Decrement);
+                    self.compile_store(inner)?;
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
             }
             // Assignment to property: obj.key = val, obj[i] = val
             Expr::Assign(left, right) => match &**left {
@@ -3971,9 +3986,7 @@ impl<'gc> Compiler<'gc> {
                         let type_idx = self.chunk.add_constant(Value::from("ReferenceError"));
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(type_idx);
-                        let msg_idx = self
-                            .chunk
-                            .add_constant(Value::from("Unsupported reference to 'super'"));
+                        let msg_idx = self.chunk.add_constant(Value::from("Unsupported reference to 'super'"));
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(msg_idx);
                         self.chunk.write_opcode(Opcode::NewError);
@@ -4438,7 +4451,11 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::ToPropertyKey);
             self.chunk.write_opcode(Opcode::Dup);
             self.emit_define_var(&key_temp);
-            // Stack: [] (Dup consumed by emit_define_var if scope_depth > 0, or by DefineGlobal)
+            // In global scope, DefineGlobal pops the dup but the original remains.
+            // Pop it so the stack is clean for the GetIndex below.
+            if self.scope_depth == 0 {
+                self.chunk.write_opcode(Opcode::Pop);
+            }
 
             // 5. Load obj and key for GetIndex
             self.emit_helper_get(&obj_temp);
@@ -4486,6 +4503,87 @@ impl<'gc> Compiler<'gc> {
             self.compile_expr(rhs)?;
             self.chunk.write_opcode(op);
             self.compile_store(lhs)?;
+        }
+        Ok(())
+    }
+
+    /// Compile ++/-- on an index expression (obj[key]) with single ToPropertyKey evaluation.
+    /// `is_postfix`: if true, leaves old value on stack (for x++ / x--)
+    fn compile_update_index(&mut self, obj: &Expr, idx_expr: &Expr, update_op: Opcode, is_postfix: bool) -> Result<(), JSError> {
+        let obj_temp = format!("__ca_obj_{}__", self.completion_counter);
+        self.completion_counter += 1;
+        let key_temp = format!("__ca_key_{}__", self.completion_counter);
+        self.completion_counter += 1;
+
+        // 1. Evaluate obj, save
+        self.compile_expr(obj)?;
+        self.chunk.write_opcode(Opcode::Dup);
+        self.emit_define_var(&obj_temp);
+
+        // 2. Evaluate key expression (side effects happen here)
+        self.compile_expr(idx_expr)?;
+
+        // 3. Check obj for null/undefined
+        self.chunk.write_opcode(Opcode::Swap);
+        self.chunk.write_opcode(Opcode::ThrowIfNullish);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        // 4. ToPropertyKey on raw key (single call)
+        self.chunk.write_opcode(Opcode::ToPropertyKey);
+        self.chunk.write_opcode(Opcode::Dup);
+        self.emit_define_var(&key_temp);
+        if self.scope_depth == 0 {
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        // 5. Load obj and key for GetIndex
+        self.emit_helper_get(&obj_temp);
+        self.emit_helper_get(&key_temp);
+        self.chunk.write_opcode(Opcode::GetIndex);
+        // Stack: [current_val]
+
+        // 6. ToNumeric, then Dup (if postfix) + update
+        self.chunk.write_opcode(Opcode::ToNumeric);
+        if is_postfix {
+            self.chunk.write_opcode(Opcode::Dup);
+        }
+        self.chunk.write_opcode(update_op);
+        // Stack (postfix): [old_val, new_val]
+        // Stack (prefix):  [new_val]
+
+        // 7. SetIndex: need [obj, key, new_val]
+        self.emit_helper_get(&obj_temp);
+        self.chunk.write_opcode(Opcode::Swap);
+        self.emit_helper_get(&key_temp);
+        self.chunk.write_opcode(Opcode::Swap);
+        self.chunk.write_opcode(Opcode::SetIndex);
+
+        // For postfix, drop the SetIndex result to expose old_val
+        if is_postfix {
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        // Clean up temps
+        if self.scope_depth > 0 {
+            if let Some(pos) = self.locals.iter().rposition(|l| l == &key_temp) {
+                self.locals.remove(pos);
+                self.chunk.write_opcode(Opcode::Swap);
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+            if let Some(pos) = self.locals.iter().rposition(|l| l == &obj_temp) {
+                self.locals.remove(pos);
+                self.chunk.write_opcode(Opcode::Swap);
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+        } else {
+            let n = crate::unicode::utf8_to_utf16(&key_temp);
+            let ni = self.chunk.add_constant(Value::String(n));
+            self.chunk.write_opcode(Opcode::DeleteGlobal);
+            self.chunk.write_u16(ni);
+            let n = crate::unicode::utf8_to_utf16(&obj_temp);
+            let ni = self.chunk.add_constant(Value::String(n));
+            self.chunk.write_opcode(Opcode::DeleteGlobal);
+            self.chunk.write_u16(ni);
         }
         Ok(())
     }

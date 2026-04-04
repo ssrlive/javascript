@@ -17,9 +17,6 @@ mod gc;
 mod value;
 pub use value::*;
 
-mod property_key;
-pub use property_key::*;
-
 mod statement;
 pub use statement::*;
 

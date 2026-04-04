@@ -3012,7 +3012,12 @@ impl<'gc> VM<'gc> {
                             self.sync_ta_element_to_buffer(ctx, &arr, idx, 0.0, &ta_name);
                             Value::BigInt(Box::new(big_val))
                         } else {
-                            let val_num = to_number(&value_v);
+                            let val_prim = self.try_to_primitive(ctx, &value_v, "number");
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.pending_throw = Some(thrown);
+                                return Value::Undefined;
+                            }
+                            let val_num = to_number(&val_prim);
                             let to_integer = if val_num.is_nan() {
                                 0.0
                             } else if val_num == 0.0 || !val_num.is_finite() {
@@ -16283,7 +16288,7 @@ impl<'gc> VM<'gc> {
                             None
                         }
                         if let Some(msg) = check_strict_errors(&statements) {
-                            return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError { message: msg.to_string() }));
+                            return Err(crate::raise_syntax_error!(msg));
                         }
                         use crate::core::statement::{SCAN_STRICT_ARGS_EVAL_ASSIGN, eval_ast_scan};
                         let strict_assign = eval_ast_scan(&statements, SCAN_STRICT_ARGS_EVAL_ASSIGN);

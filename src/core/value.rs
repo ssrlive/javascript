@@ -1,4 +1,4 @@
-use crate::core::{Collect, Gc, GcPtr, GcTrace};
+use crate::core::{Collect, GcPtr, GcTrace};
 use crate::core::{FunctionID, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
@@ -47,32 +47,6 @@ impl<'gc> std::ops::DerefMut for VmArrayData<'gc> {
     }
 }
 
-#[derive(Clone, Debug, Collect)]
-#[collect(require_static)]
-pub struct SymbolData {
-    description: Option<String>,
-    /// True for symbols created via `Symbol.for()` (global symbol registry).
-    /// Registered symbols cannot be used as WeakMap/WeakSet/WeakRef keys.
-    pub registered: bool,
-}
-impl SymbolData {
-    pub fn new(description: Option<&str>) -> Self {
-        SymbolData {
-            description: description.map(|s| s.to_string()),
-            registered: false,
-        }
-    }
-    pub fn new_registered(description: Option<&str>) -> Self {
-        SymbolData {
-            description: description.map(|s| s.to_string()),
-            registered: true,
-        }
-    }
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
-}
-
 #[derive(Clone, Default)]
 pub enum Value<'gc> {
     #[default]
@@ -100,7 +74,6 @@ pub enum Value<'gc> {
         getter: Option<Box<Value<'gc>>>,
         setter: Option<Box<Value<'gc>>>,
     },
-    Symbol(Gc<'gc, SymbolData>),
 }
 
 impl<'gc> Value<'gc> {
@@ -123,7 +96,6 @@ impl<'gc> Value<'gc> {
             Value::BigInt(_) => "bigint",
             Value::Undefined | Value::Uninitialized => "undefined",
             Value::Null => "object",
-            Value::Symbol(_) => "symbol",
             Value::VmFunction(..) | Value::VmClosure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
             Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::Property { .. } => "object",
             Value::VmObject(map) => {
@@ -147,7 +119,6 @@ impl<'gc> Value<'gc> {
 
     pub fn is_symbol_value(&self) -> bool {
         match self {
-            Value::Symbol(_) => true,
             Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
             _ => false,
         }
@@ -198,7 +169,6 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
                     s.trace(cc);
                 }
             }
-            Value::Symbol(sym) => sym.trace(cc),
             _ => {}
         }
     }
@@ -270,13 +240,6 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             }
         }
         Value::Property { .. } => "[Property]".to_string(),
-        Value::Symbol(sym) => {
-            if let Some(desc) = &sym.description {
-                format!("Symbol({desc})")
-            } else {
-                "Symbol()".to_string()
-            }
-        }
         Value::Uninitialized => "[uninitialized]".to_string(),
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
         Value::VmClosure(ip, arity, _) => format!("[VmClosure@{} arity={}]", ip, arity),
@@ -416,13 +379,7 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                     }
                     if !matches!(
                         v,
-                        Value::Undefined
-                            | Value::Null
-                            | Value::Boolean(_)
-                            | Value::Number(_)
-                            | Value::BigInt(_)
-                            | Value::String(_)
-                            | Value::Symbol(_)
+                        Value::Undefined | Value::Null | Value::Boolean(_) | Value::Number(_) | Value::BigInt(_) | Value::String(_)
                     ) {
                         continue;
                     }

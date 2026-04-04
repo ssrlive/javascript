@@ -5793,7 +5793,7 @@ impl<'gc> VM<'gc> {
                         self.throw_type_error(ctx, "Cannot convert undefined or null to object");
                         Value::Undefined
                     }
-                    Value::Boolean(_) | Value::Number(_) | Value::String(_) | Value::BigInt(_) | Value::Symbol(_) => {
+                    Value::Boolean(_) | Value::Number(_) | Value::String(_) | Value::BigInt(_) => {
                         self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&this_val))
                     }
                     _ => this_val,
@@ -6709,7 +6709,7 @@ impl<'gc> VM<'gc> {
                 };
                 if matches!(
                     desc_val,
-                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
+                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_)
                 ) || matches!(desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                 {
                     self.throw_type_error(ctx, "Property description must be an object");
@@ -10538,10 +10538,6 @@ impl<'gc> VM<'gc> {
                     _ => String::new(),
                 })
             }
-            Value::Symbol(sym) => Some(match sym.description() {
-                Some(desc) if !desc.is_empty() => format!("[{}]", desc),
-                _ => String::new(),
-            }),
             _ => None,
         }) {
             symbol_name
@@ -15065,7 +15061,7 @@ impl<'gc> VM<'gc> {
                 // CreateListFromArrayLike: argumentsList must be an object
                 if matches!(
                     arg_array,
-                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
+                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_)
                 ) || arg_array.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "CreateListFromArrayLike called on non-object");
@@ -17682,7 +17678,7 @@ impl<'gc> VM<'gc> {
                         }
                         Value::Boolean(false)
                     }
-                    Value::Number(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => Value::Boolean(false),
+                    Value::Number(_) | Value::Boolean(_) | Value::BigInt(_) => Value::Boolean(false),
                     _ => Value::Boolean(false),
                 }
             }
@@ -17985,13 +17981,7 @@ impl<'gc> VM<'gc> {
                 let desc_val = args.get(2).cloned().unwrap_or(Value::Undefined);
                 if matches!(
                     desc_val,
-                    Value::Undefined
-                        | Value::Null
-                        | Value::Number(_)
-                        | Value::Boolean(_)
-                        | Value::String(_)
-                        | Value::Symbol(_)
-                        | Value::BigInt(_)
+                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_)
                 ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                 {
                     self.throw_type_error(ctx, "Property description must be an object");
@@ -18707,13 +18697,7 @@ impl<'gc> VM<'gc> {
                     }
                     if matches!(
                         desc_val,
-                        Value::Undefined
-                            | Value::Null
-                            | Value::Number(_)
-                            | Value::Boolean(_)
-                            | Value::String(_)
-                            | Value::Symbol(_)
-                            | Value::BigInt(_)
+                        Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_)
                     ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
                     {
                         self.throw_type_error(ctx, "Property description must be an object");
@@ -18999,17 +18983,6 @@ impl<'gc> VM<'gc> {
                             obj.insert("__type__".to_string(), Value::from("BigInt"));
                             obj.insert("__value__".to_string(), Value::BigInt(bi.clone()));
                             if let Some(Value::VmObject(ctor)) = self.globals.get("BigInt")
-                                && let Some(proto) = ctor.borrow().get("prototype").cloned()
-                            {
-                                obj.insert("__proto__".to_string(), proto);
-                            }
-                            return Value::VmObject(new_gc_cell_ptr(ctx, obj));
-                        }
-                        Value::Symbol(_) => {
-                            let mut obj = IndexMap::new();
-                            obj.insert("__type__".to_string(), Value::from("Symbol"));
-                            obj.insert("__value__".to_string(), arg.clone());
-                            if let Some(Value::VmObject(ctor)) = self.globals.get("Symbol")
                                 && let Some(proto) = ctor.borrow().get("prototype").cloned()
                             {
                                 obj.insert("__proto__".to_string(), proto);
@@ -24761,13 +24734,13 @@ impl<'gc> VM<'gc> {
             // Object vs primitive: ToPrimitive(object) then recurse.
             (
                 Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_),
-                Value::String(_) | Value::Number(_) | Value::BigInt(_) | Value::Symbol(_),
+                Value::String(_) | Value::Number(_) | Value::BigInt(_),
             ) => {
                 let prim = self.loose_eq_to_primitive(ctx, a);
                 self.loose_equal(ctx, &prim, b)
             }
             (
-                Value::String(_) | Value::Number(_) | Value::BigInt(_) | Value::Symbol(_),
+                Value::String(_) | Value::Number(_) | Value::BigInt(_),
                 Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_),
             ) => {
                 let prim = self.loose_eq_to_primitive(ctx, b);

@@ -363,10 +363,6 @@ impl<'gc> VM<'gc> {
                                     self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                                     f64::NAN
                                 }
-                                Value::Symbol(_) => {
-                                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                                    f64::NAN
-                                }
                                 _ => to_number(&prim),
                             }
                         }
@@ -677,10 +673,6 @@ impl<'gc> VM<'gc> {
                         self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                         f64::NAN
                     }
-                    Value::Symbol(_) => {
-                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                        f64::NAN
-                    }
                     _ if prim.is_symbol_value() => {
                         self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                         f64::NAN
@@ -703,10 +695,6 @@ impl<'gc> VM<'gc> {
                 }
                 Value::BigInt(_) => {
                     self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
-                    f64::NAN
-                }
-                Value::Symbol(_) => {
-                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     f64::NAN
                 }
                 _ if prim.is_symbol_value() => {

@@ -6008,10 +6008,6 @@ impl<'gc> VM<'gc> {
                 self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                 self.stack.push(Value::Number(f64::NAN));
             }
-            Value::Symbol(_) => {
-                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                self.stack.push(Value::Number(f64::NAN));
-            }
             _ => self.stack.push(Value::Number(to_number(&val))),
         }
         Ok(OpcodeAction::Continue)
@@ -6034,10 +6030,6 @@ impl<'gc> VM<'gc> {
                         _ => self.stack.push(Value::Number(to_number(&prim))),
                     }
                 }
-            }
-            Value::Symbol(_) => {
-                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
-                self.stack.push(Value::Number(f64::NAN));
             }
             _ => self.stack.push(Value::Number(to_number(&val))),
         }
@@ -6950,12 +6942,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_valid = match &target {
                             Value::VmObject(_) if !is_registered_symbol => true,
-                            Value::VmArray(_)
-                            | Value::VmMap(_)
-                            | Value::VmSet(_)
-                            | Value::VmFunction(..)
-                            | Value::VmClosure(..)
-                            | Value::Symbol(_) => true,
+                            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
                             _ => false,
                         };
                         if is_valid {

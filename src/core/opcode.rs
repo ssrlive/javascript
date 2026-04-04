@@ -105,6 +105,7 @@ pub enum Opcode {
     DefineComputedMethod = 99,     // like SetIndex but also marks non-enumerable (for class methods)
     IteratorCloseAbrupt = 100,     // best-effort iterator close for throw completions; never throws
     DefineGlobalSoft = 101,        // like DefineGlobal but only defines if key doesn't already exist (for var hoisting)
+    ThrowIfNullish = 102,          // throw TypeError if TOS is null or undefined (does not pop)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -214,6 +215,7 @@ impl TryFrom<u8> for Opcode {
             99 => Opcode::DefineComputedMethod,
             100 => Opcode::IteratorCloseAbrupt,
             101 => Opcode::DefineGlobalSoft,
+            102 => Opcode::ThrowIfNullish,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

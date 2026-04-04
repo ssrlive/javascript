@@ -3842,76 +3842,40 @@ impl<'gc> Compiler<'gc> {
             }
             // Compound assignment: x += rhs
             Expr::AddAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::Add);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::Add)?;
             }
             Expr::SubAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::Sub);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::Sub)?;
             }
             Expr::MulAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::Mul);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::Mul)?;
             }
             Expr::DivAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::Div);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::Div)?;
             }
             Expr::ModAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::Mod);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::Mod)?;
             }
             Expr::BitXorAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::BitwiseXor);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::BitwiseXor)?;
             }
             Expr::BitAndAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::BitwiseAnd);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::BitwiseAnd)?;
             }
             Expr::BitOrAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::BitwiseOr);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::BitwiseOr)?;
             }
             Expr::LeftShiftAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::ShiftLeft);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::ShiftLeft)?;
             }
             Expr::RightShiftAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::ShiftRight);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::ShiftRight)?;
             }
             Expr::UnsignedRightShiftAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::UnsignedShiftRight);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::UnsignedShiftRight)?;
             }
             Expr::PowAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.compile_expr(rhs)?;
-                self.chunk.write_opcode(Opcode::Pow);
-                self.compile_store(lhs)?;
+                self.compile_compound_assign(lhs, rhs, Opcode::Pow)?;
             }
             Expr::LogicalAndAssign(lhs, rhs) => {
                 self.compile_expr(lhs)?;
@@ -4001,6 +3965,19 @@ impl<'gc> Compiler<'gc> {
                         self.compile_expr(obj)?;
                         self.compile_expr(idx_expr)?;
                         self.chunk.write_opcode(Opcode::DeleteIndex);
+                    }
+                    // delete super.x / delete super[expr] → always ReferenceError per spec
+                    Expr::SuperProperty(_) | Expr::SuperComputedProperty(_) => {
+                        let type_idx = self.chunk.add_constant(Value::from("ReferenceError"));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(type_idx);
+                        let msg_idx = self
+                            .chunk
+                            .add_constant(Value::from("Unsupported reference to 'super'"));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(msg_idx);
+                        self.chunk.write_opcode(Opcode::NewError);
+                        self.chunk.write_opcode(Opcode::Throw);
                     }
                     _ => {
                         self.compile_expr(inner)?;
@@ -4428,6 +4405,89 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(msg_idx);
         self.chunk.write_opcode(Opcode::NewError);
         self.chunk.write_opcode(Opcode::Throw);
+    }
+
+    /// Compile a compound assignment (e.g. `lhs *= rhs`).
+    /// For `Expr::Index` targets, evaluates obj and key once, caching them for
+    /// both the GetIndex and SetIndex to avoid double ToPropertyKey calls.
+    /// Order per spec: eval base, eval key expr, RequireObjectCoercible(base),
+    /// ToPropertyKey(key) — once only.
+    fn compile_compound_assign(&mut self, lhs: &Expr, rhs: &Expr, op: Opcode) -> Result<(), JSError> {
+        if let Expr::Index(obj, idx_expr) = lhs {
+            let obj_temp = format!("__ca_obj_{}__", self.completion_counter);
+            self.completion_counter += 1;
+            let key_temp = format!("__ca_key_{}__", self.completion_counter);
+            self.completion_counter += 1;
+
+            // 1. Evaluate obj, save
+            self.compile_expr(obj)?;
+            self.chunk.write_opcode(Opcode::Dup);
+            self.emit_define_var(&obj_temp);
+
+            // 2. Evaluate key expression (side effects happen here, e.g. prop())
+            self.compile_expr(idx_expr)?;
+
+            // 3. Check obj for null/undefined AFTER evaluating key, BEFORE ToPropertyKey
+            //    Swap to get obj on top, check, swap back
+            self.chunk.write_opcode(Opcode::Swap);
+            self.chunk.write_opcode(Opcode::ThrowIfNullish);
+            self.chunk.write_opcode(Opcode::Pop);
+            // Stack: [raw_key]
+
+            // 4. ToPropertyKey on raw key (only call, handles toString)
+            self.chunk.write_opcode(Opcode::ToPropertyKey);
+            self.chunk.write_opcode(Opcode::Dup);
+            self.emit_define_var(&key_temp);
+            // Stack: [] (Dup consumed by emit_define_var if scope_depth > 0, or by DefineGlobal)
+
+            // 5. Load obj and key for GetIndex
+            self.emit_helper_get(&obj_temp);
+            self.emit_helper_get(&key_temp);
+            self.chunk.write_opcode(Opcode::GetIndex);
+            // Stack: [current_val]
+
+            // 6. Evaluate RHS and apply operator
+            self.compile_expr(rhs)?;
+            self.chunk.write_opcode(op);
+            // Stack: [result]
+
+            // 7. SetIndex: need [obj, key, result]
+            self.emit_helper_get(&obj_temp);
+            self.chunk.write_opcode(Opcode::Swap);
+            self.emit_helper_get(&key_temp);
+            self.chunk.write_opcode(Opcode::Swap);
+            self.chunk.write_opcode(Opcode::SetIndex);
+
+            // Clean up temps
+            if self.scope_depth > 0 {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == &key_temp) {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                if let Some(pos) = self.locals.iter().rposition(|l| l == &obj_temp) {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+            } else {
+                let n = crate::unicode::utf8_to_utf16(&key_temp);
+                let ni = self.chunk.add_constant(Value::String(n));
+                self.chunk.write_opcode(Opcode::DeleteGlobal);
+                self.chunk.write_u16(ni);
+                let n = crate::unicode::utf8_to_utf16(&obj_temp);
+                let ni = self.chunk.add_constant(Value::String(n));
+                self.chunk.write_opcode(Opcode::DeleteGlobal);
+                self.chunk.write_u16(ni);
+            }
+        } else {
+            // Non-index targets: normal path
+            self.compile_expr(lhs)?;
+            self.compile_expr(rhs)?;
+            self.chunk.write_opcode(op);
+            self.compile_store(lhs)?;
+        }
+        Ok(())
     }
 
     /// Write-back helper for increment/decrement: store the top-of-stack value

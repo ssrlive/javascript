@@ -127,10 +127,12 @@ jobs:
             9)
               TITLE='"language/expressions/coalesce" - "language/expressions/does-not-equals"'
               FOCUS='language/expressions/coalesce,language/expressions/comma,language/expressions/compound-assignment,language/expressions/concatenation,language/expressions/conditional,language/expressions/delete,language/expressions/division,language/expressions/does-not-equals'
+              RUN_TESTS='true'
               ;;
             10)
               TITLE='"dynamic-import,module-code,import,eval-code,export"'
               FOCUS='language/expressions/dynamic-import,language/module-code,language/import,language/eval-code,language/export'
+              RUN_TESTS='true'
               ;;
             11)
               TITLE='"language/expressions/equals" - "language/expressions/generators"'

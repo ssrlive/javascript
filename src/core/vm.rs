@@ -24864,6 +24864,25 @@ impl<'gc> VM<'gc> {
         prim
     }
 
+    /// StringToBigInt for loose equality: empty/whitespace → 0n, else parse decimal/hex/bin/oct.
+    fn string_to_bigint_for_eq(s: &str) -> Option<num_bigint::BigInt> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Some(num_bigint::BigInt::from(0));
+        }
+        // Handle hex, binary, octal prefixes
+        if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+            return num_bigint::BigInt::parse_bytes(trimmed[2..].as_bytes(), 16);
+        }
+        if trimmed.starts_with("0b") || trimmed.starts_with("0B") {
+            return num_bigint::BigInt::parse_bytes(trimmed[2..].as_bytes(), 2);
+        }
+        if trimmed.starts_with("0o") || trimmed.starts_with("0O") {
+            return num_bigint::BigInt::parse_bytes(trimmed[2..].as_bytes(), 8);
+        }
+        trimmed.parse::<num_bigint::BigInt>().ok()
+    }
+
     /// JS loose equality (==) with type coercion
     fn loose_equal(&mut self, ctx: &GcContext<'gc>, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
@@ -24880,6 +24899,21 @@ impl<'gc> VM<'gc> {
             // Number vs String: coerce string to number
             (Value::Number(n), Value::String(_)) => *n == to_number(b),
             (Value::String(_), Value::Number(n)) => to_number(a) == *n,
+            // BigInt vs String: convert string to BigInt, compare
+            (Value::BigInt(x), Value::String(s)) => {
+                let s_utf8 = crate::unicode::utf16_to_utf8(s);
+                match Self::string_to_bigint_for_eq(&s_utf8) {
+                    Some(n) => **x == n,
+                    None => false,
+                }
+            }
+            (Value::String(s), Value::BigInt(x)) => {
+                let s_utf8 = crate::unicode::utf16_to_utf8(s);
+                match Self::string_to_bigint_for_eq(&s_utf8) {
+                    Some(n) => n == **x,
+                    None => false,
+                }
+            }
             // Boolean vs any: coerce boolean to number, recurse
             (Value::Boolean(bv), _) => {
                 let num = Value::Number(if *bv { 1.0 } else { 0.0 });

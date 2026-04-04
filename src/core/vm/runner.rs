@@ -62,6 +62,7 @@ impl<'gc> VM<'gc> {
                 Opcode::Pop => self.run_opcode_pop(ctx)?,
                 Opcode::DefineGlobal => self.run_opcode_define_global(ctx)?,
                 Opcode::DefineGlobalSoft => self.run_opcode_define_global_soft(ctx)?,
+                Opcode::ThrowIfNullish => self.run_opcode_throw_if_nullish(ctx)?,
                 Opcode::DefineGlobalConst => self.run_opcode_define_global_const(ctx)?,
                 Opcode::GetNewTarget => self.run_opcode_get_new_target(ctx)?,
                 Opcode::GetGlobal => self.run_opcode_get_global(ctx)?,
@@ -1524,6 +1525,16 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
+    // Opcode::ThrowIfNullish — throw TypeError if TOS is null/undefined (does not pop)
+    fn run_opcode_throw_if_nullish(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let top = self.stack.last().expect("VM Stack underflow on ThrowIfNullish");
+        if matches!(top, Value::Null | Value::Undefined) {
+            let err = self.make_type_error_object(ctx, "Cannot read properties of null or undefined");
+            self.handle_throw(ctx, &err)?;
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
     // Opcode::GetNewTarget
     fn run_opcode_get_new_target(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
@@ -1869,6 +1880,11 @@ impl<'gc> VM<'gc> {
         }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                if **b_bi == num_bigint::BigInt::from(0) {
+                    let err = self.make_range_error_object(ctx, "Division by zero");
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() / (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -2061,6 +2077,11 @@ impl<'gc> VM<'gc> {
         }
         match (&a, &b) {
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                if **b_bi == num_bigint::BigInt::from(0) {
+                    let err = self.make_range_error_object(ctx, "Division by zero");
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
                 self.stack.push(Value::BigInt(Box::new((**a_bi).clone() % (**b_bi).clone())));
             }
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
@@ -6731,8 +6752,15 @@ impl<'gc> VM<'gc> {
             b.props.shift_remove(&format!("__nonenumerable_{}__", key));
             b.props.shift_remove(&format!("__readonly_{}__", key));
             self.stack.push(Value::Boolean(true));
+        } else if matches!(obj, Value::Null | Value::Undefined) {
+            let type_name = if matches!(obj, Value::Null) { "null" } else { "undefined" };
+            let err = self.make_type_error_object(ctx, &format!("Cannot convert {} to object", type_name));
+            self.handle_throw(ctx, &err)?;
+            return Ok(OpcodeAction::Continue);
         } else {
-            self.stack.push(Value::Boolean(false));
+            // Primitives (Number, Boolean, String, BigInt, Symbol) — property doesn't
+            // exist on wrapper, so delete returns true.
+            self.stack.push(Value::Boolean(true));
         }
         Ok(OpcodeAction::Continue)
     }
@@ -7720,7 +7748,43 @@ impl<'gc> VM<'gc> {
                     self.stack.push(Value::Boolean(true));
                 }
             }
-            _ => self.stack.push(Value::Boolean(false)),
+            Value::Null | Value::Undefined => {
+                // Per spec §12.5.3.2 step 5b: ToObject on null/undefined throws TypeError
+                let type_name = if matches!(obj, Value::Null) { "null" } else { "undefined" };
+                let err = self.make_type_error_object(ctx, &format!("Cannot convert {} to object", type_name));
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            Value::String(s) => {
+                // String: only own integer indices within range are non-deletable
+                let key = match self.as_property_key_string(ctx, &idx_val) {
+                    Ok(k) => k,
+                    Err(_) => value_to_string(&idx_val),
+                };
+                if let Ok(idx) = key.parse::<usize>() {
+                    if idx < s.len() {
+                        // Character at index — non-configurable, strict mode throws
+                        if self.current_execution_is_strict() {
+                            let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of [object String]", key));
+                            self.handle_throw(ctx, &err)?;
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        self.stack.push(Value::Boolean(false));
+                    } else {
+                        self.stack.push(Value::Boolean(true));
+                    }
+                } else if key == "length" {
+                    if self.current_execution_is_strict() {
+                        let err = self.make_type_error_object(ctx, "Cannot delete property 'length' of [object String]");
+                        self.handle_throw(ctx, &err)?;
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    self.stack.push(Value::Boolean(false));
+                } else {
+                    self.stack.push(Value::Boolean(true));
+                }
+            }
+            _ => self.stack.push(Value::Boolean(true)),
         }
         Ok(OpcodeAction::Continue)
     }

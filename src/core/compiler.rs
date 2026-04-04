@@ -98,6 +98,12 @@ impl<'gc> Compiler<'gc> {
         Self::default()
     }
 
+    pub fn set_strict_mode(&mut self, strict: bool) {
+        if strict {
+            self.current_strict = true;
+        }
+    }
+
     /// Resolve a private field name to a unique key using the current class nesting context.
     /// Searches the class_privns_stack from innermost to outermost for the class that declares `name`.
     /// `name` should be the bare name (e.g., "x"), NOT prefixed.
@@ -416,6 +422,11 @@ impl<'gc> Compiler<'gc> {
                         Self::collect_object_destructuring_binding_names(elem, &mut hoisted);
                     }
                 }
+                StatementKind::Class(class_def) => {
+                    if !class_def.name.is_empty() && !hoisted.iter().any(|n| n == &class_def.name) {
+                        hoisted.push(class_def.name.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -426,6 +437,7 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_u16(uninit_idx);
 
             self.chunk.declared_globals.insert(name.clone());
+            self.chunk.lexical_declared_globals.insert(name.clone());
             let name_u16 = crate::unicode::utf8_to_utf16(&name);
             let name_idx = self.chunk.add_constant(Value::String(name_u16));
             self.chunk.write_opcode(Opcode::DefineGlobal);
@@ -637,6 +649,14 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Assign(name, expr) => {
+                if self.current_strict && name == "arguments" && self.function_depth > 0 {
+                    self.compile_expr(expr)?;
+                    self.emit_syntax_error("Unexpected eval or arguments in strict mode");
+                    if !is_last {
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    return Ok(());
+                }
                 self.compile_expr(expr)?;
                 if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     if self.const_locals.contains(name.as_str()) {
@@ -2256,6 +2276,9 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Class(class_def) => {
+                if self.scope_depth == 0 && !class_def.name.is_empty() {
+                    self.chunk.lexical_declared_globals.insert(class_def.name.clone());
+                }
                 self.compile_class_definition(class_def, false)?;
             }
 
@@ -3212,6 +3235,11 @@ impl<'gc> Compiler<'gc> {
             // Assignment to property: obj.key = val, obj[i] = val
             Expr::Assign(left, right) => match &**left {
                 Expr::Var(name, line, column) => {
+                    if self.current_strict && name == "arguments" && self.function_depth > 0 {
+                        self.compile_expr(right)?;
+                        self.emit_syntax_error("Unexpected eval or arguments in strict mode");
+                        return Ok(());
+                    }
                     // Infer function name for anonymous function/arrow assigned to a variable
                     // Parenthesized identifier targets are represented as Var(name, None, None)
                     // and must not trigger NamedEvaluation name inference.
@@ -4294,6 +4322,18 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(msg_idx);
         // ThrowTypeError: pops message, constructs TypeError, throws
         self.chunk.write_opcode(Opcode::ThrowTypeError);
+    }
+
+    /// Emit bytecode that throws a SyntaxError (used for strict-mode early errors).
+    fn emit_syntax_error(&mut self, message: &str) {
+        let type_idx = self.chunk.add_constant(Value::from("SyntaxError"));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(type_idx);
+        let msg_idx = self.chunk.add_constant(Value::from(message));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(msg_idx);
+        self.chunk.write_opcode(Opcode::NewError);
+        self.chunk.write_opcode(Opcode::Throw);
     }
 
     /// Write-back helper for increment/decrement: store the top-of-stack value

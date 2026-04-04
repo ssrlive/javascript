@@ -809,6 +809,8 @@ pub struct VM<'gc> {
     // with its own builtins, globals, and constructors. Use Option + take() pattern
     // for borrow-checker-safe mutable access.
     child_realms: Vec<Option<Box<VM<'gc>>>>,
+    // REPL compatibility mode: allow lexical declarations to persist across snippets.
+    repl_lexical_persist: bool,
 }
 
 impl<'gc> VM<'gc> {
@@ -824,6 +826,35 @@ impl<'gc> VM<'gc> {
 }
 
 impl<'gc> VM<'gc> {
+    fn eval_comment_only_fast_path(&self, code: &str) -> Option<Value<'gc>> {
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            return Some(Value::Undefined);
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("//") {
+            if let Some((idx, ch)) = rest
+                .char_indices()
+                .find(|(_, c)| matches!(*c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            {
+                let tail = &rest[idx + ch.len_utf8()..];
+                return if tail.trim().is_empty() { Some(Value::Undefined) } else { None };
+            }
+            return Some(Value::Undefined);
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/*")
+            && let Some(end_rel) = rest.find("*/")
+        {
+            let tail = &rest[end_rel + 2..];
+            if tail.trim().is_empty() {
+                return Some(Value::Undefined);
+            }
+        }
+
+        None
+    }
+
     fn parse_simple_module_namespace(&self, ctx: &GcContext<'gc>, source_text: &str) -> Value<'gc> {
         let mut map = IndexMap::new();
 
@@ -945,6 +976,7 @@ impl<'gc> VM<'gc> {
             regexp_home_proto_temp: None,
             dynamic_function_kind_override: None,
             child_realms: Vec::new(),
+            repl_lexical_persist: false,
         };
         vm.register_builtins(ctx);
         vm
@@ -11607,6 +11639,9 @@ impl<'gc> VM<'gc> {
         for (ip, name) in &eval_chunk.call_callee_names {
             self.chunk.call_callee_names.insert(ip + code_offset, name.clone());
         }
+        self.chunk
+            .lexical_declared_globals
+            .extend(eval_chunk.lexical_declared_globals.iter().cloned());
         for ip in &eval_chunk.generator_function_ips {
             self.chunk.generator_function_ips.insert(ip + code_offset);
         }
@@ -16086,18 +16121,16 @@ impl<'gc> VM<'gc> {
                 self.json_parse(ctx, &s)
             }
             BUILTIN_EVAL => {
-                let code = args.first().map(value_to_string).unwrap_or_default();
-                let expr = code.trim().trim_end_matches(';').trim();
-                if self.direct_eval
-                    && let Some(name) = expr.strip_prefix("super.")
-                    && !name.is_empty()
-                    && name.chars().all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-                {
-                    let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-                    if let Some(super_base) = self.resolve_super_base(ctx, &receiver) {
-                        return self.read_named_property(ctx, &super_base, name);
-                    }
+                let Some(first_arg) = args.first() else {
                     return Value::Undefined;
+                };
+                // Per spec, eval returns non-String arguments unchanged.
+                if !matches!(first_arg, Value::String(_)) {
+                    return first_arg.clone();
+                }
+                let code = value_to_string(first_arg);
+                if let Some(v) = self.eval_comment_only_fast_path(&code) {
+                    return v;
                 }
                 if code.contains("?.") {
                     match self.try_eval_optional_chain_expression(ctx, &code) {
@@ -16143,7 +16176,13 @@ impl<'gc> VM<'gc> {
                     // Indirect eval always runs as global code: reject super(), super.prop, new.target.
                     // Direct eval in a field initializer: reject `arguments` and `super()`.
                     {
-                        use crate::core::statement::{SCAN_ARGUMENTS, SCAN_NEW_TARGET, SCAN_SUPER_CALL, SCAN_SUPER_PROP, eval_ast_scan};
+                        use crate::core::statement::{
+                            SCAN_ARGUMENTS, SCAN_IMPORT_EXPORT, SCAN_NEW_TARGET, SCAN_SUPER_CALL, SCAN_SUPER_PROP, eval_ast_scan,
+                        };
+                        let import_export = eval_ast_scan(&statements, SCAN_IMPORT_EXPORT);
+                        if import_export & SCAN_IMPORT_EXPORT != 0 {
+                            return Err(crate::raise_syntax_error!("Unexpected token"));
+                        }
                         if !self.direct_eval {
                             // Indirect eval: reject super(), super.prop, new.target
                             let mask = SCAN_SUPER_CALL | SCAN_SUPER_PROP | SCAN_NEW_TARGET;
@@ -16255,8 +16294,14 @@ impl<'gc> VM<'gc> {
                         if let Some(msg) = check_strict_errors(&statements) {
                             return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError { message: msg.to_string() }));
                         }
+                        use crate::core::statement::{SCAN_STRICT_ARGS_EVAL_ASSIGN, eval_ast_scan};
+                        let strict_assign = eval_ast_scan(&statements, SCAN_STRICT_ARGS_EVAL_ASSIGN);
+                        if strict_assign & SCAN_STRICT_ARGS_EVAL_ASSIGN != 0 {
+                            return Err(crate::raise_syntax_error!("Unexpected eval or arguments in strict mode"));
+                        }
                     }
                     let mut compiler = crate::core::Compiler::new();
+                    compiler.set_strict_mode(is_strict);
                     if let Some(ref ctx) = privns_context {
                         compiler.set_private_name_context(ctx.clone());
                     }
@@ -16493,7 +16538,12 @@ impl<'gc> VM<'gc> {
                             std::collections::HashSet::new()
                         };
                         for (k, v) in &eval_vm.globals {
-                            // In strict mode, skip globals that were declared in the eval code
+                            // Never leak top-level lexical declarations from eval
+                            // unless REPL mode explicitly requests persistence.
+                            if !self.repl_lexical_persist && chunk.lexical_declared_globals.contains(k) {
+                                continue;
+                            }
+                            // In strict mode, skip new globals and var/function/class declarations in eval.
                             if is_strict && (!self.globals.contains_key(k) || chunk.declared_globals.contains(k)) {
                                 continue;
                             }
@@ -16537,9 +16587,11 @@ impl<'gc> VM<'gc> {
                                     if name.starts_with("__") && name.ends_with("__") {
                                         continue;
                                     }
-                                    // In strict eval, skip locals whose name was
-                                    // var-declared inside the eval (they shadow, not assign)
-                                    if is_strict && chunk.declared_globals.contains(name) {
+                                    // Skip locals whose name was declared inside eval
+                                    // (var/function/class in strict eval, lexical in all evals).
+                                    if (!self.repl_lexical_persist && chunk.lexical_declared_globals.contains(name))
+                                        || (is_strict && chunk.declared_globals.contains(name))
+                                    {
                                         continue;
                                     }
                                     if let Some(new_val) = eval_vm.globals.get(name) {
@@ -16620,41 +16672,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     Err(e) => {
-                        let msg = format!("{}", e);
-                        let msg_lower = msg.to_lowercase();
-                        let is_syntax = msg_lower.contains("syntaxerror")
-                            || msg_lower.contains("syntax error")
-                            || msg_lower.contains("illegal return")
-                            || msg_lower.contains("continue outside")
-                            || msg_lower.contains("break outside")
-                            || msg_lower.contains("parsing failed")
-                            || msg_lower.contains("parse error")
-                            || msg_lower.contains("unexpected token")
-                            || msg_lower.contains("unexpected end");
-                        let is_type_error = msg_lower.contains("typeerror") || msg_lower.contains("type error");
-                        let is_reference_error = msg_lower.contains("referenceerror") || msg_lower.contains("reference error");
-                        let type_name = if is_syntax {
-                            "SyntaxError"
-                        } else if is_type_error {
-                            "TypeError"
-                        } else if is_reference_error {
-                            "ReferenceError"
-                        } else {
-                            "Error"
-                        };
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from(type_name));
-                        err_map.insert("name".to_string(), Value::from(type_name));
-                        err_map.insert("message".to_string(), Value::from(&msg));
-                        if let Some(ctor) = self.globals.get(type_name).cloned() {
-                            err_map.insert("constructor".to_string(), ctor.clone());
-                            if let Value::VmObject(ctor_obj) = ctor
-                                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
-                            {
-                                err_map.insert("__proto__".to_string(), proto);
-                            }
-                        }
-                        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         Value::Undefined
                     }
                 }
@@ -28935,7 +28953,9 @@ impl<'gc> VM<'gc> {
     pub fn eval_repl_snippet(&mut self, ctx: &GcContext<'gc>, code: &str) -> Result<Value<'gc>, JSError> {
         // REPL submissions are independent top-level snippets, not direct eval calls.
         self.direct_eval = false;
+        self.repl_lexical_persist = true;
         let out = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(code)]);
+        self.repl_lexical_persist = false;
         if let Some(thrown) = self.pending_throw.take() {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }

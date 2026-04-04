@@ -405,6 +405,8 @@ pub const SCAN_ARGUMENTS: u8 = 0x01;
 pub const SCAN_SUPER_CALL: u8 = 0x02;
 pub const SCAN_SUPER_PROP: u8 = 0x04;
 pub const SCAN_NEW_TARGET: u8 = 0x08;
+pub const SCAN_IMPORT_EXPORT: u8 = 0x10;
+pub const SCAN_STRICT_ARGS_EVAL_ASSIGN: u8 = 0x20;
 
 /// Scan `statements` for forbidden constructs indicated by `mask`.
 /// Returns the subset of `mask` bits that were actually found.
@@ -424,7 +426,16 @@ fn scan_statement(stmt: &Statement, mask: u8, found: &mut u8) {
         return;
     }
     match &*stmt.kind {
-        StatementKind::Expr(e) => scan_expr(e, mask, found),
+        StatementKind::Expr(e) => {
+            if mask & SCAN_STRICT_ARGS_EVAL_ASSIGN != 0
+                && let Expr::Assign(lhs, _) = e
+                && let Expr::Var(name, _, _) = &**lhs
+                && (name == "arguments" || name == "eval")
+            {
+                *found |= SCAN_STRICT_ARGS_EVAL_ASSIGN;
+            }
+            scan_expr(e, mask, found);
+        }
         StatementKind::Let(decls) | StatementKind::Var(decls) => {
             for (_, init) in decls {
                 if let Some(e) = init {
@@ -550,8 +561,18 @@ fn scan_statement(stmt: &Statement, mask: u8, found: &mut u8) {
                 scan_statement(s, mask, found);
             }
         }
+        StatementKind::Import(..) | StatementKind::Export(..) => {
+            if mask & SCAN_IMPORT_EXPORT != 0 {
+                *found |= SCAN_IMPORT_EXPORT;
+            }
+        }
         StatementKind::Label(_, inner) => scan_statement(inner, mask, found),
-        StatementKind::Assign(_, e) => scan_expr(e, mask, found),
+        StatementKind::Assign(name, e) => {
+            if mask & SCAN_STRICT_ARGS_EVAL_ASSIGN != 0 && (name == "arguments" || name == "eval") {
+                *found |= SCAN_STRICT_ARGS_EVAL_ASSIGN;
+            }
+            scan_expr(e, mask, found);
+        }
         StatementKind::LetDestructuringArray(_, e)
         | StatementKind::VarDestructuringArray(_, e)
         | StatementKind::ConstDestructuringArray(_, e)
@@ -566,11 +587,7 @@ fn scan_statement(stmt: &Statement, mask: u8, found: &mut u8) {
         // Function/class declarations create new scopes — do NOT recurse
         StatementKind::FunctionDeclaration(..) | StatementKind::Class(..) => {}
         // Other statements with no sub-expressions
-        StatementKind::Break(_)
-        | StatementKind::Continue(_)
-        | StatementKind::Debugger
-        | StatementKind::Import(..)
-        | StatementKind::Export(..) => {}
+        StatementKind::Break(_) | StatementKind::Continue(_) | StatementKind::Debugger => {}
     }
 }
 
@@ -638,6 +655,12 @@ fn scan_expr(expr: &Expr, mask: u8, found: &mut u8) {
         | Expr::Index(a, b)
         | Expr::Comma(a, b)
         | Expr::OptionalIndex(a, b) => {
+            if mask & SCAN_STRICT_ARGS_EVAL_ASSIGN != 0
+                && let Expr::Var(name, _, _) = &**a
+                && (name == "arguments" || name == "eval")
+            {
+                *found |= SCAN_STRICT_ARGS_EVAL_ASSIGN;
+            }
             scan_expr(a, mask, found);
             scan_expr(b, mask, found);
         }

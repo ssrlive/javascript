@@ -481,17 +481,21 @@ impl<'gc> VM<'gc> {
                         self.stack.push(Value::Undefined);
                     }
                 }
-                // Remove excess args beyond arity to prevent local slot corruption
-                let saved_args = if arg_count > arity as usize {
+                // Preserve full argument list for Arguments object semantics.
+                let saved_args = if arg_count > 0 {
                     let first_arg_idx = callee_idx + 1;
-                    let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
-                    let drain_start = first_arg_idx + arity as usize;
-                    let drain_end = first_arg_idx + arg_count;
-                    self.stack.drain(drain_start..drain_end);
-                    Some(all_args)
+                    Some(self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec())
                 } else {
                     None
                 };
+                // Keep full args for `arguments`, but trim stack to declared arity
+                // so function-local slots remain aligned.
+                if arg_count > arity as usize {
+                    let first_arg_idx = callee_idx + 1;
+                    let drain_start = first_arg_idx + arity as usize;
+                    let drain_end = first_arg_idx + arg_count;
+                    self.stack.drain(drain_start..drain_end);
+                }
                 // For method calls, pop receiver from under callee and bind as this
                 if is_method {
                     // Remove receiver (one slot below callee)
@@ -664,17 +668,21 @@ impl<'gc> VM<'gc> {
                         self.stack.push(Value::Undefined);
                     }
                 }
-                // Remove excess args beyond arity to prevent local slot corruption
-                let saved_args = if arg_count > arity as usize {
+                // Preserve full argument list for Arguments object semantics.
+                let saved_args = if arg_count > 0 {
                     let first_arg_idx = callee_idx + 1;
-                    let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
-                    let drain_start = first_arg_idx + arity as usize;
-                    let drain_end = first_arg_idx + arg_count;
-                    self.stack.drain(drain_start..drain_end);
-                    Some(all_args)
+                    Some(self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec())
                 } else {
                     None
                 };
+                // Keep full args for `arguments`, but trim stack to declared arity
+                // so function-local slots remain aligned.
+                if arg_count > arity as usize {
+                    let first_arg_idx = callee_idx + 1;
+                    let drain_start = first_arg_idx + arity as usize;
+                    let drain_end = first_arg_idx + arg_count;
+                    self.stack.drain(drain_start..drain_end);
+                }
                 let closure_upvalues = (**upvals).clone();
                 if is_method {
                     let receiver = self.stack.remove(callee_idx - 1);
@@ -3118,6 +3126,11 @@ impl<'gc> VM<'gc> {
             String::new()
         };
         let type_str = if let Some(val) = self.globals.get(&name) {
+            if matches!(val, Value::Uninitialized) {
+                let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name));
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
             val.typeof_value()
         } else {
             "undefined"

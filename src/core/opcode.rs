@@ -259,6 +259,9 @@ pub struct Chunk<'gc> {
     /// Global names declared via `var`/`function`/`class` at the top level of this chunk.
     /// Used by strict-mode eval to avoid leaking declarations back to the caller.
     pub declared_globals: std::collections::HashSet<String>,
+    /// Top-level lexical declaration names (`let`/`const`/`class`) in this chunk.
+    /// Eval writeback must never leak these to the caller/global object.
+    pub lexical_declared_globals: std::collections::HashSet<String>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

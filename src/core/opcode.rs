@@ -102,6 +102,7 @@ pub enum Opcode {
     BoxLocal = 96,                 // create a shared upvalue cell for a local (for class name heritage scope)
     ToNumeric = 97,                // ToNumeric: like ToNumber but preserves BigInt values
     SetSuperPropertyComputed = 98, // assign to super[expr] using current this as receiver
+    DefineComputedMethod = 99,     // like SetIndex but also marks non-enumerable (for class methods)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -208,6 +209,7 @@ impl TryFrom<u8> for Opcode {
             96 => Opcode::BoxLocal,
             97 => Opcode::ToNumeric,
             98 => Opcode::SetSuperPropertyComputed,
+            99 => Opcode::DefineComputedMethod,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

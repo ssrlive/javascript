@@ -39,6 +39,9 @@ impl<'gc> VM<'gc> {
             // Check for pending throw (e.g. from generator .throw())
             if let Some(thrown) = self.pending_throw.take() {
                 self.handle_throw(ctx, &thrown)?;
+                // handle_throw already truncated the stack; no opcode handler
+                // follows, so clear the depth marker immediately.
+                self.throw_caught_stack_depth = None;
                 continue;
             }
             // Fetch instruction
@@ -109,6 +112,7 @@ impl<'gc> VM<'gc> {
                 Opcode::InitProperty => self.run_opcode_init_property(ctx)?,
                 Opcode::SetSuperProperty => self.run_opcode_set_super_property(ctx)?,
                 Opcode::SetSuperPropertyComputed => self.run_opcode_set_super_property_computed(ctx)?,
+                Opcode::DefineComputedMethod => self.run_opcode_define_computed_method(ctx)?,
                 Opcode::GetSuperProperty => self.run_opcode_get_super_property(ctx)?,
                 Opcode::GetSuperPropertyComputed => self.run_opcode_get_super_property_computed(ctx)?,
                 Opcode::GetIndex => self.run_opcode_get_index(ctx)?,
@@ -148,6 +152,14 @@ impl<'gc> VM<'gc> {
                 Opcode::AssertIterResult => self.run_opcode_assert_iter_result(ctx)?,
                 Opcode::BoxLocal => self.run_opcode_box_local(ctx)?,
             };
+            // If a throw was caught by handle_throw during this opcode, the
+            // handler may have pushed extra values onto the stack afterwards.
+            // Re-truncate to the depth recorded by handle_throw so the catch
+            // body starts with a clean stack.
+            if let Some(depth) = self.throw_caught_stack_depth.take() {
+                self.stack.truncate(depth);
+                continue;
+            }
             if let OpcodeAction::Exit(val) = action {
                 return Ok(val);
             }
@@ -3865,25 +3877,7 @@ impl<'gc> VM<'gc> {
                 } else if let Some(v) = lookup(&key) {
                     // Setter-only accessor shadows data property
                     let setter_key = format!("__set_{}", key);
-                    if lookup(&setter_key).is_some() {
-                        Value::Undefined
-                    } else if key == "prototype"
-                        && let Value::VmObject(proto_obj) = v.clone()
-                    {
-                        let current_fn = obj.clone();
-                        let needs_update = {
-                            let proto_borrow = proto_obj.borrow();
-                            !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
-                        };
-                        if needs_update {
-                            let mut proto_borrow = proto_obj.borrow_mut(ctx);
-                            proto_borrow.insert("constructor".to_string(), current_fn);
-                            proto_borrow.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
-                        }
-                        Value::VmObject(proto_obj)
-                    } else {
-                        v
-                    }
+                    if lookup(&setter_key).is_some() { Value::Undefined } else { v }
                 } else {
                     // Check for setter-only accessor
                     let setter_key = format!("__set_{}", key);
@@ -4849,6 +4843,66 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
+    // Opcode::DefineComputedMethod — like SetIndex but also marks the property non-enumerable.
+    // Used for class computed methods which must be non-enumerable per spec.
+    fn run_opcode_define_computed_method(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let val = self.stack.pop().expect("VM Stack underflow on DefineComputedMethod (val)");
+        let index = self.stack.pop().expect("VM Stack underflow on DefineComputedMethod (index)");
+        let obj = self.stack.pop().expect("VM Stack underflow on DefineComputedMethod (obj)");
+        let coerced_key = match self.as_property_key_string(ctx, &index) {
+            Ok(key) => key,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                return Err(err);
+            }
+        };
+        self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
+        match &obj {
+            Value::VmObject(map) => {
+                let ne_key = format!("__nonenumerable_{}__", coerced_key);
+                let mut borrow = map.borrow_mut(ctx);
+                // Remove any prior accessor or property flags for this key
+                borrow.shift_remove(&format!("__get_{}", coerced_key));
+                borrow.shift_remove(&format!("__set_{}", coerced_key));
+                borrow.insert(coerced_key, val.clone());
+                borrow.insert(ne_key, Value::Boolean(true));
+            }
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                // Static computed method named "prototype" is forbidden on class constructors
+                if coerced_key == "prototype" {
+                    let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
+                let props = self.get_fn_props(ctx, *ip, *arity);
+                let ne_key = format!("__nonenumerable_{}__", coerced_key);
+                let mut borrow = props.borrow_mut(ctx);
+                borrow.shift_remove(&format!("__get_{}", coerced_key));
+                borrow.shift_remove(&format!("__set_{}", coerced_key));
+                borrow.insert(coerced_key, val.clone());
+                borrow.insert(ne_key, Value::Boolean(true));
+            }
+            _ => match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
+                Ok(_) => {}
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                        return Ok(OpcodeAction::Continue);
+                    }
+                    return Err(err);
+                }
+            },
+        }
+        self.stack.push(val);
+        Ok(OpcodeAction::Continue)
+    }
+
     // Opcode::InitIndex
     fn run_opcode_init_index(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let val = self.stack.pop().expect("VM Stack underflow on InitIndex (val)");
@@ -4964,6 +5018,8 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(&coerced_key);
             }
             borrow.insert(getter_key, val.clone());
+            // Class computed getters are non-enumerable
+            borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             let props = self.get_fn_props(ctx, *ip, *arity);
             let has_nonconf = props.borrow().contains_key(&nonconfigurable_key);
@@ -4981,6 +5037,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(getter_key, val.clone());
+            borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
         }
         self.stack.push(val);
         Ok(OpcodeAction::Continue)
@@ -5026,6 +5083,7 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(&coerced_key);
             }
             borrow.insert(setter_key, val.clone());
+            borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             let props = self.get_fn_props(ctx, *ip, *arity);
             let has_nonconf = props.borrow().contains_key(&nonconfigurable_key);
@@ -5043,6 +5101,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(setter_key, val.clone());
+            borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
         }
         self.stack.push(val);
         Ok(OpcodeAction::Continue)

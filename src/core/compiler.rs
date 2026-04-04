@@ -64,10 +64,11 @@ struct UpvalueInfo {
 
 #[derive(Debug, Clone, Default)]
 struct LoopContext {
-    label: Option<String>,           // optional label for labeled break/continue
-    continue_patches: Vec<usize>,    // offsets to patch with continue target
-    break_patches: Vec<usize>,       // offsets to patch with post-loop address
-    for_of_iter_var: Option<String>, // iterator variable name for for-of loops (IteratorClose on early exit)
+    label: Option<String>,            // optional label for labeled break/continue
+    continue_patches: Vec<usize>,     // offsets to patch with continue target
+    break_patches: Vec<usize>,        // offsets to patch with post-loop address
+    for_of_iter_var: Option<String>,  // iterator variable name for for-of loops (IteratorClose on early exit)
+    body_saved_locals: Option<usize>, // locals count at start of loop body (for cleaning up block-scoped lets on continue/break)
 }
 
 #[derive(Debug, Clone)]
@@ -518,7 +519,6 @@ impl<'gc> Compiler<'gc> {
             }
 
             if self.function_depth == 0 {
-                self.chunk.write_opcode(Opcode::Dup);
                 let name_u16 = crate::unicode::utf8_to_utf16(name);
                 let name_idx = self.chunk.add_constant(Value::String(name_u16));
                 self.chunk.write_opcode(Opcode::SetGlobal);
@@ -716,14 +716,20 @@ impl<'gc> Compiler<'gc> {
                 if pushed_block_aliases {
                     self.top_level_block_aliases.push(block_aliases);
                 }
-                // Hoist function declarations to the top of the block
-                for s in statements.iter() {
-                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
-                        self.compile_statement(s, false)?;
+                // At scope_depth 0, hoist function declarations to the top
+                // of the block.  At scope_depth > 0 (inside a function),
+                // compile everything in source order so that closures in
+                // function declarations can capture block-scoped let/const
+                // variables that precede them.
+                if self.scope_depth == 0 {
+                    for s in statements.iter() {
+                        if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                            self.compile_statement(s, false)?;
+                        }
                     }
                 }
                 for (i, s) in statements.iter().enumerate() {
-                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                    if self.scope_depth == 0 && matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
                         continue;
                     }
                     let s_is_last = is_last && i == statements.len() - 1;
@@ -868,10 +874,16 @@ impl<'gc> Compiler<'gc> {
                 } else {
                     None
                 };
-                // Body
+                // Body — wrap in a block scope so let/const inside the body
+                // are properly scoped per-iteration and don't leak out.
+                let saved_body = self.locals.len();
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.body_saved_locals = Some(saved_body);
+                }
                 for s in &for_stmt.body {
                     self.compile_statement(s, false)?;
                 }
+                self.end_block_scope(saved_body);
                 // Update should not affect completion value
                 let body_cv = self.completion_var.take();
                 let update_ip = self.chunk.code.len();
@@ -1027,6 +1039,18 @@ impl<'gc> Compiler<'gc> {
                     let patch = self.emit_jump(Opcode::Jump);
                     self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
                 } else {
+                    // Pop block-scoped locals from the loop body before jumping out.
+                    if let Some(ctx) = if let Some(label) = label_opt {
+                        self.loop_stack.iter().rev().find(|c| c.label.as_deref() == Some(label.as_str()))
+                    } else {
+                        self.loop_stack.last()
+                    } && let Some(saved) = ctx.body_saved_locals
+                    {
+                        let to_pop = self.locals.len().saturating_sub(saved);
+                        for _ in 0..to_pop {
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                    }
                     // Emit IteratorClose for for-of loops being broken out of
                     if let Some(label) = label_opt {
                         let iter_vars: Vec<String> = {
@@ -1095,6 +1119,18 @@ impl<'gc> Compiler<'gc> {
                     let patch = self.emit_jump(Opcode::Jump);
                     self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
                 } else {
+                    // Pop block-scoped locals from the loop body before jumping to update.
+                    if let Some(ctx) = if let Some(label) = label_opt {
+                        self.loop_stack.iter().rev().find(|c| c.label.as_deref() == Some(label.as_str()))
+                    } else {
+                        self.loop_stack.last()
+                    } && let Some(saved) = ctx.body_saved_locals
+                    {
+                        let to_pop = self.locals.len().saturating_sub(saved);
+                        for _ in 0..to_pop {
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                    }
                     let patch = self.emit_jump(Opcode::Jump);
                     if let Some(label) = label_opt {
                         if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
@@ -1138,6 +1174,7 @@ impl<'gc> Compiler<'gc> {
                     }
                     let ctx = LoopContext {
                         label: Some(label.clone()),
+                        body_saved_locals: Some(self.locals.len()),
                         ..LoopContext::default()
                     };
                     self.loop_stack.push(ctx);
@@ -1358,14 +1395,23 @@ impl<'gc> Compiler<'gc> {
                     self.setup_completion_var();
                 }
 
-                // Determine catch binding name constant index (or 0xffff for none)
-                let binding_idx: u16 = if let Some(_catch_body) = &tc.catch_body {
+                // Determine catch binding name constant index (or 0xffff for none).
+                // Use a unique internal name so handle_throw doesn't overwrite
+                // any outer global that happens to share the catch parameter name.
+                let catch_internal_name: Option<String> = if tc.catch_body.is_some() {
                     if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        self.chunk.add_constant(Value::String(name_u16))
+                        let unique = format!("__catch_{}_{name}__", self.forin_counter);
+                        self.forin_counter = self.forin_counter.saturating_add(1);
+                        Some(unique)
                     } else {
-                        0xffff
+                        None
                     }
+                } else {
+                    None
+                };
+                let binding_idx: u16 = if let Some(ref internal) = catch_internal_name {
+                    let name_u16 = crate::unicode::utf8_to_utf16(internal);
+                    self.chunk.add_constant(Value::String(name_u16))
                 } else {
                     0xffff
                 };
@@ -1453,10 +1499,32 @@ impl<'gc> Compiler<'gc> {
 
                 // Catch body (block-scoped)
                 let saved_catch = self.locals.len();
+                // handle_throw stores the caught value in globals under the catch
+                // parameter name.  Load it from globals and push as a local so
+                // it properly shadows any outer binding with the same name.
+                // When at scope_depth 0, bump to 1 so inner let/const
+                // declarations are compiled as locals (block-scoped) and can
+                // properly shadow the catch parameter local.
+                let catch_bumped_depth = self.scope_depth == 0 && tc.catch_param.is_some();
+                if catch_bumped_depth {
+                    self.scope_depth = 1;
+                }
+                if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
+                    // Load caught value from the unique internal global name
+                    let load_name = catch_internal_name.as_deref().unwrap_or(name);
+                    let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                    let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(load_idx);
+                    self.locals.push(name.clone());
+                }
                 if let Some(ref catch_body) = tc.catch_body {
                     for s in catch_body {
                         self.compile_statement(s, false)?;
                     }
+                }
+                if catch_bumped_depth {
+                    self.scope_depth = 0;
                 }
                 self.end_block_scope(saved_catch);
 
@@ -1964,9 +2032,9 @@ impl<'gc> Compiler<'gc> {
                         self.patch_jump(bp);
                     }
 
-                    // Clean up iterator local
+                    // Clean up for-of temporary locals (TDZ var, iterator, hoisted vars)
                     if self.scope_depth > 0 && !forced_local {
-                        self.locals.retain(|l| l != &iter_var);
+                        self.end_block_scope(saved_locals);
                     }
                 }
 
@@ -4850,7 +4918,7 @@ impl<'gc> Compiler<'gc> {
     /// Expression-level array destructuring assignment: [x, y] = rhs
     /// RHS value is on stack top. Leaves the RHS value on the stack.
     fn compile_expr_array_destructuring_assign(&mut self, elems: &[Option<Expr>]) -> Result<(), JSError> {
-        // Save original RHS for expression result
+        // Save original RHS for expression result.
         let orig_temp = format!("__expr_destr_arr_orig_{}__", self.forin_counter);
         self.forin_counter += 1;
         self.chunk.write_opcode(Opcode::Dup);
@@ -4858,56 +4926,139 @@ impl<'gc> Compiler<'gc> {
         self.emit_helper_set(&orig_temp);
         self.chunk.write_opcode(Opcode::Pop);
 
-        // Normalize RHS via for-of helper
-        let temp = format!("__expr_destr_arr_{}__", self.forin_counter);
+        // Acquire iterator lazily (do not snapshot values up front).
+        let iter_temp = format!("__expr_destr_arr_iter_{}__", self.forin_counter);
         self.forin_counter += 1;
-
-        let has_rest = elems.iter().any(|e| matches!(e, Some(Expr::Spread(_))));
-        // Store RHS into helper slot before normalization.
-        self.emit_define_helper_slot(&temp);
-        self.emit_helper_set(&temp);
-        self.chunk.write_opcode(Opcode::Pop);
-
-        let mut call_args = vec![Expr::Var(temp.clone(), None, None)];
-        if !has_rest {
-            call_args.push(Expr::Number(elems.len() as f64));
-        }
         self.compile_expr(&Expr::Call(
-            Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
-            call_args,
+            Box::new(Expr::Var(INTERNAL_GETITER_HELPER.to_string(), None, None)),
+            vec![Expr::Var(orig_temp.clone(), None, None)],
         ))?;
-        self.emit_helper_set(&temp);
+        self.emit_define_helper_slot(&iter_temp);
+        self.emit_helper_set(&iter_temp);
         self.chunk.write_opcode(Opcode::Pop);
 
-        for (i, elem) in elems.iter().enumerate() {
+        // done flag mirrors iteratorRecord.[[done]]
+        let done_temp = format!("__expr_destr_arr_done_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let false_idx = self.chunk.add_constant(Value::Boolean(false));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(false_idx);
+        self.emit_define_helper_slot(&done_temp);
+        self.emit_helper_set(&done_temp);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        for elem in elems.iter() {
             match elem {
                 None => {
-                    // Elision — skip this index
+                    // Elision: advance iterator once when not done.
+                    self.emit_helper_get(&done_temp);
+                    let skip_next = self.emit_jump(Opcode::JumpIfTrue);
+
+                    self.emit_helper_get(&iter_temp);
+                    let next_key = crate::unicode::utf8_to_utf16("next");
+                    let next_idx = self.chunk.add_constant(Value::String(next_key));
+                    self.chunk.write_opcode(Opcode::GetMethod);
+                    self.chunk.write_u16(next_idx);
+                    self.emit_call_opcode(0, 0x80);
+                    self.chunk.write_opcode(Opcode::AssertIterResult);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let done_key = crate::unicode::utf8_to_utf16("done");
+                    let done_idx = self.chunk.add_constant(Value::String(done_key));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(done_idx);
+                    let not_done = self.emit_jump(Opcode::JumpIfFalse);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let true_idx = self.chunk.add_constant(Value::Boolean(true));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(true_idx);
+                    self.emit_helper_set(&done_temp);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.patch_jump(not_done);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    self.patch_jump(skip_next);
                 }
                 Some(Expr::Spread(inner)) => {
-                    // Rest element: ...target = remaining items
-                    self.emit_helper_get(&temp);
-                    self.emit_helper_get(&temp);
-                    let slice_k = self.chunk.add_constant(Value::from("slice"));
-                    self.chunk.write_opcode(Opcode::GetProperty);
-                    self.chunk.write_u16(slice_k);
-                    let start_idx = self.chunk.add_constant(Value::Number(i as f64));
+                    // Rest element collects remaining iterator values.
+                    self.emit_helper_get(&done_temp);
+                    let build_from_iter = self.emit_jump(Opcode::JumpIfFalse);
+                    self.chunk.write_opcode(Opcode::NewArray);
+                    self.chunk.write_byte(0);
+                    let rest_join = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(build_from_iter);
+                    self.compile_expr(&Expr::Call(
+                        Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
+                        vec![Expr::Var(iter_temp.clone(), None, None)],
+                    ))?;
+                    let true_idx = self.chunk.add_constant(Value::Boolean(true));
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(start_idx);
-                    self.emit_call_opcode(1, 0x80);
+                    self.chunk.write_u16(true_idx);
+                    self.emit_helper_set(&done_temp);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.patch_jump(rest_join);
+
                     self.compile_expr_assign_to_target(inner)?;
                     break;
                 }
                 Some(target) => {
-                    // Get element at index i
-                    self.emit_helper_get(&temp);
-                    let idx = self.chunk.add_constant(Value::Number(i as f64));
+                    // Step iterator once (unless already done) and bind value.
+                    self.emit_helper_get(&done_temp);
+                    let value_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
+
+                    self.emit_helper_get(&iter_temp);
+                    let next_key = crate::unicode::utf8_to_utf16("next");
+                    let next_idx = self.chunk.add_constant(Value::String(next_key));
+                    self.chunk.write_opcode(Opcode::GetMethod);
+                    self.chunk.write_u16(next_idx);
+                    self.emit_call_opcode(0, 0x80);
+                    self.chunk.write_opcode(Opcode::AssertIterResult);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let done_key = crate::unicode::utf8_to_utf16("done");
+                    let done_idx = self.chunk.add_constant(Value::String(done_key));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(done_idx);
+                    let next_not_done = self.emit_jump(Opcode::JumpIfFalse);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let true_idx = self.chunk.add_constant(Value::Boolean(true));
                     self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
-                    self.chunk.write_opcode(Opcode::GetIndex);
+                    self.chunk.write_u16(true_idx);
+                    self.emit_helper_set(&done_temp);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    let value_ready = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(next_not_done);
+                    let val_key = crate::unicode::utf8_to_utf16("value");
+                    let val_idx = self.chunk.add_constant(Value::String(val_key));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(val_idx);
+                    self.patch_jump(value_ready);
+
+                    let after_undefined = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(value_is_undefined);
+                    let undef_idx2 = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx2);
+                    self.patch_jump(after_undefined);
+
                     self.compile_expr_assign_to_target(target)?;
                 }
             }
+        }
+
+        // If iterator not done and no explicit rest consumed it, close it.
+        if !elems.iter().any(|e| matches!(e, Some(Expr::Spread(_)))) {
+            self.emit_helper_get(&done_temp);
+            let skip_close = self.emit_jump(Opcode::JumpIfTrue);
+            self.emit_helper_get(&iter_temp);
+            self.chunk.write_opcode(Opcode::IteratorClose);
+            let true_idx = self.chunk.add_constant(Value::Boolean(true));
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(true_idx);
+            self.emit_helper_set(&done_temp);
+            self.chunk.write_opcode(Opcode::Pop);
+            self.patch_jump(skip_close);
         }
 
         // Push original RHS back as the expression result.
@@ -4916,7 +5067,7 @@ impl<'gc> Compiler<'gc> {
 
         // Clean up temp locals
         if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &temp && l != &orig_temp);
+            self.locals.retain(|l| l != &iter_temp && l != &done_temp && l != &orig_temp);
         }
         Ok(())
     }
@@ -6920,6 +7071,7 @@ impl<'gc> Compiler<'gc> {
             || computed_setters.iter().any(|(_, _, _, s)| !*s);
 
         // Compile and install instance methods on ClassName.prototype
+        // Process in source order to preserve property insertion order per spec.
         if has_instance_members {
             // Push prototype: GetClass, GetProperty "prototype"
             self.emit_get_class_ref(name, is_expr)?;
@@ -6928,61 +7080,54 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_u16(proto_key);
             // stack: [proto]
 
-            for &(mname, params, body, is_static, kind) in &methods {
-                if is_static {
-                    continue;
+            for member in &class_def.members {
+                match member {
+                    ClassMember::Method(mname, params, body) => {
+                        self.compile_and_install_method_with_kind(mname, params, body, 0)?;
+                    }
+                    ClassMember::MethodGenerator(mname, params, body) => {
+                        self.compile_and_install_method_with_kind(mname, params, body, 1)?;
+                    }
+                    ClassMember::MethodAsync(mname, params, body) => {
+                        self.compile_and_install_method_with_kind(mname, params, body, 2)?;
+                    }
+                    ClassMember::MethodAsyncGenerator(mname, params, body) => {
+                        self.compile_and_install_method_with_kind(mname, params, body, 3)?;
+                    }
+                    ClassMember::MethodComputed(key, params, body) => {
+                        self.compile_and_install_computed_method(key, params, body, 0)?;
+                    }
+                    ClassMember::MethodComputedGenerator(key, params, body) => {
+                        self.compile_and_install_computed_method(key, params, body, 1)?;
+                    }
+                    ClassMember::MethodComputedAsync(key, params, body) => {
+                        self.compile_and_install_computed_method(key, params, body, 2)?;
+                    }
+                    ClassMember::MethodComputedAsyncGenerator(key, params, body) => {
+                        self.compile_and_install_computed_method(key, params, body, 3)?;
+                    }
+                    ClassMember::Getter(gname, body) => {
+                        self.compile_and_install_getter(gname, body)?;
+                    }
+                    ClassMember::Setter(sname, params, body) => {
+                        self.compile_and_install_setter(sname, params, body)?;
+                    }
+                    ClassMember::GetterComputed(key, body) => {
+                        self.compile_and_install_computed_getter(key, body)?;
+                    }
+                    ClassMember::SetterComputed(key, params, body) => {
+                        self.compile_and_install_computed_setter(key, params, body)?;
+                    }
+                    // Skip static, private, constructor, fields
+                    _ => {}
                 }
-                self.compile_and_install_method_with_kind(mname, params, body, kind)?;
-            }
-
-            // Install computed instance methods on prototype
-            for &(key_expr, params, body, is_static, kind) in &computed_methods {
-                if is_static {
-                    continue;
-                }
-                self.compile_and_install_computed_method(key_expr, params, body, kind)?;
-            }
-
-            // Install getters on prototype
-            for &(gname, body, is_static) in &getters {
-                if is_static {
-                    continue;
-                }
-                self.compile_and_install_getter(gname, body)?;
-            }
-
-            // Install setters on prototype
-            for &(sname, params, body, is_static) in &setters {
-                if is_static {
-                    continue;
-                }
-                self.compile_and_install_setter(sname, params, body)?;
-            }
-
-            // Non-static private methods/getters/setters are now installed per-instance
-            // (handled in compile_class_instance_field). Only static ones remain on the
-            // class object (handled later in static member installation).
-
-            // Install computed getters on prototype
-            for &(key_expr, body, is_static) in &computed_getters {
-                if is_static {
-                    continue;
-                }
-                self.compile_and_install_computed_getter(key_expr, body)?;
-            }
-
-            // Install computed setters on prototype
-            for &(key_expr, params, body, is_static) in &computed_setters {
-                if is_static {
-                    continue;
-                }
-                self.compile_and_install_computed_setter(key_expr, params, body)?;
             }
 
             self.chunk.write_opcode(Opcode::Pop); // pop proto
         }
 
         // Install static methods on the constructor function itself
+        // Process in source order to preserve property insertion order per spec.
         let has_static_methods = methods.iter().any(|(_, _, _, s, _)| *s)
             || getters.iter().any(|(_, _, s)| *s)
             || setters.iter().any(|(_, _, _, s)| *s)
@@ -6993,74 +7138,90 @@ impl<'gc> Compiler<'gc> {
             || computed_getters.iter().any(|(_, _, s)| *s)
             || computed_setters.iter().any(|(_, _, _, s)| *s);
         if has_static_methods {
-            for &(mname, params, body, is_static, kind) in &methods {
-                if !is_static {
-                    continue;
+            for member in &class_def.members {
+                match member {
+                    ClassMember::StaticMethod(mname, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_class_method_body_as_closure(mname, params, body, 0)?;
+                        let mk_idx = self.chunk.add_constant(Value::from(mname.as_str()));
+                        self.chunk.write_opcode(Opcode::InitProperty);
+                        self.chunk.write_u16(mk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.emit_nonenumerable_marker_standalone(mname);
+                    }
+                    ClassMember::StaticMethodGenerator(mname, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_class_method_body_as_closure(mname, params, body, 1)?;
+                        let mk_idx = self.chunk.add_constant(Value::from(mname.as_str()));
+                        self.chunk.write_opcode(Opcode::InitProperty);
+                        self.chunk.write_u16(mk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.emit_nonenumerable_marker_standalone(mname);
+                    }
+                    ClassMember::StaticMethodAsync(mname, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_class_method_body_as_closure(mname, params, body, 2)?;
+                        let mk_idx = self.chunk.add_constant(Value::from(mname.as_str()));
+                        self.chunk.write_opcode(Opcode::InitProperty);
+                        self.chunk.write_u16(mk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.emit_nonenumerable_marker_standalone(mname);
+                    }
+                    ClassMember::StaticMethodAsyncGenerator(mname, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_class_method_body_as_closure(mname, params, body, 3)?;
+                        let mk_idx = self.chunk.add_constant(Value::from(mname.as_str()));
+                        self.chunk.write_opcode(Opcode::InitProperty);
+                        self.chunk.write_u16(mk_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.emit_nonenumerable_marker_standalone(mname);
+                    }
+                    ClassMember::StaticMethodComputed(key, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_computed_method(key, params, body, 0)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticMethodComputedGenerator(key, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_computed_method(key, params, body, 1)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticMethodComputedAsync(key, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_computed_method(key, params, body, 2)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticMethodComputedAsyncGenerator(key, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_computed_method(key, params, body, 3)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticGetter(gname, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_getter(gname, body)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticSetter(sname, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_setter(sname, params, body)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticGetterComputed(key, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_computed_getter(key, body)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    ClassMember::StaticSetterComputed(key, params, body) => {
+                        self.emit_get_class_ref(name, is_expr)?;
+                        self.compile_and_install_computed_setter(key, params, body)?;
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                    _ => {}
                 }
-                self.emit_get_class_ref(name, is_expr)?;
-                self.compile_class_method_body_as_closure(mname, params, body, kind)?;
-                let mk_idx = self.chunk.add_constant(Value::from(mname));
-                self.chunk.write_opcode(Opcode::InitProperty);
-                self.chunk.write_u16(mk_idx);
-                self.chunk.write_opcode(Opcode::Pop);
-
-                // Static methods are non-enumerable
-                self.emit_get_class_ref(name, is_expr)?;
-                self.emit_nonenumerable_marker_standalone(mname);
-            }
-
-            // Static computed methods
-            for &(key_expr, params, body, is_static, kind) in &computed_methods {
-                if !is_static {
-                    continue;
-                }
-                self.emit_get_class_ref(name, is_expr)?;
-                self.compile_expr(key_expr)?;
-                self.chunk.write_opcode(Opcode::ToPropertyKey);
-                self.compile_class_method_body_as_closure("", params, body, kind)?;
-                // stack: [class, key, closure]
-                self.chunk.write_opcode(Opcode::InitIndex);
-                self.chunk.write_opcode(Opcode::Pop);
-            }
-
-            // Static getters
-            for &(gname, body, is_static) in &getters {
-                if !is_static {
-                    continue;
-                }
-                self.emit_get_class_ref(name, is_expr)?;
-                self.compile_and_install_getter(gname, body)?;
-                self.chunk.write_opcode(Opcode::Pop);
-            }
-
-            // Static setters
-            for &(sname, params, body, is_static) in &setters {
-                if !is_static {
-                    continue;
-                }
-                self.emit_get_class_ref(name, is_expr)?;
-                self.compile_and_install_setter(sname, params, body)?;
-                self.chunk.write_opcode(Opcode::Pop);
-            }
-
-            // Static computed getters
-            for &(key_expr, body, is_static) in &computed_getters {
-                if !is_static {
-                    continue;
-                }
-                self.emit_get_class_ref(name, is_expr)?;
-                self.compile_and_install_computed_getter(key_expr, body)?;
-                self.chunk.write_opcode(Opcode::Pop);
-            }
-
-            // Static computed setters
-            for &(key_expr, params, body, is_static) in &computed_setters {
-                if !is_static {
-                    continue;
-                }
-                self.emit_get_class_ref(name, is_expr)?;
-                self.compile_and_install_computed_setter(key_expr, params, body)?;
-                self.chunk.write_opcode(Opcode::Pop);
             }
 
             // Static private methods on the constructor
@@ -7719,14 +7880,14 @@ impl<'gc> Compiler<'gc> {
         kind: u8,
     ) -> Result<(), JSError> {
         // stack: [target_obj]
-        // We need: target_obj[computed_key] = method
-        // Use Dup, compute key, compile body, SetIndex, Pop
+        // Use Dup, compute key, compile body, DefineComputedMethod, Pop
         self.chunk.write_opcode(Opcode::Dup);
         self.compile_expr(key_expr)?;
         self.chunk.write_opcode(Opcode::ToPropertyKey);
         self.compile_class_method_body_as_closure("", params, body, kind)?;
         // stack: [target_obj, target_obj, key, closure]
-        self.chunk.write_opcode(Opcode::SetIndex);
+        // DefineComputedMethod sets the property and marks it non-enumerable
+        self.chunk.write_opcode(Opcode::DefineComputedMethod);
         self.chunk.write_opcode(Opcode::Pop);
         Ok(())
     }

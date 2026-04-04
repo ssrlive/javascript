@@ -811,6 +811,10 @@ pub struct VM<'gc> {
     child_realms: Vec<Option<Box<VM<'gc>>>>,
     // REPL compatibility mode: allow lexical declarations to persist across snippets.
     repl_lexical_persist: bool,
+    // When handle_throw catches a throw, the target stack depth is saved here.
+    // run_inner uses this to re-truncate the stack after opcode handlers that
+    // continue executing (and push values) after calling handle_throw.
+    throw_caught_stack_depth: Option<usize>,
 }
 
 impl<'gc> VM<'gc> {
@@ -977,6 +981,7 @@ impl<'gc> VM<'gc> {
             dynamic_function_kind_override: None,
             child_realms: Vec::new(),
             repl_lexical_persist: false,
+            throw_caught_stack_depth: None,
         };
         vm.register_builtins(ctx);
         vm
@@ -14707,9 +14712,7 @@ impl<'gc> VM<'gc> {
                     };
                     Ok(EvalRef::Value(ret))
                 }
-                _ => Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                    message: "unsupported optional-chain eval expression".to_string()
-                })),
+                _ => Err(crate::raise_syntax_error!("Unsupported expression in optional-chain eval")),
             }
         }
 
@@ -16167,9 +16170,7 @@ impl<'gc> VM<'gc> {
                     // Check for bare return statements — illegal at top level of eval
                     for stmt in &statements {
                         if matches!(*stmt.kind, crate::core::StatementKind::Return(_)) {
-                            return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                                message: "Illegal return statement".to_string()
-                            }));
+                            return Err(crate::raise_syntax_error!("Illegal return statement"));
                         }
                     }
                     // ── PerformEval early-error restrictions ──────────────
@@ -16188,19 +16189,13 @@ impl<'gc> VM<'gc> {
                             let mask = SCAN_SUPER_CALL | SCAN_SUPER_PROP | SCAN_NEW_TARGET;
                             let found = eval_ast_scan(&statements, mask);
                             if found & SCAN_SUPER_CALL != 0 {
-                                return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                                    message: "'super' keyword unexpected here".to_string()
-                                }));
+                                return Err(crate::raise_syntax_error!("'super' keyword unexpected here"));
                             }
                             if found & SCAN_SUPER_PROP != 0 {
-                                return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                                    message: "'super' keyword unexpected here".to_string()
-                                }));
+                                return Err(crate::raise_syntax_error!("'super' keyword unexpected here"));
                             }
                             if found & SCAN_NEW_TARGET != 0 {
-                                return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                                    message: "new.target expression is not allowed here".to_string()
-                                }));
+                                return Err(crate::raise_syntax_error!("new.target expression is not allowed here"));
                             }
                         } else {
                             // Direct eval: check field-init context via VM flag or fn_eval_context
@@ -16215,15 +16210,12 @@ impl<'gc> VM<'gc> {
                                 let mask = SCAN_ARGUMENTS | SCAN_SUPER_CALL;
                                 let found = eval_ast_scan(&statements, mask);
                                 if found & SCAN_ARGUMENTS != 0 {
-                                    return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                                        message: "'arguments' is not allowed in class field initializer or static initialization block"
-                                            .to_string()
-                                    }));
+                                    return Err(crate::raise_syntax_error!(
+                                        "'arguments' is not allowed in class field initializer or static initialization block"
+                                    ));
                                 }
                                 if found & SCAN_SUPER_CALL != 0 {
-                                    return Err(crate::make_js_error!(crate::JSErrorKind::SyntaxError {
-                                        message: "'super' keyword unexpected here".to_string()
-                                    }));
+                                    return Err(crate::raise_syntax_error!("'super' keyword unexpected here"));
                                 }
                             }
                         }
@@ -28927,6 +28919,9 @@ impl<'gc> VM<'gc> {
             if let Some(name) = try_frame.catch_binding {
                 self.globals.insert(name, thrown.clone());
             }
+            // Record target stack depth so run_inner can re-truncate after the
+            // opcode handler finishes (handlers may push extra values post-throw).
+            self.throw_caught_stack_depth = Some(try_frame.stack_depth);
             Ok(())
         } else {
             Err(self.vm_error_to_js_error(ctx, thrown))

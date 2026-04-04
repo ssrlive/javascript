@@ -1000,6 +1000,13 @@ impl<'gc> VM<'gc> {
         self.script_path = script_path.map(|path| path.display().to_string());
     }
 
+    /// Set module mode: top-level `this` becomes `undefined`.
+    pub fn set_module_this(&mut self) {
+        if let Some(first) = self.this_stack.first_mut() {
+            *first = Value::Undefined;
+        }
+    }
+
     #[inline]
     fn cache_symbol_value(&mut self, id: u64, value: &Value<'gc>) {
         if let Value::VmObject(obj) = value {

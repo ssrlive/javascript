@@ -164,6 +164,11 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         let chunk = compiler.compile(&statements)?;
         vm.chunk = chunk;
 
+        // In module mode, top-level `this` is undefined (not globalThis)
+        if run_as_module {
+            vm.set_module_this();
+        }
+
         // let mut vm = VM::new(chunk, ctx);
         vm.set_source_context(script_str, script_path_buf.as_deref());
         let mut v = vm.run(ctx)?;

@@ -706,6 +706,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.async_function_states.trace(cc);
         self.generator_objects.trace(cc);
         self.generator_yield_value.trace(cc);
+        self.generator_return_pending.trace(cc);
         self.active_async_promises.trace(cc);
         self.generator_prototype.trace(cc);
         self.generator_function_prototype.trace(cc);
@@ -768,6 +769,7 @@ pub struct VM<'gc> {
     next_async_function_id: usize,
     // Set by Opcode::Yield to signal generator suspension
     generator_yield_value: Option<Value<'gc>>,
+    generator_return_pending: Option<Value<'gc>>,
     // Set by Opcode::GeneratorParamInitDone during generator call-time preflight.
     generator_param_init_done: bool,
     // Set by Opcode::Await when an async function suspends.
@@ -962,6 +964,7 @@ impl<'gc> VM<'gc> {
             next_generator_id: 1,
             next_async_function_id: 1,
             generator_yield_value: None,
+            generator_return_pending: None,
             generator_param_init_done: false,
             pending_async_suspend: None,
             active_async_promises: Vec::new(),
@@ -16568,7 +16571,9 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             let adjusted = self.adjust_value_ips(ctx, v, code_offset, &eval_fn_ips);
-                            self.globals.insert(k.clone(), adjusted);
+                            self.globals.insert(k.clone(), adjusted.clone());
+                            // Also mirror onto globalThis so `this.x` sees eval-declared vars
+                            self.global_this.borrow_mut(ctx).insert(k.clone(), adjusted);
                         }
                     }
                     // For direct eval, write back modified local variables to caller's stack
@@ -25435,6 +25440,9 @@ impl<'gc> VM<'gc> {
     ) -> bool {
         let is_accessor = desc.contains_key("get") || desc.contains_key("set");
         let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
+        // Use a separate storage key for "__proto__" to avoid clashing with the
+        // internal prototype chain slot.
+        let data_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key };
         let getter_key = format!("__get_{}", key);
         let setter_key = format!("__set_{}", key);
         let readonly_key = format!("__readonly_{}__", key);
@@ -25454,7 +25462,7 @@ impl<'gc> VM<'gc> {
             current_value,
         ) = {
             let borrow = obj.borrow();
-            let implicit_string_data = if !borrow.contains_key(key)
+            let implicit_string_data = if !borrow.contains_key(data_key)
                 && let Some(Value::String(type_u16)) = borrow.get("__type__")
                 && crate::unicode::utf16_to_utf8(type_u16) == "String"
             {
@@ -25475,7 +25483,7 @@ impl<'gc> VM<'gc> {
             } else {
                 None
             };
-            let current_has_data = borrow.contains_key(key) || implicit_string_data.is_some();
+            let current_has_data = borrow.contains_key(data_key) || implicit_string_data.is_some();
             let current_has_getter = borrow.contains_key(&getter_key);
             let current_has_setter = borrow.contains_key(&setter_key);
             let current_exists = current_has_data || current_has_getter || current_has_setter;
@@ -25493,7 +25501,7 @@ impl<'gc> VM<'gc> {
             let current_get = borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined);
             let current_set = borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined);
             let current_value = borrow
-                .get(key)
+                .get(data_key)
                 .cloned()
                 .or_else(|| implicit_string_data.as_ref().map(|(_, _, value)| value.clone()))
                 .unwrap_or(Value::Undefined);
@@ -25577,7 +25585,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = obj.borrow_mut(ctx);
             let existing_slot_index = if current_exists {
                 borrow
-                    .get_index_of(key)
+                    .get_index_of(data_key)
                     .or_else(|| borrow.get_index_of(&getter_key))
                     .or_else(|| borrow.get_index_of(&setter_key))
             } else {
@@ -25594,7 +25602,7 @@ impl<'gc> VM<'gc> {
 
             if is_accessor {
                 // Converting a property to an accessor must not leave stale data values behind.
-                borrow.shift_remove(key);
+                borrow.shift_remove(data_key);
             }
             if is_accessor {
                 // For existing accessor properties, omitted get/set fields preserve current values.
@@ -25653,23 +25661,23 @@ impl<'gc> VM<'gc> {
                 }
             } else {
                 if let Some(val) = desc.get("value") {
-                    if !borrow.contains_key(key) {
+                    if !borrow.contains_key(data_key) {
                         if let Some(idx) = existing_slot_index {
-                            borrow.shift_insert(idx, key.to_string(), val.clone());
+                            borrow.shift_insert(idx, data_key.to_string(), val.clone());
                         } else {
-                            borrow.insert(key.to_string(), val.clone());
+                            borrow.insert(data_key.to_string(), val.clone());
                         }
                     } else {
-                        borrow.insert(key.to_string(), val.clone());
+                        borrow.insert(data_key.to_string(), val.clone());
                     }
                 } else if current_exists && current_is_accessor {
                     // Empty descriptor on an accessor should preserve accessor semantics.
-                } else if !borrow.contains_key(key) {
+                } else if !borrow.contains_key(data_key) {
                     // New property with no value specified: default to undefined per spec
                     if let Some(idx) = existing_slot_index {
-                        borrow.shift_insert(idx, key.to_string(), Value::Undefined);
+                        borrow.shift_insert(idx, data_key.to_string(), Value::Undefined);
                     } else {
-                        borrow.insert(key.to_string(), Value::Undefined);
+                        borrow.insert(data_key.to_string(), Value::Undefined);
                     }
                 }
             }
@@ -29180,11 +29188,14 @@ impl<'gc> VM<'gc> {
             return self.make_gen_result(ctx, &Value::Undefined, true);
         }
 
-        // mode 2 = return(value): mark done immediately and return
-        if mode == 2 {
-            // Don't re-insert — generator is completed
+        // mode 2 = return(value): if no active try handlers, return immediately;
+        // otherwise resume with pending_throw to trigger cleanup (IteratorClose, finally).
+        if mode == 2 && state.try_stack.is_empty() {
+            // No cleanup needed — generator is completed
             self.generator_objects.remove(&gen_id);
             return self.make_gen_result(ctx, resume_value, true);
+
+            // Fall through to resume with pending_throw set below
         }
 
         // Save current VM state
@@ -29196,7 +29207,6 @@ impl<'gc> VM<'gc> {
 
         // Set up generator's execution context
         self.ip = state.ip;
-        self.try_stack = state.try_stack;
 
         // Push the generator's locals onto the stack
         // Push a dummy callee slot first (Return opcode does `truncate(bp - 1)`)
@@ -29204,6 +29214,19 @@ impl<'gc> VM<'gc> {
         let bp = self.stack.len();
         for local in &state.locals {
             self.stack.push(local.clone());
+        }
+
+        // Restore try_stack and adjust stack_depth values for the new stack base.
+        // The try_stack was saved with absolute stack positions from the original
+        // execution. If the generator is resumed at a different call depth (e.g.,
+        // iter.next() from global scope but iter.return() from inside assert.throws),
+        // the stack base differs and stack_depth must be rebased.
+        self.try_stack = state.try_stack;
+        let bp_delta = bp as isize - state.bp as isize;
+        if bp_delta != 0 {
+            for try_frame in &mut self.try_stack {
+                try_frame.stack_depth = (try_frame.stack_depth as isize + bp_delta) as usize;
+            }
         }
 
         // Push a frame for the generator
@@ -29232,6 +29255,11 @@ impl<'gc> VM<'gc> {
                 // throw mode: inject the thrown value directly
                 self.stack.push(Value::Undefined); // placeholder for yield result
                 self.pending_throw = Some(resume_value.clone());
+            } else if mode == 2 {
+                // return mode: inject as throw to unwind through try handlers
+                self.stack.push(Value::Undefined); // placeholder for yield result
+                self.pending_throw = Some(resume_value.clone());
+                self.generator_return_pending = Some(resume_value.clone());
             } else {
                 self.stack.push(resume_value.clone());
             }
@@ -29263,7 +29291,14 @@ impl<'gc> VM<'gc> {
         self.this_stack.truncate(saved_this_stack_len);
 
         // Check result
-        let gen_result = if let Some(yielded) = self.generator_yield_value.take() {
+        let gen_result = if let Some(return_val) = self.generator_return_pending.take() {
+            // Generator return completion (mode 2 with cleanup).
+            // The pending_throw propagated through try handlers for cleanup
+            // (IteratorClose, finally blocks). Now complete the return.
+            self.generator_objects.remove(&gen_id);
+            self.generator_yield_value.take(); // discard any spurious yield
+            self.make_gen_result(ctx, &return_val, true)
+        } else if let Some(yielded) = self.generator_yield_value.take() {
             // Generator yielded a value. Save state for next resumption.
             let frame = self.frames.pop().unwrap();
             let locals: Vec<Value<'gc>> = self.stack[frame.bp..].to_vec();

@@ -149,6 +149,7 @@ impl<'gc> VM<'gc> {
                 Opcode::AllocBrand => self.run_opcode_alloc_brand(ctx)?,
                 Opcode::ResetPrototype => self.run_opcode_reset_prototype(ctx)?,
                 Opcode::IteratorClose => self.run_opcode_iterator_close(ctx)?,
+                Opcode::IteratorCloseAbrupt => self.run_opcode_iterator_close_abrupt(ctx)?,
                 Opcode::AssertIterResult => self.run_opcode_assert_iter_result(ctx)?,
                 Opcode::BoxLocal => self.run_opcode_box_local(ctx)?,
             };
@@ -3926,6 +3927,16 @@ impl<'gc> VM<'gc> {
                 let result = self.read_named_property(ctx, &obj, &key);
                 self.stack.push(result);
             }
+            Value::Undefined => {
+                let err = self.make_type_error_object(ctx, &format!("Cannot read properties of undefined (reading '{}')", key));
+                self.handle_throw(ctx, &err)?;
+                self.stack.push(Value::Undefined);
+            }
+            Value::Null => {
+                let err = self.make_type_error_object(ctx, &format!("Cannot read properties of null (reading '{}')", key));
+                self.handle_throw(ctx, &err)?;
+                self.stack.push(Value::Undefined);
+            }
             _ => {
                 log::warn!("GetProperty on non-object: {}", value_to_string(&obj));
                 self.stack.push(Value::Undefined);
@@ -5890,7 +5901,16 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         match self.vm_call_function_value(ctx, &return_fn, &iterator, &[]) {
-            Ok(_) => {}
+            Ok(inner_result) => {
+                // §7.4.6 step 9: If Type(innerResult.[[value]]) is not Object, throw TypeError
+                if !matches!(
+                    inner_result,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                ) {
+                    let err = self.make_type_error_object(ctx, "Iterator result is not an object");
+                    self.handle_throw(ctx, &err)?;
+                }
+            }
             Err(err) => {
                 self.set_pending_throw_from_error(&err);
             }
@@ -5898,6 +5918,71 @@ impl<'gc> VM<'gc> {
         if let Some(thrown) = self.pending_throw.take() {
             self.handle_throw(ctx, &thrown)?;
         }
+        Ok(OpcodeAction::Continue)
+    }
+
+    /// Best-effort iterator close for throw completions (§7.4.6 step 5).
+    /// Calls .return() if available but swallows all errors — the original
+    /// throw completion is always preserved by the caller.
+    /// Exception: when generator_return_pending is set, this is a return
+    /// completion and we use normal IteratorClose semantics (propagate errors,
+    /// check return type).
+    fn run_opcode_iterator_close_abrupt(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let iterator = self.stack.pop().unwrap_or(Value::Undefined);
+
+        // If this is a generator return completion, use normal IteratorClose semantics
+        if self.generator_return_pending.is_some() {
+            let return_fn = self.read_named_property(ctx, &iterator, "return");
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            if matches!(return_fn, Value::Undefined | Value::Null) {
+                return Ok(OpcodeAction::Continue);
+            }
+            if !self.is_value_callable(&return_fn) {
+                let err = self.make_type_error_object(ctx, "iterator.return is not a function");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            match self.vm_call_function_value(ctx, &return_fn, &iterator, &[]) {
+                Ok(inner_result) => {
+                    if !matches!(
+                        inner_result,
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                    ) {
+                        // §7.4.6 step 9: non-Object → TypeError
+                        // Clear the return completion so the TypeError propagates instead
+                        self.generator_return_pending = None;
+                        let err = self.make_type_error_object(ctx, "Iterator result is not an object");
+                        self.handle_throw(ctx, &err)?;
+                    }
+                }
+                Err(err) => {
+                    // §7.4.6 step 8: close error propagates for return completions
+                    self.generator_return_pending = None;
+                    self.set_pending_throw_from_error(&err);
+                }
+            }
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+            }
+            return Ok(OpcodeAction::Continue);
+        }
+
+        let return_fn = self.read_named_property(ctx, &iterator, "return");
+        // Clear any pending throw from getter evaluation (e.g. `get return() { throw ... }`)
+        // before checking the return value — the getter error must be swallowed.
+        if self.pending_throw.is_some() {
+            self.pending_throw = None;
+            return Ok(OpcodeAction::Continue);
+        }
+        if matches!(return_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&return_fn) {
+            return Ok(OpcodeAction::Continue);
+        }
+        // Call return(); ignore any error or non-object result
+        let _ = self.vm_call_function_value(ctx, &return_fn, &iterator, &[]);
+        self.pending_throw = None;
         Ok(OpcodeAction::Continue)
     }
 

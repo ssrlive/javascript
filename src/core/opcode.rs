@@ -103,6 +103,7 @@ pub enum Opcode {
     ToNumeric = 97,                // ToNumeric: like ToNumber but preserves BigInt values
     SetSuperPropertyComputed = 98, // assign to super[expr] using current this as receiver
     DefineComputedMethod = 99,     // like SetIndex but also marks non-enumerable (for class methods)
+    IteratorCloseAbrupt = 100,     // best-effort iterator close for throw completions; never throws
 }
 
 impl TryFrom<u8> for Opcode {
@@ -210,6 +211,7 @@ impl TryFrom<u8> for Opcode {
             97 => Opcode::ToNumeric,
             98 => Opcode::SetSuperPropertyComputed,
             99 => Opcode::DefineComputedMethod,
+            100 => Opcode::IteratorCloseAbrupt,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

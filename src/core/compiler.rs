@@ -493,6 +493,7 @@ impl<'gc> Compiler<'gc> {
         let name_u16 = crate::unicode::utf8_to_utf16(name);
         let name_idx = self.chunk.add_constant(Value::String(name_u16));
         if let Some((alias, alias_const_like)) = self.lookup_top_level_block_alias(name) {
+            // Store under both the original name (for eval visibility) and the alias
             self.chunk.write_opcode(Opcode::Dup);
             self.chunk.write_opcode(define_opcode);
             self.chunk.write_u16(name_idx);
@@ -518,6 +519,7 @@ impl<'gc> Compiler<'gc> {
                 return;
             }
 
+            // SetGlobal peeks (doesn't pop), so no Dup needed — just chain two SetGlobal calls.
             if self.function_depth == 0 {
                 let name_u16 = crate::unicode::utf8_to_utf16(name);
                 let name_idx = self.chunk.add_constant(Value::String(name_u16));
@@ -679,14 +681,15 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::Block(statements) => {
                 let saved_locals = self.locals.len();
-                // Collect function names declared in this block (for strict-mode block scoping)
+                // Collect block-scoped declarations for alias-based scoping at top level.
+                // let/const are always block-scoped (ES6+), function declarations only in strict mode.
                 let mut block_fn_names: Vec<String> = Vec::new();
                 let mut block_lexical_names: Vec<String> = Vec::new();
                 let mut block_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
-                if self.scope_depth == 0 && self.current_strict {
+                if self.scope_depth == 0 {
                     for s in statements.iter() {
                         match &*s.kind {
-                            StatementKind::FunctionDeclaration(name, ..) => {
+                            StatementKind::FunctionDeclaration(name, ..) if self.current_strict => {
                                 block_fn_names.push(name.clone());
                                 let alias = format!("__top_block_alias_{}__", self.forin_counter);
                                 self.forin_counter = self.forin_counter.saturating_add(1);
@@ -716,6 +719,25 @@ impl<'gc> Compiler<'gc> {
                 if pushed_block_aliases {
                     self.top_level_block_aliases.push(block_aliases);
                 }
+
+                // For blocks at scope_depth 0 with let/const declarations, wrap the
+                // block body in a try handler so that on abnormal exit (throw), the
+                // original name globals are cleaned up before re-throwing.
+                let block_needs_try_cleanup = !block_lexical_names.is_empty() && self.scope_depth == 0;
+                let rethrow_var = if block_needs_try_cleanup {
+                    let var_name = format!("__block_rethrow_{}__", self.forin_counter);
+                    self.forin_counter = self.forin_counter.saturating_add(1);
+                    let binding_u16 = crate::unicode::utf8_to_utf16(&var_name);
+                    let binding_idx = self.chunk.add_constant(Value::String(binding_u16));
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    let catch_placeholder = self.chunk.code.len();
+                    self.chunk.write_u16(0xffff); // placeholder
+                    self.chunk.write_u16(binding_idx as u16);
+                    Some((var_name, catch_placeholder))
+                } else {
+                    None
+                };
+
                 // At scope_depth 0, hoist function declarations to the top
                 // of the block.  At scope_depth > 0 (inside a function),
                 // compile everything in source order so that closures in
@@ -742,18 +764,61 @@ impl<'gc> Compiler<'gc> {
                 } else {
                     self.end_block_scope(saved_locals);
                 }
-                // In strict mode at top level, remove block-scoped function declarations from globals
-                for fn_name in block_fn_names {
-                    let name_u16 = crate::unicode::utf8_to_utf16(&fn_name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::DeleteGlobal);
-                    self.chunk.write_u16(name_idx);
-                }
-                for name in block_lexical_names {
-                    let name_u16 = crate::unicode::utf8_to_utf16(&name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::DeleteGlobal);
-                    self.chunk.write_u16(name_idx);
+
+                // Tear down the try handler for block cleanup (normal path)
+                if let Some((ref rethrow_var, catch_placeholder)) = rethrow_var {
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    // Normal cleanup: delete original names
+                    for fn_name in &block_fn_names {
+                        let name_u16 = crate::unicode::utf8_to_utf16(fn_name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DeleteGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
+                    for name in &block_lexical_names {
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DeleteGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
+                    let jump_over_catch = self.emit_jump(Opcode::Jump);
+                    // Catch handler: delete original names and re-throw
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[catch_placeholder] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    for fn_name in &block_fn_names {
+                        let name_u16 = crate::unicode::utf8_to_utf16(fn_name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DeleteGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
+                    for name in &block_lexical_names {
+                        let name_u16 = crate::unicode::utf8_to_utf16(name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DeleteGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
+                    // Re-throw: load the caught value and throw it
+                    let rv_u16 = crate::unicode::utf8_to_utf16(rethrow_var);
+                    let rv_idx = self.chunk.add_constant(Value::String(rv_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(rv_idx);
+                    self.chunk.write_opcode(Opcode::Throw);
+                    self.patch_jump(jump_over_catch);
+                } else {
+                    // No try wrapper — emit cleanup directly
+                    for fn_name in block_fn_names {
+                        let name_u16 = crate::unicode::utf8_to_utf16(&fn_name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DeleteGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
+                    for name in block_lexical_names {
+                        let name_u16 = crate::unicode::utf8_to_utf16(&name);
+                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                        self.chunk.write_opcode(Opcode::DeleteGlobal);
+                        self.chunk.write_u16(name_idx);
+                    }
                 }
                 if pushed_block_aliases {
                     self.top_level_block_aliases.pop();
@@ -4813,13 +4878,50 @@ impl<'gc> Compiler<'gc> {
                 _ => None,
             };
 
-            // Spec: evaluate the assignment target reference BEFORE getting the value.
-            // For member/private-member targets, this means evaluating the base first.
-            // Use DefineGlobal (not emit_define_var) to store the pre-evaluated base,
-            // because emit_define_var adds a positional local that would misalign
-            // with the Dup'd expression-result value already on the stack.
+            // Spec §12.15.5.2: PropertyName is evaluated FIRST (step 1),
+            // then DestructuringAssignmentTarget (step 3 → §12.15.5.4 step 1a).
+            // For computed source keys, evaluate and convert via ToPropertyKey
+            // before evaluating the target reference.
+            let computed_key_temp = if key_str.is_none() {
+                self.compile_expr(key_expr)?;
+                self.chunk.write_opcode(Opcode::ToPropertyKey);
+                let kt = format!("__destr_srckey_{}__", self.forin_counter);
+                self.forin_counter += 1;
+                self.emit_define_helper_slot(&kt);
+                self.emit_helper_set(&kt);
+                self.chunk.write_opcode(Opcode::Pop);
+                Some(kt)
+            } else {
+                None
+            };
+
+            // Pre-evaluate the full target reference (§12.15.5.4 step 1a).
+            // For Index targets, evaluate both base AND computed field expression.
+            // Use DefineGlobal (not emit_define_var) to avoid stack/local misalignment
+            // from the Dup'd expression-result value on the stack.
+            let mut pre_eval_target_field: Option<String> = None;
             let pre_eval_target = match target_expr {
-                Expr::Index(base, _) | Expr::PrivateMember(base, _) => {
+                Expr::Index(base, field) => {
+                    self.compile_expr(base)?;
+                    let target_temp = format!("__destr_tgt_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    let name_u16 = crate::unicode::utf8_to_utf16(&target_temp);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(name_idx);
+                    // Also pre-evaluate computed target field
+                    if !matches!(field.as_ref(), Expr::StringLit(_)) {
+                        self.compile_expr(field)?;
+                        let ft = format!("__destr_tgtkey_{}__", self.forin_counter);
+                        self.forin_counter += 1;
+                        self.emit_define_helper_slot(&ft);
+                        self.emit_helper_set(&ft);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        pre_eval_target_field = Some(ft);
+                    }
+                    Some(target_temp)
+                }
+                Expr::PrivateMember(base, _) => {
                     self.compile_expr(base)?;
                     let target_temp = format!("__destr_tgt_{}__", self.forin_counter);
                     self.forin_counter += 1;
@@ -4832,6 +4934,7 @@ impl<'gc> Compiler<'gc> {
                 _ => None,
             };
 
+            // GetV: read value from source using the property name (§12.15.5.4 step 2)
             if let Some(ks) = key_str {
                 if let Some(ref arr_name) = excluded_arr_temp {
                     self.emit_helper_get(arr_name);
@@ -4846,46 +4949,41 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::GetProperty);
                 self.chunk.write_u16(k);
             } else {
-                // Computed key
-                self.emit_helper_get(&temp);
-                self.compile_expr(key_expr)?;
+                // Computed key — already evaluated and saved to temp
+                let kt = computed_key_temp.as_ref().unwrap();
                 if let Some(ref arr_name) = excluded_arr_temp {
-                    // Reuse the same evaluated key value for both excluded-names
-                    // bookkeeping and source property access.
-                    self.chunk.write_opcode(Opcode::Dup);
                     self.emit_helper_get(arr_name);
-                    self.chunk.write_opcode(Opcode::Swap);
+                    self.emit_helper_get(kt);
                     self.chunk.write_opcode(Opcode::ArrayPush);
                     self.chunk.write_opcode(Opcode::Pop);
                 }
+                self.emit_helper_get(&temp);
+                self.emit_helper_get(kt);
                 self.chunk.write_opcode(Opcode::GetIndex);
             }
 
-            // Now assign the value to the target
+            // PutValue: assign the value to the target (§12.15.5.4 step 7)
             if let Some(ref tgt_temp) = pre_eval_target {
-                // Target base was pre-evaluated; use it for the set
-                // Read from global (not local) to match the DefineGlobal above
                 let tgt_name_u16 = crate::unicode::utf8_to_utf16(tgt_temp);
                 let tgt_name_idx = self.chunk.add_constant(Value::String(tgt_name_u16));
                 match target_expr {
                     Expr::Index(_, field) => {
                         // Stack: [value]
+                        // Save value to global temp, build SetIndex: [base, key, value]
+                        let val_temp = format!("__destr_val_{}__", self.forin_counter);
+                        self.forin_counter += 1;
+                        self.emit_define_helper_slot(&val_temp);
+                        self.emit_helper_set(&val_temp);
+                        self.chunk.write_opcode(Opcode::Pop);
                         self.chunk.write_opcode(Opcode::GetGlobal);
                         self.chunk.write_u16(tgt_name_idx);
-                        self.chunk.write_opcode(Opcode::Swap);
-                        let prop_name = match field.as_ref() {
-                            Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
-                            _ => {
-                                // Computed property — fall back to default
-                                self.chunk.write_opcode(Opcode::Pop); // remove GetGlobal result
-                                self.chunk.write_opcode(Opcode::Swap); // value back on TOS
-                                self.compile_expr_assign_to_target(target_expr)?;
-                                continue;
-                            }
-                        };
-                        let prop_idx = self.chunk.add_constant(Value::from(&prop_name));
-                        self.chunk.write_opcode(Opcode::SetProperty);
-                        self.chunk.write_u16(prop_idx);
+                        if let Some(ref ft) = pre_eval_target_field {
+                            self.emit_helper_get(ft);
+                        } else {
+                            self.compile_expr(field)?;
+                        }
+                        self.emit_helper_get(&val_temp);
+                        self.chunk.write_opcode(Opcode::SetIndex);
                         self.chunk.write_opcode(Opcode::Pop);
                     }
                     Expr::PrivateMember(_, field) => {
@@ -4915,13 +5013,173 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
+    /// Emit SetupTry for a nested try-catch around an iterator step.
+    /// When next() or AssertIterResult throws, the catch handler sets
+    /// done_temp=true and re-throws, so the outer catch handler knows
+    /// the iterator is "done" and skips IteratorClose (§13.15.5.5 step 2b).
+    fn emit_iter_step_try_start(&mut self) -> (usize, String) {
+        let catch_binding = format!("__iter_step_catch_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let cb_u16 = crate::unicode::utf8_to_utf16(&catch_binding);
+        let cb_idx = self.chunk.add_constant(Value::String(cb_u16));
+        self.chunk.write_opcode(Opcode::SetupTry);
+        let placeholder = self.chunk.code.len();
+        self.chunk.write_u16(0xffff);
+        self.chunk.write_u16(cb_idx);
+        (placeholder, catch_binding)
+    }
+
+    /// Emit TeardownTry + catch handler that sets done_temp=true and re-throws.
+    fn emit_iter_step_try_end(&mut self, placeholder: usize, catch_binding: &str, done_temp: &str) {
+        self.chunk.write_opcode(Opcode::TeardownTry);
+        let jump_over = self.emit_jump(Opcode::Jump);
+
+        let catch_start = self.chunk.code.len();
+        self.chunk.code[placeholder] = (catch_start & 0xff) as u8;
+        self.chunk.code[placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+
+        // Set done_temp = true
+        let true_idx = self.chunk.add_constant(Value::Boolean(true));
+        self.chunk.write_opcode(Opcode::Constant);
+        self.chunk.write_u16(true_idx);
+        self.emit_helper_set(done_temp);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        // Re-throw
+        let cb_u16 = crate::unicode::utf8_to_utf16(catch_binding);
+        let cb_idx = self.chunk.add_constant(Value::String(cb_u16));
+        self.chunk.write_opcode(Opcode::GetGlobal);
+        self.chunk.write_u16(cb_idx);
+        self.chunk.write_opcode(Opcode::Throw);
+
+        self.patch_jump(jump_over);
+    }
+
+    /// Pre-evaluate the reference part of a destructuring assignment target.
+    /// For property/index targets, this evaluates the base object (and key for
+    /// Index) and saves them to helper slots BEFORE the iterator step, matching
+    /// the spec's evaluation order (§13.15.5.5 step 1).
+    /// Returns `Some((base_temp, Option<key_temp>))` if pre-evaluation was done,
+    /// or `None` for simple variables and nested patterns.
+    fn pre_eval_destr_target_ref(&mut self, target: &Expr) -> Result<Option<(String, Option<String>)>, JSError> {
+        // Unwrap optional default value to find the actual assignment target
+        let actual = match target {
+            Expr::Assign(lhs, _) => lhs.as_ref(),
+            _ => target,
+        };
+        match actual {
+            Expr::Index(obj_expr, key_expr) => {
+                let base_temp = format!("__dstr_ref_base_{}__", self.forin_counter);
+                self.forin_counter += 1;
+                self.compile_expr(obj_expr)?;
+                self.emit_define_helper_slot(&base_temp);
+                self.emit_helper_set(&base_temp);
+                self.chunk.write_opcode(Opcode::Pop);
+
+                let key_temp = format!("__dstr_ref_key_{}__", self.forin_counter);
+                self.forin_counter += 1;
+                self.compile_expr(key_expr)?;
+                self.emit_define_helper_slot(&key_temp);
+                self.emit_helper_set(&key_temp);
+                self.chunk.write_opcode(Opcode::Pop);
+
+                Ok(Some((base_temp, Some(key_temp))))
+            }
+            Expr::Property(obj_expr, _) | Expr::PrivateMember(obj_expr, _) | Expr::OptionalPrivateMember(obj_expr, _) => {
+                let base_temp = format!("__dstr_ref_base_{}__", self.forin_counter);
+                self.forin_counter += 1;
+                self.compile_expr(obj_expr)?;
+                self.emit_define_helper_slot(&base_temp);
+                self.emit_helper_set(&base_temp);
+                self.chunk.write_opcode(Opcode::Pop);
+
+                Ok(Some((base_temp, None)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Assign a value (on top of stack) to a destructuring target, using
+    /// pre-evaluated base/key references if available.  Pops the value.
+    fn emit_destr_assign_with_pre_eval(&mut self, target: &Expr, pre_eval: Option<(String, Option<String>)>) -> Result<(), JSError> {
+        if let Some((base_temp, key_temp_opt)) = pre_eval {
+            // Handle default value wrapper
+            let actual = match target {
+                Expr::Assign(lhs, default_expr) => {
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::StrictNotEqual);
+                    let skip_default = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    if let Expr::Var(name, ..) = lhs.as_ref() {
+                        self.maybe_infer_anonymous_binding_name(name, default_expr);
+                    }
+                    self.compile_expr(default_expr)?;
+                    self.patch_jump(skip_default);
+                    lhs.as_ref()
+                }
+                _ => target,
+            };
+
+            // Stack: [value]. Assign using pre-evaluated reference.
+            if let Some(ref kt) = key_temp_opt {
+                // Index target: need [obj, key, value] for SetIndex
+                let val_temp = format!("__dstr_ref_val_{}__", self.forin_counter);
+                self.forin_counter += 1;
+                self.emit_define_helper_slot(&val_temp);
+                self.emit_helper_set(&val_temp);
+                self.chunk.write_opcode(Opcode::Pop);
+
+                self.emit_helper_get(&base_temp);
+                self.emit_helper_get(kt);
+                self.emit_helper_get(&val_temp);
+                self.chunk.write_opcode(Opcode::SetIndex);
+                self.chunk.write_opcode(Opcode::Pop);
+
+                if self.scope_depth > 0 {
+                    self.locals.retain(|l| l != &val_temp);
+                }
+            } else {
+                // Property target: need [obj, value] then SetProperty
+                self.emit_helper_get(&base_temp);
+                self.chunk.write_opcode(Opcode::Swap);
+                let prop_name = match actual {
+                    Expr::Property(_, p) => p.clone(),
+                    Expr::PrivateMember(_, p) | Expr::OptionalPrivateMember(_, p) => self.resolve_prefixed_private_key(p),
+                    _ => unreachable!(),
+                };
+                let key_u16 = crate::unicode::utf8_to_utf16(&prop_name);
+                let key_idx = self.chunk.add_constant(Value::String(key_u16));
+                self.chunk.write_opcode(Opcode::SetProperty);
+                self.chunk.write_u16(key_idx);
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+
+            // Clean up pre-eval temps
+            if self.scope_depth > 0 {
+                self.locals.retain(|l| l != &base_temp);
+                if let Some(ref kt) = key_temp_opt {
+                    self.locals.retain(|l| l != kt);
+                }
+            }
+            Ok(())
+        } else {
+            // No pre-evaluation: use standard path
+            self.compile_expr_assign_to_target(target)
+        }
+    }
+
     /// Expression-level array destructuring assignment: [x, y] = rhs
     /// RHS value is on stack top. Leaves the RHS value on the stack.
     fn compile_expr_array_destructuring_assign(&mut self, elems: &[Option<Expr>]) -> Result<(), JSError> {
         // Save original RHS for expression result.
+        // Do NOT Dup here — emit_helper_set (SetGlobal) peeks without popping,
+        // then Pop removes the value.  At the end of the function we push
+        // orig_temp back, leaving exactly one value (the expression result).
         let orig_temp = format!("__expr_destr_arr_orig_{}__", self.forin_counter);
         self.forin_counter += 1;
-        self.chunk.write_opcode(Opcode::Dup);
         self.emit_define_helper_slot(&orig_temp);
         self.emit_helper_set(&orig_temp);
         self.chunk.write_opcode(Opcode::Pop);
@@ -4947,12 +5205,27 @@ impl<'gc> Compiler<'gc> {
         self.emit_helper_set(&done_temp);
         self.chunk.write_opcode(Opcode::Pop);
 
+        // Wrap element processing in try-catch so that abrupt completions
+        // (throw from assignment target, default expression, etc.) trigger
+        // IteratorClose per §13.15.5.3 step 5 / §7.4.6.
+        let catch_binding = format!("__dstr_catch_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        let catch_binding_u16 = crate::unicode::utf8_to_utf16(&catch_binding);
+        let catch_binding_idx = self.chunk.add_constant(Value::String(catch_binding_u16));
+        self.chunk.write_opcode(Opcode::SetupTry);
+        let dstr_catch_placeholder = self.chunk.code.len();
+        self.chunk.write_u16(0xffff);
+        self.chunk.write_u16(catch_binding_idx);
+
         for elem in elems.iter() {
             match elem {
                 None => {
                     // Elision: advance iterator once when not done.
                     self.emit_helper_get(&done_temp);
                     let skip_next = self.emit_jump(Opcode::JumpIfTrue);
+
+                    // Nested try: set done=true if next() throws (§13.15.5.5 step 2b)
+                    let (iter_try_ph, iter_try_cb) = self.emit_iter_step_try_start();
 
                     self.emit_helper_get(&iter_temp);
                     let next_key = crate::unicode::utf8_to_utf16("next");
@@ -4961,6 +5234,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(next_idx);
                     self.emit_call_opcode(0, 0x80);
                     self.chunk.write_opcode(Opcode::AssertIterResult);
+
+                    self.emit_iter_step_try_end(iter_try_ph, &iter_try_cb, &done_temp);
+
                     self.chunk.write_opcode(Opcode::Dup);
                     let done_key = crate::unicode::utf8_to_utf16("done");
                     let done_idx = self.chunk.add_constant(Value::String(done_key));
@@ -4979,17 +5255,27 @@ impl<'gc> Compiler<'gc> {
                     self.patch_jump(skip_next);
                 }
                 Some(Expr::Spread(inner)) => {
-                    // Rest element collects remaining iterator values.
+                    // §13.15.5.5 AssignmentRestElement: evaluate lref BEFORE iterating.
+                    let rest_pre_eval = self.pre_eval_destr_target_ref(inner)?;
+
+                    // Collect remaining iterator values.
                     self.emit_helper_get(&done_temp);
                     let build_from_iter = self.emit_jump(Opcode::JumpIfFalse);
                     self.chunk.write_opcode(Opcode::NewArray);
                     self.chunk.write_byte(0);
                     let rest_join = self.emit_jump(Opcode::Jump);
                     self.patch_jump(build_from_iter);
+
+                    // Nested try: set done=true if iteration throws
+                    let (iter_try_ph, iter_try_cb) = self.emit_iter_step_try_start();
+
                     self.compile_expr(&Expr::Call(
                         Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
                         vec![Expr::Var(iter_temp.clone(), None, None)],
                     ))?;
+
+                    self.emit_iter_step_try_end(iter_try_ph, &iter_try_cb, &done_temp);
+
                     let true_idx = self.chunk.add_constant(Value::Boolean(true));
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(true_idx);
@@ -4997,13 +5283,21 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::Pop);
                     self.patch_jump(rest_join);
 
-                    self.compile_expr_assign_to_target(inner)?;
+                    // Stack: [collected_array]
+                    self.emit_destr_assign_with_pre_eval(inner, rest_pre_eval)?;
                     break;
                 }
                 Some(target) => {
+                    // §13.15.5.5 step 1: evaluate lref BEFORE IteratorStep for
+                    // non-pattern targets (Index, Property, etc.).
+                    let pre_eval = self.pre_eval_destr_target_ref(target)?;
+
                     // Step iterator once (unless already done) and bind value.
                     self.emit_helper_get(&done_temp);
                     let value_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
+
+                    // Nested try: set done=true if next() throws (§13.15.5.5 step 2b)
+                    let (iter_try_ph, iter_try_cb) = self.emit_iter_step_try_start();
 
                     self.emit_helper_get(&iter_temp);
                     let next_key = crate::unicode::utf8_to_utf16("next");
@@ -5012,6 +5306,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(next_idx);
                     self.emit_call_opcode(0, 0x80);
                     self.chunk.write_opcode(Opcode::AssertIterResult);
+
+                    self.emit_iter_step_try_end(iter_try_ph, &iter_try_cb, &done_temp);
+
                     self.chunk.write_opcode(Opcode::Dup);
                     let done_key = crate::unicode::utf8_to_utf16("done");
                     let done_idx = self.chunk.add_constant(Value::String(done_key));
@@ -5042,10 +5339,14 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(undef_idx2);
                     self.patch_jump(after_undefined);
 
-                    self.compile_expr_assign_to_target(target)?;
+                    // Stack: [value]
+                    self.emit_destr_assign_with_pre_eval(target, pre_eval)?;
                 }
             }
         }
+
+        // End of try body — remove handler before normal-path IteratorClose.
+        self.chunk.write_opcode(Opcode::TeardownTry);
 
         // If iterator not done and no explicit rest consumed it, close it.
         if !elems.iter().any(|e| matches!(e, Some(Expr::Spread(_)))) {
@@ -5060,6 +5361,30 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::Pop);
             self.patch_jump(skip_close);
         }
+
+        // Jump over the catch handler (normal completion path).
+        let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+        // --- Catch handler: abrupt completion iterator close ---
+        let catch_start = self.chunk.code.len();
+        self.chunk.code[dstr_catch_placeholder] = (catch_start & 0xff) as u8;
+        self.chunk.code[dstr_catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+
+        // If iterator not done, call IteratorCloseAbrupt (best-effort, never throws).
+        self.emit_helper_get(&done_temp);
+        let skip_abrupt_close = self.emit_jump(Opcode::JumpIfTrue);
+        self.emit_helper_get(&iter_temp);
+        self.chunk.write_opcode(Opcode::IteratorCloseAbrupt);
+        self.patch_jump(skip_abrupt_close);
+
+        // Re-throw the original error.
+        let cb_u16 = crate::unicode::utf8_to_utf16(&catch_binding);
+        let cb_idx = self.chunk.add_constant(Value::String(cb_u16));
+        self.chunk.write_opcode(Opcode::GetGlobal);
+        self.chunk.write_u16(cb_idx);
+        self.chunk.write_opcode(Opcode::Throw);
+
+        self.patch_jump(jump_over_catch);
 
         // Push original RHS back as the expression result.
         // Keep surrounding stack entries intact (important for nested patterns).

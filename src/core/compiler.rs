@@ -493,11 +493,8 @@ impl<'gc> Compiler<'gc> {
         let name_u16 = crate::unicode::utf8_to_utf16(name);
         let name_idx = self.chunk.add_constant(Value::String(name_u16));
         if let Some((alias, alias_const_like)) = self.lookup_top_level_block_alias(name) {
-            // Store under both the original name (for eval visibility) and the alias
-            self.chunk.write_opcode(Opcode::Dup);
-            self.chunk.write_opcode(define_opcode);
-            self.chunk.write_u16(name_idx);
-
+            // Only define under the alias — preserve the original global binding
+            // so that indirect eval sees the true global-scope value.
             let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
             let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
             self.chunk.write_opcode(if alias_const_like {
@@ -506,6 +503,8 @@ impl<'gc> Compiler<'gc> {
                 Opcode::DefineGlobal
             });
             self.chunk.write_u16(alias_idx);
+            // Record mapping so eval can resolve aliases at runtime
+            self.chunk.block_alias_to_original.insert(alias, name.to_string());
         } else {
             self.chunk.write_opcode(define_opcode);
             self.chunk.write_u16(name_idx);
@@ -519,14 +518,8 @@ impl<'gc> Compiler<'gc> {
                 return;
             }
 
-            // SetGlobal peeks (doesn't pop), so no Dup needed — just chain two SetGlobal calls.
-            if self.function_depth == 0 {
-                let name_u16 = crate::unicode::utf8_to_utf16(name);
-                let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                self.chunk.write_opcode(Opcode::SetGlobal);
-                self.chunk.write_u16(name_idx);
-            }
-
+            // Only set the alias — the original global binding stays untouched
+            // so that indirect eval and post-block references see the correct value.
             let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
             let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
             self.chunk.write_opcode(Opcode::SetGlobal);
@@ -711,6 +704,14 @@ impl<'gc> Compiler<'gc> {
                                     block_aliases.insert(name.clone(), (alias, true));
                                 }
                             }
+                            StatementKind::Class(class_def) => {
+                                if !class_def.name.is_empty() {
+                                    block_lexical_names.push(class_def.name.clone());
+                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                    self.forin_counter = self.forin_counter.saturating_add(1);
+                                    block_aliases.insert(class_def.name.clone(), (alias, false));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -719,12 +720,17 @@ impl<'gc> Compiler<'gc> {
                 if pushed_block_aliases {
                     self.top_level_block_aliases.push(block_aliases);
                 }
+                // Keep a reference to the aliases map for cleanup code emission
+                let _cleanup_aliases: std::collections::HashMap<String, (String, bool)> = if pushed_block_aliases {
+                    self.top_level_block_aliases.last().cloned().unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                };
 
-                // For blocks at scope_depth 0 with let/const declarations, wrap the
-                // block body in a try handler so that on abnormal exit (throw), the
-                // original name globals are cleaned up before re-throwing.
-                let block_needs_try_cleanup = !block_lexical_names.is_empty() && self.scope_depth == 0;
-                let rethrow_var = if block_needs_try_cleanup {
+                // With alias-only block scoping, we no longer modify original
+                // global names, so no try-catch cleanup is needed.
+                let block_needs_try_cleanup = false;
+                let rethrow_var: Option<(String, usize)> = if block_needs_try_cleanup {
                     let var_name = format!("__block_rethrow_{}__", self.forin_counter);
                     self.forin_counter = self.forin_counter.saturating_add(1);
                     let binding_u16 = crate::unicode::utf8_to_utf16(&var_name);
@@ -765,60 +771,12 @@ impl<'gc> Compiler<'gc> {
                     self.end_block_scope(saved_locals);
                 }
 
-                // Tear down the try handler for block cleanup (normal path)
-                if let Some((ref rethrow_var, catch_placeholder)) = rethrow_var {
+                // With the alias-only approach, we no longer modify the original
+                // global names during the block, so there is nothing to clean up.
+                // The try handler for block cleanup is therefore unnecessary.
+                // Aliases persist in globals (unique names, invisible to user code).
+                if let Some((_, _)) = rethrow_var {
                     self.chunk.write_opcode(Opcode::TeardownTry);
-                    // Normal cleanup: delete original names
-                    for fn_name in &block_fn_names {
-                        let name_u16 = crate::unicode::utf8_to_utf16(fn_name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DeleteGlobal);
-                        self.chunk.write_u16(name_idx);
-                    }
-                    for name in &block_lexical_names {
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DeleteGlobal);
-                        self.chunk.write_u16(name_idx);
-                    }
-                    let jump_over_catch = self.emit_jump(Opcode::Jump);
-                    // Catch handler: delete original names and re-throw
-                    let catch_ip = self.chunk.code.len();
-                    self.chunk.code[catch_placeholder] = (catch_ip & 0xff) as u8;
-                    self.chunk.code[catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
-                    for fn_name in &block_fn_names {
-                        let name_u16 = crate::unicode::utf8_to_utf16(fn_name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DeleteGlobal);
-                        self.chunk.write_u16(name_idx);
-                    }
-                    for name in &block_lexical_names {
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DeleteGlobal);
-                        self.chunk.write_u16(name_idx);
-                    }
-                    // Re-throw: load the caught value and throw it
-                    let rv_u16 = crate::unicode::utf8_to_utf16(rethrow_var);
-                    let rv_idx = self.chunk.add_constant(Value::String(rv_u16));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(rv_idx);
-                    self.chunk.write_opcode(Opcode::Throw);
-                    self.patch_jump(jump_over_catch);
-                } else {
-                    // No try wrapper — emit cleanup directly
-                    for fn_name in block_fn_names {
-                        let name_u16 = crate::unicode::utf8_to_utf16(&fn_name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DeleteGlobal);
-                        self.chunk.write_u16(name_idx);
-                    }
-                    for name in block_lexical_names {
-                        let name_u16 = crate::unicode::utf8_to_utf16(&name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DeleteGlobal);
-                        self.chunk.write_u16(name_idx);
-                    }
                 }
                 if pushed_block_aliases {
                     self.top_level_block_aliases.pop();
@@ -7274,11 +7232,8 @@ impl<'gc> Compiler<'gc> {
 
         if !is_expr {
             // Define as global/local variable (class name is const-like binding)
-            let name_u16 = crate::unicode::utf8_to_utf16(name);
-            let name_idx = self.chunk.add_constant(Value::String(name_u16));
             if self.scope_depth == 0 {
-                self.chunk.write_opcode(Opcode::DefineGlobalConst);
-                self.chunk.write_u16(name_idx);
+                self.emit_define_global_binding(name, true);
             } else if class_name_pre_slot.is_some() {
                 // Update existing pre-registered slot with actual constructor value
                 self.emit_define_var(name);
@@ -7876,11 +7831,19 @@ impl<'gc> Compiler<'gc> {
             // Fallback: try by name
             self.emit_helper_get(name);
         } else {
-            let name_u16 = crate::unicode::utf8_to_utf16(name);
-            let name_idx = self.chunk.add_constant(Value::String(name_u16));
             if self.scope_depth == 0 {
-                self.chunk.write_opcode(Opcode::GetGlobal);
-                self.chunk.write_u16(name_idx);
+                // Check if there's a block alias for this class name
+                if let Some((alias, _)) = self.lookup_top_level_block_alias(name) {
+                    let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
+                    let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(alias_idx);
+                } else {
+                    let name_u16 = crate::unicode::utf8_to_utf16(name);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(name_idx);
+                }
             } else {
                 self.emit_helper_get(name);
             }

@@ -266,6 +266,11 @@ pub struct Chunk<'gc> {
     /// Top-level lexical declaration names (`let`/`const`/`class`) in this chunk.
     /// Eval writeback must never leak these to the caller/global object.
     pub lexical_declared_globals: std::collections::HashSet<String>,
+    /// Mapping from block-alias key (`__top_block_alias_N__`) to the original
+    /// variable name it shadows.  Used at runtime so that direct eval inside a
+    /// block can resolve block-scoped variables, while indirect eval sees the
+    /// unmodified global value.
+    pub block_alias_to_original: std::collections::HashMap<String, String>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

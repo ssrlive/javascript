@@ -16222,6 +16222,40 @@ impl<'gc> VM<'gc> {
                                     return Err(crate::raise_syntax_error!("'super' keyword unexpected here"));
                                 }
                             }
+
+                            // Direct eval: check super/new.target based on the
+                            // this-environment (nearest non-arrow function frame).
+                            // §19.2.1.3 PerformEval steps 4-6.
+                            let mask = SCAN_NEW_TARGET | SCAN_SUPER_CALL | SCAN_SUPER_PROP;
+                            let found = eval_ast_scan(&statements, mask);
+                            if found != 0 {
+                                // Walk up frames to find the nearest non-arrow function
+                                // (equivalent to GetThisEnvironment in spec).
+                                let this_env_frame = self
+                                    .frames
+                                    .iter()
+                                    .rev()
+                                    .find(|f| f.func_ip != 0 && !self.chunk.arrow_function_ips.contains(&f.func_ip));
+                                let (in_function, in_method, in_constructor) = match this_env_frame {
+                                    Some(f) => {
+                                        let eval_ctx = self.chunk.fn_eval_context.get(&f.func_ip).copied().unwrap_or(0);
+                                        let in_method = eval_ctx & 0x02 != 0 || self.fn_home_objects.contains_key(&f.func_ip);
+                                        let in_constructor = eval_ctx & 0x04 != 0 || self.chunk.class_constructor_ips.contains(&f.func_ip);
+                                        (true, in_method, in_constructor)
+                                    }
+                                    None => (false, false, false),
+                                };
+
+                                if found & SCAN_NEW_TARGET != 0 && !in_function {
+                                    return Err(crate::raise_syntax_error!("new.target expression is not allowed here"));
+                                }
+                                if found & SCAN_SUPER_PROP != 0 && !in_method {
+                                    return Err(crate::raise_syntax_error!("'super' keyword unexpected here"));
+                                }
+                                if found & SCAN_SUPER_CALL != 0 && !in_constructor {
+                                    return Err(crate::raise_syntax_error!("'super' keyword unexpected here"));
+                                }
+                            }
                         }
                     }
                     // Detect strict mode: code begins with "use strict" directive, or enclosing context is strict (direct eval only)
@@ -16386,8 +16420,30 @@ impl<'gc> VM<'gc> {
                     let (eval_code_offset, _) = eval_vm.merge_eval_chunk(&chunk);
                     eval_vm.ip = eval_code_offset;
                     // Copy caller's globals into eval VM
-                    for (k, v) in &self.globals {
-                        eval_vm.globals.insert(k.clone(), v.clone());
+                    if self.direct_eval {
+                        // Direct eval: copy all globals (caller's scope)
+                        for (k, v) in &self.globals {
+                            eval_vm.globals.insert(k.clone(), v.clone());
+                        }
+                    } else {
+                        // Indirect eval: build globals from the true global scope.
+                        // First copy internal/builtin globals from self.globals
+                        // (ensures eval, globalThis, internal helpers are available).
+                        for (k, v) in &self.globals {
+                            eval_vm.globals.insert(k.clone(), v.clone());
+                        }
+                        // Then override with globalThis properties — these represent
+                        // the actual global environment, excluding eval-local vars.
+                        // Skip Uninitialized values (const declarations that haven't
+                        // been mirrored to globalThis yet).
+                        if let Some(Value::VmObject(gt)) = self.globals.get("globalThis") {
+                            for (k, v) in gt.borrow().iter() {
+                                if matches!(v, Value::Uninitialized) {
+                                    continue;
+                                }
+                                eval_vm.globals.insert(k.clone(), v.clone());
+                            }
+                        }
                     }
                     // For direct eval, inject caller's local variables as globals
                     if self.direct_eval {
@@ -16408,6 +16464,19 @@ impl<'gc> VM<'gc> {
                                     }
                                 }
                             }
+                        }
+                        // Direct eval: resolve active block aliases so that
+                        // eval("x") inside a block sees the block-scoped value.
+                        for (alias, original) in &self.chunk.block_alias_to_original {
+                            if let Some(val) = self.globals.get(alias) {
+                                eval_vm.globals.insert(original.clone(), val.clone());
+                            }
+                        }
+                    } else {
+                        // Indirect eval: remove alias keys from eval VM globals
+                        // so internal `__top_block_alias_N__` names aren't visible.
+                        for alias in self.chunk.block_alias_to_original.keys() {
+                            _ = eval_vm.globals.shift_remove(alias);
                         }
                     }
                     // Set up `this` for the eval VM
@@ -16465,6 +16534,45 @@ impl<'gc> VM<'gc> {
                         let global_this = self.globals.get("globalThis").cloned().unwrap_or(Value::Undefined);
                         eval_vm.this_stack.push(global_this);
                     }
+
+                    // §19.2.1.3 EvalDeclarationInstantiation step 5:
+                    // "If strict is false" — only check var/let collision for
+                    // non-strict indirect eval.
+                    if !self.direct_eval && !is_strict {
+                        for var_name in &chunk.declared_globals {
+                            if chunk.lexical_declared_globals.contains(var_name) {
+                                continue; // it's a let/const in eval, not a var
+                            }
+                            if self.chunk.lexical_declared_globals.contains(var_name) {
+                                return Err(crate::raise_syntax_error!(format!(
+                                    "Identifier '{}' has already been declared",
+                                    var_name
+                                )));
+                            }
+                        }
+                        // §19.2.1.3 step 10.a.iii: CanDeclareGlobalVar
+                        // If the global object is non-extensible, new var declarations
+                        // that don't already exist on the global object throw TypeError.
+                        {
+                            let gt = self.global_this.borrow();
+                            let non_extensible = gt.get("__non_extensible__").is_some_and(|v| v.to_truthy());
+                            if non_extensible {
+                                for var_name in &chunk.declared_globals {
+                                    if chunk.lexical_declared_globals.contains(var_name) {
+                                        continue;
+                                    }
+                                    if !gt.contains_key(var_name) {
+                                        drop(gt);
+                                        return Err(crate::raise_type_error!(format!(
+                                            "Cannot define global variable '{}': global object is not extensible",
+                                            var_name
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let eval_result = eval_vm.run(ctx);
                     // Sync brand counter so subsequent evals get unique brands
                     if eval_vm.runtime_brand_counter > self.runtime_brand_counter {

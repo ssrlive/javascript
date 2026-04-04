@@ -145,6 +145,8 @@ impl<'gc> Compiler<'gc> {
                 _ => break,
             }
         }
+        // Hoist top-level lexical declarations to uninitialized bindings (TDZ).
+        self.emit_hoisted_global_lexicals(statements);
         // Hoist top-level `var` declarations to `undefined` before execution.
         // Function declarations are still emitted first right below, so they override
         // same-name hoisted vars at initialization time.
@@ -364,6 +366,64 @@ impl<'gc> Compiler<'gc> {
             let undef_idx = self.chunk.add_constant(Value::Undefined);
             self.chunk.write_opcode(Opcode::Constant);
             self.chunk.write_u16(undef_idx);
+
+            self.chunk.declared_globals.insert(name.clone());
+            let name_u16 = crate::unicode::utf8_to_utf16(&name);
+            let name_idx = self.chunk.add_constant(Value::String(name_u16));
+            self.chunk.write_opcode(Opcode::DefineGlobal);
+            self.chunk.write_u16(name_idx);
+        }
+    }
+
+    fn collect_object_destructuring_binding_names(elem: &ObjectDestructuringElement, out: &mut Vec<String>) {
+        match elem {
+            ObjectDestructuringElement::Property { value, .. } | ObjectDestructuringElement::ComputedProperty { value, .. } => {
+                Self::collect_destructuring_binding_names(value, out);
+            }
+            ObjectDestructuringElement::Rest(name) => {
+                if !out.iter().any(|n| n == name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+    }
+
+    fn emit_hoisted_global_lexicals(&mut self, body: &[Statement]) {
+        let mut hoisted = Vec::new();
+        for stmt in body {
+            match &*stmt.kind {
+                StatementKind::Let(decls) => {
+                    for (name, _) in decls {
+                        if !hoisted.iter().any(|n| n == name) {
+                            hoisted.push(name.clone());
+                        }
+                    }
+                }
+                StatementKind::Const(decls) => {
+                    for (name, _) in decls {
+                        if !hoisted.iter().any(|n| n == name) {
+                            hoisted.push(name.clone());
+                        }
+                    }
+                }
+                StatementKind::LetDestructuringArray(elements, _) | StatementKind::ConstDestructuringArray(elements, _) => {
+                    for elem in elements {
+                        Self::collect_destructuring_binding_names(elem, &mut hoisted);
+                    }
+                }
+                StatementKind::LetDestructuringObject(elements, _) | StatementKind::ConstDestructuringObject(elements, _) => {
+                    for elem in elements {
+                        Self::collect_object_destructuring_binding_names(elem, &mut hoisted);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for name in hoisted {
+            let uninit_idx = self.chunk.add_constant(Value::Uninitialized);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(uninit_idx);
 
             self.chunk.declared_globals.insert(name.clone());
             let name_u16 = crate::unicode::utf8_to_utf16(&name);
@@ -3151,9 +3211,15 @@ impl<'gc> Compiler<'gc> {
             }
             // Assignment to property: obj.key = val, obj[i] = val
             Expr::Assign(left, right) => match &**left {
-                Expr::Var(name, ..) => {
+                Expr::Var(name, line, column) => {
                     // Infer function name for anonymous function/arrow assigned to a variable
-                    let func_ip = self.peek_func_ip(right);
+                    // Parenthesized identifier targets are represented as Var(name, None, None)
+                    // and must not trigger NamedEvaluation name inference.
+                    let func_ip = if line.is_some() || column.is_some() {
+                        self.peek_func_ip(right)
+                    } else {
+                        None
+                    };
                     self.compile_expr(right)?;
                     if let Some(ip) = func_ip {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
@@ -3196,6 +3262,11 @@ impl<'gc> Compiler<'gc> {
                     let name_idx = self.chunk.add_constant(Value::String(key_u16));
                     self.chunk.write_opcode(Opcode::SetSuperProperty);
                     self.chunk.write_u16(name_idx);
+                }
+                Expr::SuperComputedProperty(key_expr) => {
+                    self.compile_expr(key_expr)?;
+                    self.compile_expr(right)?;
+                    self.chunk.write_opcode(Opcode::SetSuperPropertyComputed);
                 }
                 Expr::PrivateMember(obj, prop) | Expr::OptionalPrivateMember(obj, prop) => {
                     self.compile_expr(obj)?;
@@ -3288,54 +3359,39 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if body.len() == 1 {
-                    if let StatementKind::Expr(expr) = &*body[0].kind {
-                        // Single expression body: implicitly return the value.
-                        // Async arrows return Promise.resolve(expr) to preserve promise shape.
+                    if let StatementKind::Return(ret_expr) = &*body[0].kind {
+                        // Parser encodes concise arrow body as a synthetic Return(expr).
+                        let ret_val = ret_expr.clone().unwrap_or(Expr::Undefined);
                         if is_async_arrow {
                             let wrapped = Expr::Call(
                                 Box::new(Expr::Property(
                                     Box::new(Expr::Var("Promise".to_string(), None, None)),
                                     "resolve".to_string(),
                                 )),
-                                vec![expr.clone()],
+                                vec![ret_val],
                             );
                             self.compile_expr(&wrapped)?;
                         } else {
-                            self.compile_expr(expr)?;
+                            self.compile_expr(&ret_val)?;
                         }
                         self.chunk.write_opcode(Opcode::Return);
+                    } else if is_async_arrow {
+                        self.compile_statement(&body[0], true)?;
+                        let wrapped = Expr::Call(
+                            Box::new(Expr::Property(
+                                Box::new(Expr::Var("Promise".to_string(), None, None)),
+                                "resolve".to_string(),
+                            )),
+                            vec![Expr::Undefined],
+                        );
+                        self.compile_expr(&wrapped)?;
+                        self.chunk.write_opcode(Opcode::Return);
                     } else {
-                        if is_async_arrow {
-                            if let StatementKind::Return(ret_expr) = &*body[0].kind {
-                                let wrapped_arg = ret_expr.clone().unwrap_or(Expr::Undefined);
-                                let wrapped = Expr::Call(
-                                    Box::new(Expr::Property(
-                                        Box::new(Expr::Var("Promise".to_string(), None, None)),
-                                        "resolve".to_string(),
-                                    )),
-                                    vec![wrapped_arg],
-                                );
-                                self.compile_expr(&wrapped)?;
-                                self.chunk.write_opcode(Opcode::Return);
-                            } else {
-                                self.compile_statement(&body[0], true)?;
-                                let wrapped = Expr::Call(
-                                    Box::new(Expr::Property(
-                                        Box::new(Expr::Var("Promise".to_string(), None, None)),
-                                        "resolve".to_string(),
-                                    )),
-                                    vec![Expr::Undefined],
-                                );
-                                self.compile_expr(&wrapped)?;
-                                self.chunk.write_opcode(Opcode::Return);
-                            }
-                        } else {
-                            self.compile_statement(&body[0], true)?;
-                            let idx = self.chunk.add_constant(Value::Undefined);
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(idx);
-                            self.chunk.write_opcode(Opcode::Return);
-                        }
+                        self.compile_statement(&body[0], true)?;
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                        self.chunk.write_opcode(Opcode::Return);
                     }
                 } else {
                     for (i, s) in body.iter().enumerate() {
@@ -4539,6 +4595,9 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::StrictNotEqual);
                 let skip_default = self.emit_jump(Opcode::JumpIfTrue);
                 self.chunk.write_opcode(Opcode::Pop);
+                if let Expr::Var(name, ..) = &**inner_target {
+                    self.maybe_infer_anonymous_binding_name(name, default_expr);
+                }
                 self.compile_expr(default_expr)?;
                 self.patch_jump(skip_default);
                 self.compile_expr_assign_to_target(inner_target)?;
@@ -4557,9 +4616,12 @@ impl<'gc> Compiler<'gc> {
         // Save RHS into temp so we can reference it for each property
         let temp = format!("__expr_destr_obj_{}__", self.forin_counter);
         self.forin_counter += 1;
-        // Dup so we keep the RHS value as the expression result
+        // Dup so we keep the RHS value as the expression result.
+        // Store the duplicate in a helper slot to avoid local-slot/stack skew.
         self.chunk.write_opcode(Opcode::Dup);
-        self.emit_define_var(&temp);
+        self.emit_define_helper_slot(&temp);
+        self.emit_helper_set(&temp);
+        self.chunk.write_opcode(Opcode::Pop);
 
         // Runtime guard: destructuring from undefined/null must throw
         self.emit_helper_get(&temp);
@@ -4601,7 +4663,9 @@ impl<'gc> Compiler<'gc> {
             self.forin_counter += 1;
             self.chunk.write_opcode(Opcode::NewArray);
             self.chunk.write_byte(0);
-            self.emit_define_var(&name);
+            self.emit_define_helper_slot(&name);
+            self.emit_helper_set(&name);
+            self.chunk.write_opcode(Opcode::Pop);
             Some(name)
         } else {
             None
@@ -4614,7 +4678,9 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_byte(0);
                 let rest_temp = format!("__rest_obj_{}__", self.forin_counter);
                 self.forin_counter += 1;
-                self.emit_define_var(&rest_temp);
+                self.emit_define_helper_slot(&rest_temp);
+                self.emit_helper_set(&rest_temp);
+                self.chunk.write_opcode(Opcode::Pop);
 
                 self.emit_helper_get(&rest_temp);
                 if let Some(ref arr_name) = excluded_arr_temp {
@@ -4639,17 +4705,6 @@ impl<'gc> Compiler<'gc> {
                 _ => None,
             };
 
-            if let Some(ref arr_name) = excluded_arr_temp
-                && let Some(ref ks) = key_str
-            {
-                self.emit_helper_get(arr_name);
-                let key_idx = self.chunk.add_constant(Value::from(ks));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(key_idx);
-                self.chunk.write_opcode(Opcode::ArrayPush);
-                self.chunk.write_opcode(Opcode::Pop);
-            }
-
             // Spec: evaluate the assignment target reference BEFORE getting the value.
             // For member/private-member targets, this means evaluating the base first.
             // Use DefineGlobal (not emit_define_var) to store the pre-evaluated base,
@@ -4670,6 +4725,14 @@ impl<'gc> Compiler<'gc> {
             };
 
             if let Some(ks) = key_str {
+                if let Some(ref arr_name) = excluded_arr_temp {
+                    self.emit_helper_get(arr_name);
+                    let key_idx = self.chunk.add_constant(Value::from(&ks));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(key_idx);
+                    self.chunk.write_opcode(Opcode::ArrayPush);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
                 self.emit_helper_get(&temp);
                 let k = self.chunk.add_constant(Value::from(&ks));
                 self.chunk.write_opcode(Opcode::GetProperty);
@@ -4678,6 +4741,15 @@ impl<'gc> Compiler<'gc> {
                 // Computed key
                 self.emit_helper_get(&temp);
                 self.compile_expr(key_expr)?;
+                if let Some(ref arr_name) = excluded_arr_temp {
+                    // Reuse the same evaluated key value for both excluded-names
+                    // bookkeeping and source property access.
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.emit_helper_get(arr_name);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::ArrayPush);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
                 self.chunk.write_opcode(Opcode::GetIndex);
             }
 
@@ -4742,16 +4814,19 @@ impl<'gc> Compiler<'gc> {
         let orig_temp = format!("__expr_destr_arr_orig_{}__", self.forin_counter);
         self.forin_counter += 1;
         self.chunk.write_opcode(Opcode::Dup);
-        self.emit_define_var(&orig_temp);
+        self.emit_define_helper_slot(&orig_temp);
+        self.emit_helper_set(&orig_temp);
+        self.chunk.write_opcode(Opcode::Pop);
 
         // Normalize RHS via for-of helper
         let temp = format!("__expr_destr_arr_{}__", self.forin_counter);
         self.forin_counter += 1;
 
         let has_rest = elems.iter().any(|e| matches!(e, Some(Expr::Spread(_))));
-        // Swap: use the current stack top as the temp value first
-        // Actually, the value is on the stack. Let me store it, then call helper.
-        self.emit_define_var(&temp);
+        // Store RHS into helper slot before normalization.
+        self.emit_define_helper_slot(&temp);
+        self.emit_helper_set(&temp);
+        self.chunk.write_opcode(Opcode::Pop);
 
         let mut call_args = vec![Expr::Var(temp.clone(), None, None)];
         if !has_rest {
@@ -4795,12 +4870,9 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
-        // Push original RHS back as the expression result
-        // First pop the current stack top (which is the original RHS we Dup'd)
-        // Actually the original was already saved; swap it into position
+        // Push original RHS back as the expression result.
+        // Keep surrounding stack entries intact (important for nested patterns).
         self.emit_helper_get(&orig_temp);
-        self.chunk.write_opcode(Opcode::Swap);
-        self.chunk.write_opcode(Opcode::Pop);
 
         // Clean up temp locals
         if self.scope_depth > 0 {

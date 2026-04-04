@@ -101,6 +101,7 @@ pub enum Opcode {
     AssertIterResult = 95,         // throw TypeError if TOS is not an object (IteratorResult check)
     BoxLocal = 96,                 // create a shared upvalue cell for a local (for class name heritage scope)
     ToNumeric = 97,                // ToNumeric: like ToNumber but preserves BigInt values
+    SetSuperPropertyComputed = 98, // assign to super[expr] using current this as receiver
 }
 
 impl TryFrom<u8> for Opcode {
@@ -206,6 +207,7 @@ impl TryFrom<u8> for Opcode {
             95 => Opcode::AssertIterResult,
             96 => Opcode::BoxLocal,
             97 => Opcode::ToNumeric,
+            98 => Opcode::SetSuperPropertyComputed,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

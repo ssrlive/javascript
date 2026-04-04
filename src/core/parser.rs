@@ -5062,7 +5062,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 return Err(raise_parse_error_at!(tokens.get(*index)));
             }
             *index += 1;
-            expr_inner
+            match expr_inner {
+                // Parenthesized identifiers are not IdentifierReference in assignment
+                // named-evaluation rules; clear marker metadata used by compiler.
+                Expr::Var(name, _, _) => Expr::Var(name, None, None),
+                other => other,
+            }
         }
         _ => {
             if *index < tokens.len() {

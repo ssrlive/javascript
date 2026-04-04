@@ -10367,34 +10367,71 @@ impl<'gc> VM<'gc> {
             }
             Ok(val.clone())
         } else {
+            if matches!(obj, Value::Null | Value::Undefined) {
+                let err = self.make_type_error_object(ctx, "Cannot set properties of null or undefined");
+                self.handle_throw(ctx, &err)?;
+                return Ok(val.clone());
+            }
             log::warn!("SetProperty on non-object: {}", value_to_string(obj));
             Ok(val.clone())
         }
     }
 
     fn resolve_super_base(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Option<Value<'gc>> {
-        let active_func_ips: Vec<usize> = self.frames.iter().rev().map(|f| f.func_ip).collect();
-        for func_ip in active_func_ips {
+        let frame_ips: Vec<usize> = self.frames.iter().rev().map(|f| f.func_ip).collect();
+        for func_ip in frame_ips {
+            // Arrow functions don't have [[HomeObject]]; they inherit `super`
+            // lexically from the nearest enclosing non-arrow function.
+            if self.chunk.arrow_function_ips.contains(&func_ip) {
+                continue;
+            }
             if let Some(home_obj) = self.fn_home_objects.get(&func_ip).cloned() {
-                match home_obj {
-                    Value::VmObject(map) => {
-                        let base = map.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
-                        match base {
-                            Value::Null | Value::Undefined => {}
-                            proto => return Some(proto),
-                        }
-                    }
+                let base = match home_obj {
+                    Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
                     Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                         let props = self.get_fn_props(ctx, ip, arity);
-                        let base = props.borrow().get("__proto__").cloned().unwrap_or(Value::Null);
-                        match base {
-                            Value::Null | Value::Undefined => {}
-                            proto => return Some(proto),
-                        }
+                        props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
                     }
-                    _ => {}
-                }
+                    _ => Value::Null,
+                };
+                return match base {
+                    Value::Null | Value::Undefined => None,
+                    proto => Some(proto),
+                };
             }
+            // If the nearest non-arrow frame has no recorded home object, do not
+            // walk to outer non-arrow frames (that would break lexical `super`).
+            // Use receiver shape as a fallback for class methods/constructors.
+            let direct_proto = match receiver {
+                Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
+                Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => self
+                    .get_fn_props(ctx, *ip, *arity)
+                    .borrow()
+                    .get("__proto__")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
+            let base = if self.chunk.class_constructor_ips.contains(&func_ip) {
+                match direct_proto {
+                    Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
+                    Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
+                    Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => self
+                        .get_fn_props(ctx, ip, arity)
+                        .borrow()
+                        .get("__proto__")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    other => other,
+                }
+            } else {
+                direct_proto
+            };
+            return match base {
+                Value::Null | Value::Undefined => None,
+                proto => Some(proto),
+            };
         }
 
         // Fallback for eval VM: use eval_home_object if set
@@ -10419,37 +10456,8 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        match receiver {
-            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let props = self.get_fn_props(ctx, *ip, *arity);
-                match props.borrow().get("__proto__").cloned().unwrap_or(Value::Null) {
-                    Value::Null | Value::Undefined => None,
-                    proto => Some(proto),
-                }
-            }
-            Value::VmObject(map) => {
-                let borrow = map.borrow();
-                let has_own_proto = borrow.contains_key("__proto__");
-                let immediate_proto = borrow.get("__proto__").cloned().unwrap_or(Value::Null);
-                drop(borrow);
-
-                match immediate_proto {
-                    Value::VmObject(proto_obj) => match Value::VmObject(proto_obj) {
-                        Value::Null | Value::Undefined => None,
-                        proto => Some(proto),
-                    },
-                    Value::Null | Value::Undefined if !has_own_proto => {
-                        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
-                            obj_global.borrow().get("prototype").cloned()
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        let _ = receiver;
+        None
     }
 
     fn infer_name_from_property_key(key: &str) -> String {
@@ -11155,6 +11163,27 @@ impl<'gc> VM<'gc> {
                 let wrapper_value = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
                 self.read_named_property_with_receiver(ctx, &wrapper_value, key, obj)
             }
+            Value::Boolean(b) => {
+                let mut wrapper = IndexMap::new();
+                wrapper.insert("__type__".to_string(), Value::from("Boolean"));
+                wrapper.insert("__value__".to_string(), Value::Boolean(*b));
+                let wrapper_value = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
+                self.read_named_property_with_receiver(ctx, &wrapper_value, key, obj)
+            }
+            Value::Number(n) => {
+                let mut wrapper = IndexMap::new();
+                wrapper.insert("__type__".to_string(), Value::from("Number"));
+                wrapper.insert("__value__".to_string(), Value::Number(*n));
+                let wrapper_value = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
+                self.read_named_property_with_receiver(ctx, &wrapper_value, key, obj)
+            }
+            Value::BigInt(n) => {
+                let mut wrapper = IndexMap::new();
+                wrapper.insert("__type__".to_string(), Value::from("BigInt"));
+                wrapper.insert("__value__".to_string(), Value::BigInt(n.clone()));
+                let wrapper_value = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
+                self.read_named_property_with_receiver(ctx, &wrapper_value, key, obj)
+            }
             Value::VmObject(_) => self.read_named_property_with_receiver(ctx, obj, key, obj),
             Value::VmFunction(ip, arity) => {
                 let current_fn = Value::VmFunction(*ip, *arity);
@@ -11453,6 +11482,7 @@ impl<'gc> VM<'gc> {
                     | Opcode::SetProperty
                     | Opcode::GetMethod
                     | Opcode::SetSuperProperty
+                    | Opcode::SetSuperPropertyComputed
                     | Opcode::GetSuperProperty
                     | Opcode::TypeOfGlobal
                     | Opcode::DeleteGlobal
@@ -11659,20 +11689,12 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn ensure_super_base(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+    fn ensure_super_base(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Option<Value<'gc>> {
         if let Some(super_base) = self.resolve_super_base(ctx, receiver) {
-            return Ok(super_base);
+            return Some(super_base);
         }
-
-        let mut err_map = IndexMap::new();
-        err_map.insert(
-            "message".to_string(),
-            Value::from("Cannot access 'super' of a class with null prototype"),
-        );
-        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-        let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
-        self.handle_throw(ctx, &err)?;
-        Ok(Value::Undefined)
+        self.throw_type_error(ctx, "Cannot access 'super' of a class with null prototype");
+        None
     }
 
     /// Walk the __proto__ chain looking for a property.
@@ -12855,6 +12877,10 @@ impl<'gc> VM<'gc> {
         string_map.insert("__nonenumerable_fromCharCode__".to_string(), Value::Boolean(true));
         let mut string_proto = IndexMap::new();
         string_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
+        string_proto.insert("length".to_string(), Value::Number(0.0));
+        string_proto.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        string_proto.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        string_proto.insert("__nonconfigurable_length__".to_string(), Value::Boolean(true));
         for (name, builtin_id) in [
             ("toString", BUILTIN_STRING_VALUEOF),
             ("valueOf", BUILTIN_STRING_VALUEOF),
@@ -13231,6 +13257,7 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
         fn_proto.insert("name".to_string(), Value::from(""));
         fn_proto.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        fn_proto.insert("__host_fn__".to_string(), Value::from("function.prototype.callable"));
         if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
         {
@@ -16268,6 +16295,7 @@ impl<'gc> VM<'gc> {
                                         | Opcode::GetProperty
                                         | Opcode::SetProperty
                                         | Opcode::SetSuperProperty
+                                        | Opcode::SetSuperPropertyComputed
                                         | Opcode::GetSuperProperty
                                         | Opcode::GetMethod
                                         | Opcode::TypeOfGlobal
@@ -29070,11 +29098,14 @@ impl<'gc> VM<'gc> {
             gen_map.insert("next".to_string(), Value::VmNativeFunction(BUILTIN_ASYNCGEN_NEXT));
             gen_map.insert("throw".to_string(), Value::VmNativeFunction(BUILTIN_ASYNCGEN_THROW));
             gen_map.insert("return".to_string(), Value::VmNativeFunction(BUILTIN_ASYNCGEN_RETURN));
-            if matches!(
-                fn_proto,
-                Some(Value::VmObject(_)) | Some(Value::VmArray(_)) | Some(Value::VmFunction(..)) | Some(Value::VmClosure(..))
-            ) {
-                gen_map.insert("__proto__".to_string(), fn_proto.unwrap_or(Value::Undefined));
+            if let Some(proto) = fn_proto.clone()
+                && matches!(
+                    proto,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                )
+                && !proto.is_symbol_value()
+            {
+                gen_map.insert("__proto__".to_string(), proto);
             } else if let Some(async_gen_proto) = self.globals.get("__async_generator_prototype").cloned() {
                 gen_map.insert("__proto__".to_string(), async_gen_proto);
             }
@@ -29083,11 +29114,14 @@ impl<'gc> VM<'gc> {
             gen_map.insert("throw".to_string(), Value::VmNativeFunction(BUILTIN_GEN_THROW));
             gen_map.insert("return".to_string(), Value::VmNativeFunction(BUILTIN_GEN_RETURN));
             gen_map.insert("@@sym:1".to_string(), Self::make_host_fn(ctx, "iterator.self"));
-            if matches!(
-                fn_proto,
-                Some(Value::VmObject(_)) | Some(Value::VmArray(_)) | Some(Value::VmFunction(..)) | Some(Value::VmClosure(..))
-            ) {
-                gen_map.insert("__proto__".to_string(), fn_proto.unwrap_or(Value::Undefined));
+            if let Some(proto) = fn_proto.clone()
+                && matches!(
+                    proto,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                )
+                && !proto.is_symbol_value()
+            {
+                gen_map.insert("__proto__".to_string(), proto);
             } else if !matches!(self.generator_prototype, Value::Undefined) {
                 gen_map.insert("__proto__".to_string(), self.generator_prototype.clone());
             }

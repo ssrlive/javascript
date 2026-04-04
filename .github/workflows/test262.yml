@@ -87,14 +87,17 @@ jobs:
               TITLE='"language/arguments-object" - "language/export"'
               FOCUS='language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export'
               TIMEOUT='120'
+              RUN_TESTS='true'
               ;;
             2)
               TITLE='"language/expressions/addition" - "language/expressions/assignment"'
               FOCUS='language/expressions/addition,language/expressions/array,language/expressions/arrow-function,language/expressions/assignment'
+              RUN_TESTS='true'
               ;;
             3)
               TITLE='"language/expressions/assignmenttargettype" - "language/expressions/await"'
               FOCUS='language/expressions/assignmenttargettype,language/expressions/async-arrow-function,language/expressions/async-function,language/expressions/async-generator,language/expressions/await'
+              RUN_TESTS='true'
               ;;
             4)
               TITLE='"language/expressions/bitwise-and" - "language/expressions/call"'

@@ -617,12 +617,7 @@ impl<'gc> Compiler<'gc> {
     fn resolve_import_path(&self, source: &str) -> Option<String> {
         if let Some(ref fname) = self.script_filename {
             let base_path = std::path::Path::new(fname);
-            let resolved = if source.starts_with("./") || source.starts_with("../") {
-                let parent = base_path.parent().unwrap_or(std::path::Path::new("."));
-                parent.join(source)
-            } else {
-                std::path::PathBuf::from(source)
-            };
+            let resolved = crate::core::resolve_module_path(source, base_path);
             let resolved_str = resolved.to_string_lossy().to_string();
             if self.loaded_module_exports.contains_key(&resolved_str) {
                 Some(resolved_str)

@@ -846,6 +846,9 @@ pub struct VM<'gc> {
     /// IP offset where the main module's bytecode starts (after dependency merging).
     /// Used to scope `const_import_bindings` checks to main module code only.
     pub(crate) main_module_ip_start: Option<usize>,
+    /// Cross-module namespace identity cache: absolute module path → namespace Value.
+    /// Ensures `GetModuleNamespace(module)` always returns the same object (spec §16.2.1.10).
+    pub(crate) module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1023,6 +1026,7 @@ impl<'gc> VM<'gc> {
             ambiguous_export_keys: std::collections::HashMap::new(),
             loaded_module_local_names: std::collections::HashMap::new(),
             main_module_ip_start: None,
+            module_ns_objects: std::collections::HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1044,6 +1048,23 @@ impl<'gc> VM<'gc> {
             *first = Value::Undefined;
         }
         self.is_module_mode = true;
+    }
+
+    /// Pre-create a module namespace shell in `module_ns_objects` so that
+    /// circular imports from dependency modules get the same identity object
+    /// (spec GetModuleNamespace §16.2.1.10).  The shell has no `__ns_bindings__`
+    /// yet; those are populated later when the full export info is known.
+    pub fn pre_create_module_namespace(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
+        let mut ns_map = IndexMap::new();
+        ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+        ns_map.insert("__proto__".to_string(), Value::Null);
+        ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+        ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
+        ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
+        let main_ns = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
+        self.module_ns_objects.insert(module_key.to_string(), main_ns);
     }
 
     /// Load and execute dependency modules, storing their exports in `loaded_modules`.
@@ -1382,13 +1403,20 @@ impl<'gc> VM<'gc> {
             .iter()
             .map(|(local, (path, export))| (local.clone(), path.clone(), export.clone()))
             .collect();
-        // Cache namespace objects by module path for identity (===)
+        // Local ns_cache for within-call identity; also check cross-module module_ns_objects
+        // for pre-created self-namespace shells (identity across modules).
         let mut ns_cache: std::collections::HashMap<String, Value<'gc>> = std::collections::HashMap::new();
         for (local, mod_path, export_name) in &vars {
             if export_name == "*" {
                 // Namespace import — reuse cached ns for same module path
                 if let Some(cached) = ns_cache.get(mod_path) {
                     self.module_locals.insert(local.clone(), cached.clone());
+                    continue;
+                }
+                // Cross-module identity: reuse pre-created self-namespace shell
+                if let Some(cached) = self.module_ns_objects.get(mod_path).cloned() {
+                    ns_cache.insert(mod_path.clone(), cached.clone());
+                    self.module_locals.insert(local.clone(), cached);
                     continue;
                 }
                 if let Some(exports) = self.loaded_modules.get(mod_path) {

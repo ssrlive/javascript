@@ -1640,33 +1640,58 @@ impl<'gc> VM<'gc> {
                     self.stack.push(cached_ns);
                     return Ok(OpcodeAction::Continue);
                 }
+
                 // Sort export entries alphabetically by export name (spec §26.4.2)
                 let mut sorted_entries = entries.clone();
                 sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+                // Cross-module identity: populate pre-created shell namespace
+                if let Some(ref sp) = self.script_path.clone()
+                    && let Some(cached_ns) = self.module_ns_objects.get(sp).cloned()
+                {
+                    if let Value::VmObject(obj) = &cached_ns {
+                        let mut obj_map = obj.borrow_mut(ctx);
+                        // Add export keys and __ns_bindings__ to the shell
+                        for (export_name, _) in &sorted_entries {
+                            if !obj_map.contains_key(export_name) {
+                                obj_map.insert(export_name.clone(), Value::Null);
+                            }
+                        }
+                        let mut bindings_map = IndexMap::new();
+                        for (export_name, local_name) in &sorted_entries {
+                            bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
+                        }
+                        obj_map.insert("__ns_bindings__".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bindings_map)));
+                    }
+                    self.module_locals.insert("__self_ns_cached__".to_string(), cached_ns.clone());
+                    self.module_locals.insert(name_str.clone(), cached_ns.clone());
+                    self.stack.push(cached_ns);
+                    return Ok(OpcodeAction::Continue);
+                }
+
+                // Build new namespace object
                 let mut ns_map = IndexMap::new();
-                // Store export names as keys (with Null placeholder) for [[HasProperty]]/[[OwnPropertyKeys]]
                 for (export_name, _) in &sorted_entries {
                     ns_map.insert(export_name.clone(), Value::Null);
                 }
-                // Store the export→local binding map under __ns_bindings__
                 let mut bindings_map = IndexMap::new();
                 for (export_name, local_name) in &sorted_entries {
                     bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
                 }
                 ns_map.insert("__ns_bindings__".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bindings_map)));
-                // Module namespace exotic object properties
                 ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
                 ns_map.insert("__proto__".to_string(), Value::Null);
                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
-                // Symbol.toStringTag = "Module" (non-writable, non-enumerable, non-configurable)
                 ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
                 ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
                 ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
                 ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
-                // Cache in module_locals so subsequent accesses return the same object
                 self.module_locals.insert("__self_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
+                if let Some(ref sp) = self.script_path {
+                    self.module_ns_objects.insert(sp.clone(), ns_obj.clone());
+                }
                 self.stack.push(ns_obj);
                 return Ok(OpcodeAction::Continue);
             }

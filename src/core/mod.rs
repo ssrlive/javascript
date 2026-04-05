@@ -145,13 +145,28 @@ pub(crate) enum ReexportSpec {
 pub(crate) fn resolve_module_path(specifier: &str, base_path: &std::path::Path) -> std::path::PathBuf {
     let spec_path = std::path::Path::new(specifier);
     if spec_path.is_absolute() {
-        return spec_path.to_path_buf();
+        return normalize_path(spec_path);
     }
     if specifier.starts_with("./") || specifier.starts_with("../") {
         let parent = base_path.parent().unwrap_or(std::path::Path::new("."));
-        return parent.join(spec_path);
+        return normalize_path(&parent.join(spec_path));
     }
     spec_path.to_path_buf()
+}
+
+/// Remove `.` and resolve `..` components from a path without touching the filesystem.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut result = std::path::PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            other => result.push(other),
+        }
+    }
+    result
 }
 
 pub(crate) type ExportInfo = (Vec<String>, HashMap<String, String>, Vec<(String, Vec<ReexportSpec>)>);
@@ -360,6 +375,12 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let sources = collect_module_sources(&statements, self_basename);
             if !sources.is_empty() {
+                // Pre-create the main module's namespace shell so that any
+                // dependency that circularly imports back the main module
+                // receives the same identity object (spec GetModuleNamespace).
+                let main_key = entry_path.to_string_lossy().to_string();
+                vm.pre_create_module_namespace(ctx, &main_key);
+
                 vm.load_module_dependencies(ctx, entry_path, &sources);
                 // Fixup circular re-exports
                 vm.fixup_circular_reexports();

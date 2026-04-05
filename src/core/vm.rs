@@ -684,6 +684,32 @@ unsafe impl<'gc> Collect<'gc> for AsyncFunctionState<'gc> {
     }
 }
 
+/// State saved when a module's top-level `await` causes it to suspend,
+/// allowing sibling module deps to evaluate before the async module resumes.
+struct SuspendedModuleState<'gc> {
+    ip: usize,
+    module_locals: IndexMap<String, Value<'gc>>,
+    stack: Vec<Value<'gc>>,
+    top_level_cells: HashMap<usize, VmUpvalueCell<'gc>>,
+    const_globals: std::collections::HashSet<String>,
+    loaded_module_vars: std::collections::HashMap<String, (String, String)>,
+    const_import_bindings: std::collections::HashSet<String>,
+    self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    self_import_aliases: std::collections::HashMap<String, String>,
+    live_import_bindings: std::collections::HashMap<String, String>,
+    dep_source: String,
+    resolved_path: std::path::PathBuf,
+    key: String,
+}
+
+unsafe impl<'gc> Collect<'gc> for SuspendedModuleState<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.module_locals.trace(cc);
+        self.stack.trace(cc);
+        self.top_level_cells.trace(cc);
+    }
+}
+
 unsafe impl<'gc> Collect<'gc> for VM<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         self.chunk.trace(cc);
@@ -722,6 +748,10 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         // Trace loaded module exports
         for exports in self.loaded_modules.values() {
             exports.trace(cc);
+        }
+        // Trace suspended module states (TLA)
+        for state in &self.suspended_module_states {
+            state.trace(cc);
         }
     }
 }
@@ -849,6 +879,13 @@ pub struct VM<'gc> {
     /// Cross-module namespace identity cache: absolute module path → namespace Value.
     /// Ensures `GetModuleNamespace(module)` always returns the same object (spec §16.2.1.10).
     pub(crate) module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
+    /// When true, `run_opcode_await` at module top level exits early to support
+    /// async module suspension (spec §16.2.1.5.2.1 InnerModuleEvaluation step 14).
+    suspend_on_module_await: bool,
+    /// Set by `run_opcode_await` when it exits early due to `suspend_on_module_await`.
+    module_await_suspended: bool,
+    /// Suspended module states for TLA modules awaiting resumption.
+    suspended_module_states: Vec<SuspendedModuleState<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1027,6 +1064,9 @@ impl<'gc> VM<'gc> {
             loaded_module_local_names: std::collections::HashMap::new(),
             main_module_ip_start: None,
             module_ns_objects: std::collections::HashMap::new(),
+            suspend_on_module_await: false,
+            module_await_suspended: false,
+            suspended_module_states: Vec::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1157,8 +1197,30 @@ impl<'gc> VM<'gc> {
             // Inject sub-dependency bindings before running
             self.inject_loaded_module_bindings(ctx);
 
-            // Execute
+            // Execute (with TLA suspension support for async module interleaving)
+            self.suspend_on_module_await = true;
             let _dep_result = self.run(ctx);
+            let was_suspended = self.module_await_suspended;
+            self.module_await_suspended = false;
+
+            if was_suspended {
+                // Save dep execution state for later resumption (stored in VM for GC safety)
+                self.suspended_module_states.push(SuspendedModuleState {
+                    ip: self.ip,
+                    module_locals: self.module_locals.clone(),
+                    stack: self.stack.clone(),
+                    top_level_cells: self.top_level_cells.clone(),
+                    const_globals: self.const_globals.clone(),
+                    loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+                    const_import_bindings: self.chunk.const_import_bindings.clone(),
+                    self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+                    self_import_aliases: self.chunk.self_import_aliases.clone(),
+                    live_import_bindings: self.chunk.live_import_bindings.clone(),
+                    dep_source: dep_source.clone(),
+                    resolved_path: resolved_path.clone(),
+                    key: key.clone(),
+                });
+            }
 
             // Collect the dependency's exports
             let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
@@ -1307,6 +1369,67 @@ impl<'gc> VM<'gc> {
             }
 
             // Restore execution state and module-specific chunk metadata
+            self.ip = saved_ip;
+            self.module_locals = saved_module_locals;
+            self.script_path = saved_script_path;
+            self.stack = saved_stack;
+            self.top_level_cells = saved_top_level_cells;
+            self.chunk.loaded_module_vars = saved_loaded_module_vars;
+            self.chunk.const_import_bindings = saved_const_import_bindings;
+            self.chunk.self_namespace_imports = saved_self_namespace_imports;
+            self.chunk.self_import_aliases = saved_self_import_aliases;
+            self.chunk.live_import_bindings = saved_live_import_bindings;
+            self.main_module_ip_start = saved_main_module_ip_start;
+            self.const_globals = saved_const_globals;
+        }
+
+        // Resume any TLA-suspended module deps now that all siblings have evaluated.
+        // Per spec §16.2.1.5.2.1 step 14, async modules suspend and resume after
+        // sibling modules in the graph have been evaluated.
+        let suspended = std::mem::take(&mut self.suspended_module_states);
+        for state in suspended {
+            let saved_ip = self.ip;
+            let saved_module_locals = std::mem::replace(&mut self.module_locals, state.module_locals);
+            let saved_script_path = self.script_path.take();
+            let saved_stack = std::mem::replace(&mut self.stack, state.stack);
+            let saved_top_level_cells = std::mem::replace(&mut self.top_level_cells, state.top_level_cells);
+            let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, state.loaded_module_vars);
+            let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, state.const_import_bindings);
+            let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, state.self_namespace_imports);
+            let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, state.self_import_aliases);
+            let saved_live_import_bindings = std::mem::replace(&mut self.chunk.live_import_bindings, state.live_import_bindings);
+            let saved_main_module_ip_start = self.main_module_ip_start.take();
+            let saved_const_globals = std::mem::replace(&mut self.const_globals, state.const_globals);
+
+            self.ip = state.ip;
+            self.set_source_context(&state.dep_source, Some(state.resolved_path.as_path()));
+
+            // Resume execution from where the await suspended
+            let _resume_result = self.run(ctx);
+
+            // Update exports with any bindings defined after the await
+            if let Some(existing_exports) = self.loaded_modules.get_mut(&state.key) {
+                let (export_names, export_name_to_local, _) =
+                    collect_exports_from_ast(&crate::core::parse_program_statements(&state.dep_source, true).unwrap_or_default());
+                for (export_name, local_name) in &export_name_to_local {
+                    if let Some(val) = self.module_locals.get(local_name).cloned() {
+                        existing_exports.insert(export_name.clone(), val);
+                    } else if let Some(val) = self.globals.get(local_name).cloned() {
+                        existing_exports.insert(export_name.clone(), val);
+                    }
+                }
+                for export_name in &export_names {
+                    if !existing_exports.contains_key(export_name) {
+                        if let Some(val) = self.module_locals.get(export_name).cloned() {
+                            existing_exports.insert(export_name.clone(), val);
+                        } else if let Some(val) = self.globals.get(export_name).cloned() {
+                            existing_exports.insert(export_name.clone(), val);
+                        }
+                    }
+                }
+            }
+
+            // Restore parent state
             self.ip = saved_ip;
             self.module_locals = saved_module_locals;
             self.script_path = saved_script_path;

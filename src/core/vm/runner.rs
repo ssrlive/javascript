@@ -245,6 +245,12 @@ impl<'gc> VM<'gc> {
             } else {
                 self.stack.push(awaited_value);
             }
+            // Module-level TLA suspension: exit run loop so sibling deps can evaluate
+            if self.suspend_on_module_await && self.frames.is_empty() {
+                self.module_await_suspended = true;
+                self.suspend_on_module_await = false;
+                return Ok(OpcodeAction::Exit(Value::Undefined));
+            }
             return Ok(OpcodeAction::Continue);
         }
 

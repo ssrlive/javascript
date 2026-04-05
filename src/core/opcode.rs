@@ -286,6 +286,12 @@ pub struct Chunk<'gc> {
     pub is_eval_code: bool,
     /// Function IPs that have an InitNamedFnSelf opcode (named function expressions).
     pub named_fn_self_ips: std::collections::HashSet<usize>,
+    /// Import bindings that are immutable (from self-import resolution).
+    pub const_import_bindings: std::collections::HashSet<String>,
+    /// Self-import namespace imports: (local_name, Vec<(export_name, local_binding_name)>).
+    pub self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    /// Self-import alias map: local_name -> exported_name (for live binding resolution at runtime).
+    pub self_import_aliases: std::collections::HashMap<String, String>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

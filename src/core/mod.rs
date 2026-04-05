@@ -160,7 +160,10 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             None
         };
 
-        let compiler = Compiler::new();
+        let mut compiler = Compiler::new();
+        if run_as_module && let Some(ref p) = script_path_buf {
+            compiler.set_script_filename(p.to_string_lossy().to_string());
+        }
         let chunk = compiler.compile(&statements)?;
         vm.chunk = chunk;
 

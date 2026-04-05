@@ -1613,6 +1613,27 @@ impl<'gc> VM<'gc> {
                 }
                 return Ok(OpcodeAction::Continue);
             }
+            // Check for self-import namespace: build namespace object from current module state
+            if self.is_module_mode {
+                if let Some(entries) = self.chunk.self_namespace_imports.iter()
+                    .find(|(local, _)| local == &name_str)
+                    .map(|(_, entries)| entries.clone())
+                {
+                    let mut ns_map = IndexMap::new();
+                    for (export_name, local_name) in &entries {
+                        let val = self.module_locals.get(local_name)
+                            .or_else(|| self.globals.get(local_name))
+                            .cloned()
+                            .unwrap_or(Value::Undefined);
+                        let val = if matches!(val, Value::Uninitialized) { Value::Undefined } else { val };
+                        ns_map.insert(export_name.clone(), val);
+                    }
+                    ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+                    let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
+                    self.stack.push(ns_obj);
+                    return Ok(OpcodeAction::Continue);
+                }
+            }
             if let Some(val) = self.globals.get(&name_str).cloned() {
                 if matches!(val, Value::Uninitialized) {
                     let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
@@ -1734,6 +1755,12 @@ impl<'gc> VM<'gc> {
         let name_val = &self.chunk.constants[name_idx];
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
+            // Check for immutable import bindings (self-import aliases)
+            if self.chunk.const_import_bindings.contains(&name_str) {
+                let err = self.make_type_error_object(ctx, "Assignment to constant variable");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
             if self.const_globals.contains(&name_str) {
                 let mut err_map = IndexMap::new();
                 err_map.insert("message".to_string(), Value::from("Assignment to constant variable"));

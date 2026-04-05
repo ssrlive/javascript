@@ -28,6 +28,14 @@ pub struct Compiler<'gc> {
     current_class_expr_names: Vec<String>,                // names of in-flight class expressions (for Var resolution)
     allow_super_call: bool,                               // whether direct super() calls are allowed in current function body
     allow_super_in_arrow_iife: bool,                      // temporary flag for immediate arrow invocation contexts
+    // Module self-import support: maps imported local name -> exported binding name
+    self_import_aliases: std::collections::HashMap<String, String>,
+    // Track module's own exported names for self-import resolution
+    module_export_names: Vec<String>,
+    // Maps export name -> local binding name (e.g. "if" -> "_if" from `export { _if as if }`)
+    export_name_to_local: std::collections::HashMap<String, String>,
+    // Script filename for detecting self-imports
+    script_filename: Option<String>,
     // Closure capture support
     parent_locals: Vec<String>,        // direct parent function's locals
     parent_upvalues: Vec<UpvalueInfo>, // direct parent function's upvalues
@@ -99,6 +107,10 @@ impl<'gc> Compiler<'gc> {
         Self::default()
     }
 
+    pub fn set_script_filename(&mut self, filename: String) {
+        self.script_filename = Some(filename);
+    }
+
     pub fn set_strict_mode(&mut self, strict: bool) {
         if strict {
             self.current_strict = true;
@@ -153,6 +165,11 @@ impl<'gc> Compiler<'gc> {
             }
         }
         // Hoist top-level lexical declarations to uninitialized bindings (TDZ).
+        // Pre-scan: collect module export names for self-import resolution
+        if self.script_filename.is_some() {
+            self.collect_module_export_names(statements);
+            self.collect_self_import_aliases(statements);
+        }
         self.emit_hoisted_global_lexicals(statements);
         // Hoist top-level `var` declarations to `undefined` before execution.
         // Function declarations are still emitted first right below, so they override
@@ -169,6 +186,22 @@ impl<'gc> Compiler<'gc> {
             {
                 self.compile_statement(stmt, false)?;
             }
+            // Also hoist export default function/generator/async function declarations
+            if let StatementKind::Export(specs, None, _) = &*stmt.kind {
+                for spec in specs {
+                    if let crate::core::statement::ExportSpecifier::Default(expr) = spec {
+                        if matches!(
+                            expr,
+                            Expr::Function(Some(_), ..)
+                                | Expr::GeneratorFunction(Some(_), ..)
+                                | Expr::AsyncFunction(Some(_), ..)
+                                | Expr::AsyncGeneratorFunction(Some(_), ..)
+                        ) {
+                            self.compile_statement(stmt, false)?;
+                        }
+                    }
+                }
+            }
         }
         let is_exported_fn_decl = |s: &Statement| -> bool {
             if let StatementKind::Export(_, Some(inner), _) = &*s.kind {
@@ -177,12 +210,60 @@ impl<'gc> Compiler<'gc> {
                 false
             }
         };
+        let is_export_default_fn = |s: &Statement| -> bool {
+            if let StatementKind::Export(specs, None, _) = &*s.kind {
+                specs.iter().any(|spec| {
+                    matches!(
+                        spec,
+                        crate::core::statement::ExportSpecifier::Default(
+                            Expr::Function(Some(_), ..)
+                                | Expr::GeneratorFunction(Some(_), ..)
+                                | Expr::AsyncFunction(Some(_), ..)
+                                | Expr::AsyncGeneratorFunction(Some(_), ..)
+                        )
+                    )
+                })
+            } else {
+                false
+            }
+        };
         let mut remaining_non_function = statements
             .iter()
-            .filter(|stmt| !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) && !is_exported_fn_decl(stmt))
+            .filter(|stmt| {
+                !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..))
+                    && !is_exported_fn_decl(stmt)
+                    && !is_export_default_fn(stmt)
+            })
             .count();
+
+        // Set up completion value tracking if the last statement is a declaration
+        // (class, let, var, etc.) so eval('1; class C {}') returns 1 instead of
+        // undefined.  Per spec, declaration completion is "empty" and the previous
+        // non-empty completion should be preserved.
+        {
+            let non_fn_stmts: Vec<&Statement> = statements
+                .iter()
+                .filter(|stmt| {
+                    !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..))
+                        && !is_exported_fn_decl(stmt)
+                        && !is_export_default_fn(stmt)
+                })
+                .collect();
+            if non_fn_stmts.len() >= 2 {
+                if let Some(last) = non_fn_stmts.last() {
+                    let last_is_non_expr = !matches!(*last.kind, StatementKind::Expr(_));
+                    if last_is_non_expr {
+                        self.setup_completion_var();
+                    }
+                }
+            }
+        }
+
         for stmt in statements.iter() {
-            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) || is_exported_fn_decl(stmt) {
+            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..))
+                || is_exported_fn_decl(stmt)
+                || is_export_default_fn(stmt)
+            {
                 continue;
             }
             remaining_non_function = remaining_non_function.saturating_sub(1);
@@ -446,7 +527,7 @@ impl<'gc> Compiler<'gc> {
                         hoisted.push(class_def.name.clone());
                     }
                 }
-                StatementKind::Export(_, Some(inner_stmt), _) => match &*inner_stmt.kind {
+                StatementKind::Export(specs, Some(inner_stmt), _) => match &*inner_stmt.kind {
                     StatementKind::Let(decls) => {
                         for (name, _) in decls {
                             if !hoisted.iter().any(|n| n == name) {
@@ -476,13 +557,31 @@ impl<'gc> Compiler<'gc> {
                             hoisted.push(class_def.name.clone());
                         }
                     }
-                    _ => {
-                        log::trace!("Not hoisting from export statement: {:?}", stmt);
-                    }
+                    _ => {}
                 },
-                _ => {
-                    log::trace!("Not hoisting from statement: {:?}", stmt);
+                StatementKind::Export(specs, None, _) => {
+                    // export default <expression> creates a *default* binding (TDZ)
+                    // But NOT for function/generator/async function declarations — those are hoisted
+                    // Distinction: declarations have Some(name), expressions have None name
+                    for spec in specs {
+                        if let crate::core::statement::ExportSpecifier::Default(expr) = spec {
+                            let is_fn_decl = matches!(
+                                expr,
+                                Expr::Function(Some(_), ..)
+                                    | Expr::GeneratorFunction(Some(_), ..)
+                                    | Expr::AsyncFunction(Some(_), ..)
+                                    | Expr::AsyncGeneratorFunction(Some(_), ..)
+                            );
+                            if !is_fn_decl {
+                                let name = "*default*".to_string();
+                                if !hoisted.iter().any(|n| n == &name) {
+                                    hoisted.push(name);
+                                }
+                            }
+                        }
+                    }
                 }
+                _ => {}
             }
         }
 
@@ -500,11 +599,139 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    /// Check if an import source refers to the current module (self-import)
+    fn is_self_import(&self, source: &str) -> bool {
+        if let Some(ref fname) = self.script_filename {
+            let import_base = source.strip_prefix("./").unwrap_or(source);
+            let self_base = std::path::Path::new(fname)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            import_base == self_base
+        } else {
+            false
+        }
+    }
+
+    /// Pre-scan statements to collect all exported binding names from this module.
+    fn collect_module_export_names(&mut self, statements: &[Statement]) {
+        use crate::core::statement::ExportSpecifier;
+        for stmt in statements {
+            if let StatementKind::Export(specs, inner, _source) = &*stmt.kind {
+                // export { name }, export { name as alias }
+                for spec in specs {
+                    match spec {
+                        ExportSpecifier::Named(name, alias) => {
+                            let exported = alias.as_deref().unwrap_or(name);
+                            if !self.module_export_names.contains(&exported.to_string()) {
+                                self.module_export_names.push(exported.to_string());
+                            }
+                            // Map export name -> local binding name
+                            // e.g. `export { _if as if }` maps "if" -> "_if"
+                            self.export_name_to_local.insert(exported.to_string(), name.clone());
+                        }
+                        ExportSpecifier::Default(_) => {
+                            if !self.module_export_names.contains(&"default".to_string()) {
+                                self.module_export_names.push("default".to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // export var/let/const/function/class/generator
+                if let Some(inner_stmt) = inner {
+                    match &*inner_stmt.kind {
+                        StatementKind::Var(decls) | StatementKind::Let(decls) => {
+                            for (name, _) in decls {
+                                if !self.module_export_names.contains(name) {
+                                    self.module_export_names.push(name.clone());
+                                }
+                                self.export_name_to_local.insert(name.clone(), name.clone());
+                            }
+                        }
+                        StatementKind::Const(decls) => {
+                            for (name, _) in decls {
+                                if !self.module_export_names.contains(name) {
+                                    self.module_export_names.push(name.clone());
+                                }
+                                self.export_name_to_local.insert(name.clone(), name.clone());
+                            }
+                        }
+                        StatementKind::FunctionDeclaration(name, ..) => {
+                            if !name.is_empty() && !self.module_export_names.contains(name) {
+                                self.module_export_names.push(name.clone());
+                            }
+                            if !name.is_empty() {
+                                self.export_name_to_local.insert(name.clone(), name.clone());
+                            }
+                        }
+                        StatementKind::Class(cd) => {
+                            if !cd.name.is_empty() && !self.module_export_names.contains(&cd.name) {
+                                self.module_export_names.push(cd.name.clone());
+                            }
+                            if !cd.name.is_empty() {
+                                self.export_name_to_local.insert(cd.name.clone(), cd.name.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// Create a LoopContext, consuming any pending label
     fn make_loop_context(&mut self, _loop_start: usize) -> LoopContext {
         LoopContext {
             label: self.pending_label.take(),
             ..LoopContext::default()
+        }
+    }
+
+    /// Pre-scan import statements to register self-import aliases before compilation.
+    fn collect_self_import_aliases(&mut self, statements: &[Statement]) {
+        for stmt in statements {
+            if let StatementKind::Import(specifiers, source) = &*stmt.kind {
+                if self.is_self_import(source) {
+                    for spec in specifiers {
+                        match spec {
+                            ImportSpecifier::Named(name, alias) => {
+                                let local = alias.as_deref().unwrap_or(name).to_string();
+                                // Resolve export name -> local binding via export_name_to_local
+                                let target = self.export_name_to_local.get(name)
+                                    .cloned()
+                                    .unwrap_or_else(|| name.clone());
+                                self.self_import_aliases.insert(local.clone(), target.clone());
+                                self.chunk.self_import_aliases.insert(local.clone(), target);
+                                self.chunk.const_import_bindings.insert(local);
+                            }
+                            ImportSpecifier::Default(local) => {
+                                self.self_import_aliases.insert(local.clone(), "*default*".to_string());
+                                self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
+                                self.chunk.const_import_bindings.insert(local.clone());
+                            }
+                            ImportSpecifier::Namespace(local) => {
+                                // Build (export_name, local_binding_name) pairs
+                                let entries: Vec<(String, String)> = self.module_export_names.iter()
+                                    .map(|exp_name| {
+                                        let local_name = self.export_name_to_local.get(exp_name)
+                                            .cloned()
+                                            .unwrap_or_else(|| {
+                                                if exp_name == "default" {
+                                                    "*default*".to_string()
+                                                } else {
+                                                    exp_name.clone()
+                                                }
+                                            });
+                                        (exp_name.clone(), local_name)
+                                    })
+                                    .collect();
+                                self.chunk.self_namespace_imports.push((local.clone(), entries));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2426,6 +2653,15 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.lexical_declared_globals.insert(class_def.name.clone());
                 }
                 self.compile_class_definition(class_def, false)?;
+                if is_last {
+                    if self.completion_var.is_some() {
+                        self.emit_load_completion();
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
+                }
             }
 
             StatementKind::VarDestructuringArray(elements, init)
@@ -2500,6 +2736,49 @@ impl<'gc> Compiler<'gc> {
                 };
 
                 for spec in specifiers {
+                    // Check for self-import first
+                    if self.is_self_import(source) {
+                        match spec {
+                            ImportSpecifier::Named(name, alias) => {
+                                let local = alias.as_deref().unwrap_or(name).to_string();
+                                // Resolve export name -> local binding via export_name_to_local
+                                let target = self.export_name_to_local.get(name)
+                                    .cloned()
+                                    .unwrap_or_else(|| name.clone());
+                                self.self_import_aliases.insert(local.clone(), target.clone());
+                                self.chunk.self_import_aliases.insert(local.clone(), target);
+                                // Mark as const (imported bindings are immutable)
+                                self.chunk.const_import_bindings.insert(local);
+                                continue;
+                            }
+                            ImportSpecifier::Default(local) => {
+                                // import X from './self.js' => X aliases "*default*"
+                                self.self_import_aliases.insert(local.clone(), "*default*".to_string());
+                                self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
+                                self.chunk.const_import_bindings.insert(local.clone());
+                                continue;
+                            }
+                            ImportSpecifier::Namespace(local) => {
+                                // import * as ns from './self.js' => build namespace object at runtime
+                                let entries: Vec<(String, String)> = self.module_export_names.iter()
+                                    .map(|exp_name| {
+                                        let local_name = self.export_name_to_local.get(exp_name)
+                                            .cloned()
+                                            .unwrap_or_else(|| {
+                                                if exp_name == "default" {
+                                                    "*default*".to_string()
+                                                } else {
+                                                    exp_name.clone()
+                                                }
+                                            });
+                                        (exp_name.clone(), local_name)
+                                    })
+                                    .collect();
+                                self.chunk.self_namespace_imports.push((local.clone(), entries));
+                                continue;
+                            }
+                        }
+                    }
                     match (source.as_str(), spec) {
                         ("math", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
@@ -2643,7 +2922,8 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::Dup);
                             self.emit_define_global_binding(&name, false);
                         }
-                        self.chunk.write_opcode(Opcode::Pop);
+                        // Store value into *default* binding (initialized by hoisting as TDZ)
+                        self.emit_define_global_binding("*default*", false);
                     }
                 }
                 if is_last {
@@ -2710,6 +2990,12 @@ impl<'gc> Compiler<'gc> {
                 } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
                     self.chunk.write_opcode(Opcode::GetUpvalue);
                     self.chunk.write_byte(upvalue_idx);
+                } else if let Some(target) = self.self_import_aliases.get(name).cloned() {
+                    // Self-import alias: redirect to the exported binding name
+                    let target_u16 = crate::unicode::utf8_to_utf16(&target);
+                    let target_idx = self.chunk.add_constant(Value::String(target_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(target_idx);
                 } else if let Some((alias, _)) = self.lookup_top_level_block_alias(name) {
                     let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
                     let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
@@ -3064,7 +3350,13 @@ impl<'gc> Compiler<'gc> {
             Expr::TypeOf(inner) => {
                 // typeof on an undeclared variable must return "undefined", not throw
                 if let Expr::Var(name, ..) = &**inner {
-                    if name != "arguments" || self.scope_depth == 0 {
+                    // Self-import alias: redirect typeof to the target binding
+                    if let Some(target) = self.self_import_aliases.get(name).cloned() {
+                        let target_u16 = crate::unicode::utf8_to_utf16(&target);
+                        let target_idx = self.chunk.add_constant(Value::String(target_u16));
+                        self.chunk.write_opcode(Opcode::TypeOfGlobal);
+                        self.chunk.write_u16(target_idx);
+                    } else if name != "arguments" || self.scope_depth == 0 {
                         // If the name is the current class expression name, it's always defined.
                         let is_class_expr_name = self.current_class_expr_names.last().is_some_and(|n| n == name);
                         let has_block_alias = self.lookup_top_level_block_alias(name).is_some();
@@ -7065,6 +7357,27 @@ impl<'gc> Compiler<'gc> {
             None
         };
 
+        // For class declarations at top-level, set up the inner immutable binding
+        // BEFORE the heritage expression, so closures in the heritage capture the
+        // inner binding (per spec §14.6 step 4 before step 6).
+        let mut class_expr_temp: Option<String> = None;
+        if !is_expr && self.scope_depth == 0 && !name.is_empty() {
+            let temp_name = format!("__cls_expr_{}__", self.forin_counter);
+            self.forin_counter += 1;
+            self.current_class_expr_refs.push(temp_name.clone());
+            self.current_class_expr_names.push(name.to_string());
+            self.const_locals.insert(name.to_string());
+            // Define temp as Uninitialized (TDZ) — it will be set after class creation
+            let uninit_idx = self.chunk.add_constant(Value::Uninitialized);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(uninit_idx);
+            let temp_u16 = crate::unicode::utf8_to_utf16(&temp_name);
+            let temp_idx = self.chunk.add_constant(Value::String(temp_u16));
+            self.chunk.write_opcode(Opcode::DefineGlobal);
+            self.chunk.write_u16(temp_idx);
+            class_expr_temp = Some(temp_name);
+        }
+
         // Evaluate extends expression and bind to a temp local if it's not a simple Var
         let (parent_name, extends_temp_local) = if let Some(ref ext_expr) = class_def.extends {
             if let Expr::Var(pname, ..) = ext_expr {
@@ -7503,14 +7816,23 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_byte(slot as u8);
         }
 
-        let mut class_expr_temp: Option<String> = None;
-
         if !is_expr {
             // Define as global/local variable
-            // At the top level, class declarations create mutable bindings (per §14.7.14)
-            // Only inside the class body is the class name const-like
             if self.scope_depth == 0 {
-                self.emit_define_global_binding(name, false);
+                if !name.is_empty() && class_expr_temp.is_some() {
+                    // Temp was pre-created before heritage. Now store the constructor
+                    // to both the mutable outer binding and the immutable temp.
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.emit_define_global_binding(name, false);
+                    // Overwrite the Uninitialized temp with the actual constructor
+                    let temp_name = class_expr_temp.as_ref().unwrap();
+                    let temp_u16 = crate::unicode::utf8_to_utf16(temp_name);
+                    let temp_idx = self.chunk.add_constant(Value::String(temp_u16));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(temp_idx);
+                } else {
+                    self.emit_define_global_binding(name, false);
+                }
             } else if class_name_pre_slot.is_some() {
                 // Update existing pre-registered slot with actual constructor value
                 self.emit_define_var(name);
@@ -8047,6 +8369,16 @@ impl<'gc> Compiler<'gc> {
         // We cannot remove them from self.locals because upvalue cells are indexed
         // by local position and removing from the middle would shift indices.
         // For class expressions we already cleaned them up above.
+
+        // For class declarations, we also pushed to current_class_expr_refs/names
+        // (for inner name scoping). Clean them up now that the class body is done.
+        if !is_expr && class_expr_temp.is_some() {
+            self.current_class_expr_refs.pop();
+            if !name.is_empty() {
+                self.current_class_expr_names.pop();
+                self.const_locals.remove(name);
+            }
+        }
 
         // Restore previous class context
         self.class_privns_stack.pop();

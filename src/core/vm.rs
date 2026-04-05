@@ -10191,6 +10191,64 @@ impl<'gc> VM<'gc> {
         props_rc
     }
 
+    /// When OrdinarySetWithOwnDescriptor reaches the data-descriptor path (no
+    /// accessor found on the prototype chain), spec step 2c calls
+    /// `Receiver.[[GetOwnProperty]](P)`.  For module namespace exotic objects,
+    /// `[[GetOwnProperty]]` triggers `[[Get]]` which resolves live bindings.
+    /// If the binding is in TDZ (Uninitialized) → throw ReferenceError.
+    /// After TDZ passes, namespace `[[Set]]` always returns false → TypeError.
+    /// Returns `true` if the receiver was a namespace (error already thrown).
+    fn check_receiver_namespace_tdz_set(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        key: &str,
+    ) -> Result<bool, JSError> {
+        let recv = match receiver {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        let recv_map = match recv {
+            Value::VmObject(m) => m,
+            _ => return Ok(false),
+        };
+        if !recv_map.borrow().contains_key("__module_namespace__") {
+            return Ok(false);
+        }
+        let borrow = recv_map.borrow();
+        if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
+            let bindings_b = bindings.borrow();
+            if let Some(Value::String(local_u16)) = bindings_b.get(key) {
+                let local_name = crate::unicode::utf16_to_utf8(local_u16);
+                drop(bindings_b);
+                drop(borrow);
+                let binding_val = self
+                    .module_locals
+                    .get(&local_name)
+                    .or_else(|| self.globals.get(&local_name))
+                    .cloned()
+                    .unwrap_or(Value::Undefined);
+                if matches!(binding_val, Value::Uninitialized) {
+                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(true);
+                }
+            } else {
+                drop(bindings_b);
+                drop(borrow);
+            }
+        } else {
+            drop(borrow);
+        }
+        // Namespace [[Set]] always returns false → TypeError in strict mode
+        let err = self.make_type_error_object(
+            ctx,
+            &format!("Cannot assign to read only property '{}' of object '[object Module]'", key),
+        );
+        self.handle_throw(ctx, &err)?;
+        Ok(true)
+    }
+
     fn assign_named_property(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -10428,6 +10486,8 @@ impl<'gc> VM<'gc> {
                             self.set_pending_throw_from_error(&err);
                         }
                     }
+                } else if self.check_receiver_namespace_tdz_set(ctx, receiver, key)? {
+                    // Receiver is a module namespace → TDZ check done + TypeError thrown
                 } else if is_frozen || (is_non_ext && !key_exists) || is_readonly || getter_only {
                     let msg = if getter_only {
                         format!("Cannot set property {} of object which has only a getter", key)
@@ -10546,6 +10606,8 @@ impl<'gc> VM<'gc> {
                         self.set_pending_throw_from_error(&err);
                     }
                 }
+            } else if self.check_receiver_namespace_tdz_set(ctx, receiver, key)? {
+                // Receiver is a module namespace → TDZ check done + TypeError thrown
             } else if is_frozen || (is_non_ext && !key_exists) || non_ext_proto_mutation || is_readonly || proto_readonly || getter_only {
                 let msg = if is_frozen {
                     format!("Cannot assign to read only property '{}' of object", key)

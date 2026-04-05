@@ -3144,10 +3144,15 @@ impl<'gc> Compiler<'gc> {
                 if name == "arguments" && self.scope_depth > 0 {
                     // inside a function, treat `arguments` as the special arguments object
                     self.chunk.write_opcode(Opcode::GetArguments);
-                } else if self.current_class_expr_names.last().is_some_and(|n| n == name) {
-                    // Name refers to the current class expression's binding — redirect to
-                    // GetGlobal(temp) so it works correctly inside inline method bodies.
-                    self.emit_get_class_ref(name, true)?;
+                } else if let Some(cls_idx) = self.current_class_expr_names.iter().rposition(|n| n == name) {
+                    // Name refers to a class expression's immutable inner binding — use
+                    // the corresponding temp ref so it works correctly inside inline
+                    // method bodies and nested class definitions.
+                    let temp_name = self.current_class_expr_refs[cls_idx].clone();
+                    let temp_u16 = crate::unicode::utf8_to_utf16(&temp_name);
+                    let temp_idx = self.chunk.add_constant(Value::String(temp_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(temp_idx);
                 } else if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
@@ -8015,9 +8020,7 @@ impl<'gc> Compiler<'gc> {
             let temp_name = format!("__cls_expr_{}__", self.forin_counter);
             self.forin_counter += 1;
             self.current_class_expr_refs.push(temp_name.clone());
-            if !name.is_empty() {
-                self.current_class_expr_names.push(name.to_string());
-            }
+            self.current_class_expr_names.push(name.to_string());
             // Always define as a global so methods can use GetGlobal(temp_name).
             {
                 let temp_u16 = crate::unicode::utf8_to_utf16(&temp_name);
@@ -8518,10 +8521,7 @@ impl<'gc> Compiler<'gc> {
             // the class value sit on top at a fresh position.
 
             self.current_class_expr_refs.pop();
-            // Pop the class expression name tracker if we pushed one.
-            if !name.is_empty() {
-                self.current_class_expr_names.pop();
-            }
+            self.current_class_expr_names.pop();
             // Remove the const-tracking entry for the class expression name
             // so it doesn't bleed into the enclosing scope.
             if class_expr_const_added {
@@ -8539,8 +8539,8 @@ impl<'gc> Compiler<'gc> {
         // (for inner name scoping). Clean them up now that the class body is done.
         if !is_expr && class_expr_temp.is_some() {
             self.current_class_expr_refs.pop();
+            self.current_class_expr_names.pop();
             if !name.is_empty() {
-                self.current_class_expr_names.pop();
                 self.const_locals.remove(name);
             }
         }

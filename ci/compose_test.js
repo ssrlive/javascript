@@ -59,8 +59,7 @@ function createComposedTarget(testPath) {
   const testDir = path.dirname(path.resolve(testPath));
   const base = path.basename(testPath, path.extname(testPath));
   const ext = path.extname(testPath);
-  const rand = Math.random().toString(36).slice(2, 8);
-  const tmpName = `.test262_composed_${rand}_${base}${ext}`;
+  const tmpName = `.test262_composed_${base}${ext}`;
   const tmpPath = path.join(testDir, tmpName);
   return {tmpDir: testDir, tmpPath};
 }
@@ -356,6 +355,7 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   // If no module tests: add strict wrapper
   const composed = createComposedTarget(testPath);
   const tmpName = composed.tmpPath;
+  try { fs.unlinkSync(tmpName); } catch (_) {}
   const outLines = [];
   if (needStrict) {
     outLines.push('"use strict";');

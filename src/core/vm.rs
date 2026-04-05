@@ -29651,10 +29651,12 @@ impl<'gc> VM<'gc> {
         }
 
         let mut walker = proto.clone();
-        for _ in 0..128 {
+        for _i in 0..128 {
             match walker {
                 Value::Null | Value::Undefined => break,
-                ref current if self.values_same(current, target) => return Ok(false),
+                ref current if self.values_same(current, target) => {
+                    return Ok(false);
+                }
                 Value::VmObject(ref obj) => {
                     let next = {
                         let borrow = obj.borrow();

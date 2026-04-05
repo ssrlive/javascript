@@ -2059,18 +2059,32 @@ impl<'gc> VM<'gc> {
     }
 
     // Opcode::LessThan
-    /// Abstract Relational Comparison (§7.2.14).
+    /// Abstract Relational Comparison (§7.2.14 IsLessThan).
+    /// `left_first` controls ToPrimitive evaluation order per spec.
     /// Returns Some(true/false) for a definite result, or None for undefined (NaN).
-    fn abstract_relational_comparison(&mut self, ctx: &GcContext<'gc>, x: &Value<'gc>, y: &Value<'gc>) -> Option<bool> {
-        // 1-2. ToPrimitive with hint "number"
-        let px = self.try_to_primitive(ctx, x, "number");
-        if self.pending_throw.is_some() {
-            return None;
-        }
-        let py = self.try_to_primitive(ctx, y, "number");
-        if self.pending_throw.is_some() {
-            return None;
-        }
+    fn abstract_relational_comparison(&mut self, ctx: &GcContext<'gc>, x: &Value<'gc>, y: &Value<'gc>, left_first: bool) -> Option<bool> {
+        // 1-2. ToPrimitive with hint "number", respecting LeftFirst order
+        let (px, py) = if left_first {
+            let px = self.try_to_primitive(ctx, x, "number");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            let py = self.try_to_primitive(ctx, y, "number");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            (px, py)
+        } else {
+            let py = self.try_to_primitive(ctx, y, "number");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            let px = self.try_to_primitive(ctx, x, "number");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            (px, py)
+        };
 
         // 3. If both are strings, do string comparison
         if let (Value::String(a_s), Value::String(b_s)) = (&px, &py) {
@@ -2087,7 +2101,11 @@ impl<'gc> VM<'gc> {
             return Self::string_to_bigint_for_eq(&a_str).map(|a_bi| a_bi < *b_bi.as_ref());
         }
 
-        // 5. ToNumeric on both primitives (BigInt stays BigInt, others become Number)
+        // 5. ToNumeric on both primitives — Symbol throws TypeError
+        if px.is_symbol_value() || py.is_symbol_value() {
+            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return None;
+        }
         let nx = match &px {
             Value::BigInt(_) => px.clone(),
             _ => Value::Number(to_number(&px)),
@@ -2116,7 +2134,8 @@ impl<'gc> VM<'gc> {
     fn run_opcode_less_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let result = self.abstract_relational_comparison(ctx, &a, &b);
+        // Per spec §13.10.1: a < b → IsLessThan(lval, rval, true)
+        let result = self.abstract_relational_comparison(ctx, &a, &b, true);
         if let Some(thrown) = self.pending_throw.take() {
             self.handle_throw(ctx, &thrown)?;
             return Ok(OpcodeAction::Continue);
@@ -2125,12 +2144,12 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::GreaterThan — spec: a > b ≡ !(b < a is false or undefined)
+    // Opcode::GreaterThan
     fn run_opcode_greater_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        // Per spec: x > y is defined as y < x
-        let result = self.abstract_relational_comparison(ctx, &b, &a);
+        // Per spec §13.10.1: a > b → IsLessThan(rval, lval, false)
+        let result = self.abstract_relational_comparison(ctx, &b, &a, false);
         if let Some(thrown) = self.pending_throw.take() {
             self.handle_throw(ctx, &thrown)?;
             return Ok(OpcodeAction::Continue);
@@ -2220,7 +2239,7 @@ impl<'gc> VM<'gc> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
         // Per spec: x <= y is !(y < x), where undefined means false
-        let result = self.abstract_relational_comparison(ctx, &b, &a);
+        let result = self.abstract_relational_comparison(ctx, &b, &a, false);
         if let Some(thrown) = self.pending_throw.take() {
             self.handle_throw(ctx, &thrown)?;
             return Ok(OpcodeAction::Continue);
@@ -2234,7 +2253,7 @@ impl<'gc> VM<'gc> {
     fn run_opcode_greater_equal(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let result = self.abstract_relational_comparison(ctx, &a, &b);
+        let result = self.abstract_relational_comparison(ctx, &a, &b, true);
         if let Some(thrown) = self.pending_throw.take() {
             self.handle_throw(ctx, &thrown)?;
             return Ok(OpcodeAction::Continue);

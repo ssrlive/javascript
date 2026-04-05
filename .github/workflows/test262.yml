@@ -137,10 +137,12 @@ jobs:
             11)
               TITLE='"language/expressions/equals" - "language/expressions/generators"'
               FOCUS='language/expressions/equals,language/expressions/exponentiation,language/expressions/function,language/expressions/generators'
+              RUN_TESTS='true'
               ;;
             12)
               TITLE='"language/expressions/greater-than" - "language/expressions/void"'
               FOCUS='language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/logical-and,language/expressions/logical-assignment,language/expressions/logical-not,language/expressions/logical-or,language/expressions/void'
+              RUN_TESTS='true'
               ;;
             13)
               TITLE='"language/expressions/grouping" - "language/expressions/prefix-increment"'

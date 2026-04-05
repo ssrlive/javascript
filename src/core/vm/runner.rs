@@ -2059,48 +2059,83 @@ impl<'gc> VM<'gc> {
     }
 
     // Opcode::LessThan
+    /// Abstract Relational Comparison (§7.2.14).
+    /// Returns Some(true/false) for a definite result, or None for undefined (NaN).
+    fn abstract_relational_comparison(&mut self, ctx: &GcContext<'gc>, x: &Value<'gc>, y: &Value<'gc>) -> Option<bool> {
+        // 1-2. ToPrimitive with hint "number"
+        let px = self.try_to_primitive(ctx, x, "number");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let py = self.try_to_primitive(ctx, y, "number");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        // 3. If both are strings, do string comparison
+        if let (Value::String(a_s), Value::String(b_s)) = (&px, &py) {
+            return Some(a_s < b_s);
+        }
+
+        // 4. BigInt vs String: parse string as BigInt (StringToBigInt)
+        if let (Value::BigInt(a_bi), Value::String(b_s)) = (&px, &py) {
+            let b_str = crate::unicode::utf16_to_utf8(b_s);
+            return Self::string_to_bigint_for_eq(&b_str).map(|b_bi| a_bi.as_ref() < &b_bi);
+        }
+        if let (Value::String(a_s), Value::BigInt(b_bi)) = (&px, &py) {
+            let a_str = crate::unicode::utf16_to_utf8(a_s);
+            return Self::string_to_bigint_for_eq(&a_str).map(|a_bi| a_bi < *b_bi.as_ref());
+        }
+
+        // 5. ToNumeric on both primitives (BigInt stays BigInt, others become Number)
+        let nx = match &px {
+            Value::BigInt(_) => px.clone(),
+            _ => Value::Number(to_number(&px)),
+        };
+        let ny = match &py {
+            Value::BigInt(_) => py.clone(),
+            _ => Value::Number(to_number(&py)),
+        };
+
+        // 6-8. Same type or cross-type comparison
+        match (&nx, &ny) {
+            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => Some(a_bi < b_bi),
+            (Value::Number(a_num), Value::Number(b_num)) => {
+                if a_num.is_nan() || b_num.is_nan() {
+                    None
+                } else {
+                    Some(a_num < b_num)
+                }
+            }
+            (Value::BigInt(a_bi), Value::Number(b_num)) => compare_bigint_number(a_bi, *b_num).map(|o| o == std::cmp::Ordering::Less),
+            (Value::Number(a_num), Value::BigInt(b_bi)) => compare_bigint_number(b_bi, *a_num).map(|o| o == std::cmp::Ordering::Greater),
+            _ => None,
+        }
+    }
+
     fn run_opcode_less_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        if a.is_symbol_value() || b.is_symbol_value() {
-            let mut err_map = IndexMap::new();
-            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+        let result = self.abstract_relational_comparison(ctx, &a, &b);
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
             return Ok(OpcodeAction::Continue);
         }
-        let result = match (&a, &b) {
-            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi < b_bi,
-            (Value::BigInt(a_bi), Value::Number(b_num)) => compare_bigint_number(a_bi, *b_num) == Some(std::cmp::Ordering::Less),
-            (Value::Number(a_num), Value::BigInt(b_bi)) => compare_bigint_number(b_bi, *a_num) == Some(std::cmp::Ordering::Greater),
-            (Value::String(a_s), Value::String(b_s)) => a_s < b_s,
-            (Value::Number(a_num), Value::Number(b_num)) => a_num < b_num,
-            _ => to_number(&a) < to_number(&b),
-        };
-        self.stack.push(Value::Boolean(result));
+        self.stack.push(Value::Boolean(result.unwrap_or(false)));
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::GreaterThan
+    // Opcode::GreaterThan — spec: a > b ≡ !(b < a is false or undefined)
     fn run_opcode_greater_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        if a.is_symbol_value() || b.is_symbol_value() {
-            let mut err_map = IndexMap::new();
-            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+        // Per spec: x > y is defined as y < x
+        let result = self.abstract_relational_comparison(ctx, &b, &a);
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
             return Ok(OpcodeAction::Continue);
         }
-        let result = match (&a, &b) {
-            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi > b_bi,
-            (Value::BigInt(a_bi), Value::Number(b_num)) => compare_bigint_number(a_bi, *b_num) == Some(std::cmp::Ordering::Greater),
-            (Value::Number(a_num), Value::BigInt(b_bi)) => compare_bigint_number(b_bi, *a_num) == Some(std::cmp::Ordering::Less),
-            (Value::String(a_s), Value::String(b_s)) => a_s > b_s,
-            (Value::Number(a_num), Value::Number(b_num)) => a_num > b_num,
-            _ => to_number(&a) > to_number(&b),
-        };
-        self.stack.push(Value::Boolean(result));
+        self.stack.push(Value::Boolean(result.unwrap_or(false)));
         Ok(OpcodeAction::Continue)
     }
 
@@ -2180,45 +2215,32 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::LessEqual
+    // Opcode::LessEqual — spec: a <= b ≡ !(b < a)
     fn run_opcode_less_equal(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let result = match (&a, &b) {
-            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi <= b_bi,
-            (Value::BigInt(a_bi), Value::Number(b_num)) => {
-                !matches!(compare_bigint_number(a_bi, *b_num), Some(std::cmp::Ordering::Greater) | None)
-            }
-            (Value::Number(a_num), Value::BigInt(b_bi)) => {
-                !matches!(compare_bigint_number(b_bi, *a_num), Some(std::cmp::Ordering::Less) | None)
-            }
-            (Value::String(a_s), Value::String(b_s)) => a_s <= b_s,
-            (Value::Number(a_num), Value::Number(b_num)) => a_num <= b_num,
-            _ => to_number(&a) <= to_number(&b),
-        };
-        self.stack.push(Value::Boolean(result));
+        // Per spec: x <= y is !(y < x), where undefined means false
+        let result = self.abstract_relational_comparison(ctx, &b, &a);
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        // undefined or true → false (not <=); false → true (<= holds)
+        self.stack.push(Value::Boolean(!result.unwrap_or(true)));
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::GreaterEqual
+    // Opcode::GreaterEqual — spec: a >= b ≡ !(a < b)
     fn run_opcode_greater_equal(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
-        let result = match (&a, &b) {
-            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => a_bi >= b_bi,
-            (Value::BigInt(a_bi), Value::Number(b_num)) => {
-                !matches!(compare_bigint_number(a_bi, *b_num), Some(std::cmp::Ordering::Less) | None)
-            }
-            (Value::Number(a_num), Value::BigInt(b_bi)) => {
-                !matches!(compare_bigint_number(b_bi, *a_num), Some(std::cmp::Ordering::Greater) | None)
-            }
-            (Value::String(a_s), Value::String(b_s)) => a_s >= b_s,
-            (Value::Number(a_num), Value::Number(b_num)) => a_num >= b_num,
-            _ => to_number(&a) >= to_number(&b),
-        };
-        self.stack.push(Value::Boolean(result));
+        let result = self.abstract_relational_comparison(ctx, &a, &b);
+        if let Some(thrown) = self.pending_throw.take() {
+            self.handle_throw(ctx, &thrown)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        // undefined or true → false (not >=); false → true (>= holds)
+        self.stack.push(Value::Boolean(!result.unwrap_or(true)));
         Ok(OpcodeAction::Continue)
     }
 

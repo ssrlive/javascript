@@ -2564,6 +2564,15 @@ impl<'gc> Compiler<'gc> {
                         } else {
                             Vec::new()
                         };
+                        // Extract binding name for named declarations (export default function F(){})
+                        let binding_name = match expr {
+                            Expr::Function(Some(n), _, _)
+                            | Expr::AsyncFunction(Some(n), _, _)
+                            | Expr::GeneratorFunction(Some(n), _, _)
+                            | Expr::AsyncGeneratorFunction(Some(n), _, _) if n != "default" => Some(n.clone()),
+                            Expr::Class(cd) if !cd.name.is_empty() => Some(cd.name.clone()),
+                            _ => None,
+                        };
                         self.compile_expr(expr)?;
                         if is_anon_class {
                             // Find the newly added constructor IP and name it "default"
@@ -2572,6 +2581,11 @@ impl<'gc> Compiler<'gc> {
                                     self.chunk.fn_names.insert(*ip, "default".to_string());
                                 }
                             }
+                        }
+                        // Create a top-level binding for named declarations
+                        if let Some(name) = binding_name {
+                            self.chunk.write_opcode(Opcode::Dup);
+                            self.emit_define_global_binding(&name, false);
                         }
                         self.chunk.write_opcode(Opcode::Pop);
                     }

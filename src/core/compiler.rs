@@ -3046,7 +3046,27 @@ impl<'gc> Compiler<'gc> {
                                 _ => None,
                             })
                             .collect();
-                        self.compile_expr(expr)?;
+                        // For named default function/generator/async function declarations,
+                        // compile with is_expression=false so the function name is mutable
+                        // (it's a declaration binding, not a function expression name binding).
+                        match expr {
+                            Expr::Function(Some(n), params, body) if n != "default" => {
+                                self.compile_function_body(Some(n), params, body, false)?;
+                            }
+                            Expr::AsyncFunction(Some(n), params, body) if n != "default" => {
+                                let func_ip = self.compile_function_body(Some(n), params, body, false)?;
+                                self.chunk.async_function_ips.insert(func_ip);
+                            }
+                            Expr::GeneratorFunction(Some(n), params, body) if n != "default" => {
+                                self.compile_generator_function_body(Some(n), params, body, false)?;
+                            }
+                            Expr::AsyncGeneratorFunction(Some(n), params, body) if n != "default" => {
+                                self.compile_async_generator_function_body(Some(n), params, body, false)?;
+                            }
+                            _ => {
+                                self.compile_expr(expr)?;
+                            }
+                        }
                         if is_anon_class {
                             // Find the newly added constructor IP and name it "default"
                             for ip in &self.chunk.class_constructor_ips {

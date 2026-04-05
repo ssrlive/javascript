@@ -1605,9 +1605,16 @@ impl<'gc> VM<'gc> {
         let name_val = &self.chunk.constants[name_idx];
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
+            // Live import binding resolution: aliased imports redirect to source name
+            let resolved_name = self
+                .chunk
+                .live_import_bindings
+                .get(&name_str)
+                .cloned()
+                .unwrap_or_else(|| name_str.clone());
             // In module mode, check module_locals first
             if self.is_module_mode
-                && let Some(val) = self.module_locals.get(&name_str).cloned()
+                && let Some(val) = self.module_locals.get(&resolved_name).cloned()
             {
                 if matches!(val, Value::Uninitialized) {
                     let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
@@ -1784,8 +1791,15 @@ impl<'gc> VM<'gc> {
         let name_val = &self.chunk.constants[name_idx];
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
-            // Check for immutable import bindings (self-import aliases)
-            if self.chunk.const_import_bindings.contains(&name_str) {
+            // Check for immutable import bindings (self-import aliases).
+            // Only apply when executing code from the main module — closures
+            // from loaded dependency modules may legitimately modify their own
+            // module-level vars that happen to share the same name.
+            let in_main_module = match self.main_module_ip_start {
+                Some(start) => self.current_opcode_ip >= start,
+                None => true,
+            };
+            if in_main_module && self.chunk.const_import_bindings.contains(&name_str) {
                 let err = self.make_type_error_object(ctx, "Assignment to constant variable");
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
@@ -3250,13 +3264,16 @@ impl<'gc> VM<'gc> {
                     captures.push(cell);
                     self.frames.last_mut().unwrap().local_cells.insert(index, cell);
                 } else {
-                    // Top-level (no frame), no pre-boxed cell: capture by value
+                    // Top-level (no frame): create shared cell so closures and
+                    // module-level code see the same binding (needed for live bindings).
                     let val = if bp + index < self.stack.len() {
                         self.stack[bp + index].clone()
                     } else {
                         Value::Undefined
                     };
-                    captures.push(new_gc_cell_ptr(ctx, val));
+                    let cell = new_gc_cell_ptr(ctx, val);
+                    captures.push(cell);
+                    self.top_level_cells.insert(index, cell);
                 }
             } else {
                 // Capture from current frame's upvalues — share the cell
@@ -3348,9 +3365,11 @@ impl<'gc> VM<'gc> {
         } else {
             String::new()
         };
+        // Live import binding resolution
+        let resolved = self.chunk.live_import_bindings.get(&name).cloned().unwrap_or_else(|| name.clone());
         // In module mode, check module_locals first
         if self.is_module_mode
-            && let Some(val) = self.module_locals.get(&name)
+            && let Some(val) = self.module_locals.get(&resolved)
         {
             if matches!(val, Value::Uninitialized) {
                 let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name));

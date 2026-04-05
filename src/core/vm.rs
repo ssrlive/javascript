@@ -729,7 +729,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
 /// Bytecode VM first stage prototype
 pub struct VM<'gc> {
     pub(crate) chunk: Chunk<'gc>,
-    ip: usize,
+    pub(crate) ip: usize,
     stack: Vec<Value<'gc>>,
     globals: IndexMap<String, Value<'gc>>,
     const_globals: std::collections::HashSet<String>,
@@ -840,6 +840,12 @@ pub struct VM<'gc> {
     reexport_deps: std::collections::HashMap<String, Vec<(String, Vec<crate::core::ReexportSpec>)>>,
     /// Keys removed as ambiguous per module (must not be re-added by fixup).
     ambiguous_export_keys: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Export-name-to-local-name mapping per loaded module.
+    /// Used to set up live import bindings (e.g. `import val from './m.js'` where default→fn).
+    loaded_module_local_names: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// IP offset where the main module's bytecode starts (after dependency merging).
+    /// Used to scope `const_import_bindings` checks to main module code only.
+    pub(crate) main_module_ip_start: Option<usize>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1015,6 +1021,8 @@ impl<'gc> VM<'gc> {
             export_origins: std::collections::HashMap::new(),
             reexport_deps: std::collections::HashMap::new(),
             ambiguous_export_keys: std::collections::HashMap::new(),
+            loaded_module_local_names: std::collections::HashMap::new(),
+            main_module_ip_start: None,
         };
         vm.register_builtins(ctx);
         vm
@@ -1096,14 +1104,31 @@ impl<'gc> VM<'gc> {
                 Err(_) => continue,
             };
 
-            // Save main module state
-            let saved_chunk = std::mem::replace(&mut self.chunk, dep_chunk);
+            // Extract module-specific metadata before merge consumes the chunk
+            let dep_loaded_module_vars = dep_chunk.loaded_module_vars.clone();
+            let dep_const_import_bindings = dep_chunk.const_import_bindings.clone();
+            let dep_self_namespace_imports = dep_chunk.self_namespace_imports.clone();
+            let dep_self_import_aliases = dep_chunk.self_import_aliases.clone();
+
+            // Merge dependency chunk into VM's persistent chunk so that
+            // functions created during dependency execution have IPs valid
+            // in the merged chunk (enabling cross-module function calls).
+            let dep_ip_offset = self.chunk.merge_dependency_chunk(dep_chunk);
+
+            // Save current state and temporarily activate dependency's module metadata
             let saved_ip = self.ip;
             let saved_module_locals = std::mem::take(&mut self.module_locals);
             let saved_script_path = self.script_path.take();
             let saved_stack = std::mem::take(&mut self.stack);
+            let saved_top_level_cells = std::mem::take(&mut self.top_level_cells);
+            let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, dep_loaded_module_vars);
+            let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, dep_const_import_bindings);
+            let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, dep_self_namespace_imports);
+            let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, dep_self_import_aliases);
+            let saved_live_import_bindings = std::mem::take(&mut self.chunk.live_import_bindings);
+            let saved_main_module_ip_start = self.main_module_ip_start.take();
 
-            self.ip = 0;
+            self.ip = dep_ip_offset;
             self.set_module_this();
             self.set_source_context(&dep_source, Some(resolved_path.as_path()));
 
@@ -1254,16 +1279,23 @@ impl<'gc> VM<'gc> {
 
             self.loaded_modules.insert(key.clone(), exports);
             self.export_origins.insert(key.clone(), origins);
+            self.loaded_module_local_names.insert(key.clone(), export_name_to_local.clone());
             if !all_reexport_deps.is_empty() {
                 self.reexport_deps.insert(key.clone(), all_reexport_deps);
             }
 
-            // Restore main module state
-            self.chunk = saved_chunk;
+            // Restore execution state and module-specific chunk metadata
             self.ip = saved_ip;
             self.module_locals = saved_module_locals;
             self.script_path = saved_script_path;
             self.stack = saved_stack;
+            self.top_level_cells = saved_top_level_cells;
+            self.chunk.loaded_module_vars = saved_loaded_module_vars;
+            self.chunk.const_import_bindings = saved_const_import_bindings;
+            self.chunk.self_namespace_imports = saved_self_namespace_imports;
+            self.chunk.self_import_aliases = saved_self_import_aliases;
+            self.chunk.live_import_bindings = saved_live_import_bindings;
+            self.main_module_ip_start = saved_main_module_ip_start;
         }
     }
 
@@ -1383,7 +1415,20 @@ impl<'gc> VM<'gc> {
                 // Named/default import
                 if let Some(exports) = self.loaded_modules.get(mod_path) {
                     let val = exports.get(export_name).cloned().unwrap_or(Value::Undefined);
-                    self.module_locals.insert(local.clone(), val);
+                    self.module_locals.insert(local.clone(), val.clone());
+
+                    // Set up live binding: also define the source local name so
+                    // mutations by the exporting module's closures are visible.
+                    let source_local = self
+                        .loaded_module_local_names
+                        .get(mod_path)
+                        .and_then(|m| m.get(export_name))
+                        .cloned()
+                        .unwrap_or_else(|| export_name.clone());
+                    if &source_local != local {
+                        self.module_locals.insert(source_local.clone(), val);
+                        self.chunk.live_import_bindings.insert(local.clone(), source_local);
+                    }
                 }
             }
         }

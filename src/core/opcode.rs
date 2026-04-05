@@ -295,6 +295,10 @@ pub struct Chunk<'gc> {
     /// External module variable bindings: local_name -> (module_path, export_name).
     /// Used by multi-file module loading to resolve imports from loaded dependencies.
     pub loaded_module_vars: std::collections::HashMap<String, (String, String)>,
+    /// Live import bindings: alias_name -> source_local_name.
+    /// When reading an aliased import, redirect GetGlobal to the source binding
+    /// so that mutations by the exporting module are visible (ES2024 §9.4.1.1).
+    pub live_import_bindings: std::collections::HashMap<String, String>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {
@@ -344,5 +348,209 @@ impl<'gc> Chunk<'gc> {
             Err(0) => None,
             Err(idx) => Some((self.line_map[idx - 1].1, self.line_map[idx - 1].2)),
         }
+    }
+
+    /// Merge a dependency chunk into this chunk.
+    ///
+    /// Appends the dependency's bytecode and constants, adjusting all IP
+    /// references and constant indices so functions created during dependency
+    /// execution remain valid in the merged chunk.
+    ///
+    /// Returns `ip_offset` — the bytecode offset where the dependency's code
+    /// starts in the merged chunk.
+    pub fn merge_dependency_chunk(&mut self, dep: Chunk<'gc>) -> usize {
+        let ip_offset = self.code.len();
+        let const_offset = self.constants.len();
+
+        // 1. Adjust VmFunction IPs in dependency constants
+        let mut adjusted_constants = dep.constants;
+        for val in &mut adjusted_constants {
+            match val {
+                Value::VmFunction(ip, _) => *ip += ip_offset,
+                Value::VmClosure(ip, _, _) => *ip += ip_offset,
+                _ => {}
+            }
+        }
+        self.constants.extend(adjusted_constants);
+
+        // 2. Append dependency bytecode with adjusted operands
+        let mut dep_code = dep.code;
+        Self::adjust_bytecode_offsets(&mut dep_code, ip_offset, const_offset);
+        self.code.extend(dep_code);
+
+        // 3. Merge IP-keyed metadata (all IPs shifted by ip_offset)
+        for (ip, name) in dep.fn_names {
+            self.fn_names.insert(ip + ip_offset, name);
+        }
+        for (ip, len) in dep.fn_lengths {
+            self.fn_lengths.insert(ip + ip_offset, len);
+        }
+        for ip in dep.class_constructor_ips {
+            self.class_constructor_ips.insert(ip + ip_offset);
+        }
+        for ip in dep.derived_constructor_ips {
+            self.derived_constructor_ips.insert(ip + ip_offset);
+        }
+        for (ip, strict) in dep.fn_strictness {
+            self.fn_strictness.insert(ip + ip_offset, strict);
+        }
+        for ip in dep.async_function_ips {
+            self.async_function_ips.insert(ip + ip_offset);
+        }
+        for ip in dep.arrow_function_ips {
+            self.arrow_function_ips.insert(ip + ip_offset);
+        }
+        for (ip, names) in dep.fn_local_names {
+            self.fn_local_names.insert(ip + ip_offset, names);
+        }
+        for (ip, name) in dep.call_callee_names {
+            self.call_callee_names.insert(ip + ip_offset, name);
+        }
+        for ip in dep.generator_function_ips {
+            self.generator_function_ips.insert(ip + ip_offset);
+        }
+        for ip in dep.method_function_ips {
+            self.method_function_ips.insert(ip + ip_offset);
+        }
+        for (offset, line, col) in dep.line_map {
+            self.line_map.push((offset + ip_offset, line, col));
+        }
+        for (ip, ctx) in dep.fn_private_name_context {
+            self.fn_private_name_context.insert(ip + ip_offset, ctx);
+        }
+        for (ip, flags) in dep.fn_eval_context {
+            self.fn_eval_context.insert(ip + ip_offset, flags);
+        }
+        for (ip, brand) in dep.fn_brand_upvalue {
+            self.fn_brand_upvalue.insert(ip + ip_offset, brand);
+        }
+        for (ip, names) in dep.fn_upvalue_names {
+            self.fn_upvalue_names.insert(ip + ip_offset, names);
+        }
+        for ip in dep.named_fn_self_ips {
+            self.named_fn_self_ips.insert(ip + ip_offset);
+        }
+
+        // 4. Merge name-keyed metadata (no IP adjustment)
+        self.declared_globals.extend(dep.declared_globals);
+        self.lexical_declared_globals.extend(dep.lexical_declared_globals);
+        self.fn_declared_globals.extend(dep.fn_declared_globals);
+        self.block_alias_to_original.extend(dep.block_alias_to_original);
+        // Note: const_import_bindings, self_namespace_imports, self_import_aliases,
+        // loaded_module_vars are module-specific and not merged — they are set
+        // separately from the main module's chunk after all merges.
+        // Note: self_namespace_imports, self_import_aliases, loaded_module_vars
+        // are module-specific and not merged — they belong to the main module.
+
+        ip_offset
+    }
+
+    /// Walk through bytecode and adjust constant indices and jump targets.
+    ///
+    /// Operand layout for each opcode:
+    /// - Constant index (u16, needs const_offset): Constant, DefineGlobal,
+    ///   DefineGlobalConst, DefineGlobalSoft, GetGlobal, SetGlobal, GetProperty,
+    ///   SetProperty, GetMethod, DeleteProperty, TypeOfGlobal, DeleteGlobal,
+    ///   GetSuperProperty, SetSuperProperty, InitProperty
+    /// - Jump target (u16, needs ip_offset): Jump, JumpIfFalse, JumpIfTrue
+    /// - SetupTry: u16 jump + u16 const
+    /// - MakeClosure: u16 const + u8 count + count×2 bytes
+    /// - Call: u8 flags, conditionally +u16 (arg count, no adjustment)
+    fn adjust_bytecode_offsets(code: &mut [u8], ip_offset: usize, const_offset: usize) {
+        let len = code.len();
+        let mut i = 0;
+        while i < len {
+            let opcode = code[i];
+            i += 1;
+            match opcode {
+                // No operands
+                0
+                | 2..=6
+                | 12..=14
+                | 18..=25
+                | 27..=28
+                | 31..=35
+                | 37..=39
+                | 41..=44
+                | 47..=49
+                | 51
+                | 56..=65
+                | 67..=68
+                | 72
+                | 74..=77
+                | 79..=95
+                | 97..=100
+                | 102..=103 => {}
+
+                // u8 operand, no adjustment needed
+                16 | 17 | 69 | 70 | 50 | 96 => {
+                    i += 1;
+                }
+
+                // Call (15): u8 flags, conditionally +u16 arg count
+                15 => {
+                    let flags = code[i];
+                    i += 1;
+                    if (flags & 0x3f) == 0x3f {
+                        i += 2; // extended arg count, no adjustment
+                    }
+                }
+
+                // NewCall (46): u8 arg count
+                46 => {
+                    i += 1;
+                }
+
+                // CallSpread (66): u8 flags
+                66 => {
+                    i += 1;
+                }
+
+                // u16 constant index — add const_offset
+                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 => {
+                    Self::adjust_u16_at(code, i, const_offset);
+                    i += 2;
+                }
+
+                // u16 jump target — add ip_offset
+                10 | 11 | 26 => {
+                    Self::adjust_u16_at(code, i, ip_offset);
+                    i += 2;
+                }
+
+                // SetupTry (36): u16 catch_ip (jump) + u16 binding_idx (const)
+                36 => {
+                    Self::adjust_u16_at(code, i, ip_offset);
+                    i += 2;
+                    Self::adjust_u16_at(code, i, const_offset);
+                    i += 2;
+                }
+
+                // MakeClosure (71): u16 const_idx + u8 capture_count + count×2 bytes
+                71 => {
+                    Self::adjust_u16_at(code, i, const_offset);
+                    i += 2;
+                    let capture_count = code[i] as usize;
+                    i += 1;
+                    i += capture_count * 2;
+                }
+
+                // Unknown opcode — should not happen with valid bytecode
+                _ => {}
+            }
+        }
+    }
+
+    /// Read a little-endian u16 at position `pos`, add `offset`, write back.
+    fn adjust_u16_at(code: &mut [u8], pos: usize, offset: usize) {
+        if offset == 0 || pos + 1 >= code.len() {
+            return;
+        }
+        let lo = code[pos] as u16;
+        let hi = code[pos + 1] as u16;
+        let val = (hi << 8) | lo;
+        let new_val = val + offset as u16;
+        code[pos] = (new_val & 0xff) as u8;
+        code[pos + 1] = ((new_val >> 8) & 0xff) as u8;
     }
 }

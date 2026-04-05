@@ -205,11 +205,35 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
                         }
                         export_name_to_local.insert(export_name, name.clone());
                     }
-                    ES::Default(_) => {
+                    ES::Default(expr) => {
                         if !export_names.contains(&"default".to_string()) {
                             export_names.push("default".to_string());
                         }
-                        export_name_to_local.insert("default".to_string(), "*default*".to_string());
+                        // For named default function/class exports, use the actual
+                        // local binding name so live bindings resolve correctly.
+                        let local_name = match expr {
+                            Expr::Function(Some(n), ..)
+                            | Expr::AsyncFunction(Some(n), ..)
+                            | Expr::GeneratorFunction(Some(n), ..)
+                            | Expr::AsyncGeneratorFunction(Some(n), ..)
+                                if !n.is_empty() =>
+                            {
+                                n.clone()
+                            }
+                            Expr::Class(cd) if !cd.name.is_empty() => cd.name.clone(),
+                            _ => {
+                                // Also check inner declaration (e.g. `export default class C {}`)
+                                inner
+                                    .as_ref()
+                                    .and_then(|inner_stmt| match &*inner_stmt.kind {
+                                        StatementKind::FunctionDeclaration(name, ..) if !name.is_empty() => Some(name.clone()),
+                                        StatementKind::Class(cd) if !cd.name.is_empty() => Some(cd.name.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| "*default*".to_string())
+                            }
+                        };
+                        export_name_to_local.insert("default".to_string(), local_name);
                     }
                     ES::Namespace(_) | ES::Star => {}
                 }
@@ -351,7 +375,30 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         }
 
         let chunk = compiler.compile(&statements)?;
-        vm.chunk = chunk;
+
+        // If dependency code was already merged into vm.chunk, merge the main
+        // module's chunk too so all code shares one unified bytecode buffer.
+        if run_as_module && vm.chunk.code.is_empty() {
+            vm.chunk = chunk;
+        } else if run_as_module && !vm.chunk.code.is_empty() {
+            // Save module-specific metadata before merge consumes the chunk
+            let main_loaded_module_vars = chunk.loaded_module_vars.clone();
+            let main_self_namespace_imports = chunk.self_namespace_imports.clone();
+            let main_self_import_aliases = chunk.self_import_aliases.clone();
+            let main_const_import_bindings = chunk.const_import_bindings.clone();
+
+            let main_ip = vm.chunk.merge_dependency_chunk(chunk);
+            vm.ip = main_ip;
+            vm.main_module_ip_start = Some(main_ip);
+
+            // Restore main module's module-specific metadata on the merged chunk
+            vm.chunk.loaded_module_vars = main_loaded_module_vars;
+            vm.chunk.self_namespace_imports = main_self_namespace_imports;
+            vm.chunk.self_import_aliases = main_self_import_aliases;
+            vm.chunk.const_import_bindings = main_const_import_bindings;
+        } else {
+            vm.chunk = chunk;
+        }
 
         // In module mode, top-level `this` is undefined (not globalThis)
         if run_as_module {

@@ -2103,6 +2103,9 @@ impl<'gc> Compiler<'gc> {
 
                 // Save local variable names for direct eval support
                 self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+                if !self.const_locals.is_empty() {
+                    self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
+                }
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
 
                 // Collect upvalues before restoring
@@ -4086,6 +4089,9 @@ impl<'gc> Compiler<'gc> {
 
                 // Save local variable names for direct eval support
                 self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+                if !self.const_locals.is_empty() {
+                    self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
+                }
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
 
                 // Collect upvalues before restoring
@@ -6551,6 +6557,9 @@ impl<'gc> Compiler<'gc> {
 
         // Save local variable names for direct eval support
         self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+        if !self.const_locals.is_empty() {
+            self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
+        }
         self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
         if let Some(name) = function_name
             && !name.is_empty()
@@ -6915,6 +6924,9 @@ impl<'gc> Compiler<'gc> {
         self.chunk.generator_function_ips.insert(func_ip);
 
         self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+        if !self.const_locals.is_empty() {
+            self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
+        }
         self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
         if let Some(name) = function_name
             && !name.is_empty()
@@ -7059,6 +7071,9 @@ impl<'gc> Compiler<'gc> {
         self.chunk.generator_function_ips.insert(func_ip);
 
         self.chunk.fn_local_names.insert(func_ip, self.locals.clone());
+        if !self.const_locals.is_empty() {
+            self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
+        }
         self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
         if let Some(name) = function_name
             && !name.is_empty()
@@ -8047,6 +8062,9 @@ impl<'gc> Compiler<'gc> {
 
         self.patch_jump(jump_over);
         self.chunk.fn_local_names.insert(fn_start, self.locals.clone());
+        if !self.const_locals.is_empty() {
+            self.chunk.fn_const_local_names.insert(fn_start, self.const_locals.clone());
+        }
         let ctor_upvalues = std::mem::take(&mut self.upvalues);
         self.chunk
             .fn_upvalue_names

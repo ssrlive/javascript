@@ -17325,6 +17325,7 @@ impl<'gc> VM<'gc> {
                         // Walk all frames from outermost to innermost so inner scopes shadow outer
                         for frame in self.frames.iter() {
                             if let Some(local_names) = self.chunk.fn_local_names.get(&frame.func_ip) {
+                                let const_names = self.chunk.fn_const_local_names.get(&frame.func_ip);
                                 for (idx, name) in local_names.iter().enumerate() {
                                     if name.starts_with("__") && name.ends_with("__") {
                                         continue; // skip synthetic locals
@@ -17336,6 +17337,12 @@ impl<'gc> VM<'gc> {
                                         if stack_idx < self.stack.len() {
                                             eval_vm.globals.insert(name.clone(), self.stack[stack_idx].clone());
                                         }
+                                    }
+                                    // Mark const/immutable locals as const_globals in eval VM
+                                    if let Some(cn) = const_names
+                                        && cn.contains(name)
+                                    {
+                                        eval_vm.const_globals.insert(name.clone());
                                     }
                                 }
                             }

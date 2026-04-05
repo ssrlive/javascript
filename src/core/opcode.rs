@@ -245,6 +245,8 @@ pub struct Chunk<'gc> {
     pub arrow_function_ips: std::collections::HashSet<usize>,
     /// Map from function IP to local variable names (for direct eval)
     pub fn_local_names: std::collections::HashMap<usize, Vec<String>>,
+    /// Map from function IP to set of const/immutable local names (for direct eval)
+    pub fn_const_local_names: std::collections::HashMap<usize, std::collections::HashSet<String>>,
     /// Map from Call instruction IP to callee variable name (for error messages)
     pub call_callee_names: std::collections::HashMap<usize, String>,
     /// Function IPs that correspond to generator functions.
@@ -402,6 +404,9 @@ impl<'gc> Chunk<'gc> {
         }
         for (ip, names) in dep.fn_local_names {
             self.fn_local_names.insert(ip + ip_offset, names);
+        }
+        for (ip, names) in dep.fn_const_local_names {
+            self.fn_const_local_names.insert(ip + ip_offset, names);
         }
         for (ip, name) in dep.call_callee_names {
             self.call_callee_names.insert(ip + ip_offset, name);

@@ -189,16 +189,16 @@ impl<'gc> Compiler<'gc> {
             // Also hoist export default function/generator/async function declarations
             if let StatementKind::Export(specs, None, _) = &*stmt.kind {
                 for spec in specs {
-                    if let crate::core::statement::ExportSpecifier::Default(expr) = spec {
-                        if matches!(
+                    if let crate::core::statement::ExportSpecifier::Default(expr) = spec
+                        && matches!(
                             expr,
                             Expr::Function(Some(_), ..)
                                 | Expr::GeneratorFunction(Some(_), ..)
                                 | Expr::AsyncFunction(Some(_), ..)
                                 | Expr::AsyncGeneratorFunction(Some(_), ..)
-                        ) {
-                            self.compile_statement(stmt, false)?;
-                        }
+                        )
+                    {
+                        self.compile_statement(stmt, false)?;
                     }
                 }
             }
@@ -230,9 +230,7 @@ impl<'gc> Compiler<'gc> {
         let mut remaining_non_function = statements
             .iter()
             .filter(|stmt| {
-                !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..))
-                    && !is_exported_fn_decl(stmt)
-                    && !is_export_default_fn(stmt)
+                !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) && !is_exported_fn_decl(stmt) && !is_export_default_fn(stmt)
             })
             .count();
 
@@ -249,21 +247,18 @@ impl<'gc> Compiler<'gc> {
                         && !is_export_default_fn(stmt)
                 })
                 .collect();
-            if non_fn_stmts.len() >= 2 {
-                if let Some(last) = non_fn_stmts.last() {
-                    let last_is_non_expr = !matches!(*last.kind, StatementKind::Expr(_));
-                    if last_is_non_expr {
-                        self.setup_completion_var();
-                    }
+            if non_fn_stmts.len() >= 2
+                && let Some(last) = non_fn_stmts.last()
+            {
+                let last_is_non_expr = !matches!(*last.kind, StatementKind::Expr(_));
+                if last_is_non_expr {
+                    self.setup_completion_var();
                 }
             }
         }
 
         for stmt in statements.iter() {
-            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..))
-                || is_exported_fn_decl(stmt)
-                || is_export_default_fn(stmt)
-            {
+            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) || is_exported_fn_decl(stmt) || is_export_default_fn(stmt) {
                 continue;
             }
             remaining_non_function = remaining_non_function.saturating_sub(1);
@@ -527,7 +522,7 @@ impl<'gc> Compiler<'gc> {
                         hoisted.push(class_def.name.clone());
                     }
                 }
-                StatementKind::Export(specs, Some(inner_stmt), _) => match &*inner_stmt.kind {
+                StatementKind::Export(_specs, Some(inner_stmt), _) => match &*inner_stmt.kind {
                     StatementKind::Let(decls) => {
                         for (name, _) in decls {
                             if !hoisted.iter().any(|n| n == name) {
@@ -603,10 +598,7 @@ impl<'gc> Compiler<'gc> {
     fn is_self_import(&self, source: &str) -> bool {
         if let Some(ref fname) = self.script_filename {
             let import_base = source.strip_prefix("./").unwrap_or(source);
-            let self_base = std::path::Path::new(fname)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let self_base = std::path::Path::new(fname).file_name().and_then(|n| n.to_str()).unwrap_or("");
             import_base == self_base
         } else {
             false
@@ -691,43 +683,41 @@ impl<'gc> Compiler<'gc> {
     /// Pre-scan import statements to register self-import aliases before compilation.
     fn collect_self_import_aliases(&mut self, statements: &[Statement]) {
         for stmt in statements {
-            if let StatementKind::Import(specifiers, source) = &*stmt.kind {
-                if self.is_self_import(source) {
-                    for spec in specifiers {
-                        match spec {
-                            ImportSpecifier::Named(name, alias) => {
-                                let local = alias.as_deref().unwrap_or(name).to_string();
-                                // Resolve export name -> local binding via export_name_to_local
-                                let target = self.export_name_to_local.get(name)
-                                    .cloned()
-                                    .unwrap_or_else(|| name.clone());
-                                self.self_import_aliases.insert(local.clone(), target.clone());
-                                self.chunk.self_import_aliases.insert(local.clone(), target);
-                                self.chunk.const_import_bindings.insert(local);
-                            }
-                            ImportSpecifier::Default(local) => {
-                                self.self_import_aliases.insert(local.clone(), "*default*".to_string());
-                                self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
-                                self.chunk.const_import_bindings.insert(local.clone());
-                            }
-                            ImportSpecifier::Namespace(local) => {
-                                // Build (export_name, local_binding_name) pairs
-                                let entries: Vec<(String, String)> = self.module_export_names.iter()
-                                    .map(|exp_name| {
-                                        let local_name = self.export_name_to_local.get(exp_name)
-                                            .cloned()
-                                            .unwrap_or_else(|| {
-                                                if exp_name == "default" {
-                                                    "*default*".to_string()
-                                                } else {
-                                                    exp_name.clone()
-                                                }
-                                            });
-                                        (exp_name.clone(), local_name)
-                                    })
-                                    .collect();
-                                self.chunk.self_namespace_imports.push((local.clone(), entries));
-                            }
+            if let StatementKind::Import(specifiers, source) = &*stmt.kind
+                && self.is_self_import(source)
+            {
+                for spec in specifiers {
+                    match spec {
+                        ImportSpecifier::Named(name, alias) => {
+                            let local = alias.as_deref().unwrap_or(name).to_string();
+                            // Resolve export name -> local binding via export_name_to_local
+                            let target = self.export_name_to_local.get(name).cloned().unwrap_or_else(|| name.clone());
+                            self.self_import_aliases.insert(local.clone(), target.clone());
+                            self.chunk.self_import_aliases.insert(local.clone(), target);
+                            self.chunk.const_import_bindings.insert(local);
+                        }
+                        ImportSpecifier::Default(local) => {
+                            self.self_import_aliases.insert(local.clone(), "*default*".to_string());
+                            self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
+                            self.chunk.const_import_bindings.insert(local.clone());
+                        }
+                        ImportSpecifier::Namespace(local) => {
+                            // Build (export_name, local_binding_name) pairs
+                            let entries: Vec<(String, String)> = self
+                                .module_export_names
+                                .iter()
+                                .map(|exp_name| {
+                                    let local_name = self.export_name_to_local.get(exp_name).cloned().unwrap_or_else(|| {
+                                        if exp_name == "default" {
+                                            "*default*".to_string()
+                                        } else {
+                                            exp_name.clone()
+                                        }
+                                    });
+                                    (exp_name.clone(), local_name)
+                                })
+                                .collect();
+                            self.chunk.self_namespace_imports.push((local.clone(), entries));
                         }
                     }
                 }
@@ -2742,9 +2732,7 @@ impl<'gc> Compiler<'gc> {
                             ImportSpecifier::Named(name, alias) => {
                                 let local = alias.as_deref().unwrap_or(name).to_string();
                                 // Resolve export name -> local binding via export_name_to_local
-                                let target = self.export_name_to_local.get(name)
-                                    .cloned()
-                                    .unwrap_or_else(|| name.clone());
+                                let target = self.export_name_to_local.get(name).cloned().unwrap_or_else(|| name.clone());
                                 self.self_import_aliases.insert(local.clone(), target.clone());
                                 self.chunk.self_import_aliases.insert(local.clone(), target);
                                 // Mark as const (imported bindings are immutable)
@@ -2760,17 +2748,17 @@ impl<'gc> Compiler<'gc> {
                             }
                             ImportSpecifier::Namespace(local) => {
                                 // import * as ns from './self.js' => build namespace object at runtime
-                                let entries: Vec<(String, String)> = self.module_export_names.iter()
+                                let entries: Vec<(String, String)> = self
+                                    .module_export_names
+                                    .iter()
                                     .map(|exp_name| {
-                                        let local_name = self.export_name_to_local.get(exp_name)
-                                            .cloned()
-                                            .unwrap_or_else(|| {
-                                                if exp_name == "default" {
-                                                    "*default*".to_string()
-                                                } else {
-                                                    exp_name.clone()
-                                                }
-                                            });
+                                        let local_name = self.export_name_to_local.get(exp_name).cloned().unwrap_or_else(|| {
+                                            if exp_name == "default" {
+                                                "*default*".to_string()
+                                            } else {
+                                                exp_name.clone()
+                                            }
+                                        });
                                         (exp_name.clone(), local_name)
                                     })
                                     .collect();
@@ -2890,6 +2878,14 @@ impl<'gc> Compiler<'gc> {
                     if let crate::core::statement::ExportSpecifier::Default(expr) = spec {
                         // Per spec, export default class {} should have name "default"
                         let is_anon_class = matches!(expr, Expr::Class(cd) if cd.name.is_empty());
+                        // Per spec §15.2.3.11, anonymous function/generator gets name "default"
+                        let is_anon_fn = matches!(
+                            expr,
+                            Expr::Function(None, ..)
+                                | Expr::GeneratorFunction(None, ..)
+                                | Expr::AsyncFunction(None, ..)
+                                | Expr::AsyncGeneratorFunction(None, ..)
+                        );
                         let pre_ctors: Vec<usize> = if is_anon_class {
                             self.chunk.class_constructor_ips.iter().copied().collect()
                         } else {
@@ -2908,11 +2904,32 @@ impl<'gc> Compiler<'gc> {
                             Expr::Class(cd) if !cd.name.is_empty() => Some(cd.name.clone()),
                             _ => None,
                         };
+                        // Track function IPs before compiling to find the newly created function
+                        let pre_fn_ips: Vec<usize> = self
+                            .chunk
+                            .constants
+                            .iter()
+                            .filter_map(|c| match c {
+                                Value::VmFunction(ip, _) => Some(*ip),
+                                _ => None,
+                            })
+                            .collect();
                         self.compile_expr(expr)?;
                         if is_anon_class {
                             // Find the newly added constructor IP and name it "default"
                             for ip in &self.chunk.class_constructor_ips {
                                 if !pre_ctors.contains(ip) && !self.chunk.fn_names.contains_key(ip) {
+                                    self.chunk.fn_names.insert(*ip, "default".to_string());
+                                }
+                            }
+                        }
+                        if is_anon_fn {
+                            // Find the newly added function IP and name it "default"
+                            for c in &self.chunk.constants {
+                                if let Value::VmFunction(ip, _) = c
+                                    && !pre_fn_ips.contains(ip)
+                                    && !self.chunk.fn_names.contains_key(ip)
+                                {
                                     self.chunk.fn_names.insert(*ip, "default".to_string());
                                 }
                             }
@@ -7819,13 +7836,14 @@ impl<'gc> Compiler<'gc> {
         if !is_expr {
             // Define as global/local variable
             if self.scope_depth == 0 {
-                if !name.is_empty() && class_expr_temp.is_some() {
+                if !name.is_empty()
+                    && let Some(temp_name) = class_expr_temp.as_ref()
+                {
                     // Temp was pre-created before heritage. Now store the constructor
                     // to both the mutable outer binding and the immutable temp.
                     self.chunk.write_opcode(Opcode::Dup);
                     self.emit_define_global_binding(name, false);
                     // Overwrite the Uninitialized temp with the actual constructor
-                    let temp_name = class_expr_temp.as_ref().unwrap();
                     let temp_u16 = crate::unicode::utf8_to_utf16(temp_name);
                     let temp_idx = self.chunk.add_constant(Value::String(temp_u16));
                     self.chunk.write_opcode(Opcode::DefineGlobal);

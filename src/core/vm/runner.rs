@@ -1614,25 +1614,43 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             }
             // Check for self-import namespace: build namespace object from current module state
-            if self.is_module_mode {
-                if let Some(entries) = self.chunk.self_namespace_imports.iter()
+            // The namespace is cached in module_locals so identity (===) is preserved.
+            if self.is_module_mode
+                && let Some(entries) = self
+                    .chunk
+                    .self_namespace_imports
+                    .iter()
                     .find(|(local, _)| local == &name_str)
                     .map(|(_, entries)| entries.clone())
-                {
-                    let mut ns_map = IndexMap::new();
-                    for (export_name, local_name) in &entries {
-                        let val = self.module_locals.get(local_name)
-                            .or_else(|| self.globals.get(local_name))
-                            .cloned()
-                            .unwrap_or(Value::Undefined);
-                        let val = if matches!(val, Value::Uninitialized) { Value::Undefined } else { val };
-                        ns_map.insert(export_name.clone(), val);
-                    }
-                    ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
-                    let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
-                    self.stack.push(ns_obj);
-                    return Ok(OpcodeAction::Continue);
+            {
+                // Sort export entries alphabetically by export name (spec §26.4.2)
+                let mut sorted_entries = entries.clone();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut ns_map = IndexMap::new();
+                // Store export names as keys (with Null placeholder) for [[HasProperty]]/[[OwnPropertyKeys]]
+                for (export_name, _) in &sorted_entries {
+                    ns_map.insert(export_name.clone(), Value::Null);
                 }
+                // Store the export→local binding map under __ns_bindings__
+                let mut bindings_map = IndexMap::new();
+                for (export_name, local_name) in &sorted_entries {
+                    bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
+                }
+                ns_map.insert("__ns_bindings__".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bindings_map)));
+                // Module namespace exotic object properties
+                ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+                ns_map.insert("__proto__".to_string(), Value::Null);
+                ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                // Symbol.toStringTag = "Module" (non-writable, non-enumerable, non-configurable)
+                ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
+                ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+                ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+                ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
+                let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
+                // Cache in module_locals so subsequent accesses return the same object
+                self.module_locals.insert(name_str.clone(), ns_obj.clone());
+                self.stack.push(ns_obj);
+                return Ok(OpcodeAction::Continue);
             }
             if let Some(val) = self.globals.get(&name_str).cloned() {
                 if matches!(val, Value::Uninitialized) {
@@ -3531,6 +3549,48 @@ impl<'gc> VM<'gc> {
         } // end private-key proxy guard
         match &obj {
             Value::VmObject(map) => {
+                // Module namespace exotic object [[Get]] (§10.4.6.8)
+                if map.borrow().contains_key("__module_namespace__") {
+                    if key.starts_with("@@sym:") {
+                        // Symbol properties: ordinary [[Get]]
+                        let borrow = map.borrow();
+                        let val = borrow.get(&key).cloned().unwrap_or(Value::Undefined);
+                        drop(borrow);
+                        self.stack.push(val);
+                    } else {
+                        // Look up live binding via __ns_bindings__
+                        let borrow = map.borrow();
+                        let local_name = if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
+                            let bb = bindings.borrow();
+                            if let Some(Value::String(u16s)) = bb.get(&key) {
+                                Some(crate::unicode::utf16_to_utf8(u16s))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        drop(borrow);
+                        if let Some(local) = local_name {
+                            let val = self
+                                .module_locals
+                                .get(&local)
+                                .or_else(|| self.globals.get(&local))
+                                .cloned()
+                                .unwrap_or(Value::Undefined);
+                            if matches!(val, Value::Uninitialized) {
+                                let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
+                                self.handle_throw(ctx, &err)?;
+                                self.stack.push(Value::Undefined);
+                            } else {
+                                self.stack.push(val);
+                            }
+                        } else {
+                            self.stack.push(Value::Undefined);
+                        }
+                    }
+                    return Ok(OpcodeAction::Continue);
+                }
                 let borrow = map.borrow();
                 if matches!(borrow.get("__dynamic_import_live__"), Some(Value::Boolean(true))) {
                     let live = match key.as_str() {
@@ -6349,53 +6409,69 @@ impl<'gc> VM<'gc> {
         }
         let result = match &obj {
             Value::VmObject(map) => {
-                let b = map.borrow();
-                if b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key)) {
-                    true
-                } else {
-                    // Check built-in properties based on __type__
-                    let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
-                    if type_name == "String" {
-                        if key == "length" {
-                            true
-                        } else if let Some(Value::String(s)) = b.get("__value__") {
-                            if let Ok(idx) = key.parse::<usize>() { idx < s.len() } else { false }
+                // Module namespace exotic object [[HasProperty]] (§10.4.6.7)
+                if map.borrow().contains_key("__module_namespace__") {
+                    let b = map.borrow();
+                    if key.starts_with("@@sym:") {
+                        // Symbol keys: check via ordinary hasProperty (e.g., Symbol.toStringTag)
+                        b.contains_key(&key)
+                    } else {
+                        // Check if key is in exported bindings
+                        if let Some(Value::VmObject(bindings)) = b.get("__ns_bindings__") {
+                            bindings.borrow().contains_key(&key)
                         } else {
                             false
                         }
-                    } else if matches!(type_name.as_str(), "String" if key == "length") {
+                    }
+                } else {
+                    let b = map.borrow();
+                    if b.contains_key(&key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key)) {
                         true
                     } else {
-                        // Walk __proto__ chain - check for proxy in proto
-                        let proto = b.get("__proto__").cloned();
-                        if proto.is_none()
-                            && let Some(Value::String(type_name_u16)) = b.get("__type__")
-                        {
-                            let tn = crate::unicode::utf16_to_utf8(type_name_u16);
-                            if let Some(Value::VmObject(ctor)) = self.globals.get(&tn)
-                                && let Some(type_proto) = ctor.borrow().get("prototype").cloned()
-                            {
-                                drop(b);
-                                self.lookup_proto_chain(Some(&type_proto), &key).is_some()
-                                    || self.lookup_proto_chain(Some(&type_proto), &format!("__get_{}", key)).is_some()
-                                    || self.lookup_proto_chain(Some(&type_proto), &format!("__set_{}", key)).is_some()
+                        // Check built-in properties based on __type__
+                        let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
+                        if type_name == "String" {
+                            if key == "length" {
+                                true
+                            } else if let Some(Value::String(s)) = b.get("__value__") {
+                                if let Ok(idx) = key.parse::<usize>() { idx < s.len() } else { false }
                             } else {
                                 false
                             }
+                        } else if matches!(type_name.as_str(), "String" if key == "length") {
+                            true
                         } else {
-                            drop(b);
-                            // If proto is a proxy, use try_proxy_has
-                            if let Some(ref proto_val) = proto
-                                && let Ok(Some(result)) = self.try_proxy_has(ctx, proto_val, &key)
+                            // Walk __proto__ chain - check for proxy in proto
+                            let proto = b.get("__proto__").cloned();
+                            if proto.is_none()
+                                && let Some(Value::String(type_name_u16)) = b.get("__type__")
                             {
-                                return {
-                                    self.stack.push(Value::Boolean(result));
-                                    Ok(OpcodeAction::Continue)
-                                };
+                                let tn = crate::unicode::utf16_to_utf8(type_name_u16);
+                                if let Some(Value::VmObject(ctor)) = self.globals.get(&tn)
+                                    && let Some(type_proto) = ctor.borrow().get("prototype").cloned()
+                                {
+                                    drop(b);
+                                    self.lookup_proto_chain(Some(&type_proto), &key).is_some()
+                                        || self.lookup_proto_chain(Some(&type_proto), &format!("__get_{}", key)).is_some()
+                                        || self.lookup_proto_chain(Some(&type_proto), &format!("__set_{}", key)).is_some()
+                                } else {
+                                    false
+                                }
+                            } else {
+                                drop(b);
+                                // If proto is a proxy, use try_proxy_has
+                                if let Some(ref proto_val) = proto
+                                    && let Ok(Some(result)) = self.try_proxy_has(ctx, proto_val, &key)
+                                {
+                                    return {
+                                        self.stack.push(Value::Boolean(result));
+                                        Ok(OpcodeAction::Continue)
+                                    };
+                                }
+                                self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
                             }
-                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
                         }
                     }
                 }
@@ -6882,32 +6958,60 @@ impl<'gc> VM<'gc> {
             }
         }
         if let Value::VmObject(map) = &obj {
-            let nc_key = format!("__nonconfigurable_{}__", key);
-            if map.borrow().contains_key(&nc_key) {
-                let mut err_map = IndexMap::new();
-                err_map.insert(
-                    "message".to_string(),
-                    Value::from(&format!("Cannot delete property '{}' of #<Object>", key)),
-                );
-                err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                self.stack.push(Value::Boolean(false));
-            } else {
-                let getter_key = format!("__get_{}", key);
-                let setter_key = format!("__set_{}", key);
-                let ne_key = format!("__nonenumerable_{}__", key);
-                let ro_key = format!("__readonly_{}__", key);
-                let mut b = map.borrow_mut(ctx);
-                b.shift_remove(&key);
-                if key == "@@sym:4" || key == "Symbol(Symbol.toStringTag)" {
-                    b.shift_remove("__toStringTag__");
+            // Module namespace exotic object [[Delete]] (§10.4.6.10)
+            if map.borrow().contains_key("__module_namespace__") {
+                let is_export = if !key.starts_with("@@sym:") {
+                    if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
+                        bindings.borrow().contains_key(&key)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_export {
+                    let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of [object Module]", key));
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(Value::Boolean(false));
+                } else if key.starts_with("@@sym:") {
+                    let nc_key = format!("__nonconfigurable_{}__", key);
+                    if map.borrow().contains_key(&nc_key) {
+                        let err =
+                            self.make_type_error_object(ctx, "Cannot delete property 'Symbol(Symbol.toStringTag)' of [object Module]");
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(Value::Boolean(false));
+                    } else {
+                        self.stack.push(Value::Boolean(true));
+                    }
+                } else {
+                    self.stack.push(Value::Boolean(true));
                 }
-                b.shift_remove(&getter_key);
-                b.shift_remove(&setter_key);
-                b.shift_remove(&nc_key);
-                b.shift_remove(&ne_key);
-                b.shift_remove(&ro_key);
-                self.stack.push(Value::Boolean(true));
+                return Ok(OpcodeAction::Continue);
+            } else {
+                let nc_key = format!("__nonconfigurable_{}__", key);
+                if map.borrow().contains_key(&nc_key) {
+                    if self.current_execution_is_strict() {
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                        self.handle_throw(ctx, &err)?;
+                    }
+                    self.stack.push(Value::Boolean(false));
+                } else {
+                    let getter_key = format!("__get_{}", key);
+                    let setter_key = format!("__set_{}", key);
+                    let ne_key = format!("__nonenumerable_{}__", key);
+                    let ro_key = format!("__readonly_{}__", key);
+                    let mut b = map.borrow_mut(ctx);
+                    b.shift_remove(&key);
+                    if key == "@@sym:4" || key == "Symbol(Symbol.toStringTag)" {
+                        b.shift_remove("__toStringTag__");
+                    }
+                    b.shift_remove(&getter_key);
+                    b.shift_remove(&setter_key);
+                    b.shift_remove(&nc_key);
+                    b.shift_remove(&ne_key);
+                    b.shift_remove(&ro_key);
+                    self.stack.push(Value::Boolean(true));
+                }
             }
         } else if let Value::VmFunction(..) | Value::VmClosure(..) = &obj {
             let props = self.get_fn_props_for_value(ctx, &obj).unwrap();
@@ -7870,6 +7974,36 @@ impl<'gc> VM<'gc> {
                     Ok(k) => k,
                     Err(_) => value_to_string(&idx_val),
                 };
+                // Module namespace exotic object [[Delete]]
+                if map.borrow().contains_key("__module_namespace__") {
+                    let is_export = if !key.starts_with("@@sym:") {
+                        if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
+                            bindings.borrow().contains_key(&key)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if is_export {
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of [object Module]", key));
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(Value::Boolean(false));
+                    } else if key.starts_with("@@sym:") {
+                        let nc_key = format!("__nonconfigurable_{}__", key);
+                        if map.borrow().contains_key(&nc_key) {
+                            let err =
+                                self.make_type_error_object(ctx, "Cannot delete property 'Symbol(Symbol.toStringTag)' of [object Module]");
+                            self.handle_throw(ctx, &err)?;
+                            self.stack.push(Value::Boolean(false));
+                        } else {
+                            self.stack.push(Value::Boolean(true));
+                        }
+                    } else {
+                        self.stack.push(Value::Boolean(true));
+                    }
+                    return Ok(OpcodeAction::Continue);
+                }
                 let nc_key = format!("__nonconfigurable_{}__", key);
                 if map.borrow().contains_key(&nc_key) {
                     if self.current_execution_is_strict() {

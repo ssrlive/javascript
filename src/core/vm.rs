@@ -5935,6 +5935,22 @@ impl<'gc> VM<'gc> {
                 }
                 match receiver {
                     Some(Value::VmObject(map)) => {
+                        // Module namespace: route through [[GetOwnProperty]]
+                        if map.borrow().contains_key("__module_namespace__") {
+                            let recv_val = Value::VmObject(*map);
+                            let key_val = args.first().cloned().unwrap_or(Value::Undefined);
+                            let desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[recv_val, key_val]);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            return if let Value::VmObject(d) = desc {
+                                let b = d.borrow();
+                                let enumerable = !matches!(b.get("enumerable"), Some(Value::Boolean(false)));
+                                Value::Boolean(enumerable)
+                            } else {
+                                Value::Boolean(false)
+                            };
+                        }
                         // Proxy: use [[GetOwnProperty]] which routes through traps
                         if map.borrow().contains_key("__proxy_target__") {
                             let recv_val = Value::VmObject(*map);
@@ -6054,6 +6070,23 @@ impl<'gc> VM<'gc> {
                 if key.starts_with(super::PRIVATE_KEY_PREFIX) {
                     return Value::Boolean(false);
                 }
+                // Module namespace exotic object [[HasProperty]] (§10.4.6.7)
+                if let Value::VmObject(ref obj) = target
+                    && obj.borrow().contains_key("__module_namespace__")
+                {
+                    let b = obj.borrow();
+                    if key.starts_with("@@sym:") {
+                        return Value::Boolean(b.contains_key(&key));
+                    } else {
+                        // Check if key is in exported bindings
+                        let found = if let Some(Value::VmObject(bindings)) = b.get("__ns_bindings__") {
+                            bindings.borrow().contains_key(&key)
+                        } else {
+                            false
+                        };
+                        return Value::Boolean(found);
+                    }
+                }
                 let exists = match self.try_proxy_has(ctx, &target, &key) {
                     Ok(Some(v)) => v,
                     Ok(None) => self.has_property_in_chain(ctx, &target, &key),
@@ -6149,6 +6182,13 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     }
+                }
+
+                // Module namespace exotic objects: [[Set]] always returns false (§10.4.6.9)
+                if let Value::VmObject(ref obj) = target
+                    && obj.borrow().contains_key("__module_namespace__")
+                {
+                    return Value::Boolean(false);
                 }
 
                 // TypedArray [[Set]] internal method (spec 10.4.5.5):
@@ -6348,6 +6388,28 @@ impl<'gc> VM<'gc> {
                     Ok(Some(deleted)) => Value::Boolean(deleted),
                     Ok(None) => match &target {
                         Value::VmObject(map) => {
+                            // Module namespace exotic object [[Delete]] (§10.4.6.10)
+                            if map.borrow().contains_key("__module_namespace__") {
+                                // Symbol keys: allow deletion (but non-configurable symbols like toStringTag return false)
+                                if key.starts_with("@@sym:") {
+                                    let nc_key = format!("__nonconfigurable_{}__", key);
+                                    if map.borrow().contains_key(&nc_key) {
+                                        return Value::Boolean(false);
+                                    }
+                                    return Value::Boolean(true);
+                                }
+                                // Check if key is an exported binding
+                                let is_export = if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
+                                    bindings.borrow().contains_key(&key)
+                                } else {
+                                    false
+                                };
+                                if is_export {
+                                    return Value::Boolean(false);
+                                }
+                                // Non-exported string keys
+                                return Value::Boolean(true);
+                            }
                             let nc_key = format!("__nonconfigurable_{}__", key);
                             let is_nc = map.borrow().contains_key(&nc_key) || self.is_string_wrapper_nonconfigurable_key(map, &key);
                             if is_nc {
@@ -6790,6 +6852,55 @@ impl<'gc> VM<'gc> {
                     }
                 }
 
+                // Module namespace exotic object [[DefineOwnProperty]] (§10.4.6.5)
+                if let Value::VmObject(obj) = &target
+                    && obj.borrow().contains_key("__module_namespace__")
+                {
+                    let current = self.call_builtin(
+                        ctx,
+                        BUILTIN_OBJECT_GETOWNPROPDESC,
+                        &[target.clone(), args.get(1).cloned().unwrap_or(Value::Undefined)],
+                    );
+                    if self.pending_throw.is_some() {
+                        self.pending_throw = None;
+                        return Value::Boolean(false);
+                    }
+                    if matches!(current, Value::Undefined) {
+                        return Value::Boolean(false);
+                    }
+                    if let Value::VmObject(cur_desc) = &current {
+                        let cur_b = cur_desc.borrow();
+                        let cur_configurable = matches!(cur_b.get("configurable"), Some(Value::Boolean(true)));
+                        let cur_enumerable = matches!(cur_b.get("enumerable"), Some(Value::Boolean(true)));
+                        let cur_writable = matches!(cur_b.get("writable"), Some(Value::Boolean(true)));
+                        if let Some(Value::Boolean(c)) = desc.get("configurable")
+                            && *c != cur_configurable
+                        {
+                            return Value::Boolean(false);
+                        }
+                        if let Some(Value::Boolean(e)) = desc.get("enumerable")
+                            && *e != cur_enumerable
+                        {
+                            return Value::Boolean(false);
+                        }
+                        if let Some(Value::Boolean(w)) = desc.get("writable")
+                            && *w != cur_writable
+                        {
+                            return Value::Boolean(false);
+                        }
+                        if let Some(v) = desc.get("value") {
+                            let cur_val = cur_b.get("value").cloned().unwrap_or(Value::Undefined);
+                            if !self.values_same(v, &cur_val) {
+                                return Value::Boolean(false);
+                            }
+                        }
+                        if desc.contains_key("get") || desc.contains_key("set") {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    return Value::Boolean(true);
+                }
+
                 let ok = match &target {
                     Value::VmObject(obj) => self.apply_object_property_descriptor(ctx, obj, &key, &desc),
                     Value::VmArray(arr) => self.apply_array_property_descriptor(ctx, arr, &key, &desc),
@@ -7012,6 +7123,13 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     }
+                }
+
+                // Module namespace exotic object [[SetPrototypeOf]] (§10.4.6.2)
+                if let Value::VmObject(ref obj) = target
+                    && obj.borrow().contains_key("__module_namespace__")
+                {
+                    return Value::Boolean(matches!(proto, Value::Null));
                 }
 
                 match self.set_object_like_prototype(ctx, &target, &proto) {
@@ -9509,6 +9627,17 @@ impl<'gc> VM<'gc> {
             self.handle_throw(ctx, &err)?;
             return Ok(val.clone());
         }
+        // Module namespace exotic objects: [[Set]] always returns false → TypeError in strict mode
+        if let Value::VmObject(map) = obj
+            && map.borrow().contains_key("__module_namespace__")
+        {
+            let err = self.make_type_error_object(
+                ctx,
+                &format!("Cannot assign to read only property '{}' of object '[object Module]'", key),
+            );
+            self.handle_throw(ctx, &err)?;
+            return Ok(val.clone());
+        }
         // Private field access bypasses proxy traps entirely (spec: PrivateFieldSet).
         // Private fields live on the exact object (including proxies) — no unwrapping.
         // Auxiliary keys (__get_, __set_, __readonly_) also bypass when they contain a private key.
@@ -10727,6 +10856,38 @@ impl<'gc> VM<'gc> {
                     self.set_pending_throw_from_error(&err);
                     return Value::Undefined;
                 }
+            }
+        }
+
+        // Module namespace exotic object [[Get]] (§10.4.6.8)
+        if let Value::VmObject(map) = obj
+            && map.borrow().contains_key("__module_namespace__")
+        {
+            let borrow = map.borrow();
+            if !key.starts_with("@@sym:") {
+                // Look up live binding via __ns_bindings__
+                if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
+                    let bindings_b = bindings.borrow();
+                    if let Some(Value::String(local_u16)) = bindings_b.get(key) {
+                        let local_name = crate::unicode::utf16_to_utf8(local_u16);
+                        drop(bindings_b);
+                        drop(borrow);
+                        let val = self
+                            .module_locals
+                            .get(&local_name)
+                            .or_else(|| self.globals.get(&local_name))
+                            .cloned()
+                            .unwrap_or(Value::Undefined);
+                        if matches!(val, Value::Uninitialized) {
+                            let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        return val;
+                    }
+                }
+                drop(borrow);
+                return Value::Undefined;
             }
         }
 
@@ -17737,6 +17898,12 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 if let Some(Value::VmObject(obj)) = args.first() {
+                    // Module namespace: freeze must throw TypeError because exports are writable:true
+                    // and we can't change them to writable:false (non-configurable exports)
+                    if obj.borrow().contains_key("__module_namespace__") {
+                        self.throw_type_error(ctx, "Cannot freeze a module namespace object");
+                        return Value::Undefined;
+                    }
                     let keys: Vec<String> = {
                         let b = obj.borrow();
                         self.collect_object_map_keys(&b, false)
@@ -18205,6 +18372,54 @@ impl<'gc> VM<'gc> {
                 }
 
                 if let Some(Value::VmObject(obj)) = args.first() {
+                    // Module namespace exotic object [[DefineOwnProperty]] (§10.4.6.5)
+                    if obj.borrow().contains_key("__module_namespace__") {
+                        let current = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[Value::VmObject(*obj), key_arg.clone()]);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if matches!(current, Value::Undefined) {
+                            self.throw_type_error(ctx, &format!("Cannot define property {}, object is not extensible", key));
+                            return Value::Undefined;
+                        }
+                        if let Value::VmObject(cur_desc) = &current {
+                            let cur_b = cur_desc.borrow();
+                            let cur_configurable = matches!(cur_b.get("configurable"), Some(Value::Boolean(true)));
+                            let cur_enumerable = matches!(cur_b.get("enumerable"), Some(Value::Boolean(true)));
+                            let cur_writable = matches!(cur_b.get("writable"), Some(Value::Boolean(true)));
+                            if let Some(Value::Boolean(c)) = desc.get("configurable")
+                                && *c != cur_configurable
+                            {
+                                self.throw_type_error(ctx, &format!("Cannot redefine property: {}", key));
+                                return Value::Undefined;
+                            }
+                            if let Some(Value::Boolean(e)) = desc.get("enumerable")
+                                && *e != cur_enumerable
+                            {
+                                self.throw_type_error(ctx, &format!("Cannot redefine property: {}", key));
+                                return Value::Undefined;
+                            }
+                            if let Some(Value::Boolean(w)) = desc.get("writable")
+                                && *w != cur_writable
+                            {
+                                self.throw_type_error(ctx, &format!("Cannot redefine property: {}", key));
+                                return Value::Undefined;
+                            }
+                            if let Some(v) = desc.get("value") {
+                                let cur_val = cur_b.get("value").cloned().unwrap_or(Value::Undefined);
+                                if !self.values_same(v, &cur_val) {
+                                    self.throw_type_error(ctx, &format!("Cannot redefine property: {}", key));
+                                    return Value::Undefined;
+                                }
+                            }
+                            if desc.contains_key("get") || desc.contains_key("set") {
+                                self.throw_type_error(ctx, &format!("Cannot redefine property: {}", key));
+                                return Value::Undefined;
+                            }
+                        }
+                        return Value::VmObject(*obj);
+                    }
+
                     if obj.borrow().contains_key("__proxy_target__") {
                         let (target, handler, revoked) = {
                             let borrow = obj.borrow();
@@ -18529,6 +18744,49 @@ impl<'gc> VM<'gc> {
                         if borrow.contains_key("__vm_symbol__") {
                             return Value::Undefined;
                         }
+                        // Module namespace exotic object [[GetOwnProperty]] (§10.4.6.4)
+                        if borrow.contains_key("__module_namespace__") {
+                            if key.starts_with("@@sym:") {
+                                // Symbol properties use ordinary [[GetOwnProperty]]
+                                if let Some(val) = borrow.get(&key) {
+                                    let writable = !matches!(borrow.get(&format!("__readonly_{}__", key)), Some(Value::Boolean(true)));
+                                    let enumerable =
+                                        !matches!(borrow.get(&format!("__nonenumerable_{}__", key)), Some(Value::Boolean(true)));
+                                    let configurable =
+                                        !matches!(borrow.get(&format!("__nonconfigurable_{}__", key)), Some(Value::Boolean(true)));
+                                    return self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable);
+                                }
+                                return Value::Undefined;
+                            }
+                            // Look up live binding via __ns_bindings__
+                            let local_name = if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
+                                let bindings_b = bindings.borrow();
+                                if let Some(Value::String(local_u16)) = bindings_b.get(&key) {
+                                    Some(crate::unicode::utf16_to_utf8(local_u16))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            drop(borrow);
+                            if let Some(local) = local_name {
+                                let val = self
+                                    .module_locals
+                                    .get(&local)
+                                    .or_else(|| self.globals.get(&local))
+                                    .cloned()
+                                    .unwrap_or(Value::Undefined);
+                                if matches!(val, Value::Uninitialized) {
+                                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
+                                    self.pending_throw = Some(err);
+                                    return Value::Undefined;
+                                }
+                                // Spec: {value, writable: true, enumerable: true, configurable: false}
+                                return self.make_data_descriptor_object(ctx, &val, true, true, false);
+                            }
+                            return Value::Undefined;
+                        }
                         if let (Some(Value::String(type_name_u16)), Some(Value::String(str_u16))) =
                             (borrow.get("__type__"), borrow.get("__value__"))
                             && crate::unicode::utf16_to_utf8(type_name_u16) == "String"
@@ -18763,6 +19021,18 @@ impl<'gc> VM<'gc> {
                     Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
                 ) {
                     return target;
+                }
+
+                // Module namespace exotic object [[SetPrototypeOf]] (§10.4.6.2)
+                // Only allows null (the current prototype); rejects anything else
+                if let Value::VmObject(ref obj) = target
+                    && obj.borrow().contains_key("__module_namespace__")
+                {
+                    if matches!(proto, Value::Null) {
+                        return target;
+                    }
+                    self.throw_type_error(ctx, "Immutable prototype object '#<Object>' cannot have its prototype set");
+                    return Value::Undefined;
                 }
 
                 if let Value::VmObject(obj) = &target
@@ -19105,6 +19375,20 @@ impl<'gc> VM<'gc> {
                         } else {
                             return self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPERTYNAMES, &[proxy_target]);
                         }
+                    }
+                    // Module namespace exotic object [[OwnPropertyKeys]] (§10.4.6.11)
+                    if obj.borrow().contains_key("__module_namespace__") {
+                        let borrow = obj.borrow();
+                        let mut keys: Vec<Value<'gc>> = Vec::new();
+                        // Get sorted export names from __ns_bindings__
+                        if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
+                            let bb = bindings.borrow();
+                            for key in bb.keys() {
+                                keys.push(Value::from(key.as_str()));
+                            }
+                        }
+                        drop(borrow);
+                        return mk_names_array(keys, self);
                     }
                     let borrow = obj.borrow();
                     let names = self.collect_object_map_keys(&borrow, false);
@@ -24160,6 +24444,14 @@ impl<'gc> VM<'gc> {
             }
             return match &receiver {
                 Value::VmObject(map) => {
+                    // Module namespace: route through [[GetOwnProperty]] which throws on uninitialized
+                    if map.borrow().contains_key("__module_namespace__") {
+                        let desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[receiver.clone(), key_val]);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        return Value::Boolean(!matches!(desc, Value::Undefined));
+                    }
                     // Proxy: use [[GetOwnProperty]] which routes through traps
                     if map.borrow().contains_key("__proxy_target__") {
                         let desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[receiver.clone(), key_val]);
@@ -25376,6 +25668,42 @@ impl<'gc> VM<'gc> {
     fn collect_enumerable_own_keys(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Vec<String> {
         match val {
             Value::VmObject(obj) => {
+                // Module namespace: export keys are enumerable; uninitialized → ReferenceError via [[GetOwnProperty]]
+                if obj.borrow().contains_key("__module_namespace__") {
+                    let b = obj.borrow();
+                    let mut keys = Vec::new();
+                    // Collect export→local mappings from __ns_bindings__
+                    let bindings: Vec<(String, String)> = if let Some(Value::VmObject(bmap)) = b.get("__ns_bindings__") {
+                        let bb = bmap.borrow();
+                        bb.iter()
+                            .filter_map(|(k, v)| {
+                                if let Value::String(u16s) = v {
+                                    Some((k.clone(), crate::unicode::utf16_to_utf8(u16s)))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    drop(b);
+                    for (export_name, local_name) in &bindings {
+                        let val = self
+                            .module_locals
+                            .get(local_name)
+                            .or_else(|| self.globals.get(local_name))
+                            .cloned()
+                            .unwrap_or(Value::Undefined);
+                        if matches!(val, Value::Uninitialized) {
+                            let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", export_name));
+                            self.pending_throw = Some(err);
+                            return Vec::new();
+                        }
+                        keys.push(export_name.clone());
+                    }
+                    return keys;
+                }
                 if obj.borrow().contains_key("__proxy_target__") {
                     let names = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPERTYNAMES, std::slice::from_ref(val));
                     if self.pending_throw.is_some() {

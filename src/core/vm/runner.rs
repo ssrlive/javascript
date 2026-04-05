@@ -3304,7 +3304,14 @@ impl<'gc> VM<'gc> {
                     };
                     let cell = new_gc_cell_ptr(ctx, val);
                     captures.push(cell);
-                    self.top_level_cells.insert(index, cell);
+                    // Only persist the cell in module mode where live import
+                    // bindings require shared cells.  In script mode, each
+                    // closure gets its own cell so per-iteration bindings
+                    // (for-of/for-in with const/let) work correctly and stale
+                    // cells don't leak across block scopes (breaking TDZ).
+                    if self.is_module_mode {
+                        self.top_level_cells.insert(index, cell);
+                    }
                 }
             } else {
                 // Capture from current frame's upvalues — share the cell
@@ -8274,7 +8281,7 @@ impl<'gc> VM<'gc> {
         let cell = new_gc_cell_ptr(ctx, val);
         if let Some(frame) = self.frames.last_mut() {
             frame.local_cells.insert(index, cell);
-        } else {
+        } else if self.is_module_mode {
             self.top_level_cells.insert(index, cell);
         }
         Ok(OpcodeAction::Continue)

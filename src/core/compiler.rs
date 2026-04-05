@@ -728,7 +728,22 @@ impl<'gc> Compiler<'gc> {
                         crate::core::statement::ExportSpecifier::Default(_) => {
                             reexport_map.insert("default".to_string(), (source.clone(), "default".to_string()));
                         }
-                        _ => {}
+                        crate::core::statement::ExportSpecifier::Star => {
+                            // export * from "module" — expand all exports (except default)
+                            if let Some(resolved) = self.resolve_import_path(source) {
+                                if let Some(exports) = self.loaded_module_exports.get(&resolved) {
+                                    for export_name in exports.keys() {
+                                        if export_name != "default" {
+                                            reexport_map.insert(export_name.clone(), (source.clone(), export_name.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        crate::core::statement::ExportSpecifier::Namespace(name) => {
+                            // export * as name from "module" — namespace re-export
+                            reexport_map.insert(name.clone(), (source.clone(), "*".to_string()));
+                        }
                     }
                 }
             }
@@ -771,7 +786,7 @@ impl<'gc> Compiler<'gc> {
                         }
                         ImportSpecifier::Namespace(local) => {
                             // Build (export_name, local_binding_name) pairs
-                            let entries: Vec<(String, String)> = self
+                            let mut entries: Vec<(String, String)> = self
                                 .module_export_names
                                 .iter()
                                 .filter(|exp_name| !reexport_map.contains_key(*exp_name))
@@ -786,15 +801,17 @@ impl<'gc> Compiler<'gc> {
                                     (exp_name.clone(), local_name)
                                 })
                                 .collect();
-                            self.chunk.self_namespace_imports.push((local.clone(), entries));
 
-                            // Also record re-exported names for the namespace
+                            // Include re-exported names in the namespace
                             for (export_name, (re_src, orig_name)) in &reexport_map {
                                 if let Some(resolved) = self.resolve_import_path(re_src) {
                                     let ns_reexport_key = format!("__ns_reexport_{}_{}", local, export_name);
-                                    self.chunk.loaded_module_vars.insert(ns_reexport_key, (resolved, orig_name.clone()));
+                                    self.chunk.loaded_module_vars.insert(ns_reexport_key.clone(), (resolved, orig_name.clone()));
+                                    entries.push((export_name.clone(), ns_reexport_key));
                                 }
                             }
+
+                            self.chunk.self_namespace_imports.push((local.clone(), entries));
 
                             // Namespace imports are immutable bindings
                             self.chunk.const_import_bindings.insert(local.clone());

@@ -9429,8 +9429,12 @@ impl<'gc> VM<'gc> {
         // prototype property (after length and name)
         if needs_prototype {
             let mut proto = IndexMap::new();
-            proto.insert("constructor".to_string(), Value::VmFunction(ip, arity));
-            proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            // Generator/async-generator prototypes should be plain objects (no constructor).
+            // Only regular functions get constructor on their prototype.
+            if !is_generator {
+                proto.insert("constructor".to_string(), Value::VmFunction(ip, arity));
+                proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            }
             // Generator functions: fn.prototype.__proto__ = %GeneratorPrototype%
             // Regular functions: fn.prototype.__proto__ = Object.prototype
             if is_generator {
@@ -10793,7 +10797,9 @@ impl<'gc> VM<'gc> {
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
                                 // Don't overwrite accessor properties set via Object.defineProperty
-                                !proto_borrow.contains_key("__get_constructor")
+                                // Only update constructor if it already exists as an own property
+                                proto_borrow.contains_key("constructor")
+                                    && !proto_borrow.contains_key("__get_constructor")
                                     && !proto_borrow.contains_key("__set_constructor")
                                     && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                                     && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, obj))
@@ -11043,7 +11049,8 @@ impl<'gc> VM<'gc> {
                             drop(borrow);
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
-                                !proto_borrow.contains_key("__get_constructor")
+                                proto_borrow.contains_key("constructor")
+                                    && !proto_borrow.contains_key("__get_constructor")
                                     && !proto_borrow.contains_key("__set_constructor")
                                     && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                                     && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
@@ -11100,7 +11107,8 @@ impl<'gc> VM<'gc> {
                             drop(borrow);
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
-                                !proto_borrow.contains_key("__get_constructor")
+                                proto_borrow.contains_key("constructor")
+                                    && !proto_borrow.contains_key("__get_constructor")
                                     && !proto_borrow.contains_key("__set_constructor")
                                     && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                                     && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
@@ -16839,8 +16847,7 @@ impl<'gc> VM<'gc> {
                                             self.globals.get("__async_generator_prototype").cloned().unwrap_or(Value::Undefined);
                                         let mut fn_proto = IndexMap::new();
                                         fn_proto.insert("__proto__".to_string(), async_gen_proto);
-                                        fn_proto.insert("constructor".to_string(), Value::VmObject(wrapped_fn));
-                                        fn_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+                                        // Per spec §27.4.3.1: AsyncGeneratorFunction .prototype has no constructor
                                         let mut b = wrapped_fn.borrow_mut(ctx);
                                         b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
                                         b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
@@ -24971,7 +24978,21 @@ impl<'gc> VM<'gc> {
                 self.loose_equal(ctx, a, &prim)
             }
             // Reference equality for objects/arrays/maps/sets
-            (Value::VmObject(a_rc), Value::VmObject(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
+            // Symbols are VmObject with __vm_symbol__; when one side is a symbol and the
+            // other is a plain object, ToPrimitive the non-symbol side (spec §7.2.14 step 10).
+            (Value::VmObject(a_rc), Value::VmObject(b_rc)) => {
+                let a_sym = a.is_symbol_value();
+                let b_sym = b.is_symbol_value();
+                if a_sym && !b_sym {
+                    let prim = self.loose_eq_to_primitive(ctx, b);
+                    return self.loose_equal(ctx, a, &prim);
+                }
+                if b_sym && !a_sym {
+                    let prim = self.loose_eq_to_primitive(ctx, a);
+                    return self.loose_equal(ctx, &prim, b);
+                }
+                Gc::ptr_eq(*a_rc, *b_rc)
+            }
             (Value::VmArray(a_rc), Value::VmArray(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),

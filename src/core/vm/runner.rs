@@ -3203,9 +3203,13 @@ impl<'gc> VM<'gc> {
         let closure_value = Value::VmClosure(ip, arity, Gc::new(ctx, captures));
         let props = self.get_fn_props(ctx, ip, arity);
         if let Some(Value::VmObject(proto_obj)) = props.borrow().get("prototype").cloned() {
-            let mut proto_borrow = proto_obj.borrow_mut(ctx);
-            proto_borrow.insert("constructor".to_string(), closure_value.clone());
-            proto_borrow.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            // Generator/async-generator prototypes should NOT have a constructor property (spec §27.3.3.1, §27.4.3.1)
+            let is_generator = self.chunk.generator_function_ips.contains(&ip);
+            if !is_generator {
+                let mut proto_borrow = proto_obj.borrow_mut(ctx);
+                proto_borrow.insert("constructor".to_string(), closure_value.clone());
+                proto_borrow.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            }
         }
         self.stack.push(closure_value);
         Ok(OpcodeAction::Continue)

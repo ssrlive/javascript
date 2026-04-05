@@ -2569,7 +2569,11 @@ impl<'gc> Compiler<'gc> {
                             Expr::Function(Some(n), _, _)
                             | Expr::AsyncFunction(Some(n), _, _)
                             | Expr::GeneratorFunction(Some(n), _, _)
-                            | Expr::AsyncGeneratorFunction(Some(n), _, _) if n != "default" => Some(n.clone()),
+                            | Expr::AsyncGeneratorFunction(Some(n), _, _)
+                                if n != "default" =>
+                            {
+                                Some(n.clone())
+                            }
                             Expr::Class(cd) if !cd.name.is_empty() => Some(cd.name.clone()),
                             _ => None,
                         };
@@ -5852,16 +5856,15 @@ impl<'gc> Compiler<'gc> {
         // Named function expression: the function name is an immutable const
         // binding visible to both parameter defaults and the body.
         // Emit InitNamedFnSelf BEFORE params so defaults can see the name.
-        if is_expression {
-            if let Some(name) = function_name
-                && !name.is_empty()
-                && !self.locals.contains(&name.to_string())
-            {
-                self.chunk.named_fn_self_ips.insert(func_ip);
-                self.chunk.write_opcode(Opcode::InitNamedFnSelf);
-                self.locals.push(name.to_string());
-                self.const_locals.insert(name.to_string());
-            }
+        if is_expression
+            && let Some(name) = function_name
+            && !name.is_empty()
+            && !self.locals.contains(&name.to_string())
+        {
+            self.chunk.named_fn_self_ips.insert(func_ip);
+            self.chunk.write_opcode(Opcode::InitNamedFnSelf);
+            self.locals.push(name.to_string());
+            self.const_locals.insert(name.to_string());
         }
 
         // Count non-rest params and check for rest
@@ -6206,16 +6209,15 @@ impl<'gc> Compiler<'gc> {
         self.scope_depth = 1;
 
         // Named async generator expression: immutable binding before params
-        if is_expression {
-            if let Some(name) = function_name
-                && !name.is_empty()
-                && !self.locals.contains(&name.to_string())
-            {
-                self.chunk.named_fn_self_ips.insert(func_ip);
-                self.chunk.write_opcode(Opcode::InitNamedFnSelf);
-                self.locals.push(name.to_string());
-                self.const_locals.insert(name.to_string());
-            }
+        if is_expression
+            && let Some(name) = function_name
+            && !name.is_empty()
+            && !self.locals.contains(&name.to_string())
+        {
+            self.chunk.named_fn_self_ips.insert(func_ip);
+            self.chunk.write_opcode(Opcode::InitNamedFnSelf);
+            self.locals.push(name.to_string());
+            self.const_locals.insert(name.to_string());
         }
 
         let param_local_offset = self.locals.len() as u8;
@@ -6352,16 +6354,15 @@ impl<'gc> Compiler<'gc> {
         self.scope_depth = 1;
 
         // Named generator expression: immutable binding before params
-        if is_expression {
-            if let Some(name) = function_name
-                && !name.is_empty()
-                && !self.locals.contains(&name.to_string())
-            {
-                self.chunk.named_fn_self_ips.insert(func_ip);
-                self.chunk.write_opcode(Opcode::InitNamedFnSelf);
-                self.locals.push(name.to_string());
-                self.const_locals.insert(name.to_string());
-            }
+        if is_expression
+            && let Some(name) = function_name
+            && !name.is_empty()
+            && !self.locals.contains(&name.to_string())
+        {
+            self.chunk.named_fn_self_ips.insert(func_ip);
+            self.chunk.write_opcode(Opcode::InitNamedFnSelf);
+            self.locals.push(name.to_string());
+            self.const_locals.insert(name.to_string());
         }
 
         let param_local_offset = self.locals.len() as u8;

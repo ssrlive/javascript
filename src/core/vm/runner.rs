@@ -8281,7 +8281,10 @@ impl<'gc> VM<'gc> {
         let cell = new_gc_cell_ptr(ctx, val);
         if let Some(frame) = self.frames.last_mut() {
             frame.local_cells.insert(index, cell);
-        } else if self.is_module_mode {
+        } else {
+            // BoxLocal is only emitted for class-name heritage pre-boxing,
+            // where a shared cell is required so closures in the heritage
+            // expression and the later SetLocal share the same binding.
             self.top_level_cells.insert(index, cell);
         }
         Ok(OpcodeAction::Continue)

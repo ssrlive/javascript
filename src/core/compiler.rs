@@ -163,13 +163,26 @@ impl<'gc> Compiler<'gc> {
             if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
                 self.compile_statement(stmt, false)?;
             }
+            // Also hoist export function declarations
+            if let StatementKind::Export(_, Some(inner), _) = &*stmt.kind
+                && matches!(*inner.kind, StatementKind::FunctionDeclaration(..))
+            {
+                self.compile_statement(stmt, false)?;
+            }
         }
+        let is_exported_fn_decl = |s: &Statement| -> bool {
+            if let StatementKind::Export(_, Some(inner), _) = &*s.kind {
+                matches!(*inner.kind, StatementKind::FunctionDeclaration(..))
+            } else {
+                false
+            }
+        };
         let mut remaining_non_function = statements
             .iter()
-            .filter(|stmt| !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)))
+            .filter(|stmt| !matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) && !is_exported_fn_decl(stmt))
             .count();
         for stmt in statements.iter() {
-            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) {
+            if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) || is_exported_fn_decl(stmt) {
                 continue;
             }
             remaining_non_function = remaining_non_function.saturating_sub(1);
@@ -331,6 +344,9 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::FunctionDeclaration(..) | StatementKind::Class(..) => {}
+            StatementKind::Export(_, Some(inner_stmt), _) => {
+                Self::collect_function_var_names_from_statement(inner_stmt, out);
+            }
             _ => {}
         }
     }
@@ -430,7 +446,43 @@ impl<'gc> Compiler<'gc> {
                         hoisted.push(class_def.name.clone());
                     }
                 }
-                _ => {}
+                StatementKind::Export(_, Some(inner_stmt), _) => match &*inner_stmt.kind {
+                    StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            if !hoisted.iter().any(|n| n == name) {
+                                hoisted.push(name.clone());
+                            }
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            if !hoisted.iter().any(|n| n == name) {
+                                hoisted.push(name.clone());
+                            }
+                        }
+                    }
+                    StatementKind::LetDestructuringArray(elements, _) | StatementKind::ConstDestructuringArray(elements, _) => {
+                        for elem in elements {
+                            Self::collect_destructuring_binding_names(elem, &mut hoisted);
+                        }
+                    }
+                    StatementKind::LetDestructuringObject(elements, _) | StatementKind::ConstDestructuringObject(elements, _) => {
+                        for elem in elements {
+                            Self::collect_object_destructuring_binding_names(elem, &mut hoisted);
+                        }
+                    }
+                    StatementKind::Class(class_def) => {
+                        if !class_def.name.is_empty() && !hoisted.iter().any(|n| n == &class_def.name) {
+                            hoisted.push(class_def.name.clone());
+                        }
+                    }
+                    _ => {
+                        log::trace!("Not hoisting from export statement: {:?}", stmt);
+                    }
+                },
+                _ => {
+                    log::trace!("Not hoisting from statement: {:?}", stmt);
+                }
             }
         }
 
@@ -7454,9 +7506,11 @@ impl<'gc> Compiler<'gc> {
         let mut class_expr_temp: Option<String> = None;
 
         if !is_expr {
-            // Define as global/local variable (class name is const-like binding)
+            // Define as global/local variable
+            // At the top level, class declarations create mutable bindings (per §14.7.14)
+            // Only inside the class body is the class name const-like
             if self.scope_depth == 0 {
-                self.emit_define_global_binding(name, true);
+                self.emit_define_global_binding(name, false);
             } else if class_name_pre_slot.is_some() {
                 // Update existing pre-registered slot with actual constructor value
                 self.emit_define_var(name);

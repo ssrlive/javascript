@@ -1498,20 +1498,25 @@ impl<'gc> VM<'gc> {
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
             let val = self.stack.pop().unwrap_or(Value::Undefined);
-            self.globals.insert(name_str.clone(), val.clone());
-            // Per spec, script-level var/function declarations create
-            // non-configurable properties on the global object.
-            // Eval-level declarations are configurable (D=true).
-            let is_var_binding = !self.chunk.is_eval_code
-                && self.chunk.declared_globals.contains(&name_str)
-                && !self.chunk.lexical_declared_globals.contains(&name_str);
-            if is_var_binding {
-                let nc_key = format!("__nonconfigurable_{}__", name_str);
-                let mut gt = self.global_this.borrow_mut(ctx);
-                gt.insert(name_str, val);
-                gt.insert(nc_key, Value::Boolean(true));
+            // In module mode, top-level declarations go to module_locals, not globals/globalThis
+            if self.is_module_mode && self.frames.is_empty() {
+                self.module_locals.insert(name_str, val);
             } else {
-                self.global_this.borrow_mut(ctx).insert(name_str, val);
+                self.globals.insert(name_str.clone(), val.clone());
+                // Per spec, script-level var/function declarations create
+                // non-configurable properties on the global object.
+                // Eval-level declarations are configurable (D=true).
+                let is_var_binding = !self.chunk.is_eval_code
+                    && self.chunk.declared_globals.contains(&name_str)
+                    && !self.chunk.lexical_declared_globals.contains(&name_str);
+                if is_var_binding {
+                    let nc_key = format!("__nonconfigurable_{}__", name_str);
+                    let mut gt = self.global_this.borrow_mut(ctx);
+                    gt.insert(name_str, val);
+                    gt.insert(nc_key, Value::Boolean(true));
+                } else {
+                    self.global_this.borrow_mut(ctx).insert(name_str, val);
+                }
             }
         }
         Ok(OpcodeAction::Continue)
@@ -1525,7 +1530,11 @@ impl<'gc> VM<'gc> {
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
             let val = self.stack.pop().unwrap_or(Value::Undefined);
-            self.globals.insert(name_str.clone(), val);
+            if self.is_module_mode && self.frames.is_empty() {
+                self.module_locals.insert(name_str.clone(), val);
+            } else {
+                self.globals.insert(name_str.clone(), val);
+            }
             self.const_globals.insert(name_str);
         }
         Ok(OpcodeAction::Continue)
@@ -1540,7 +1549,11 @@ impl<'gc> VM<'gc> {
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
             let val = self.stack.pop().unwrap_or(Value::Undefined);
-            if !self.globals.contains_key(&name_str) {
+            if self.is_module_mode && self.frames.is_empty() {
+                if !self.module_locals.contains_key(&name_str) {
+                    self.module_locals.insert(name_str, val);
+                }
+            } else if !self.globals.contains_key(&name_str) {
                 self.globals.insert(name_str.clone(), val.clone());
                 self.global_this.borrow_mut(ctx).insert(name_str, val);
             }
@@ -1588,6 +1601,18 @@ impl<'gc> VM<'gc> {
         let name_val = &self.chunk.constants[name_idx];
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
+            // In module mode, check module_locals first
+            if self.is_module_mode
+                && let Some(val) = self.module_locals.get(&name_str).cloned()
+            {
+                if matches!(val, Value::Uninitialized) {
+                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
+                    self.handle_throw(ctx, &err)?;
+                } else {
+                    self.stack.push(val);
+                }
+                return Ok(OpcodeAction::Continue);
+            }
             if let Some(val) = self.globals.get(&name_str).cloned() {
                 if matches!(val, Value::Uninitialized) {
                     let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
@@ -1718,6 +1743,16 @@ impl<'gc> VM<'gc> {
             }
             // Assignment leaves the value on the stack, so just peek
             let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
+            // In module mode, check module_locals first
+            if self.is_module_mode && self.module_locals.contains_key(&name_str) {
+                if self.module_locals.get(&name_str).is_some_and(|v| matches!(v, Value::Uninitialized)) {
+                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                self.module_locals.insert(name_str, val);
+                return Ok(OpcodeAction::Continue);
+            }
             if self.globals.get(&name_str).is_some_and(|v| matches!(v, Value::Uninitialized)) {
                 let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
                 self.handle_throw(ctx, &err)?;
@@ -3257,6 +3292,18 @@ impl<'gc> VM<'gc> {
         } else {
             String::new()
         };
+        // In module mode, check module_locals first
+        if self.is_module_mode
+            && let Some(val) = self.module_locals.get(&name)
+        {
+            if matches!(val, Value::Uninitialized) {
+                let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name));
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            self.stack.push(Value::from(val.typeof_value()));
+            return Ok(OpcodeAction::Continue);
+        }
         let type_str = if let Some(val) = self.globals.get(&name) {
             if matches!(val, Value::Uninitialized) {
                 let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name));
@@ -3280,6 +3327,9 @@ impl<'gc> VM<'gc> {
         } else {
             String::new()
         };
+        if self.is_module_mode {
+            _ = self.module_locals.shift_remove(&name);
+        }
         _ = self.globals.shift_remove(&name);
         self.const_globals.remove(&name);
         Ok(OpcodeAction::Continue)

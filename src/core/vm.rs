@@ -718,6 +718,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.top_level_cells.trace(cc);
         self.regexp_home_proto_temp.trace(cc);
         self.child_realms.trace(cc);
+        self.module_locals.trace(cc);
     }
 }
 
@@ -820,6 +821,10 @@ pub struct VM<'gc> {
     // run_inner uses this to re-truncate the stack after opcode handlers that
     // continue executing (and push values) after calling handle_throw.
     throw_caught_stack_depth: Option<usize>,
+    // Module mode: top-level declarations go into module_locals instead of globals/globalThis,
+    // so they don't leak onto the global object (per ES2024 §16.2.1.6).
+    is_module_mode: bool,
+    module_locals: IndexMap<String, Value<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -989,6 +994,8 @@ impl<'gc> VM<'gc> {
             child_realms: Vec::new(),
             repl_lexical_persist: false,
             throw_caught_stack_depth: None,
+            is_module_mode: false,
+            module_locals: IndexMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1009,6 +1016,7 @@ impl<'gc> VM<'gc> {
         if let Some(first) = self.this_stack.first_mut() {
             *first = Value::Undefined;
         }
+        self.is_module_mode = true;
     }
 
     #[inline]

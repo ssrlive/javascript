@@ -4424,48 +4424,13 @@ impl<'gc> Compiler<'gc> {
                 self.compile_compound_assign(lhs, rhs, Opcode::Pow)?;
             }
             Expr::LogicalAndAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.chunk.write_opcode(Opcode::Dup);
-                let end_jump = self.emit_jump(Opcode::JumpIfFalse);
-                self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(rhs)?;
-                self.compile_store(lhs)?;
-                self.patch_jump(end_jump);
+                self.compile_logical_assign(lhs, rhs, "and")?;
             }
             Expr::LogicalOrAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-                self.chunk.write_opcode(Opcode::Dup);
-                let assign_jump = self.emit_jump(Opcode::JumpIfFalse);
-                let end_jump = self.emit_jump(Opcode::Jump);
-                self.patch_jump(assign_jump);
-                self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(rhs)?;
-                self.compile_store(lhs)?;
-                self.patch_jump(end_jump);
+                self.compile_logical_assign(lhs, rhs, "or")?;
             }
             Expr::NullishAssign(lhs, rhs) => {
-                self.compile_expr(lhs)?;
-
-                self.chunk.write_opcode(Opcode::Dup);
-                let null_idx = self.chunk.add_constant(Value::Null);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(null_idx);
-                self.chunk.write_opcode(Opcode::Equal);
-                let assign_if_null = self.emit_jump(Opcode::JumpIfTrue);
-
-                self.chunk.write_opcode(Opcode::Dup);
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Equal);
-                let keep_current = self.emit_jump(Opcode::JumpIfFalse);
-
-                self.patch_jump(assign_if_null);
-                self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(rhs)?;
-                self.compile_store(lhs)?;
-
-                self.patch_jump(keep_current);
+                self.compile_logical_assign(lhs, rhs, "nullish")?;
             }
             // Ternary: cond ? a : b
             Expr::Conditional(cond, then_expr, else_expr) => {
@@ -5034,6 +4999,166 @@ impl<'gc> Compiler<'gc> {
             self.compile_expr(rhs)?;
             self.chunk.write_opcode(op);
             self.compile_store(lhs)?;
+        }
+        Ok(())
+    }
+
+    /// Compile logical assignment (&&=, ||=, ??=).
+    /// `mode`: "and" | "or" | "nullish"
+    /// For Index LHS, caches obj and key to avoid double-evaluation.
+    /// Also handles NamedEvaluation for anonymous function/arrow/class RHS.
+    fn compile_logical_assign(&mut self, lhs: &Expr, rhs: &Expr, mode: &str) -> Result<(), JSError> {
+        // Determine if RHS is an anonymous function definition for NamedEvaluation
+        let lhs_name = match lhs {
+            Expr::Var(name, ..) => Some(name.clone()),
+            _ => None,
+        };
+
+        if let Expr::Index(obj, idx_expr) = lhs {
+            let obj_temp = format!("__la_obj_{}__", self.completion_counter);
+            self.completion_counter += 1;
+            let key_temp = format!("__la_key_{}__", self.completion_counter);
+            self.completion_counter += 1;
+
+            // 1. Evaluate obj, save
+            self.compile_expr(obj)?;
+            self.chunk.write_opcode(Opcode::Dup);
+            self.emit_define_var(&obj_temp);
+
+            // 2. Evaluate key expression
+            self.compile_expr(idx_expr)?;
+
+            // 3. Check obj for null/undefined
+            self.chunk.write_opcode(Opcode::Swap);
+            self.chunk.write_opcode(Opcode::ThrowIfNullish);
+            self.chunk.write_opcode(Opcode::Pop);
+
+            // 4. ToPropertyKey (single call)
+            self.chunk.write_opcode(Opcode::ToPropertyKey);
+            self.chunk.write_opcode(Opcode::Dup);
+            self.emit_define_var(&key_temp);
+            if self.scope_depth == 0 {
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+
+            // 5. Read current value
+            self.emit_helper_get(&obj_temp);
+            self.emit_helper_get(&key_temp);
+            self.chunk.write_opcode(Opcode::GetIndex);
+
+            // 6. Conditional check + short-circuit jump
+            self.chunk.write_opcode(Opcode::Dup);
+            let end_jump;
+            let assign_jump;
+            match mode {
+                "and" => {
+                    end_jump = self.emit_jump(Opcode::JumpIfFalse);
+                    assign_jump = None;
+                }
+                "or" => {
+                    assign_jump = Some(self.emit_jump(Opcode::JumpIfFalse));
+                    end_jump = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(assign_jump.unwrap());
+                }
+                "nullish" => {
+                    // Check null
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    // Check undefined
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    end_jump = self.emit_jump(Opcode::JumpIfFalse);
+                    self.patch_jump(is_null);
+                    assign_jump = None;
+                }
+                _ => unreachable!(),
+            }
+            let _ = assign_jump;
+
+            // 7. Pop old value, evaluate RHS, store
+            self.chunk.write_opcode(Opcode::Pop);
+            self.compile_expr(rhs)?;
+
+            // SetIndex with saved temps
+            self.emit_helper_get(&obj_temp);
+            self.chunk.write_opcode(Opcode::Swap);
+            self.emit_helper_get(&key_temp);
+            self.chunk.write_opcode(Opcode::Swap);
+            self.chunk.write_opcode(Opcode::SetIndex);
+
+            self.patch_jump(end_jump);
+
+            // Clean up temps
+            if self.scope_depth > 0 {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == &key_temp) {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+                if let Some(pos) = self.locals.iter().rposition(|l| l == &obj_temp) {
+                    self.locals.remove(pos);
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+            } else {
+                let n = crate::unicode::utf8_to_utf16(&key_temp);
+                let ni = self.chunk.add_constant(Value::String(n));
+                self.chunk.write_opcode(Opcode::DeleteGlobal);
+                self.chunk.write_u16(ni);
+                let n = crate::unicode::utf8_to_utf16(&obj_temp);
+                let ni = self.chunk.add_constant(Value::String(n));
+                self.chunk.write_opcode(Opcode::DeleteGlobal);
+                self.chunk.write_u16(ni);
+            }
+        } else {
+            // Non-index: simple path (var, property)
+            self.compile_expr(lhs)?;
+            self.chunk.write_opcode(Opcode::Dup);
+
+            let end_jump;
+            match mode {
+                "and" => {
+                    end_jump = self.emit_jump(Opcode::JumpIfFalse);
+                }
+                "or" => {
+                    let assign_jump = self.emit_jump(Opcode::JumpIfFalse);
+                    end_jump = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(assign_jump);
+                }
+                "nullish" => {
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    end_jump = self.emit_jump(Opcode::JumpIfFalse);
+                    self.patch_jump(is_null);
+                }
+                _ => unreachable!(),
+            }
+
+            self.chunk.write_opcode(Opcode::Pop);
+
+            // NamedEvaluation: if RHS is anonymous function/arrow/class and LHS is identifier
+            let func_ip = if lhs_name.is_some() { self.peek_func_ip(rhs) } else { None };
+            self.compile_expr(rhs)?;
+            if let (Some(ip), Some(name)) = (func_ip, &lhs_name) {
+                self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
+            }
+
+            self.compile_store(lhs)?;
+            self.patch_jump(end_jump);
         }
         Ok(())
     }

@@ -832,6 +832,9 @@ pub struct VM<'gc> {
     /// Loaded external module exports: resolved_path -> (exports IndexMap, module_locals IndexMap).
     /// Used by multi-file module loading to resolve cross-module imports.
     pub(crate) loaded_modules: std::collections::HashMap<String, IndexMap<String, Value<'gc>>>,
+    /// Export origin tracking: module_path -> export_name -> (origin_module_path, origin_binding_name).
+    /// Used for spec-compliant ambiguous star-export detection (ResolveExport §15.2.1.16.3).
+    export_origins: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1004,6 +1007,7 @@ impl<'gc> VM<'gc> {
             is_module_mode: false,
             module_locals: IndexMap::new(),
             loaded_modules: std::collections::HashMap::new(),
+            export_origins: std::collections::HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1029,13 +1033,8 @@ impl<'gc> VM<'gc> {
 
     /// Load and execute dependency modules, storing their exports in `loaded_modules`.
     /// `sources` is a list of raw import specifiers (e.g. `"./dep.js"`).
-    pub fn load_module_dependencies(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        entry_path: &std::path::Path,
-        sources: &[String],
-    ) {
-        use crate::core::{resolve_module_path, collect_exports_from_ast, collect_module_sources};
+    pub fn load_module_dependencies(&mut self, ctx: &GcContext<'gc>, entry_path: &std::path::Path, sources: &[String]) {
+        use crate::core::{collect_exports_from_ast, collect_module_sources, resolve_module_path};
 
         // Topologically load modules: iterate sources, load each one.
         // For simplicity we do a single-pass; circular deps get empty exports.
@@ -1128,7 +1127,41 @@ impl<'gc> VM<'gc> {
                 }
             }
 
-            // Handle re-exports
+            // Build export origins for local exports
+            let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+
+            // Detect namespace imports: `import * as foo from "mod"` + `export { foo }`
+            // Per spec ParseModule §16.2.1.7.1 step 10.1.ii.2, these are indirect exports
+            // with ImportName = "all", so their origin is (mod_path, "namespace").
+            let mut ns_import_origins: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            for stmt in &dep_stmts {
+                if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
+                    for spec in specs {
+                        if let crate::core::statement::ImportSpecifier::Namespace(local_name) = spec {
+                            let imp_resolved = resolve_module_path(source, resolved_path);
+                            ns_import_origins.insert(local_name.clone(), imp_resolved.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+
+            for export_name in exports.keys() {
+                // Check if this export is a re-export of a namespace import
+                let local_name = export_name_to_local
+                    .get(export_name)
+                    .cloned()
+                    .unwrap_or_else(|| export_name.clone());
+                if let Some(ns_mod_path) = ns_import_origins.get(&local_name) {
+                    origins.insert(export_name.clone(), (ns_mod_path.clone(), "namespace".to_string()));
+                } else {
+                    origins.insert(export_name.clone(), (key.clone(), export_name.clone()));
+                }
+            }
+
+            // Handle re-exports — track star-exported keys for ambiguity detection
+            // Per spec §15.2.1.16.3 ResolveExport: compare (Module, BindingName) not immediate source
+            let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+            let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
             for (reexport_src, reexport_specs) in &reexport_sources {
                 let reexport_resolved = resolve_module_path(reexport_src, resolved_path);
                 let reexport_key = reexport_resolved.to_string_lossy().to_string();
@@ -1138,14 +1171,45 @@ impl<'gc> VM<'gc> {
                             crate::core::ReexportSpec::Named(name, alias) => {
                                 let ename = alias.as_deref().unwrap_or(name).to_string();
                                 if let Some(val) = source_exports.get(name).cloned() {
-                                    exports.insert(ename, val);
+                                    exports.insert(ename.clone(), val);
+                                    // Trace origin through source module
+                                    let origin = self
+                                        .export_origins
+                                        .get(&reexport_key)
+                                        .and_then(|o| o.get(name))
+                                        .cloned()
+                                        .unwrap_or_else(|| (reexport_key.clone(), name.clone()));
+                                    origins.insert(ename, origin);
                                 }
                             }
                             crate::core::ReexportSpec::Star => {
                                 for (k, v) in &source_exports {
-                                    if k != "default" && !exports.contains_key(k) {
-                                        exports.insert(k.clone(), v.clone());
+                                    if k == "default" {
+                                        continue;
                                     }
+                                    // Local exports take precedence over star re-exports
+                                    if exports.contains_key(k) && !star_export_origins.contains_key(k) {
+                                        continue;
+                                    }
+                                    // Get the origin of this key from the source module
+                                    let cur_origin = self
+                                        .export_origins
+                                        .get(&reexport_key)
+                                        .and_then(|o| o.get(k))
+                                        .cloned()
+                                        .unwrap_or_else(|| (reexport_key.clone(), k.clone()));
+
+                                    if let Some(prev_origin) = star_export_origins.get(k) {
+                                        if prev_origin != &cur_origin {
+                                            ambiguous_keys.insert(k.clone());
+                                        }
+                                    } else {
+                                        star_export_origins.insert(k.clone(), cur_origin.clone());
+                                        if !exports.contains_key(k) {
+                                            exports.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                    origins.insert(k.clone(), cur_origin);
                                 }
                             }
                             crate::core::ReexportSpec::Namespace(name) => {
@@ -1162,13 +1226,21 @@ impl<'gc> VM<'gc> {
                                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
                                 ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
                                 exports.insert(name.clone(), Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map)));
+                                // Namespace origin: the referenced module with "namespace" binding
+                                origins.insert(name.clone(), (reexport_key.clone(), "namespace".to_string()));
                             }
                         }
                     }
                 }
             }
+            // Remove ambiguous star-exported keys
+            for k in &ambiguous_keys {
+                exports.shift_remove(k);
+                origins.remove(k);
+            }
 
             self.loaded_modules.insert(key.clone(), exports);
+            self.export_origins.insert(key.clone(), origins);
 
             // Restore main module state
             self.chunk = saved_chunk;
@@ -1181,18 +1253,24 @@ impl<'gc> VM<'gc> {
 
     /// Inject loaded module bindings into `module_locals` based on `chunk.loaded_module_vars`.
     pub fn inject_loaded_module_bindings(&mut self, ctx: &GcContext<'gc>) {
-        let vars: Vec<(String, String, String)> = self.chunk.loaded_module_vars
+        let vars: Vec<(String, String, String)> = self
+            .chunk
+            .loaded_module_vars
             .iter()
             .map(|(local, (path, export))| (local.clone(), path.clone(), export.clone()))
             .collect();
+        // Cache namespace objects by module path for identity (===)
+        let mut ns_cache: std::collections::HashMap<String, Value<'gc>> = std::collections::HashMap::new();
         for (local, mod_path, export_name) in &vars {
             if export_name == "*" {
-                // Namespace import
+                // Namespace import — reuse cached ns for same module path
+                if let Some(cached) = ns_cache.get(mod_path) {
+                    self.module_locals.insert(local.clone(), cached.clone());
+                    continue;
+                }
                 if let Some(exports) = self.loaded_modules.get(mod_path) {
                     let mut ns_map = IndexMap::new();
-                    let mut sorted_keys: Vec<_> = exports.keys()
-                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@"))
-                        .collect();
+                    let mut sorted_keys: Vec<_> = exports.keys().filter(|k| !k.starts_with("__") && !k.starts_with("@@")).collect();
                     sorted_keys.sort();
                     for k in &sorted_keys {
                         if let Some(v) = exports.get(*k) {
@@ -1207,6 +1285,7 @@ impl<'gc> VM<'gc> {
                     ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
                     ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
                     let ns_obj = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
+                    ns_cache.insert(mod_path.clone(), ns_obj.clone());
                     self.module_locals.insert(local.clone(), ns_obj);
                 }
             } else {
@@ -25910,10 +25989,7 @@ impl<'gc> VM<'gc> {
                             .collect()
                     } else {
                         // Loaded module namespace: enumerate direct keys
-                        let direct_keys: Vec<String> = b.keys()
-                            .filter(|k| !k.starts_with("__") && !k.starts_with("@@"))
-                            .cloned()
-                            .collect();
+                        let direct_keys: Vec<String> = b.keys().filter(|k| !k.starts_with("__") && !k.starts_with("@@")).cloned().collect();
                         drop(b);
                         return direct_keys;
                     };

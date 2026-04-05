@@ -730,12 +730,12 @@ impl<'gc> Compiler<'gc> {
                         }
                         crate::core::statement::ExportSpecifier::Star => {
                             // export * from "module" — expand all exports (except default)
-                            if let Some(resolved) = self.resolve_import_path(source) {
-                                if let Some(exports) = self.loaded_module_exports.get(&resolved) {
-                                    for export_name in exports.keys() {
-                                        if export_name != "default" {
-                                            reexport_map.insert(export_name.clone(), (source.clone(), export_name.clone()));
-                                        }
+                            if let Some(resolved) = self.resolve_import_path(source)
+                                && let Some(exports) = self.loaded_module_exports.get(&resolved)
+                            {
+                                for export_name in exports.keys() {
+                                    if export_name != "default" {
+                                        reexport_map.insert(export_name.clone(), (source.clone(), export_name.clone()));
                                     }
                                 }
                             }
@@ -758,12 +758,12 @@ impl<'gc> Compiler<'gc> {
                         ImportSpecifier::Named(name, alias) => {
                             let local = alias.as_deref().unwrap_or(name).to_string();
                             // Check if this is a re-export → redirect to loaded module
-                            if let Some((re_src, orig_name)) = reexport_map.get(name) {
-                                if let Some(resolved) = self.resolve_import_path(re_src) {
-                                    self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
-                                    self.chunk.const_import_bindings.insert(local);
-                                    continue;
-                                }
+                            if let Some((re_src, orig_name)) = reexport_map.get(name)
+                                && let Some(resolved) = self.resolve_import_path(re_src)
+                            {
+                                self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
+                                self.chunk.const_import_bindings.insert(local);
+                                continue;
                             }
                             // Resolve export name -> local binding via export_name_to_local
                             let target = self.export_name_to_local.get(name).cloned().unwrap_or_else(|| name.clone());
@@ -773,12 +773,12 @@ impl<'gc> Compiler<'gc> {
                         }
                         ImportSpecifier::Default(local) => {
                             // Check if default is a re-export
-                            if let Some((re_src, orig_name)) = reexport_map.get("default") {
-                                if let Some(resolved) = self.resolve_import_path(re_src) {
-                                    self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
-                                    self.chunk.const_import_bindings.insert(local.clone());
-                                    continue;
-                                }
+                            if let Some((re_src, orig_name)) = reexport_map.get("default")
+                                && let Some(resolved) = self.resolve_import_path(re_src)
+                            {
+                                self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
+                                self.chunk.const_import_bindings.insert(local.clone());
+                                continue;
                             }
                             self.self_import_aliases.insert(local.clone(), "*default*".to_string());
                             self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
@@ -806,7 +806,9 @@ impl<'gc> Compiler<'gc> {
                             for (export_name, (re_src, orig_name)) in &reexport_map {
                                 if let Some(resolved) = self.resolve_import_path(re_src) {
                                     let ns_reexport_key = format!("__ns_reexport_{}_{}", local, export_name);
-                                    self.chunk.loaded_module_vars.insert(ns_reexport_key.clone(), (resolved, orig_name.clone()));
+                                    self.chunk
+                                        .loaded_module_vars
+                                        .insert(ns_reexport_key.clone(), (resolved, orig_name.clone()));
                                     entries.push((export_name.clone(), ns_reexport_key));
                                 }
                             }
@@ -2940,13 +2942,11 @@ impl<'gc> Compiler<'gc> {
                             define_binding(self, local);
                         }
                         (_, ImportSpecifier::Namespace(local)) => {
-                            let resolved = self.resolve_import_path(source);
-                            if resolved.is_some() {
+                            if let Some(resolved_str) = self.resolve_import_path(source) {
                                 // Resolved from loaded module — value injected at runtime.
                                 // Still emit placeholder + define to keep stack balanced.
                                 self.chunk.write_opcode(Opcode::NewObject);
                                 self.chunk.write_byte(0);
-                                let resolved_str = resolved.unwrap();
                                 self.chunk.loaded_module_vars.insert(local.clone(), (resolved_str, "*".to_string()));
                                 self.chunk.const_import_bindings.insert(local.clone());
                             } else {
@@ -2963,7 +2963,9 @@ impl<'gc> Compiler<'gc> {
                                 let idx = self.chunk.add_constant(Value::Undefined);
                                 self.chunk.write_opcode(Opcode::Constant);
                                 self.chunk.write_u16(idx);
-                                self.chunk.loaded_module_vars.insert(local.clone(), (resolved_str, "default".to_string()));
+                                self.chunk
+                                    .loaded_module_vars
+                                    .insert(local.clone(), (resolved_str, "default".to_string()));
                                 self.chunk.const_import_bindings.insert(local.clone());
                             } else {
                                 let idx = self.chunk.add_constant(Value::Undefined);

@@ -1627,6 +1627,12 @@ impl<'gc> VM<'gc> {
                     .find(|(local, _)| local == &name_str)
                     .map(|(_, entries)| entries.clone())
             {
+                // Reuse cached self-namespace object for identity (===) across imports
+                if let Some(cached_ns) = self.module_locals.get("__self_ns_cached__").cloned() {
+                    self.module_locals.insert(name_str.clone(), cached_ns.clone());
+                    self.stack.push(cached_ns);
+                    return Ok(OpcodeAction::Continue);
+                }
                 // Sort export entries alphabetically by export name (spec §26.4.2)
                 let mut sorted_entries = entries.clone();
                 sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1652,6 +1658,7 @@ impl<'gc> VM<'gc> {
                 ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
                 // Cache in module_locals so subsequent accesses return the same object
+                self.module_locals.insert("__self_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
                 self.stack.push(ns_obj);
                 return Ok(OpcodeAction::Continue);
@@ -3354,16 +3361,12 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         // Check self-import namespace bindings (they return "object")
-        if self.is_module_mode
-            && self.chunk.self_namespace_imports.iter().any(|(local, _)| local == &name)
-        {
+        if self.is_module_mode && self.chunk.self_namespace_imports.iter().any(|(local, _)| local == &name) {
             self.stack.push(Value::from("object"));
             return Ok(OpcodeAction::Continue);
         }
         // Check loaded module bindings
-        if self.is_module_mode
-            && self.chunk.loaded_module_vars.contains_key(&name)
-        {
+        if self.is_module_mode && self.chunk.loaded_module_vars.contains_key(&name) {
             let val = self.module_locals.get(&name).cloned().unwrap_or(Value::Undefined);
             self.stack.push(Value::from(val.typeof_value()));
             return Ok(OpcodeAction::Continue);

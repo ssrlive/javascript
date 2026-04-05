@@ -1,11 +1,11 @@
 use crate::error::JSError;
 use crate::raise_eval_error;
-use std::collections::HashMap;
 pub(crate) use gc_arena::GcWeak;
 pub(crate) use gc_arena::Mutation as GcContext;
 pub(crate) use gc_arena::collect::Trace as GcTrace;
 pub(crate) use gc_arena::lock::RefLock as GcCell;
 pub(crate) use gc_arena::{Collect, Gc};
+use std::collections::HashMap;
 pub(crate) type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 
 #[inline]
@@ -154,8 +154,10 @@ pub(crate) fn resolve_module_path(specifier: &str, base_path: &std::path::Path) 
     spec_path.to_path_buf()
 }
 
+pub(crate) type ExportInfo = (Vec<String>, HashMap<String, String>, Vec<(String, Vec<ReexportSpec>)>);
+
 /// Collect export info from parsed AST statements.
-pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> (Vec<String>, HashMap<String, String>, Vec<(String, Vec<ReexportSpec>)>) {
+pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
     use crate::core::statement::ExportSpecifier as ES;
     let mut export_names = Vec::new();
     let mut export_name_to_local: HashMap<String, String> = HashMap::new();

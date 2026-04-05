@@ -154,6 +154,7 @@ impl<'gc> VM<'gc> {
                 Opcode::IteratorCloseAbrupt => self.run_opcode_iterator_close_abrupt(ctx)?,
                 Opcode::AssertIterResult => self.run_opcode_assert_iter_result(ctx)?,
                 Opcode::BoxLocal => self.run_opcode_box_local(ctx)?,
+                Opcode::InitNamedFnSelf => self.run_opcode_init_named_fn_self(ctx)?,
             };
             // If a throw was caught by handle_throw during this opcode, the
             // handler may have pushed extra values onto the stack afterwards.
@@ -417,6 +418,9 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
+                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                        self.named_fn_callee_stack.push(callee.clone());
+                    }
                     let promise = self.invoke_async_function(ctx, target_ip, arity, &args_vec, &[], &receiver);
                     self.stack.push(promise);
                     return Ok(OpcodeAction::Continue);
@@ -431,6 +435,9 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
+                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                        self.named_fn_callee_stack.push(callee.clone());
+                    }
                     let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, &[], &this_val, true) {
                         Ok(obj) => obj,
                         Err(err) => {
@@ -451,6 +458,9 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
+                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                        self.named_fn_callee_stack.push(callee.clone());
+                    }
                     let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, &[], &this_val, false) {
                         Ok(obj) => obj,
                         Err(err) => {
@@ -561,6 +571,9 @@ impl<'gc> VM<'gc> {
                     };
                     self.frames.push(frame);
                 }
+                if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    self.named_fn_callee_stack.push(callee.clone());
+                }
                 self.ip = target_ip;
             }
             Value::VmClosure(target_ip, arity, ref upvals) => {
@@ -605,6 +618,9 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
+                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                        self.named_fn_callee_stack.push(callee.clone());
+                    }
                     let promise = self.invoke_async_function(ctx, target_ip, arity, &args_vec, upvals, &receiver);
                     self.stack.push(promise);
                     return Ok(OpcodeAction::Continue);
@@ -619,6 +635,9 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
+                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                        self.named_fn_callee_stack.push(callee.clone());
+                    }
                     let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, upvals, &this_val, true) {
                         Ok(obj) => obj,
                         Err(err) => {
@@ -639,6 +658,9 @@ impl<'gc> VM<'gc> {
                     };
                     let base = if is_method { callee_idx.saturating_sub(1) } else { callee_idx };
                     self.stack.truncate(base);
+                    if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                        self.named_fn_callee_stack.push(callee.clone());
+                    }
                     let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, upvals, &this_val, false) {
                         Ok(obj) => obj,
                         Err(err) => {
@@ -745,6 +767,9 @@ impl<'gc> VM<'gc> {
                         this_tdz: None,
                     };
                     self.frames.push(frame);
+                }
+                if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    self.named_fn_callee_stack.push(callee.clone());
                 }
                 self.ip = target_ip;
             }
@@ -6581,9 +6606,24 @@ impl<'gc> VM<'gc> {
                         if matches!(proto, Value::Undefined) { None } else { Some(proto) }
                     })
                 }
-                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
-                    // Functions inherit from Function.prototype
-                    if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    // Check fn_props for explicit __proto__ first (e.g. async generator functions)
+                    let fn_props = self
+                        .get_fn_props_for_value(ctx, &lhs)
+                        .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
+                    if let Some(proto) = fn_props.borrow().get("__proto__").cloned() {
+                        Some(proto)
+                    } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
+                        function_ctor.borrow().get("prototype").cloned()
+                    } else {
+                        None
+                    }
+                }
+                Value::VmNativeFunction(id) => {
+                    let fn_props = self.get_native_fn_props(ctx, *id);
+                    if let Some(proto) = fn_props.borrow().get("__proto__").cloned() {
+                        Some(proto)
+                    } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
                         function_ctor.borrow().get("prototype").cloned()
                     } else {
                         None
@@ -7938,6 +7978,16 @@ impl<'gc> VM<'gc> {
         } else {
             self.top_level_cells.insert(index, cell);
         }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::InitNamedFnSelf — push the callee for a named function expression
+    fn run_opcode_init_named_fn_self(&mut self, _ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let callee = self.named_fn_callee_stack.pop().unwrap_or(Value::Undefined);
+        // Insert at frame base so the named fn self occupies local slot 0,
+        // shifting existing args (already on the stack) up by one position.
+        let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+        self.stack.insert(bp, callee);
         Ok(OpcodeAction::Continue)
     }
 }

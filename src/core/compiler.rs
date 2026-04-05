@@ -1647,14 +1647,14 @@ impl<'gc> Compiler<'gc> {
             StatementKind::FunctionDeclaration(name, params, body, is_gen, is_async) => {
                 self.chunk.fn_declared_globals.insert(name.clone());
                 if *is_gen && !*is_async {
-                    let func_ip = self.compile_generator_function_body(Some(name.as_str()), params, body)?;
+                    let func_ip = self.compile_generator_function_body(Some(name.as_str()), params, body, false)?;
                     self.chunk.fn_names.insert(func_ip, name.clone());
                     self.emit_define_global_binding(name, false);
                     return Ok(());
                 }
 
                 if *is_gen && *is_async {
-                    self.compile_async_generator_function_body(Some(name.as_str()), params, body)?;
+                    self.compile_async_generator_function_body(Some(name.as_str()), params, body, false)?;
                     if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone())) {
                         self.chunk.fn_names.insert(func_ip, name.clone());
                     }
@@ -1720,8 +1720,8 @@ impl<'gc> Compiler<'gc> {
                 if !Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
                 }
-                self.emit_parameter_default_initializers(params)?;
-                self.emit_parameter_pattern_bindings(params)?;
+                self.emit_parameter_default_initializers(params, 0)?;
+                self.emit_parameter_pattern_bindings(params, 0)?;
                 if Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
                 }
@@ -3489,8 +3489,8 @@ impl<'gc> Compiler<'gc> {
                 if !Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
                 }
-                self.emit_parameter_default_initializers(params)?;
-                self.emit_parameter_pattern_bindings(params)?;
+                self.emit_parameter_default_initializers(params, 0)?;
+                self.emit_parameter_pattern_bindings(params, 0)?;
                 if Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
                 }
@@ -3591,21 +3591,21 @@ impl<'gc> Compiler<'gc> {
             }
             // Anonymous function expression: function(params) { body }
             Expr::Function(name, params, body) => {
-                self.compile_function_body(name.as_deref(), params, body)?;
+                self.compile_function_body(name.as_deref(), params, body, true)?;
             }
             // Minimal async function expression support in VM path.
             // The body is compiled like a normal function for now.
             Expr::AsyncFunction(name, params, body) => {
-                let func_ip = self.compile_function_body(name.as_deref(), params, body)?;
+                let func_ip = self.compile_function_body(name.as_deref(), params, body, true)?;
                 self.chunk.async_function_ips.insert(func_ip);
             }
             Expr::GeneratorFunction(name, params, body) => {
-                self.compile_generator_function_body(name.as_deref(), params, body)?;
+                self.compile_generator_function_body(name.as_deref(), params, body, true)?;
             }
             // Minimal async generator support in VM path.
             // The body is executed eagerly and each yield/yield* appends to an internal array.
             Expr::AsyncGeneratorFunction(name, params, body) => {
-                self.compile_async_generator_function_body(name.as_deref(), params, body)?;
+                self.compile_async_generator_function_body(name.as_deref(), params, body, true)?;
             }
             // VM await lowering uses a dedicated opcode so async functions can
             // suspend and resume on the microtask queue.
@@ -5801,6 +5801,7 @@ impl<'gc> Compiler<'gc> {
         function_name: Option<&str>,
         params: &[DestructuringElement],
         body: &[Statement],
+        is_expression: bool,
     ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
@@ -5834,7 +5835,23 @@ impl<'gc> Compiler<'gc> {
             self.add_upvalue(name, idx as u8, true);
         }
 
+        // Named function expression: the function name is an immutable const
+        // binding visible to both parameter defaults and the body.
+        // Emit InitNamedFnSelf BEFORE params so defaults can see the name.
+        if is_expression {
+            if let Some(name) = function_name
+                && !name.is_empty()
+                && !self.locals.contains(&name.to_string())
+            {
+                self.chunk.named_fn_self_ips.insert(func_ip);
+                self.chunk.write_opcode(Opcode::InitNamedFnSelf);
+                self.locals.push(name.to_string());
+                self.const_locals.insert(name.to_string());
+            }
+        }
+
         // Count non-rest params and check for rest
+        let param_local_offset = self.locals.len() as u8;
         let mut non_rest_count = 0u8;
         let mut has_rest = false;
         for (param_index, param) in params.iter().enumerate() {
@@ -5860,8 +5877,8 @@ impl<'gc> Compiler<'gc> {
         if !Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
-        self.emit_parameter_default_initializers(params)?;
-        self.emit_parameter_pattern_bindings(params)?;
+        self.emit_parameter_default_initializers(params, param_local_offset)?;
+        self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
@@ -5924,7 +5941,7 @@ impl<'gc> Compiler<'gc> {
         Ok(func_ip)
     }
 
-    fn emit_parameter_default_initializers(&mut self, params: &[DestructuringElement]) -> Result<(), JSError> {
+    fn emit_parameter_default_initializers(&mut self, params: &[DestructuringElement], local_offset: u8) -> Result<(), JSError> {
         let mut forbidden_names_per_param: Vec<Vec<String>> = Vec::with_capacity(params.len());
         for i in 0..params.len() {
             let mut names = Vec::new();
@@ -5934,7 +5951,7 @@ impl<'gc> Compiler<'gc> {
             forbidden_names_per_param.push(names);
         }
 
-        let mut local_slot: u8 = 0;
+        let mut local_slot: u8 = local_offset;
         for (param_index, param) in params.iter().enumerate() {
             match param {
                 DestructuringElement::Variable(_, Some(default_expr)) => {
@@ -6091,8 +6108,8 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
-    fn emit_parameter_pattern_bindings(&mut self, params: &[DestructuringElement]) -> Result<(), JSError> {
-        let mut local_slot: u8 = 0;
+    fn emit_parameter_pattern_bindings(&mut self, params: &[DestructuringElement], local_offset: u8) -> Result<(), JSError> {
+        let mut local_slot: u8 = local_offset;
         for param in params {
             match param {
                 DestructuringElement::NestedArray(inner, _) => {
@@ -6142,6 +6159,7 @@ impl<'gc> Compiler<'gc> {
         function_name: Option<&str>,
         params: &[DestructuringElement],
         body: &[Statement],
+        is_expression: bool,
     ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
@@ -6173,6 +6191,20 @@ impl<'gc> Compiler<'gc> {
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
 
+        // Named async generator expression: immutable binding before params
+        if is_expression {
+            if let Some(name) = function_name
+                && !name.is_empty()
+                && !self.locals.contains(&name.to_string())
+            {
+                self.chunk.named_fn_self_ips.insert(func_ip);
+                self.chunk.write_opcode(Opcode::InitNamedFnSelf);
+                self.locals.push(name.to_string());
+                self.const_locals.insert(name.to_string());
+            }
+        }
+
+        let param_local_offset = self.locals.len() as u8;
         let mut non_rest_count = 0u8;
         let mut has_rest = false;
         for (param_index, param) in params.iter().enumerate() {
@@ -6197,8 +6229,8 @@ impl<'gc> Compiler<'gc> {
         if !Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
-        self.emit_parameter_default_initializers(params)?;
-        self.emit_parameter_pattern_bindings(params)?;
+        self.emit_parameter_default_initializers(params, param_local_offset)?;
+        self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
@@ -6273,6 +6305,7 @@ impl<'gc> Compiler<'gc> {
         function_name: Option<&str>,
         params: &[DestructuringElement],
         body: &[Statement],
+        is_expression: bool,
     ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
@@ -6304,6 +6337,20 @@ impl<'gc> Compiler<'gc> {
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
 
+        // Named generator expression: immutable binding before params
+        if is_expression {
+            if let Some(name) = function_name
+                && !name.is_empty()
+                && !self.locals.contains(&name.to_string())
+            {
+                self.chunk.named_fn_self_ips.insert(func_ip);
+                self.chunk.write_opcode(Opcode::InitNamedFnSelf);
+                self.locals.push(name.to_string());
+                self.const_locals.insert(name.to_string());
+            }
+        }
+
+        let param_local_offset = self.locals.len() as u8;
         let mut non_rest_count = 0u8;
         let mut has_rest = false;
         for (param_index, param) in params.iter().enumerate() {
@@ -6328,8 +6375,8 @@ impl<'gc> Compiler<'gc> {
         if !Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
-        self.emit_parameter_default_initializers(params)?;
-        self.emit_parameter_pattern_bindings(params)?;
+        self.emit_parameter_default_initializers(params, param_local_offset)?;
+        self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
@@ -7217,7 +7264,7 @@ impl<'gc> Compiler<'gc> {
                     let visible_name = Self::private_display_name(&private_name);
                     let display_name = format!("get {}", visible_name);
                     let empty_params: Vec<DestructuringElement> = vec![];
-                    let g_start = self.compile_function_body(Some(&display_name), &empty_params, body)?;
+                    let g_start = self.compile_function_body(Some(&display_name), &empty_params, body, false)?;
                     self.chunk.method_function_ips.insert(g_start);
                     self.chunk.fn_lengths.insert(g_start, 0);
                     self.record_brand_upvalue_for_fn(g_start);
@@ -7233,7 +7280,7 @@ impl<'gc> Compiler<'gc> {
                     let global_name = format!("__ps_{}_{}__", class_id, sname);
                     let visible_name = Self::private_display_name(&private_name);
                     let display_name = format!("set {}", visible_name);
-                    let s_start = self.compile_function_body(Some(&display_name), params, body)?;
+                    let s_start = self.compile_function_body(Some(&display_name), params, body, false)?;
                     self.chunk.method_function_ips.insert(s_start);
                     self.record_brand_upvalue_for_fn(s_start);
                     let n16 = crate::unicode::utf8_to_utf16(&global_name);
@@ -7300,8 +7347,8 @@ impl<'gc> Compiler<'gc> {
         if !Self::has_parameter_expressions(&ctor_params) {
             self.emit_hoisted_var_slots(&ctor_body);
         }
-        self.emit_parameter_default_initializers(&ctor_params)?;
-        self.emit_parameter_pattern_bindings(&ctor_params)?;
+        self.emit_parameter_default_initializers(&ctor_params, 0)?;
+        self.emit_parameter_pattern_bindings(&ctor_params, 0)?;
         if Self::has_parameter_expressions(&ctor_params) {
             self.emit_hoisted_var_slots(&ctor_body);
         }
@@ -8044,8 +8091,8 @@ impl<'gc> Compiler<'gc> {
         if !Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
-        self.emit_parameter_default_initializers(params)?;
-        self.emit_parameter_pattern_bindings(params)?;
+        self.emit_parameter_default_initializers(params, 0)?;
+        self.emit_parameter_pattern_bindings(params, 0)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
@@ -8185,7 +8232,7 @@ impl<'gc> Compiler<'gc> {
 
         // Stack: [target_obj]
         self.chunk.write_opcode(Opcode::Dup); // [target, target]
-        let g_start = self.compile_function_body(Some(&display_name), &empty_params, body)?;
+        let g_start = self.compile_function_body(Some(&display_name), &empty_params, body, false)?;
         // [target, target, closure]
         self.chunk.method_function_ips.insert(g_start);
         self.chunk.fn_lengths.insert(g_start, 0);
@@ -8218,7 +8265,7 @@ impl<'gc> Compiler<'gc> {
 
         // Stack: [target_obj]
         self.chunk.write_opcode(Opcode::Dup); // [target, target]
-        let s_start = self.compile_function_body(Some(&display_name), params, body)?;
+        let s_start = self.compile_function_body(Some(&display_name), params, body, false)?;
         // [target, target, closure]
         self.chunk.method_function_ips.insert(s_start);
         self.record_brand_upvalue_for_fn(s_start);
@@ -8262,26 +8309,26 @@ impl<'gc> Compiler<'gc> {
         let func_ip = match kind {
             1 => {
                 // Generator method
-                let ip = self.compile_generator_function_body(Some(display_name), params, body)?;
+                let ip = self.compile_generator_function_body(Some(display_name), params, body, false)?;
                 self.chunk.method_function_ips.insert(ip);
                 ip
             }
             2 => {
                 // Async method
-                let ip = self.compile_function_body(Some(display_name), params, body)?;
+                let ip = self.compile_function_body(Some(display_name), params, body, false)?;
                 self.chunk.async_function_ips.insert(ip);
                 self.chunk.method_function_ips.insert(ip);
                 ip
             }
             3 => {
                 // Async generator method
-                let ip = self.compile_async_generator_function_body(Some(display_name), params, body)?;
+                let ip = self.compile_async_generator_function_body(Some(display_name), params, body, false)?;
                 self.chunk.method_function_ips.insert(ip);
                 ip
             }
             _ => {
                 // Normal method: use compile_function_body for proper upvalue/hoisting support
-                let ip = self.compile_function_body(Some(display_name), params, body)?;
+                let ip = self.compile_function_body(Some(display_name), params, body, false)?;
                 self.chunk.method_function_ips.insert(ip);
                 ip
             }
@@ -8349,7 +8396,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::ToPropertyKey);
         // Compile getter body with proper upvalue capture
         let empty_params: Vec<DestructuringElement> = vec![];
-        let g_start = self.compile_function_body(None, &empty_params, body)?;
+        let g_start = self.compile_function_body(None, &empty_params, body, false)?;
         self.chunk.method_function_ips.insert(g_start);
         // stack: [target_obj, target_obj, key, getter_closure]
         self.chunk.write_opcode(Opcode::SetComputedGetter);
@@ -8369,7 +8416,7 @@ impl<'gc> Compiler<'gc> {
         self.compile_expr(key_expr)?;
         self.chunk.write_opcode(Opcode::ToPropertyKey);
         // Compile setter body with proper upvalue capture
-        let s_start = self.compile_function_body(None, params, body)?;
+        let s_start = self.compile_function_body(None, params, body, false)?;
         self.chunk.method_function_ips.insert(s_start);
         // stack: [target_obj, target_obj, key, setter_closure]
         self.chunk.write_opcode(Opcode::SetComputedSetter);

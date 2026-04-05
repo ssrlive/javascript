@@ -707,6 +707,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.generator_objects.trace(cc);
         self.generator_yield_value.trace(cc);
         self.generator_return_pending.trace(cc);
+        self.named_fn_callee_stack.trace(cc);
         self.active_async_promises.trace(cc);
         self.generator_prototype.trace(cc);
         self.generator_function_prototype.trace(cc);
@@ -772,6 +773,8 @@ pub struct VM<'gc> {
     generator_return_pending: Option<Value<'gc>>,
     // Set by Opcode::GeneratorParamInitDone during generator call-time preflight.
     generator_param_init_done: bool,
+    // Stack of callee values for named function expression self-reference (InitNamedFnSelf opcode).
+    named_fn_callee_stack: Vec<Value<'gc>>,
     // Set by Opcode::Await when an async function suspends.
     pending_async_suspend: Option<usize>,
     // Promise corresponding to the currently executing async function.
@@ -966,6 +969,7 @@ impl<'gc> VM<'gc> {
             generator_yield_value: None,
             generator_return_pending: None,
             generator_param_init_done: false,
+            named_fn_callee_stack: Vec::new(),
             pending_async_suspend: None,
             active_async_promises: Vec::new(),
             last_throw_ip: None,
@@ -11668,6 +11672,9 @@ impl<'gc> VM<'gc> {
         for (ip, &(uv_idx, class_id)) in &eval_chunk.fn_brand_upvalue {
             self.chunk.fn_brand_upvalue.insert(ip + code_offset, (uv_idx, class_id));
         }
+        for ip in &eval_chunk.named_fn_self_ips {
+            self.chunk.named_fn_self_ips.insert(ip + code_offset);
+        }
         for &(ip, line, col) in &eval_chunk.line_map {
             self.chunk.line_map.push((ip + code_offset, line, col));
         }
@@ -13847,9 +13854,15 @@ impl<'gc> VM<'gc> {
                     return Ok(result);
                 }
                 if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
+                    if self.chunk.named_fn_self_ips.contains(ip) {
+                        self.named_fn_callee_stack.push(func.clone());
+                    }
                     return Ok(self.invoke_async_function(ctx, *ip, *arity, args, &[], this_arg));
                 }
                 if self.chunk.generator_function_ips.contains(ip) {
+                    if self.chunk.named_fn_self_ips.contains(ip) {
+                        self.named_fn_callee_stack.push(func.clone());
+                    }
                     return self.create_generator_object(ctx, *ip, *arity, args, &[], this_arg, self.chunk.async_function_ips.contains(ip));
                 }
                 let is_arrow = self.chunk.arrow_function_ips.contains(ip);
@@ -13869,6 +13882,9 @@ impl<'gc> VM<'gc> {
                     stack_args.truncate(target_arity);
                 }
                 self.this_stack.push(effective_this);
+                if self.chunk.named_fn_self_ips.contains(ip) {
+                    self.named_fn_callee_stack.push(func.clone());
+                }
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
                 let out = self.call_vm_function_result(ctx, *ip, &stack_args, saved_args, &[]);
                 self.try_stack = saved_try_stack;
@@ -13897,10 +13913,16 @@ impl<'gc> VM<'gc> {
                 }
                 if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
                     let uv = (**upv).to_vec();
+                    if self.chunk.named_fn_self_ips.contains(ip) {
+                        self.named_fn_callee_stack.push(func.clone());
+                    }
                     return Ok(self.invoke_async_function(ctx, *ip, *arity, args, &uv, this_arg));
                 }
                 if self.chunk.generator_function_ips.contains(ip) {
                     let uv = (**upv).to_vec();
+                    if self.chunk.named_fn_self_ips.contains(ip) {
+                        self.named_fn_callee_stack.push(func.clone());
+                    }
                     return self.create_generator_object(ctx, *ip, *arity, args, &uv, this_arg, self.chunk.async_function_ips.contains(ip));
                 }
                 let is_arrow = self.chunk.arrow_function_ips.contains(ip);
@@ -13921,6 +13943,9 @@ impl<'gc> VM<'gc> {
                 }
                 self.this_stack.push(effective_this);
                 let uv = (**upv).to_vec();
+                if self.chunk.named_fn_self_ips.contains(ip) {
+                    self.named_fn_callee_stack.push(func.clone());
+                }
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
                 let out = self.call_vm_function_result(ctx, *ip, &stack_args, saved_args, &uv);
                 self.try_stack = saved_try_stack;

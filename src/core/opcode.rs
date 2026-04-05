@@ -106,6 +106,7 @@ pub enum Opcode {
     IteratorCloseAbrupt = 100,     // best-effort iterator close for throw completions; never throws
     DefineGlobalSoft = 101,        // like DefineGlobal but only defines if key doesn't already exist (for var hoisting)
     ThrowIfNullish = 102,          // throw TypeError if TOS is null or undefined (does not pop)
+    InitNamedFnSelf = 103,         // push the callee (named fn expression's own function) from pending stack
 }
 
 impl TryFrom<u8> for Opcode {
@@ -216,6 +217,7 @@ impl TryFrom<u8> for Opcode {
             100 => Opcode::IteratorCloseAbrupt,
             101 => Opcode::DefineGlobalSoft,
             102 => Opcode::ThrowIfNullish,
+            103 => Opcode::InitNamedFnSelf,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -282,6 +284,8 @@ pub struct Chunk<'gc> {
     /// Affects property descriptor semantics (e.g. var bindings are configurable
     /// in eval but non-configurable in scripts).
     pub is_eval_code: bool,
+    /// Function IPs that have an InitNamedFnSelf opcode (named function expressions).
+    pub named_fn_self_ips: std::collections::HashSet<usize>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

@@ -1148,6 +1148,7 @@ impl<'gc> VM<'gc> {
             let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, dep_self_import_aliases);
             let saved_live_import_bindings = std::mem::take(&mut self.chunk.live_import_bindings);
             let saved_main_module_ip_start = self.main_module_ip_start.take();
+            let saved_const_globals = std::mem::take(&mut self.const_globals);
 
             self.ip = dep_ip_offset;
             self.set_module_this();
@@ -1317,6 +1318,7 @@ impl<'gc> VM<'gc> {
             self.chunk.self_import_aliases = saved_self_import_aliases;
             self.chunk.live_import_bindings = saved_live_import_bindings;
             self.main_module_ip_start = saved_main_module_ip_start;
+            self.const_globals = saved_const_globals;
         }
     }
 
@@ -9356,6 +9358,8 @@ impl<'gc> VM<'gc> {
 
                 for _ in 0..8 {
                     let Value::VmObject(obj) = &current else {
+                        // await on a non-object wraps in Promise.resolve(); drain microtasks
+                        self.drain_microtasks(ctx);
                         return current;
                     };
 
@@ -9395,6 +9399,8 @@ impl<'gc> VM<'gc> {
                     }
 
                     let Some(then_val) = then_prop else {
+                        // Object without .then — not a thenable; drain microtasks
+                        self.drain_microtasks(ctx);
                         return current;
                     };
 
@@ -9435,8 +9441,12 @@ impl<'gc> VM<'gc> {
                     {
                         let mut pb = p.borrow_mut(ctx);
                         if !pb.contains_key("__promise_value__") {
+                            // Recover original thrown JS value if preserved
+                            let rejection_value = self
+                                .take_preserved_thrown_value_for_error(&err)
+                                .unwrap_or_else(|| normalize_reason(&err.message()));
                             pb.insert("__promise_rejected__".to_string(), Value::Boolean(true));
-                            pb.insert("__promise_value__".to_string(), normalize_reason(&err.message()));
+                            pb.insert("__promise_value__".to_string(), rejection_value);
                         }
                     }
 

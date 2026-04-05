@@ -171,6 +171,65 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
 
 pub(crate) type ExportInfo = (Vec<String>, HashMap<String, String>, Vec<(String, Vec<ReexportSpec>)>);
 
+/// Extract binding names from object destructuring pattern elements.
+fn collect_object_destr_binding_names(elems: &[crate::core::statement::ObjectDestructuringElement]) -> Vec<String> {
+    use crate::core::statement::ObjectDestructuringElement;
+    let mut names = Vec::new();
+    for elem in elems {
+        match elem {
+            ObjectDestructuringElement::Property { value, .. } | ObjectDestructuringElement::ComputedProperty { value, .. } => {
+                collect_destr_binding_names(value, &mut names);
+            }
+            ObjectDestructuringElement::Rest(name) => {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Extract binding names from array destructuring pattern elements.
+fn collect_array_destr_binding_names(elems: &[crate::core::statement::DestructuringElement]) -> Vec<String> {
+    let mut names = Vec::new();
+    for elem in elems {
+        collect_destr_binding_names(elem, &mut names);
+    }
+    names
+}
+
+/// Recursively extract binding names from a destructuring element.
+fn collect_destr_binding_names(elem: &crate::core::statement::DestructuringElement, names: &mut Vec<String>) {
+    use crate::core::statement::DestructuringElement;
+    match elem {
+        DestructuringElement::Variable(name, _) => {
+            names.push(name.clone());
+        }
+        DestructuringElement::Property(_, inner) => {
+            collect_destr_binding_names(inner, names);
+        }
+        DestructuringElement::ComputedProperty(_, inner) => {
+            collect_destr_binding_names(inner, names);
+        }
+        DestructuringElement::Rest(name) => {
+            names.push(name.clone());
+        }
+        DestructuringElement::RestPattern(inner) => {
+            collect_destr_binding_names(inner, names);
+        }
+        DestructuringElement::NestedArray(elems, _) => {
+            for e in elems {
+                collect_destr_binding_names(e, names);
+            }
+        }
+        DestructuringElement::NestedObject(elems, _) => {
+            for e in elems {
+                collect_destr_binding_names(e, names);
+            }
+        }
+        DestructuringElement::Empty => {}
+    }
+}
+
 /// Collect export info from parsed AST statements.
 pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
     use crate::core::statement::ExportSpecifier as ES;
@@ -293,6 +352,24 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
                                 export_names.push(cd.name.clone());
                             }
                             export_name_to_local.insert(cd.name.clone(), cd.name.clone());
+                        }
+                    }
+                    StatementKind::ConstDestructuringObject(elems, _)
+                    | StatementKind::LetDestructuringObject(elems, _)
+                    | StatementKind::VarDestructuringObject(elems, _) => {
+                        for name in collect_object_destr_binding_names(elems) {
+                            if !export_names.contains(&name) {
+                                export_names.push(name.clone());
+                            }
+                            export_name_to_local.insert(name.clone(), name);
+                        }
+                    }
+                    StatementKind::ConstDestructuringArray(elems, _) | StatementKind::LetDestructuringArray(elems, _) => {
+                        for name in collect_array_destr_binding_names(elems) {
+                            if !export_names.contains(&name) {
+                                export_names.push(name.clone());
+                            }
+                            export_name_to_local.insert(name.clone(), name);
                         }
                     }
                     _ => {}

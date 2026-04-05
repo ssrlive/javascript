@@ -292,6 +292,9 @@ pub struct Chunk<'gc> {
     pub self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
     /// Self-import alias map: local_name -> exported_name (for live binding resolution at runtime).
     pub self_import_aliases: std::collections::HashMap<String, String>,
+    /// External module variable bindings: local_name -> (module_path, export_name).
+    /// Used by multi-file module loading to resolve imports from loaded dependencies.
+    pub loaded_module_vars: std::collections::HashMap<String, (String, String)>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

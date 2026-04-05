@@ -1500,6 +1500,10 @@ impl<'gc> VM<'gc> {
             let val = self.stack.pop().unwrap_or(Value::Undefined);
             // In module mode, top-level declarations go to module_locals, not globals/globalThis
             if self.is_module_mode && self.frames.is_empty() {
+                // Don't overwrite values already injected from loaded modules
+                if self.chunk.loaded_module_vars.contains_key(&name_str) && self.module_locals.contains_key(&name_str) {
+                    return Ok(OpcodeAction::Continue);
+                }
                 self.module_locals.insert(name_str, val);
             } else {
                 self.globals.insert(name_str.clone(), val.clone());
@@ -3346,6 +3350,21 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
+            self.stack.push(Value::from(val.typeof_value()));
+            return Ok(OpcodeAction::Continue);
+        }
+        // Check self-import namespace bindings (they return "object")
+        if self.is_module_mode
+            && self.chunk.self_namespace_imports.iter().any(|(local, _)| local == &name)
+        {
+            self.stack.push(Value::from("object"));
+            return Ok(OpcodeAction::Continue);
+        }
+        // Check loaded module bindings
+        if self.is_module_mode
+            && self.chunk.loaded_module_vars.contains_key(&name)
+        {
+            let val = self.module_locals.get(&name).cloned().unwrap_or(Value::Undefined);
             self.stack.push(Value::from(val.typeof_value()));
             return Ok(OpcodeAction::Continue);
         }

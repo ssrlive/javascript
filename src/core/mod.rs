@@ -1,5 +1,6 @@
 use crate::error::JSError;
 use crate::raise_eval_error;
+use std::collections::HashMap;
 pub(crate) use gc_arena::GcWeak;
 pub(crate) use gc_arena::Mutation as GcContext;
 pub(crate) use gc_arena::collect::Trace as GcTrace;
@@ -66,7 +67,7 @@ fn script_declares_await_identifier(s: &str) -> bool {
         || s.contains("class await")
 }
 
-fn parse_program_statements(script: &str, run_as_module: bool) -> Result<Vec<Statement>, JSError> {
+pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Result<Vec<Statement>, JSError> {
     let mut tokens = tokenize(script)?;
     if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
         tokens.pop();
@@ -133,6 +134,168 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
         .map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))
 }
 
+#[derive(Clone)]
+pub(crate) enum ReexportSpec {
+    Named(String, Option<String>), // export { name as alias } from ...
+    Star,                          // export * from ...
+    Namespace(String),             // export * as name from ...
+}
+
+/// Resolve a module specifier relative to a base path.
+pub(crate) fn resolve_module_path(specifier: &str, base_path: &std::path::Path) -> std::path::PathBuf {
+    let spec_path = std::path::Path::new(specifier);
+    if spec_path.is_absolute() {
+        return spec_path.to_path_buf();
+    }
+    if specifier.starts_with("./") || specifier.starts_with("../") {
+        let parent = base_path.parent().unwrap_or(std::path::Path::new("."));
+        return parent.join(spec_path);
+    }
+    spec_path.to_path_buf()
+}
+
+/// Collect export info from parsed AST statements.
+pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> (Vec<String>, HashMap<String, String>, Vec<(String, Vec<ReexportSpec>)>) {
+    use crate::core::statement::ExportSpecifier as ES;
+    let mut export_names = Vec::new();
+    let mut export_name_to_local: HashMap<String, String> = HashMap::new();
+    let mut reexport_sources: Vec<(String, Vec<ReexportSpec>)> = Vec::new();
+
+    for stmt in statements {
+        if let StatementKind::Export(specs, inner, source) = &*stmt.kind {
+            if let Some(src) = source {
+                // Re-export: export { ... } from './other.js' or export * from './other.js'
+                let mut reexport_specs = Vec::new();
+                for spec in specs {
+                    match spec {
+                        ES::Named(name, alias) => {
+                            let export_name = alias.as_deref().unwrap_or(name).to_string();
+                            reexport_specs.push(ReexportSpec::Named(name.clone(), alias.clone()));
+                            if !export_names.contains(&export_name) {
+                                export_names.push(export_name.clone());
+                            }
+                        }
+                        ES::Star => {
+                            reexport_specs.push(ReexportSpec::Star);
+                        }
+                        ES::Namespace(name) => {
+                            reexport_specs.push(ReexportSpec::Namespace(name.clone()));
+                            if !export_names.contains(name) {
+                                export_names.push(name.clone());
+                            }
+                        }
+                        ES::Default(_) => {}
+                    }
+                }
+                if !reexport_specs.is_empty() {
+                    reexport_sources.push((src.clone(), reexport_specs));
+                }
+                continue;
+            }
+
+            // Local exports
+            for spec in specs {
+                match spec {
+                    ES::Named(name, alias) => {
+                        let export_name = alias.as_deref().unwrap_or(name).to_string();
+                        if !export_names.contains(&export_name) {
+                            export_names.push(export_name.clone());
+                        }
+                        export_name_to_local.insert(export_name, name.clone());
+                    }
+                    ES::Default(_) => {
+                        if !export_names.contains(&"default".to_string()) {
+                            export_names.push("default".to_string());
+                        }
+                    }
+                    ES::Namespace(_) | ES::Star => {}
+                }
+            }
+
+            // Exported declarations
+            if let Some(inner) = inner {
+                match &*inner.kind {
+                    StatementKind::Var(decls) => {
+                        for (n, _) in decls {
+                            if !export_names.contains(n) {
+                                export_names.push(n.clone());
+                            }
+                            export_name_to_local.insert(n.clone(), n.clone());
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (n, _) in decls {
+                            if !export_names.contains(n) {
+                                export_names.push(n.clone());
+                            }
+                            export_name_to_local.insert(n.clone(), n.clone());
+                        }
+                    }
+                    StatementKind::Let(decls) => {
+                        for (n, _) in decls {
+                            if !export_names.contains(n) {
+                                export_names.push(n.clone());
+                            }
+                            export_name_to_local.insert(n.clone(), n.clone());
+                        }
+                    }
+                    StatementKind::FunctionDeclaration(name, _, _, _, _) => {
+                        if !name.is_empty() && !export_names.contains(name) {
+                            export_names.push(name.clone());
+                            export_name_to_local.insert(name.clone(), name.clone());
+                        }
+                    }
+                    StatementKind::Class(cd) => {
+                        if !cd.name.is_empty() {
+                            if !export_names.contains(&cd.name) {
+                                export_names.push(cd.name.clone());
+                            }
+                            export_name_to_local.insert(cd.name.clone(), cd.name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    (export_names, export_name_to_local, reexport_sources)
+}
+
+/// Extract external import/export-from sources from the AST.
+pub(crate) fn collect_module_sources(statements: &[Statement], self_basename: &str) -> Vec<String> {
+    let mut sources = Vec::new();
+    let known_builtins = ["math", "console", "os", "std", "./es6_module_export.js"];
+
+    for stmt in statements {
+        match &*stmt.kind {
+            StatementKind::Import(_, source) => {
+                let import_base = source.strip_prefix("./").unwrap_or(source);
+                if import_base == self_basename {
+                    continue;
+                }
+                if known_builtins.contains(&source.as_str()) {
+                    continue;
+                }
+                if !sources.contains(source) {
+                    sources.push(source.clone());
+                }
+            }
+            StatementKind::Export(_specs, _, Some(source)) => {
+                let import_base = source.strip_prefix("./").unwrap_or(source);
+                if import_base == self_basename {
+                    continue;
+                }
+                if !sources.contains(source) {
+                    sources.push(source.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    sources
+}
+
 pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script: T,
     run_as_module: bool,
@@ -164,12 +327,35 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         if run_as_module && let Some(ref p) = script_path_buf {
             compiler.set_script_filename(p.to_string_lossy().to_string());
         }
+
+        // Multi-file module loading: load and execute dependencies before the main module.
+        if run_as_module && let Some(ref entry_path) = script_path_buf {
+            let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let sources = collect_module_sources(&statements, self_basename);
+            if !sources.is_empty() {
+                vm.load_module_dependencies(ctx, entry_path, &sources);
+                // Pass loaded module info to the main compiler
+                for (path, exports) in &vm.loaded_modules {
+                    let mut info = HashMap::new();
+                    for k in exports.keys() {
+                        info.insert(k.clone(), path.clone());
+                    }
+                    compiler.set_loaded_module_exports(path.clone(), info);
+                }
+            }
+        }
+
         let chunk = compiler.compile(&statements)?;
         vm.chunk = chunk;
 
         // In module mode, top-level `this` is undefined (not globalThis)
         if run_as_module {
             vm.set_module_this();
+        }
+
+        // Inject loaded module bindings into module_locals before execution.
+        if run_as_module {
+            vm.inject_loaded_module_bindings(ctx);
         }
 
         // let mut vm = VM::new(chunk, ctx);

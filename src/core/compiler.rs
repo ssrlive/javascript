@@ -61,6 +61,9 @@ pub struct Compiler<'gc> {
     eval_context_flags: u8,
     // Brand info for classes with private members: stack of Option<(brand_local_name, class_id)>
     current_class_brand_info: Vec<Option<(String, usize)>>,
+    /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
+    /// Populated by the module loader before compilation so the compiler can resolve external imports.
+    loaded_module_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +112,11 @@ impl<'gc> Compiler<'gc> {
 
     pub fn set_script_filename(&mut self, filename: String) {
         self.script_filename = Some(filename);
+    }
+
+    /// Register exports from a loaded external module so the compiler can resolve imports.
+    pub fn set_loaded_module_exports(&mut self, resolved_path: String, export_info: std::collections::HashMap<String, String>) {
+        self.loaded_module_exports.insert(resolved_path, export_info);
     }
 
     pub fn set_strict_mode(&mut self, strict: bool) {
@@ -605,6 +613,27 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    /// Resolve an import specifier to a loaded module path, if available.
+    fn resolve_import_path(&self, source: &str) -> Option<String> {
+        if let Some(ref fname) = self.script_filename {
+            let base_path = std::path::Path::new(fname);
+            let resolved = if source.starts_with("./") || source.starts_with("../") {
+                let parent = base_path.parent().unwrap_or(std::path::Path::new("."));
+                parent.join(source)
+            } else {
+                std::path::PathBuf::from(source)
+            };
+            let resolved_str = resolved.to_string_lossy().to_string();
+            if self.loaded_module_exports.contains_key(&resolved_str) {
+                Some(resolved_str)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     /// Pre-scan statements to collect all exported binding names from this module.
     fn collect_module_export_names(&mut self, statements: &[Statement]) {
         use crate::core::statement::ExportSpecifier;
@@ -718,6 +747,8 @@ impl<'gc> Compiler<'gc> {
                                 })
                                 .collect();
                             self.chunk.self_namespace_imports.push((local.clone(), entries));
+                            // Namespace imports are immutable bindings
+                            self.chunk.const_import_bindings.insert(local.clone());
                         }
                     }
                 }
@@ -2763,6 +2794,7 @@ impl<'gc> Compiler<'gc> {
                                     })
                                     .collect();
                                 self.chunk.self_namespace_imports.push((local.clone(), entries));
+                                self.chunk.const_import_bindings.insert(local.clone());
                                 continue;
                             }
                         }
@@ -2842,22 +2874,54 @@ impl<'gc> Compiler<'gc> {
                             define_binding(self, local);
                         }
                         (_, ImportSpecifier::Namespace(local)) => {
-                            // Fallback empty namespace
-                            self.chunk.write_opcode(Opcode::NewObject);
-                            self.chunk.write_byte(0);
+                            let resolved = self.resolve_import_path(source);
+                            if resolved.is_some() {
+                                // Resolved from loaded module — value injected at runtime.
+                                // Still emit placeholder + define to keep stack balanced.
+                                self.chunk.write_opcode(Opcode::NewObject);
+                                self.chunk.write_byte(0);
+                                let resolved_str = resolved.unwrap();
+                                self.chunk.loaded_module_vars.insert(local.clone(), (resolved_str, "*".to_string()));
+                                self.chunk.const_import_bindings.insert(local.clone());
+                            } else {
+                                // Fallback empty namespace
+                                self.chunk.write_opcode(Opcode::NewObject);
+                                self.chunk.write_byte(0);
+                            }
                             define_binding(self, local);
                         }
-                        (_, ImportSpecifier::Default(local)) | (_, ImportSpecifier::Named(local, None)) => {
-                            let idx = self.chunk.add_constant(Value::Undefined);
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(idx);
+                        (_, ImportSpecifier::Default(local)) => {
+                            let resolved = self.resolve_import_path(source);
+                            if let Some(resolved_str) = resolved {
+                                // Resolved from loaded module — value injected at runtime.
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                                self.chunk.loaded_module_vars.insert(local.clone(), (resolved_str, "default".to_string()));
+                                self.chunk.const_import_bindings.insert(local.clone());
+                            } else {
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                            }
                             define_binding(self, local);
                         }
-                        (_, ImportSpecifier::Named(_name, Some(alias))) => {
-                            let idx = self.chunk.add_constant(Value::Undefined);
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(idx);
-                            define_binding(self, alias);
+                        (_, ImportSpecifier::Named(name, alias)) => {
+                            let local = alias.as_deref().unwrap_or(name).to_string();
+                            let resolved = self.resolve_import_path(source);
+                            if let Some(resolved_str) = resolved {
+                                // Resolved from loaded module — value injected at runtime.
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                                self.chunk.loaded_module_vars.insert(local.clone(), (resolved_str, name.clone()));
+                                self.chunk.const_import_bindings.insert(local.clone());
+                            } else {
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                            }
+                            define_binding(self, &local);
                         }
                     }
                 }

@@ -57,27 +57,12 @@ function ensureArrayDistinct(arr) {
 
 function createComposedTarget(testPath) {
   const testDir = path.dirname(path.resolve(testPath));
-  const tmpDir = fs.mkdtempSync(path.join(testDir, '.test262.'));
-  const tmpPath = path.join(tmpDir, path.basename(testPath));
-  return {tmpDir, tmpPath};
-}
-
-function mirrorSiblingModuleFiles(testPath, targetDir) {
-  const testDir = path.dirname(path.resolve(testPath));
-  const testAbs = path.resolve(testPath);
-  const siblings = fs.readdirSync(testDir, {withFileTypes: true});
-  for (const entry of siblings) {
-    if (!entry.isFile()) continue;
-    const name = entry.name;
-    if (/^\.test262\./.test(name)) continue;
-    if (!/\.(js|mjs|json)$/.test(name)) continue;
-    const src = path.join(testDir, name);
-    if (path.resolve(src) === testAbs) continue;
-    const dst = path.join(targetDir, name);
-    if (!fs.existsSync(dst)) {
-      fs.copyFileSync(src, dst);
-    }
-  }
+  const base = path.basename(testPath, path.extname(testPath));
+  const ext = path.extname(testPath);
+  const rand = Math.random().toString(36).slice(2, 8);
+  const tmpName = `.test262_composed_${rand}_${base}${ext}`;
+  const tmpPath = path.join(testDir, tmpName);
+  return {tmpDir: testDir, tmpPath};
 }
 
 const realmFeatureName = 'cross-realm';
@@ -455,7 +440,6 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   outLines.push(fs.readFileSync(testPath, 'utf8'));
 
   fs.writeFileSync(tmpName, outLines.join('\n'));
-  mirrorSiblingModuleFiles(testPath, composed.tmpDir);
 
   return {testToRun: tmpName, tmpPath: tmpName, cleanupTmp: true};
 }

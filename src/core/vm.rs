@@ -719,6 +719,10 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.regexp_home_proto_temp.trace(cc);
         self.child_realms.trace(cc);
         self.module_locals.trace(cc);
+        // Trace loaded module exports
+        for exports in self.loaded_modules.values() {
+            exports.trace(cc);
+        }
     }
 }
 
@@ -825,6 +829,9 @@ pub struct VM<'gc> {
     // so they don't leak onto the global object (per ES2024 §16.2.1.6).
     is_module_mode: bool,
     module_locals: IndexMap<String, Value<'gc>>,
+    /// Loaded external module exports: resolved_path -> (exports IndexMap, module_locals IndexMap).
+    /// Used by multi-file module loading to resolve cross-module imports.
+    pub(crate) loaded_modules: std::collections::HashMap<String, IndexMap<String, Value<'gc>>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -996,6 +1003,7 @@ impl<'gc> VM<'gc> {
             throw_caught_stack_depth: None,
             is_module_mode: false,
             module_locals: IndexMap::new(),
+            loaded_modules: std::collections::HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1017,6 +1025,198 @@ impl<'gc> VM<'gc> {
             *first = Value::Undefined;
         }
         self.is_module_mode = true;
+    }
+
+    /// Load and execute dependency modules, storing their exports in `loaded_modules`.
+    /// `sources` is a list of raw import specifiers (e.g. `"./dep.js"`).
+    pub fn load_module_dependencies(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        entry_path: &std::path::Path,
+        sources: &[String],
+    ) {
+        use crate::core::{resolve_module_path, collect_exports_from_ast, collect_module_sources};
+
+        // Topologically load modules: iterate sources, load each one.
+        // For simplicity we do a single-pass; circular deps get empty exports.
+        let mut load_queue: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for src in sources {
+            let resolved = resolve_module_path(src, entry_path);
+            let key = resolved.to_string_lossy().to_string();
+            if !self.loaded_modules.contains_key(&key) {
+                load_queue.push((src.clone(), resolved));
+            }
+        }
+
+        for (_src, resolved_path) in &load_queue {
+            let key = resolved_path.to_string_lossy().to_string();
+            if self.loaded_modules.contains_key(&key) {
+                continue;
+            }
+
+            // Read and parse the dependency module
+            let dep_source = match crate::core::read_script_file(resolved_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let dep_stmts = match crate::core::parse_program_statements(&dep_source, true) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Insert sentinel to prevent circular recursion
+            self.loaded_modules.insert(key.clone(), IndexMap::new());
+
+            // Recursively load any sub-dependencies first
+            let dep_basename = resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let sub_sources = collect_module_sources(&dep_stmts, dep_basename);
+            if !sub_sources.is_empty() {
+                self.load_module_dependencies(ctx, resolved_path, &sub_sources);
+            }
+
+            // Compile the dependency
+            let mut dep_compiler = crate::core::Compiler::new();
+            dep_compiler.set_script_filename(key.clone());
+            // Pass already-loaded module info to the dependency compiler
+            for (path, exports) in &self.loaded_modules {
+                let mut info = std::collections::HashMap::new();
+                for k in exports.keys() {
+                    info.insert(k.clone(), path.clone());
+                }
+                dep_compiler.set_loaded_module_exports(path.clone(), info);
+            }
+            let dep_chunk = match dep_compiler.compile(&dep_stmts) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Save main module state
+            let saved_chunk = std::mem::replace(&mut self.chunk, dep_chunk);
+            let saved_ip = self.ip;
+            let saved_module_locals = std::mem::take(&mut self.module_locals);
+            let saved_script_path = self.script_path.take();
+            let saved_stack = std::mem::take(&mut self.stack);
+
+            self.ip = 0;
+            self.set_module_this();
+            self.set_source_context(&dep_source, Some(resolved_path.as_path()));
+
+            // Inject sub-dependency bindings before running
+            self.inject_loaded_module_bindings(ctx);
+
+            // Execute
+            let _dep_result = self.run(ctx);
+
+            // Collect the dependency's exports
+            let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
+            let mut exports = IndexMap::new();
+
+            for (export_name, local_name) in &export_name_to_local {
+                if let Some(val) = self.module_locals.get(local_name).cloned() {
+                    exports.insert(export_name.clone(), val);
+                } else if let Some(val) = self.globals.get(local_name).cloned() {
+                    exports.insert(export_name.clone(), val);
+                }
+            }
+            for export_name in &export_names {
+                if !exports.contains_key(export_name) {
+                    if let Some(val) = self.module_locals.get(export_name).cloned() {
+                        exports.insert(export_name.clone(), val);
+                    } else if let Some(val) = self.globals.get(export_name).cloned() {
+                        exports.insert(export_name.clone(), val);
+                    }
+                }
+            }
+
+            // Handle re-exports
+            for (reexport_src, reexport_specs) in &reexport_sources {
+                let reexport_resolved = resolve_module_path(reexport_src, resolved_path);
+                let reexport_key = reexport_resolved.to_string_lossy().to_string();
+                if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
+                    for spec in reexport_specs {
+                        match spec {
+                            crate::core::ReexportSpec::Named(name, alias) => {
+                                let ename = alias.as_deref().unwrap_or(name).to_string();
+                                if let Some(val) = source_exports.get(name).cloned() {
+                                    exports.insert(ename, val);
+                                }
+                            }
+                            crate::core::ReexportSpec::Star => {
+                                for (k, v) in &source_exports {
+                                    if k != "default" && !exports.contains_key(k) {
+                                        exports.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            crate::core::ReexportSpec::Namespace(name) => {
+                                let mut ns_map = IndexMap::new();
+                                let mut sorted_keys: Vec<&String> = source_exports.keys().collect();
+                                sorted_keys.sort();
+                                for k in &sorted_keys {
+                                    if let Some(v) = source_exports.get(*k) {
+                                        ns_map.insert((*k).clone(), v.clone());
+                                    }
+                                }
+                                ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+                                ns_map.insert("__proto__".to_string(), Value::Null);
+                                ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                                ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
+                                exports.insert(name.clone(), Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map)));
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.loaded_modules.insert(key, exports);
+
+            // Restore main module state
+            self.chunk = saved_chunk;
+            self.ip = saved_ip;
+            self.module_locals = saved_module_locals;
+            self.script_path = saved_script_path;
+            self.stack = saved_stack;
+        }
+    }
+
+    /// Inject loaded module bindings into `module_locals` based on `chunk.loaded_module_vars`.
+    pub fn inject_loaded_module_bindings(&mut self, ctx: &GcContext<'gc>) {
+        let vars: Vec<(String, String, String)> = self.chunk.loaded_module_vars
+            .iter()
+            .map(|(local, (path, export))| (local.clone(), path.clone(), export.clone()))
+            .collect();
+        for (local, mod_path, export_name) in &vars {
+            if export_name == "*" {
+                // Namespace import
+                if let Some(exports) = self.loaded_modules.get(mod_path) {
+                    let mut ns_map = IndexMap::new();
+                    let mut sorted_keys: Vec<_> = exports.keys()
+                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@"))
+                        .collect();
+                    sorted_keys.sort();
+                    for k in &sorted_keys {
+                        if let Some(v) = exports.get(*k) {
+                            ns_map.insert((*k).clone(), v.clone());
+                        }
+                    }
+                    ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+                    ns_map.insert("__proto__".to_string(), Value::Null);
+                    ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                    ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
+                    ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+                    ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+                    ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
+                    let ns_obj = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
+                    self.module_locals.insert(local.clone(), ns_obj);
+                }
+            } else {
+                // Named/default import
+                if let Some(exports) = self.loaded_modules.get(mod_path) {
+                    let val = exports.get(export_name).cloned().unwrap_or(Value::Undefined);
+                    self.module_locals.insert(local.clone(), val);
+                }
+            }
+        }
     }
 
     #[inline]

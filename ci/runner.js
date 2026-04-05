@@ -73,7 +73,9 @@ function cleanupComposedArtifacts(tmpPath){
   try {
     if (!tmpPath) return;
     const dir = path.dirname(tmpPath);
-    if (path.basename(dir).startsWith('.test262.')) {
+    const base = path.basename(dir);
+    // Legacy subdirectory cleanup
+    if (base.startsWith('.test262.')) {
       fs.rmSync(dir, {recursive: true, force: true});
     }
   } catch (e) {
@@ -160,7 +162,7 @@ function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
 // Build harness index
 const HARNESS_INDEX = {};
 function shouldSkipDirEntry(entryName){
-  return entryName.startsWith('.test262.');
+  return entryName.startsWith('.test262.') || entryName.startsWith('.test262_composed_');
 }
 
 function walkDir(dir){
@@ -253,7 +255,7 @@ function collectTests(){
     }
 
     for (const f of files){
-      if (f.includes('/.test262.')) continue;
+      if (f.includes('/.test262.') || f.includes('/.test262_composed_')) continue;
       const meta = extractMeta(f);
       if (/includes:|flags:\s*\[.*module.*\]|negative:|features:/.test(meta)) {
         other.push(f);

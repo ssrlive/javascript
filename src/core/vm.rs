@@ -1168,7 +1168,7 @@ impl<'gc> VM<'gc> {
                 }
             }
 
-            self.loaded_modules.insert(key, exports);
+            self.loaded_modules.insert(key.clone(), exports);
 
             // Restore main module state
             self.chunk = saved_chunk;
@@ -6282,7 +6282,8 @@ impl<'gc> VM<'gc> {
                         let found = if let Some(Value::VmObject(bindings)) = b.get("__ns_bindings__") {
                             bindings.borrow().contains_key(&key)
                         } else {
-                            false
+                            // Loaded module namespace: check key directly
+                            !key.starts_with("__") && b.contains_key(&key)
                         };
                         return Value::Boolean(found);
                     }
@@ -6602,7 +6603,8 @@ impl<'gc> VM<'gc> {
                                 let is_export = if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
                                     bindings.borrow().contains_key(&key)
                                 } else {
-                                    false
+                                    // Loaded module namespace: check key directly
+                                    !key.starts_with("__") && map.borrow().contains_key(&key)
                                 };
                                 if is_export {
                                     return Value::Boolean(false);
@@ -11085,6 +11087,11 @@ impl<'gc> VM<'gc> {
                         }
                         return val;
                     }
+                } else {
+                    // Loaded module namespace: read value directly
+                    let val = borrow.get(key).cloned();
+                    drop(borrow);
+                    return val.unwrap_or(Value::Undefined);
                 }
                 drop(borrow);
                 return Value::Undefined;
@@ -18969,6 +18976,13 @@ impl<'gc> VM<'gc> {
                             } else {
                                 None
                             };
+                            // For loaded module namespaces (no __ns_bindings__), read directly
+                            let has_ns_bindings = borrow.contains_key("__ns_bindings__");
+                            let direct_val = if local_name.is_none() && !has_ns_bindings {
+                                borrow.get(&key).cloned()
+                            } else {
+                                None
+                            };
                             drop(borrow);
                             if let Some(local) = local_name {
                                 let val = self
@@ -18983,6 +18997,9 @@ impl<'gc> VM<'gc> {
                                     return Value::Undefined;
                                 }
                                 // Spec: {value, writable: true, enumerable: true, configurable: false}
+                                return self.make_data_descriptor_object(ctx, &val, true, true, false);
+                            }
+                            if let Some(val) = direct_val {
                                 return self.make_data_descriptor_object(ctx, &val, true, true, false);
                             }
                             return Value::Undefined;
@@ -19585,6 +19602,13 @@ impl<'gc> VM<'gc> {
                             let bb = bindings.borrow();
                             for key in bb.keys() {
                                 keys.push(Value::from(key.as_str()));
+                            }
+                        } else {
+                            // Loaded module namespace: enumerate direct keys, skip internal ones
+                            for key in borrow.keys() {
+                                if !key.starts_with("__") && !key.starts_with("@@") {
+                                    keys.push(Value::from(key.as_str()));
+                                }
                             }
                         }
                         drop(borrow);
@@ -25885,7 +25909,13 @@ impl<'gc> VM<'gc> {
                             })
                             .collect()
                     } else {
-                        Vec::new()
+                        // Loaded module namespace: enumerate direct keys
+                        let direct_keys: Vec<String> = b.keys()
+                            .filter(|k| !k.starts_with("__") && !k.starts_with("@@"))
+                            .cloned()
+                            .collect();
+                        drop(b);
+                        return direct_keys;
                     };
                     drop(b);
                     for (export_name, local_name) in &bindings {

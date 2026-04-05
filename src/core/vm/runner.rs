@@ -3579,6 +3579,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         // Look up live binding via __ns_bindings__
                         let borrow = map.borrow();
+                        let has_ns_bindings = borrow.contains_key("__ns_bindings__");
                         let local_name = if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
                             let bb = bindings.borrow();
                             if let Some(Value::String(u16s)) = bb.get(&key) {
@@ -3586,6 +3587,12 @@ impl<'gc> VM<'gc> {
                             } else {
                                 None
                             }
+                        } else {
+                            None
+                        };
+                        // For loaded module namespaces (no __ns_bindings__), read directly
+                        let direct_val = if local_name.is_none() && !has_ns_bindings {
+                            borrow.get(&key).cloned()
                         } else {
                             None
                         };
@@ -3604,6 +3611,8 @@ impl<'gc> VM<'gc> {
                             } else {
                                 self.stack.push(val);
                             }
+                        } else if let Some(val) = direct_val {
+                            self.stack.push(val);
                         } else {
                             self.stack.push(Value::Undefined);
                         }
@@ -6439,7 +6448,8 @@ impl<'gc> VM<'gc> {
                         if let Some(Value::VmObject(bindings)) = b.get("__ns_bindings__") {
                             bindings.borrow().contains_key(&key)
                         } else {
-                            false
+                            // Loaded module namespace: check key directly (skip internal keys)
+                            !key.starts_with("__") && b.contains_key(&key)
                         }
                     }
                 } else {
@@ -6983,7 +6993,8 @@ impl<'gc> VM<'gc> {
                     if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
                         bindings.borrow().contains_key(&key)
                     } else {
-                        false
+                        // Loaded module namespace: check key directly
+                        !key.starts_with("__") && map.borrow().contains_key(&key)
                     }
                 } else {
                     false
@@ -7999,7 +8010,8 @@ impl<'gc> VM<'gc> {
                         if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
                             bindings.borrow().contains_key(&key)
                         } else {
-                            false
+                            // Loaded module namespace: check key directly
+                            !key.starts_with("__") && map.borrow().contains_key(&key)
                         }
                     } else {
                         false

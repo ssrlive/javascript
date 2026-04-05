@@ -711,6 +711,29 @@ impl<'gc> Compiler<'gc> {
 
     /// Pre-scan import statements to register self-import aliases before compilation.
     fn collect_self_import_aliases(&mut self, statements: &[Statement]) {
+        // Build re-export map: export_name → (source_specifier, original_name)
+        // Only for re-exports from OTHER modules (not self)
+        let mut reexport_map: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        for stmt in statements {
+            if let StatementKind::Export(specs, _, Some(source)) = &*stmt.kind {
+                if self.is_self_import(source) {
+                    continue; // Skip self-re-exports
+                }
+                for spec in specs {
+                    match spec {
+                        crate::core::statement::ExportSpecifier::Named(name, alias) => {
+                            let export_name = alias.as_deref().unwrap_or(name).to_string();
+                            reexport_map.insert(export_name, (source.clone(), name.clone()));
+                        }
+                        crate::core::statement::ExportSpecifier::Default(_) => {
+                            reexport_map.insert("default".to_string(), (source.clone(), "default".to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         for stmt in statements {
             if let StatementKind::Import(specifiers, source) = &*stmt.kind
                 && self.is_self_import(source)
@@ -719,6 +742,14 @@ impl<'gc> Compiler<'gc> {
                     match spec {
                         ImportSpecifier::Named(name, alias) => {
                             let local = alias.as_deref().unwrap_or(name).to_string();
+                            // Check if this is a re-export → redirect to loaded module
+                            if let Some((re_src, orig_name)) = reexport_map.get(name) {
+                                if let Some(resolved) = self.resolve_import_path(re_src) {
+                                    self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
+                                    self.chunk.const_import_bindings.insert(local);
+                                    continue;
+                                }
+                            }
                             // Resolve export name -> local binding via export_name_to_local
                             let target = self.export_name_to_local.get(name).cloned().unwrap_or_else(|| name.clone());
                             self.self_import_aliases.insert(local.clone(), target.clone());
@@ -726,6 +757,14 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.const_import_bindings.insert(local);
                         }
                         ImportSpecifier::Default(local) => {
+                            // Check if default is a re-export
+                            if let Some((re_src, orig_name)) = reexport_map.get("default") {
+                                if let Some(resolved) = self.resolve_import_path(re_src) {
+                                    self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
+                                    self.chunk.const_import_bindings.insert(local.clone());
+                                    continue;
+                                }
+                            }
                             self.self_import_aliases.insert(local.clone(), "*default*".to_string());
                             self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
                             self.chunk.const_import_bindings.insert(local.clone());
@@ -735,6 +774,7 @@ impl<'gc> Compiler<'gc> {
                             let entries: Vec<(String, String)> = self
                                 .module_export_names
                                 .iter()
+                                .filter(|exp_name| !reexport_map.contains_key(*exp_name))
                                 .map(|exp_name| {
                                     let local_name = self.export_name_to_local.get(exp_name).cloned().unwrap_or_else(|| {
                                         if exp_name == "default" {
@@ -747,6 +787,15 @@ impl<'gc> Compiler<'gc> {
                                 })
                                 .collect();
                             self.chunk.self_namespace_imports.push((local.clone(), entries));
+
+                            // Also record re-exported names for the namespace
+                            for (export_name, (re_src, orig_name)) in &reexport_map {
+                                if let Some(resolved) = self.resolve_import_path(re_src) {
+                                    let ns_reexport_key = format!("__ns_reexport_{}_{}", local, export_name);
+                                    self.chunk.loaded_module_vars.insert(ns_reexport_key, (resolved, orig_name.clone()));
+                                }
+                            }
+
                             // Namespace imports are immutable bindings
                             self.chunk.const_import_bindings.insert(local.clone());
                         }

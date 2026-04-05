@@ -207,6 +207,7 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> (Vec<String>
                         if !export_names.contains(&"default".to_string()) {
                             export_names.push("default".to_string());
                         }
+                        export_name_to_local.insert("default".to_string(), "*default*".to_string());
                     }
                     ES::Namespace(_) | ES::Star => {}
                 }

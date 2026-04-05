@@ -835,6 +835,11 @@ pub struct VM<'gc> {
     /// Export origin tracking: module_path -> export_name -> (origin_module_path, origin_binding_name).
     /// Used for spec-compliant ambiguous star-export detection (ResolveExport §15.2.1.16.3).
     export_origins: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
+    /// Re-export dependencies: module_key -> list of (source_module_key, specs).
+    /// Used by fixup pass to resolve circular re-exports of all types.
+    reexport_deps: std::collections::HashMap<String, Vec<(String, Vec<crate::core::ReexportSpec>)>>,
+    /// Keys removed as ambiguous per module (must not be re-added by fixup).
+    ambiguous_export_keys: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1008,6 +1013,8 @@ impl<'gc> VM<'gc> {
             module_locals: IndexMap::new(),
             loaded_modules: std::collections::HashMap::new(),
             export_origins: std::collections::HashMap::new(),
+            reexport_deps: std::collections::HashMap::new(),
+            ambiguous_export_keys: std::collections::HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -1162,9 +1169,12 @@ impl<'gc> VM<'gc> {
             // Per spec §15.2.1.16.3 ResolveExport: compare (Module, BindingName) not immediate source
             let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
             let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut all_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
             for (reexport_src, reexport_specs) in &reexport_sources {
                 let reexport_resolved = resolve_module_path(reexport_src, resolved_path);
                 let reexport_key = reexport_resolved.to_string_lossy().to_string();
+                // Record all re-export deps for circular fixup
+                all_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
                 if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
                     for spec in reexport_specs {
                         match spec {
@@ -1238,9 +1248,15 @@ impl<'gc> VM<'gc> {
                 exports.shift_remove(k);
                 origins.remove(k);
             }
+            if !ambiguous_keys.is_empty() {
+                self.ambiguous_export_keys.insert(key.clone(), ambiguous_keys);
+            }
 
             self.loaded_modules.insert(key.clone(), exports);
             self.export_origins.insert(key.clone(), origins);
+            if !all_reexport_deps.is_empty() {
+                self.reexport_deps.insert(key.clone(), all_reexport_deps);
+            }
 
             // Restore main module state
             self.chunk = saved_chunk;
@@ -1248,6 +1264,81 @@ impl<'gc> VM<'gc> {
             self.module_locals = saved_module_locals;
             self.script_path = saved_script_path;
             self.stack = saved_stack;
+        }
+    }
+
+    /// Fixup pass for circular re-exports.
+    /// After all modules are loaded, re-resolve re-exports using fully populated exports.
+    /// Iterates until stable to handle transitive circular deps.
+    pub fn fixup_circular_reexports(&mut self) {
+        if self.reexport_deps.is_empty() {
+            return;
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            #[allow(clippy::type_complexity)]
+            let deps_snapshot: Vec<(String, Vec<(String, Vec<crate::core::ReexportSpec>)>)> =
+                self.reexport_deps.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (module_key, reexport_list) in &deps_snapshot {
+                for (src_key, specs) in reexport_list {
+                    let source_exports = if let Some(e) = self.loaded_modules.get(src_key).cloned() {
+                        e
+                    } else {
+                        continue;
+                    };
+                    for spec in specs {
+                        match spec {
+                            crate::core::ReexportSpec::Named(name, alias) => {
+                                let ename = alias.as_deref().unwrap_or(name.as_str()).to_string();
+                                let has_key = self.loaded_modules.get(module_key.as_str()).is_some_and(|e| e.contains_key(&ename));
+                                if !has_key && let Some(val) = source_exports.get(name).cloned() {
+                                    let origin = self
+                                        .export_origins
+                                        .get(src_key)
+                                        .and_then(|o| o.get(name))
+                                        .cloned()
+                                        .unwrap_or_else(|| (src_key.clone(), name.clone()));
+                                    if let Some(me) = self.loaded_modules.get_mut(module_key.as_str()) {
+                                        me.insert(ename.clone(), val);
+                                    }
+                                    if let Some(mo) = self.export_origins.get_mut(module_key.as_str()) {
+                                        mo.insert(ename, origin);
+                                    }
+                                    changed = true;
+                                }
+                            }
+                            crate::core::ReexportSpec::Star => {
+                                let ambiguous = self.ambiguous_export_keys.get(module_key.as_str()).cloned().unwrap_or_default();
+                                for (k, v) in &source_exports {
+                                    if k == "default" || ambiguous.contains(k) {
+                                        continue;
+                                    }
+                                    let has_key = self.loaded_modules.get(module_key.as_str()).is_some_and(|e| e.contains_key(k));
+                                    if !has_key {
+                                        let origin = self
+                                            .export_origins
+                                            .get(src_key)
+                                            .and_then(|o| o.get(k))
+                                            .cloned()
+                                            .unwrap_or_else(|| (src_key.clone(), k.clone()));
+                                        if let Some(me) = self.loaded_modules.get_mut(module_key.as_str()) {
+                                            me.insert(k.clone(), v.clone());
+                                        }
+                                        if let Some(mo) = self.export_origins.get_mut(module_key.as_str()) {
+                                            mo.insert(k.clone(), origin);
+                                        }
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            crate::core::ReexportSpec::Namespace(_) => {
+                                // Namespace re-exports don't need circular fixup
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

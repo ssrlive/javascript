@@ -337,6 +337,8 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
             let sources = collect_module_sources(&statements, self_basename);
             if !sources.is_empty() {
                 vm.load_module_dependencies(ctx, entry_path, &sources);
+                // Fixup circular re-exports
+                vm.fixup_circular_reexports();
                 // Pass loaded module info to the main compiler
                 for (path, exports) in &vm.loaded_modules {
                     let mut info = HashMap::new();

@@ -24155,7 +24155,24 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     let pattern = args.first().map(value_to_string).unwrap_or_default();
-                    let replacement = args.get(1).map(value_to_string).unwrap_or_default();
+                    // Check if replacement is a callable function
+                    let repl = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    if self.is_callable_value(&repl) {
+                        if let Some(pos) = rust_str.find(&pattern) {
+                            let matched = Value::from(&pattern);
+                            let offset = Value::Number(pos as f64);
+                            let full_str = Value::from(&rust_str);
+                            let cb_args = vec![matched, offset, full_str];
+                            let cb_result = match self.vm_call_function_value(ctx, &repl, &Value::Undefined, &cb_args) {
+                                Ok(v) => value_to_string(&v),
+                                Err(_) => String::new(),
+                            };
+                            let result = format!("{}{}{}", &rust_str[..pos], cb_result, &rust_str[pos + pattern.len()..]);
+                            return Value::from(&result);
+                        }
+                        return Value::from(&rust_str);
+                    }
+                    let replacement = value_to_string(&repl);
                     let result = rust_str.replacen(&pattern, &replacement, 1);
                     return Value::from(&result);
                 }

@@ -1602,7 +1602,7 @@ impl<'gc> VM<'gc> {
                 if !self.module_locals.contains_key(&name_str) {
                     self.module_locals.insert(name_str, val);
                 }
-            } else if !self.global_object_has_own_property(&name_str) {
+            } else if !self.global_object_has_own_property(&name_str) && !self.globals.contains_key(&name_str) {
                 let is_var_binding = !self.chunk.is_eval_code
                     && self.chunk.declared_globals.contains(&name_str)
                     && !self.chunk.lexical_declared_globals.contains(&name_str);
@@ -4692,6 +4692,10 @@ impl<'gc> VM<'gc> {
             }
             self.stack.push(val);
         } else {
+            if self.check_receiver_namespace_tdz_set(ctx, Some(&receiver), &key)? {
+                self.stack.push(val);
+                return Ok(OpcodeAction::Continue);
+            }
             let result = self.assign_named_property(ctx, &receiver, &key, &val, None)?;
             self.stack.push(result);
         }
@@ -4745,6 +4749,10 @@ impl<'gc> VM<'gc> {
             }
             self.stack.push(val);
         } else {
+            if self.check_receiver_namespace_tdz_set(ctx, Some(&receiver), &key)? {
+                self.stack.push(val);
+                return Ok(OpcodeAction::Continue);
+            }
             let result = self.assign_named_property(ctx, &receiver, &key, &val, None)?;
             self.stack.push(result);
         }
@@ -5380,6 +5388,17 @@ impl<'gc> VM<'gc> {
         self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
         match &obj {
             Value::VmObject(map) => {
+                if coerced_key == "prototype"
+                    && map
+                        .borrow()
+                        .get("__type__")
+                        .is_some_and(|v| matches!(v, Value::String(s) if crate::unicode::utf16_to_utf8(s) == "Function"))
+                {
+                    let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
+                    self.handle_throw(ctx, &err)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
                 let ne_key = format!("__nonenumerable_{}__", coerced_key);
                 let mut borrow = map.borrow_mut(ctx);
                 // Remove any prior accessor or property flags for this key
@@ -5516,6 +5535,16 @@ impl<'gc> VM<'gc> {
         let getter_key = format!("__get_{}", coerced_key);
         let nonconfigurable_key = format!("__nonconfigurable_{}__", coerced_key);
         if let Value::VmObject(map) = &obj {
+            if coerced_key == "prototype"
+                && map
+                    .borrow()
+                    .get("__type__")
+                    .is_some_and(|v| matches!(v, Value::String(s) if crate::unicode::utf16_to_utf8(s) == "Function"))
+            {
+                let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
             let has_nonconf = map.borrow().contains_key(&nonconfigurable_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
@@ -5538,6 +5567,11 @@ impl<'gc> VM<'gc> {
             // Class computed getters are non-enumerable
             borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
+            if coerced_key == "prototype" {
+                let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
             let props = self.get_fn_props(ctx, *ip, *arity);
             let has_nonconf = props.borrow().contains_key(&nonconfigurable_key);
             if has_nonconf {
@@ -5581,6 +5615,16 @@ impl<'gc> VM<'gc> {
         let setter_key = format!("__set_{}", coerced_key);
         let nonconfigurable_key = format!("__nonconfigurable_{}__", coerced_key);
         if let Value::VmObject(map) = &obj {
+            if coerced_key == "prototype"
+                && map
+                    .borrow()
+                    .get("__type__")
+                    .is_some_and(|v| matches!(v, Value::String(s) if crate::unicode::utf16_to_utf8(s) == "Function"))
+            {
+                let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
             let has_nonconf = map.borrow().contains_key(&nonconfigurable_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
@@ -5602,6 +5646,11 @@ impl<'gc> VM<'gc> {
             borrow.insert(setter_key, val.clone());
             borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
+            if coerced_key == "prototype" {
+                let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
             let props = self.get_fn_props(ctx, *ip, *arity);
             let has_nonconf = props.borrow().contains_key(&nonconfigurable_key);
             if has_nonconf {

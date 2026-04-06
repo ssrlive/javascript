@@ -23,6 +23,7 @@ pub struct Compiler<'gc> {
     pending_label: Option<String>,                        // label to attach to the next loop
     forin_counter: u32,                                   // unique ID for for-in synthetic variables
     current_class_parent: Option<String>,                 // parent class name for super resolution
+    current_class_bindings: Vec<(String, bool)>,          // active class binding name + whether class is an expression
     current_class_instance_fields: Vec<Vec<ClassMember>>, // instance fields to init after super()
     current_class_expr_refs: Vec<String>,                 // temp bindings for class expressions
     current_class_expr_names: Vec<String>,                // names of in-flight class expressions (for Var resolution)
@@ -63,6 +64,9 @@ pub struct Compiler<'gc> {
     hoisting_fn_decl: bool,
     // Function-body lexical bindings predeclared for hoisted function capture.
     hoisted_function_lexicals: std::collections::HashSet<String>,
+    // Nested block depth while compiling statements. Used to distinguish
+    // function-body declarations from inner block declarations.
+    block_stmt_depth: u32,
     // Brand info for classes with private members: stack of Option<(brand_local_name, class_id)>
     current_class_brand_info: Vec<Option<(String, usize)>>,
     /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
@@ -454,6 +458,10 @@ impl<'gc> Compiler<'gc> {
     }
 
     fn emit_hoisted_var_slots(&mut self, body: &[Statement]) {
+        self.emit_hoisted_var_slots_with_shadow(body, None);
+    }
+
+    fn emit_hoisted_var_slots_with_shadow(&mut self, body: &[Statement], shadow_name: Option<&str>) {
         let mut hoisted = Vec::new();
         for stmt in body {
             Self::collect_function_var_names_from_statement(stmt, &mut hoisted);
@@ -461,7 +469,10 @@ impl<'gc> Compiler<'gc> {
 
         for name in hoisted {
             if self.locals.iter().any(|existing| existing == &name) {
-                continue;
+                let allow_named_shadow = shadow_name.is_some_and(|n| n == name) && self.const_locals.contains(name.as_str());
+                if !allow_named_shadow {
+                    continue;
+                }
             }
             let undef_idx = self.chunk.add_constant(Value::Undefined);
             self.chunk.write_opcode(Opcode::Constant);
@@ -1027,6 +1038,7 @@ impl<'gc> Compiler<'gc> {
 
                     if self.scope_depth > 0 {
                         if self.scope_depth == 1
+                            && self.block_stmt_depth == 0
                             && self.hoisted_function_lexicals.contains(name)
                             && let Some(pos) = self.locals.iter().position(|l| l == name)
                         {
@@ -1105,6 +1117,7 @@ impl<'gc> Compiler<'gc> {
                     }
                     if self.scope_depth > 0 {
                         if self.scope_depth == 1
+                            && self.block_stmt_depth == 0
                             && self.hoisted_function_lexicals.contains(name)
                             && let Some(pos) = self.locals.iter().position(|l| l == name)
                         {
@@ -1156,6 +1169,7 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::Block(statements) => {
                 let saved_locals = self.locals.len();
+                self.block_stmt_depth = self.block_stmt_depth.saturating_add(1);
                 // Collect block-scoped declarations for alias-based scoping at top level.
                 // let/const are always block-scoped (ES6+), function declarations only in strict mode.
                 let mut block_fn_names: Vec<String> = Vec::new();
@@ -1263,6 +1277,7 @@ impl<'gc> Compiler<'gc> {
                 if pushed_block_aliases {
                     self.top_level_block_aliases.pop();
                 }
+                self.block_stmt_depth = self.block_stmt_depth.saturating_sub(1);
             }
             StatementKind::If(if_stmt) => {
                 self.compile_expr(&if_stmt.condition)?;
@@ -3606,16 +3621,18 @@ impl<'gc> Compiler<'gc> {
             }
             Expr::SuperCall(args) => {
                 // super(args) → call parent constructor with current this
-                if let Some(pname) = self.current_class_parent.clone() {
+                if let Some((class_name, class_is_expr)) = self.current_class_bindings.last().cloned() {
                     // Spec §12.3.7.1 SuperCall:
                     //   1. GetThisBinding (bypass TDZ — super() initializes this)
-                    //   2. GetSuperConstructor
+                    //   2. GetSuperConstructor (current class constructor's [[Prototype]])
                     //   3. ArgumentListEvaluation
                     //   4. IsConstructor check → TypeError if false
                     //   5. Construct
                     self.chunk.write_opcode(Opcode::GetThisSuper);
-                    let parent_expr = Expr::Var(pname.clone(), None, None);
-                    self.compile_expr(&parent_expr)?;
+                    self.emit_get_class_ref(&class_name, class_is_expr)?;
+                    let proto_key = self.chunk.add_constant(Value::from("__proto__"));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(proto_key);
                     // Check for spread arguments
                     let has_spread = args.iter().any(|a| matches!(a, Expr::Spread(_)));
                     if has_spread {
@@ -7156,6 +7173,11 @@ impl<'gc> Compiler<'gc> {
             self.locals.push(name.to_string());
             self.const_locals.insert(name.to_string());
         }
+        let named_self_shadow = if is_expression {
+            function_name.filter(|name| !name.is_empty())
+        } else {
+            None
+        };
 
         // Count non-rest params and check for rest
         let param_local_offset = self.locals.len() as u8;
@@ -7182,12 +7204,12 @@ impl<'gc> Compiler<'gc> {
         }
 
         if !Self::has_parameter_expressions(params) {
-            self.emit_hoisted_var_slots(body);
+            self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_parameter_default_initializers(params, param_local_offset)?;
         self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
-            self.emit_hoisted_var_slots(body);
+            self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_hoisted_function_lexical_slots(body);
 
@@ -7527,6 +7549,11 @@ impl<'gc> Compiler<'gc> {
             self.locals.push(name.to_string());
             self.const_locals.insert(name.to_string());
         }
+        let named_self_shadow = if is_expression {
+            function_name.filter(|name| !name.is_empty())
+        } else {
+            None
+        };
 
         let param_local_offset = self.locals.len() as u8;
         let mut non_rest_count = 0u8;
@@ -7551,12 +7578,12 @@ impl<'gc> Compiler<'gc> {
         }
 
         if !Self::has_parameter_expressions(params) {
-            self.emit_hoisted_var_slots(body);
+            self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_parameter_default_initializers(params, param_local_offset)?;
         self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
-            self.emit_hoisted_var_slots(body);
+            self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.chunk.write_opcode(Opcode::GeneratorParamInitDone);
 
@@ -7677,6 +7704,11 @@ impl<'gc> Compiler<'gc> {
             self.locals.push(name.to_string());
             self.const_locals.insert(name.to_string());
         }
+        let named_self_shadow = if is_expression {
+            function_name.filter(|name| !name.is_empty())
+        } else {
+            None
+        };
 
         let param_local_offset = self.locals.len() as u8;
         let mut non_rest_count = 0u8;
@@ -7701,12 +7733,12 @@ impl<'gc> Compiler<'gc> {
         }
 
         if !Self::has_parameter_expressions(params) {
-            self.emit_hoisted_var_slots(body);
+            self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_parameter_default_initializers(params, param_local_offset)?;
         self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
-            self.emit_hoisted_var_slots(body);
+            self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.chunk.write_opcode(Opcode::GeneratorParamInitDone);
 
@@ -7781,7 +7813,7 @@ impl<'gc> Compiler<'gc> {
     fn emit_define_var(&mut self, name: &str) {
         if self.scope_depth > 0 {
             // Check if already exists (var re-declaration)
-            if let Some(pos) = self.locals.iter().position(|l| l == name) {
+            if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                 self.chunk.write_opcode(Opcode::SetLocal);
                 self.chunk.write_byte(pos as u8);
                 self.chunk.write_opcode(Opcode::Pop);
@@ -8382,6 +8414,7 @@ impl<'gc> Compiler<'gc> {
         // Save/set class parent context for super resolution
         let prev_parent = self.current_class_parent.take();
         self.current_class_parent = parent_name.clone();
+        self.current_class_bindings.push((name.clone(), is_expr));
 
         // Assign a compile-time unique ID for this class and collect its private names
         let class_id = self.class_privns_counter;
@@ -9357,6 +9390,7 @@ impl<'gc> Compiler<'gc> {
         // Restore previous class context
         self.class_privns_stack.pop();
         self.current_class_brand_info.pop();
+        self.current_class_bindings.pop();
         self.current_class_parent = prev_parent;
         Ok(())
     }

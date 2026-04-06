@@ -1885,6 +1885,16 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
                 self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
 
+                // If this try has a finally block, gen.return() uses Throw to
+                // propagate through try handlers. Skip the catch body (only run
+                // finally) when generator_return_pending is set.
+                let skip_catch_for_return = if has_finally {
+                    self.chunk.write_opcode(Opcode::CheckGeneratorReturn);
+                    Some(self.emit_jump(Opcode::JumpIfTrue))
+                } else {
+                    None
+                };
+
                 // Catch body (block-scoped)
                 let saved_catch = self.locals.len();
                 // handle_throw stores the caught value in globals under the catch
@@ -1917,6 +1927,11 @@ impl<'gc> Compiler<'gc> {
                 self.end_block_scope(saved_catch);
 
                 self.patch_jump(jump_over_catch);
+
+                // Patch the gen.return() skip-catch jump to land here (finally start)
+                if let Some(jp) = skip_catch_for_return {
+                    self.patch_jump(jp);
+                }
 
                 // Patch break-through-finally jumps to here (the finally body start)
                 let finally_context = if has_finally {
@@ -4346,6 +4361,11 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
                         self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
 
+                        // Check if this is a return completion (gen.return() called)
+                        self.chunk.write_opcode(Opcode::CheckGeneratorReturn);
+                        let return_delegation_jump = self.emit_jump(Opcode::JumpIfTrue);
+
+                        // === Throw delegation path ===
                         // Check if iter.throw exists
                         self.emit_helper_get(&ys_iter);
                         let throw_key = crate::unicode::utf8_to_utf16("throw");
@@ -4372,7 +4392,6 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::AssertIterResult);
 
                         // Store in ys_result and jump to result_check
-                        // (result_check does done check, then SetupTry + YieldDirect)
                         self.emit_helper_set(&ys_result);
                         self.chunk.write_opcode(Opcode::Pop);
 
@@ -4407,6 +4426,68 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(te_msg_idx);
                         self.chunk.write_opcode(Opcode::ThrowTypeError);
+
+                        // === Return delegation path (spec §14.4.7 step 5.c) ===
+                        self.patch_jump(return_delegation_jump);
+
+                        // c.ii: let return = GetMethod(iterator, "return")
+                        self.emit_helper_get(&ys_iter);
+                        let ret_key_rd = crate::unicode::utf8_to_utf16("return");
+                        let ret_idx_rd = self.chunk.add_constant(Value::String(ret_key_rd));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(ret_idx_rd);
+                        let undef_rd = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_rd);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let has_return_method = self.emit_jump(Opcode::JumpIfTrue);
+
+                        // c.iv: innerReturnResult = Call(return, iterator, « received.[[Value]] »)
+                        self.emit_helper_get(&ys_iter);
+                        let ret_key_rd2 = crate::unicode::utf8_to_utf16("return");
+                        let ret_idx_rd2 = self.chunk.add_constant(Value::String(ret_key_rd2));
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(ret_idx_rd2);
+                        self.emit_helper_get(&ys_thrown);
+                        self.emit_call_opcode(1, 0x80);
+
+                        // c.v: If Type(innerReturnResult) is not Object, throw TypeError
+                        self.chunk.write_opcode(Opcode::AssertIterResult);
+
+                        // c.vi: let done = IteratorComplete(innerReturnResult)
+                        self.chunk.write_opcode(Opcode::Dup);
+                        let done_key_rd = crate::unicode::utf8_to_utf16("done");
+                        let done_idx_rd = self.chunk.add_constant(Value::String(done_key_rd));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(done_idx_rd);
+                        let return_done_jump = self.emit_jump(Opcode::JumpIfTrue);
+
+                        // c.viii: not done — received = GeneratorYield(innerReturnResult)
+                        // Store result in ys_result and jump to result_check for yield
+                        self.emit_helper_set(&ys_result);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.chunk.write_opcode(Opcode::Jump);
+                        let target_rc = result_check as u16;
+                        self.chunk.write_u16(target_rc);
+
+                        // c.vii: done is true — return Completion{return, value}
+                        self.patch_jump(return_done_jump);
+                        let value_key_rd = crate::unicode::utf8_to_utf16("value");
+                        let value_idx_rd = self.chunk.add_constant(Value::String(value_key_rd));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(value_idx_rd);
+                        // Update generator_return_pending with inner return value, then
+                        // throw to propagate through outer try/finally handlers.
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::SetGeneratorReturn);
+                        self.chunk.write_opcode(Opcode::Throw);
+
+                        // c.iii: return is undefined — return Completion(received)
+                        // generator_return_pending already has the correct value from gen.return()
+                        self.patch_jump(has_return_method);
+                        self.emit_helper_get(&ys_thrown);
+                        self.chunk.write_opcode(Opcode::Throw);
 
                         // Done: ys_result is on stack (from the Dup before done check)
                         // Get .value from it

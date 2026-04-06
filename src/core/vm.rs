@@ -30562,18 +30562,21 @@ impl<'gc> VM<'gc> {
         // Pop the generator's this binding
         self.this_stack.truncate(saved_this_stack_len);
 
-        // Check result
-        let gen_result = if let Some(return_val) = self.generator_return_pending.take() {
-            // Generator return completion (mode 2 with cleanup).
-            // The pending_throw propagated through try handlers for cleanup
-            // (IteratorClose, finally blocks). Now complete the return.
-            self.generator_objects.remove(&gen_id);
-            self.generator_yield_value.take(); // discard any spurious yield
-            self.make_gen_result(ctx, &return_val, true)
-        } else if let Some(yielded) = self.generator_yield_value.take() {
+        // Check result — yield takes precedence over pending return so that
+        // yield* delegation can re-yield when the inner iterator's .return()
+        // reports done=false.
+        let gen_result = if let Some(yielded) = self.generator_yield_value.take() {
             // Generator yielded a value. Save state for next resumption.
             let is_direct = self.generator_yield_direct;
             self.generator_yield_direct = false;
+
+            if is_direct {
+                // YieldDirect (yield* delegation): the delegation is handling
+                // the return, so clear generator_return_pending — the outer
+                // generator is not done yet.
+                self.generator_return_pending = None;
+            }
+
             let frame = self.frames.pop().unwrap();
             let locals: Vec<Value<'gc>> = self.stack[frame.bp..].to_vec();
             let gen_try_stack = std::mem::take(&mut self.try_stack);
@@ -30599,6 +30602,12 @@ impl<'gc> VM<'gc> {
             } else {
                 self.make_gen_result(ctx, &yielded, false)
             }
+        } else if let Some(return_val) = self.generator_return_pending.take() {
+            // Generator return completion (mode 2 with cleanup).
+            // The pending_throw propagated through try handlers for cleanup
+            // (IteratorClose, finally blocks). Now complete the return.
+            self.generator_objects.remove(&gen_id);
+            self.make_gen_result(ctx, &return_val, true)
         } else {
             self.generator_objects.remove(&gen_id);
             match &result {

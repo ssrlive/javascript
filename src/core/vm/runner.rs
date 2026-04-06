@@ -54,6 +54,8 @@ impl<'gc> VM<'gc> {
                 Opcode::Return => self.run_opcode_return(ctx, min_depth)?,
                 Opcode::Yield => self.run_opcode_yield(ctx)?,
                 Opcode::YieldDirect => self.run_opcode_yield_direct(ctx)?,
+                Opcode::CheckGeneratorReturn => self.run_opcode_check_generator_return()?,
+                Opcode::SetGeneratorReturn => self.run_opcode_set_generator_return()?,
                 Opcode::GeneratorParamInitDone => self.run_opcode_generator_param_init_done(ctx)?,
                 Opcode::Await => self.run_opcode_await(ctx)?,
                 Opcode::GetLocal => self.run_opcode_get_local(ctx)?,
@@ -233,6 +235,21 @@ impl<'gc> VM<'gc> {
         self.generator_yield_value = Some(yielded);
         self.generator_yield_direct = true;
         Ok(OpcodeAction::Exit(Value::Undefined))
+    }
+
+    // Opcode::CheckGeneratorReturn — push true if generator_return_pending is set, else push false.
+    // Does NOT clear the flag — it stays set so resume_generator returns the value.
+    fn run_opcode_check_generator_return(&mut self) -> Result<OpcodeAction<'gc>, JSError> {
+        let is_return = self.generator_return_pending.is_some();
+        self.stack.push(Value::Boolean(is_return));
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::SetGeneratorReturn — pop value and update generator_return_pending.
+    fn run_opcode_set_generator_return(&mut self) -> Result<OpcodeAction<'gc>, JSError> {
+        let val = self.stack.pop().unwrap_or(Value::Undefined);
+        self.generator_return_pending = Some(val);
+        Ok(OpcodeAction::Continue)
     }
 
     // Opcode::GeneratorParamInitDone

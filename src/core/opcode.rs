@@ -109,6 +109,8 @@ pub enum Opcode {
     InitNamedFnSelf = 103,         // push the callee (named fn expression's own function) from pending stack
     FreezeTemplate = 104,          // freeze template object and its .raw property (tagged templates)
     YieldDirect = 105,             // like Yield but the yielded value is returned directly without make_gen_result wrapping
+    CheckGeneratorReturn = 106,    // push true if generator_return_pending is set, else push false
+    SetGeneratorReturn = 107,      // pop value and set generator_return_pending = Some(value)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -222,6 +224,8 @@ impl TryFrom<u8> for Opcode {
             103 => Opcode::InitNamedFnSelf,
             104 => Opcode::FreezeTemplate,
             105 => Opcode::YieldDirect,
+            106 => Opcode::CheckGeneratorReturn,
+            107 => Opcode::SetGeneratorReturn,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -490,7 +494,7 @@ impl<'gc> Chunk<'gc> {
                 | 79..=95
                 | 97..=100
                 | 102..=103
-                | 105 => {}
+                | 105..=107 => {}
 
                 // u8 operand, no adjustment needed
                 16 | 17 | 69 | 70 | 50 | 96 => {

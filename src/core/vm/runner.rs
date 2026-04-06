@@ -6876,33 +6876,24 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
 
-        let rhs_proto = match &rhs {
-            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let fn_props = self
-                    .get_fn_props_for_value(ctx, &rhs)
-                    .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
-                fn_props.borrow().get("prototype").cloned()
-            }
-            Value::VmObject(map) => map.borrow().get("prototype").cloned(),
-            Value::VmNativeFunction(id) => {
-                let fn_props = self.get_native_fn_props(ctx, *id);
-                fn_props.borrow().get("prototype").cloned()
-            }
-            _ => None,
-        };
-
-        // Per spec §7.3.21 OrdinaryHasInstance step 5: if rhs.prototype is not an object, throw TypeError
-        if let Some(ref target_proto) = rhs_proto {
-            let proto_is_object = matches!(
-                target_proto,
-                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-            );
-            if !proto_is_object {
-                let err = self.make_type_error_object(ctx, "Function has non-object prototype in instanceof check");
-                self.handle_throw(ctx, &err)?;
-                return Ok(OpcodeAction::Continue);
-            }
+        // Per spec §7.3.21 step 4: Let P be ? Get(C, "prototype").
+        // Use read_named_property to invoke getters.
+        let rhs_proto_val = self.read_named_property(ctx, &rhs, "prototype");
+        if self.pending_throw.is_some() {
+            return Ok(OpcodeAction::Continue);
         }
+
+        // Per spec §7.3.21 step 5: if Type(P) is not Object, throw TypeError
+        let proto_is_object = matches!(
+            rhs_proto_val,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        );
+        if !proto_is_object {
+            let err = self.make_type_error_object(ctx, "Function has non-object prototype in instanceof check");
+            self.handle_throw(ctx, &err)?;
+            return Ok(OpcodeAction::Continue);
+        }
+        let rhs_proto = Some(rhs_proto_val);
 
         if let Some(target_proto) = &rhs_proto {
             // Walk __proto__ chain of lhs looking for target_proto

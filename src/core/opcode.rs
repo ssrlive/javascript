@@ -337,6 +337,13 @@ impl<'gc> Chunk<'gc> {
         self.code.push(((value >> 8) & 0xff) as u8);
     }
 
+    pub fn write_u32(&mut self, value: u32) {
+        self.code.push((value & 0xff) as u8);
+        self.code.push(((value >> 8) & 0xff) as u8);
+        self.code.push(((value >> 16) & 0xff) as u8);
+        self.code.push(((value >> 24) & 0xff) as u8);
+    }
+
     pub fn add_constant(&mut self, value: Value<'gc>) -> u16 {
         self.constants.push(value);
         (self.constants.len() - 1) as u16
@@ -467,7 +474,7 @@ impl<'gc> Chunk<'gc> {
     ///   DefineGlobalConst, DefineGlobalSoft, GetGlobal, SetGlobal, GetProperty,
     ///   SetProperty, GetMethod, DeleteProperty, TypeOfGlobal, DeleteGlobal,
     ///   GetSuperProperty, SetSuperProperty, InitProperty
-    /// - Jump target (u16, needs ip_offset): Jump, JumpIfFalse, JumpIfTrue
+    /// - Jump target (u32, needs ip_offset): Jump, JumpIfFalse, JumpIfTrue
     /// - SetupTry: u16 jump + u16 const
     /// - MakeClosure: u16 const + u8 count + count×2 bytes
     /// - Call: u8 flags, conditionally +u16 (arg count, no adjustment)
@@ -528,10 +535,10 @@ impl<'gc> Chunk<'gc> {
                     i += 2;
                 }
 
-                // u16 jump target — add ip_offset
+                // u32 jump target — add ip_offset
                 10 | 11 | 26 => {
-                    Self::adjust_u16_at(code, i, ip_offset);
-                    i += 2;
+                    Self::adjust_u32_at(code, i, ip_offset);
+                    i += 4;
                 }
 
                 // SetupTry (36): u16 catch_ip (jump) + u16 binding_idx (const)
@@ -568,5 +575,24 @@ impl<'gc> Chunk<'gc> {
         let new_val = val + offset as u16;
         code[pos] = (new_val & 0xff) as u8;
         code[pos + 1] = ((new_val >> 8) & 0xff) as u8;
+    }
+
+    /// Read a little-endian u32 at position `pos`, add `offset`, write back.
+    fn adjust_u32_at(code: &mut [u8], pos: usize, offset: usize) {
+        if offset == 0 || pos + 3 >= code.len() {
+            return;
+        }
+        let b0 = code[pos] as u32;
+        let b1 = code[pos + 1] as u32;
+        let b2 = code[pos + 2] as u32;
+        let b3 = code[pos + 3] as u32;
+        let val = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+        let new_val = val
+            .checked_add(offset as u32)
+            .expect("jump target overflow while adjusting merged bytecode");
+        code[pos] = (new_val & 0xff) as u8;
+        code[pos + 1] = ((new_val >> 8) & 0xff) as u8;
+        code[pos + 2] = ((new_val >> 16) & 0xff) as u8;
+        code[pos + 3] = ((new_val >> 24) & 0xff) as u8;
     }
 }

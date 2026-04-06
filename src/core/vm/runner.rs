@@ -1948,7 +1948,7 @@ impl<'gc> VM<'gc> {
     // Opcode::Jump
     fn run_opcode_jump(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
-        let offset = self.read_u16();
+        let offset = self.read_u32();
         self.ip = offset as usize;
         Ok(OpcodeAction::Continue)
     }
@@ -1956,7 +1956,7 @@ impl<'gc> VM<'gc> {
     // Opcode::JumpIfFalse
     fn run_opcode_jump_if_false(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
-        let offset = self.read_u16();
+        let offset = self.read_u32();
         let val = self.stack.pop().unwrap_or(Value::Undefined);
         if !val.to_truthy() {
             self.ip = offset as usize;
@@ -3588,7 +3588,7 @@ impl<'gc> VM<'gc> {
     // Opcode::JumpIfTrue
     fn run_opcode_jump_if_true(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
-        let offset = self.read_u16();
+        let offset = self.read_u32();
         let val = self.stack.pop().unwrap_or(Value::Undefined);
         if val.to_truthy() {
             self.ip = offset as usize;

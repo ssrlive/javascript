@@ -12473,14 +12473,16 @@ impl<'gc> VM<'gc> {
                         pc += 2;
                     }
                 }
-                // Opcodes with u16 absolute jump target
+                // Opcodes with u32 absolute jump target
                 Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => {
-                    if pc + 1 < ec.len() {
-                        let target = ec[pc] as u16 | ((ec[pc + 1] as u16) << 8);
-                        let new_target = target + code_offset as u16;
+                    if pc + 3 < ec.len() {
+                        let target = ec[pc] as u32 | ((ec[pc + 1] as u32) << 8) | ((ec[pc + 2] as u32) << 16) | ((ec[pc + 3] as u32) << 24);
+                        let new_target = target + code_offset as u32;
                         self.chunk.code.push((new_target & 0xff) as u8);
                         self.chunk.code.push(((new_target >> 8) & 0xff) as u8);
-                        pc += 2;
+                        self.chunk.code.push(((new_target >> 16) & 0xff) as u8);
+                        self.chunk.code.push(((new_target >> 24) & 0xff) as u8);
+                        pc += 4;
                     }
                 }
                 Ok(Opcode::SetupTry) => {
@@ -17401,7 +17403,7 @@ impl<'gc> VM<'gc> {
                                         | Opcode::DeleteGlobal
                                         | Opcode::FreezeTemplate,
                                     ) => pc += 2,
-                                    Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => pc += 2,
+                                    Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => pc += 4,
                                     Ok(Opcode::SetupTry) => pc += 4,
                                     Ok(Opcode::Call) => {
                                         if pc < code.len() {
@@ -30352,6 +30354,15 @@ impl<'gc> VM<'gc> {
         let lo = self.read_byte() as u16;
         let hi = self.read_byte() as u16;
         (hi << 8) | lo
+    }
+
+    /// Read a u32 from the bytecode array (little endian) and advance the IP
+    fn read_u32(&mut self) -> u32 {
+        let b0 = self.read_byte() as u32;
+        let b1 = self.read_byte() as u32;
+        let b2 = self.read_byte() as u32;
+        let b3 = self.read_byte() as u32;
+        (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
     }
 
     /// Evaluate a REPL snippet against the current VM global state.

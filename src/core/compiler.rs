@@ -61,6 +61,8 @@ pub struct Compiler<'gc> {
     eval_context_flags: u8,
     // True when compiling hoisted function declarations at the top of a function body
     hoisting_fn_decl: bool,
+    // Function-body lexical bindings predeclared for hoisted function capture.
+    hoisted_function_lexicals: std::collections::HashSet<String>,
     // Brand info for classes with private members: stack of Option<(brand_local_name, class_id)>
     current_class_brand_info: Vec<Option<(String, usize)>>,
     /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
@@ -284,9 +286,9 @@ impl<'gc> Compiler<'gc> {
 
     fn emit_jump(&mut self, opcode: Opcode) -> usize {
         self.chunk.write_opcode(opcode);
-        // Write placeholder u16
-        self.chunk.write_u16(0xffff);
-        self.chunk.code.len() - 2 // Return the offset to the placeholder
+        // Write placeholder u32
+        self.chunk.write_u32(0xffff_ffff);
+        self.chunk.code.len() - 4 // Return the offset to the placeholder
     }
 
     fn patch_jump(&mut self, offset: usize) {
@@ -295,19 +297,22 @@ impl<'gc> Compiler<'gc> {
     }
 
     fn patch_jump_to(&mut self, offset: usize, target: usize) {
-        if target > u16::MAX as usize {
+        if target > u32::MAX as usize {
             panic!("Jump target too large");
         }
+        let target = target as u32;
         self.chunk.code[offset] = (target & 0xff) as u8;
         self.chunk.code[offset + 1] = ((target >> 8) & 0xff) as u8;
+        self.chunk.code[offset + 2] = ((target >> 16) & 0xff) as u8;
+        self.chunk.code[offset + 3] = ((target >> 24) & 0xff) as u8;
     }
 
     fn emit_loop(&mut self, loop_start: usize) {
         self.chunk.write_opcode(Opcode::Jump);
-        if loop_start > u16::MAX as usize {
+        if loop_start > u32::MAX as usize {
             panic!("Loop start too large");
         }
-        self.chunk.write_u16(loop_start as u16);
+        self.chunk.write_u32(loop_start as u32);
     }
 
     fn write_call_operand(&mut self, arg_count: usize, flags: u8) {
@@ -516,6 +521,7 @@ impl<'gc> Compiler<'gc> {
             let uninit_idx = self.chunk.add_constant(Value::Uninitialized);
             self.chunk.write_opcode(Opcode::Constant);
             self.chunk.write_u16(uninit_idx);
+            self.hoisted_function_lexicals.insert(name.clone());
             self.locals.push(name);
         }
     }
@@ -1021,6 +1027,7 @@ impl<'gc> Compiler<'gc> {
 
                     if self.scope_depth > 0 {
                         if self.scope_depth == 1
+                            && self.hoisted_function_lexicals.contains(name)
                             && let Some(pos) = self.locals.iter().position(|l| l == name)
                         {
                             self.chunk.write_opcode(Opcode::SetLocal);
@@ -1098,6 +1105,7 @@ impl<'gc> Compiler<'gc> {
                     }
                     if self.scope_depth > 0 {
                         if self.scope_depth == 1
+                            && self.hoisted_function_lexicals.contains(name)
                             && let Some(pos) = self.locals.iter().position(|l| l == name)
                         {
                             self.chunk.write_opcode(Opcode::SetLocal);
@@ -1300,8 +1308,7 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(cond)?;
                 let continue_jump = self.emit_jump(Opcode::JumpIfTrue);
                 // Patch: JumpIfTrue target is loop_start
-                self.chunk.code[continue_jump] = (loop_start & 0xff) as u8;
-                self.chunk.code[continue_jump + 1] = ((loop_start >> 8) & 0xff) as u8;
+                self.patch_jump_to(continue_jump, loop_start);
 
                 let ctx = self.loop_stack.pop().unwrap();
                 for bp in ctx.break_patches {
@@ -2169,6 +2176,7 @@ impl<'gc> Compiler<'gc> {
                 let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
                 let old_upvalues = std::mem::take(&mut self.upvalues);
                 let old_const_locals = std::mem::take(&mut self.const_locals);
+                let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
                 let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
@@ -2265,6 +2273,7 @@ impl<'gc> Compiler<'gc> {
                 self.parent_upvalues = old_parent_upvalues;
                 self.upvalues = old_upvalues;
                 self.const_locals = old_const_locals;
+                self.hoisted_function_lexicals = old_hoisted_function_lexicals;
                 self.parent_const_locals = old_parent_const_locals;
                 self.function_depth = old_function_depth;
 
@@ -4186,6 +4195,7 @@ impl<'gc> Compiler<'gc> {
                 let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
                 let old_upvalues = std::mem::take(&mut self.upvalues);
                 let old_const_locals = std::mem::take(&mut self.const_locals);
+                let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
                 let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
@@ -4325,6 +4335,7 @@ impl<'gc> Compiler<'gc> {
                 self.parent_upvalues = old_parent_upvalues;
                 self.upvalues = old_upvalues;
                 self.const_locals = old_const_locals;
+                self.hoisted_function_lexicals = old_hoisted_function_lexicals;
                 self.parent_const_locals = old_parent_const_locals;
                 self.function_depth = old_function_depth;
 
@@ -4598,8 +4609,10 @@ impl<'gc> Compiler<'gc> {
 
                         // Jump to result_check (which has SetupTry wrapping)
                         self.chunk.write_opcode(Opcode::Jump);
-                        let target = result_check as u16;
-                        self.chunk.write_u16(target);
+                        if result_check > u32::MAX as usize {
+                            panic!("Jump target too large");
+                        }
+                        self.chunk.write_u32(result_check as u32);
 
                         // No .throw method: close iterator then throw TypeError
                         self.patch_jump(no_throw_method);
@@ -4669,8 +4682,10 @@ impl<'gc> Compiler<'gc> {
                         self.emit_helper_set(&ys_result);
                         self.chunk.write_opcode(Opcode::Pop);
                         self.chunk.write_opcode(Opcode::Jump);
-                        let target_rc = result_check as u16;
-                        self.chunk.write_u16(target_rc);
+                        if result_check > u32::MAX as usize {
+                            panic!("Jump target too large");
+                        }
+                        self.chunk.write_u32(result_check as u32);
 
                         // c.vii: done is true — return Completion{return, value}
                         self.patch_jump(return_done_jump);
@@ -6062,15 +6077,15 @@ impl<'gc> Compiler<'gc> {
         match expr {
             // Anonymous function expression or arrow: the func body starts after the jump instruction
             Expr::Function(name, ..) if name.is_none() || name.as_deref() == Some("") => {
-                // Jump opcode (1) + u16 operand (2) = 3 bytes before func body
-                Some(self.chunk.code.len() + 3)
+                // Jump opcode (1) + u32 operand (4) = 5 bytes before func body
+                Some(self.chunk.code.len() + 5)
             }
-            Expr::GeneratorFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 3),
-            Expr::AsyncFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 3),
-            Expr::AsyncGeneratorFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 3),
+            Expr::GeneratorFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 5),
+            Expr::AsyncFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 5),
+            Expr::AsyncGeneratorFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 5),
             Expr::Getter(inner) | Expr::Setter(inner) => self.peek_func_ip(inner),
-            Expr::Class(class_def) if class_def.name.is_empty() => Some(self.chunk.code.len() + 3),
-            Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..) => Some(self.chunk.code.len() + 3),
+            Expr::Class(class_def) if class_def.name.is_empty() => Some(self.chunk.code.len() + 5),
+            Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..) => Some(self.chunk.code.len() + 5),
             _ => None,
         }
     }
@@ -7110,6 +7125,7 @@ impl<'gc> Compiler<'gc> {
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
+        let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -7224,6 +7240,7 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
+        self.hoisted_function_lexicals = old_hoisted_function_lexicals;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
 
@@ -7482,6 +7499,7 @@ impl<'gc> Compiler<'gc> {
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
+        let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -7590,6 +7608,7 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
+        self.hoisted_function_lexicals = old_hoisted_function_lexicals;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
         self.current_strict = old_ctx;
@@ -7630,6 +7649,7 @@ impl<'gc> Compiler<'gc> {
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
+        let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -7737,6 +7757,7 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
+        self.hoisted_function_lexicals = old_hoisted_function_lexicals;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
         self.current_strict = old_ctx;
@@ -8641,6 +8662,7 @@ impl<'gc> Compiler<'gc> {
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
+        let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -8731,6 +8753,7 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
+        self.hoisted_function_lexicals = old_hoisted_function_lexicals;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
 

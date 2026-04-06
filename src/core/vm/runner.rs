@@ -1728,12 +1728,25 @@ impl<'gc> VM<'gc> {
                         .push(Value::VmClosure(frame.func_ip, arity, Gc::new(ctx, frame.upvalues.clone())));
                 }
             } else {
-                // unresolvable reference
-                let mut err_map = IndexMap::new();
-                err_map.insert("message".to_string(), Value::from(&format!("{} is not defined", name_str)));
-                err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
-                let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
-                self.handle_throw(ctx, &err)?;
+                // Fall through to globalThis for properties defined via Object.defineProperty
+                let has_prop = {
+                    let gt = self.global_this.borrow();
+                    gt.contains_key(&name_str)
+                        || gt.contains_key(&format!("__get_{}__", name_str))
+                        || gt.contains_key(&format!("__get_{}", name_str))
+                };
+                if has_prop {
+                    let global_obj = Value::VmObject(self.global_this);
+                    let val = self.read_named_property(ctx, &global_obj, &name_str);
+                    self.stack.push(val);
+                } else {
+                    // unresolvable reference
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("message".to_string(), Value::from(&format!("{} is not defined", name_str)));
+                    err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
+                    let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
+                    self.handle_throw(ctx, &err)?;
+                }
             }
         }
         Ok(OpcodeAction::Continue)
@@ -3478,7 +3491,18 @@ impl<'gc> VM<'gc> {
             }
             val.typeof_value()
         } else {
-            "undefined"
+            // Fall through to globalThis for properties defined via Object.defineProperty
+            let has_prop = {
+                let gt = self.global_this.borrow();
+                gt.contains_key(&name) || gt.contains_key(&format!("__get_{}__", name)) || gt.contains_key(&format!("__get_{}", name))
+            };
+            if has_prop {
+                let global_obj = Value::VmObject(self.global_this);
+                let val = self.read_named_property(ctx, &global_obj, &name);
+                val.typeof_value()
+            } else {
+                "undefined"
+            }
         };
         self.stack.push(Value::from(type_str));
         Ok(OpcodeAction::Continue)

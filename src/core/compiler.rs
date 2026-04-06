@@ -4979,6 +4979,40 @@ impl<'gc> Compiler<'gc> {
 
                     self.patch_jump(after_callee_short);
                     self.patch_jump(end_jump);
+                } else if let Expr::SuperProperty(method_name) = &**callee {
+                    // super.method?.() — lookup method on super, call with current this
+                    self.chunk.write_opcode(Opcode::GetThis);
+                    let mk = self.chunk.add_constant(Value::from(method_name));
+                    self.chunk.write_opcode(Opcode::GetSuperProperty);
+                    self.chunk.write_u16(mk);
+                    // Check if method is nullish
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let null_idx = self.chunk.add_constant(Value::Null);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(null_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_null = self.emit_jump(Opcode::JumpIfTrue);
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Equal);
+                    let is_undef = self.emit_jump(Opcode::JumpIfTrue);
+                    // Not nullish — call as method with this as receiver
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_call_opcode(args.len(), 0x80);
+                    let end_jump = self.emit_jump(Opcode::Jump);
+                    // Nullish — short-circuit
+                    self.patch_jump(is_null);
+                    self.patch_jump(is_undef);
+                    self.chunk.write_opcode(Opcode::Pop); // pop method
+                    self.chunk.write_opcode(Opcode::Pop); // pop this (receiver)
+                    let idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(idx);
+                    self.patch_jump(end_jump);
                 } else {
                     self.compile_expr(callee)?;
                     self.chunk.write_opcode(Opcode::Dup);

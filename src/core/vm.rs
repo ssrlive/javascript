@@ -26049,7 +26049,10 @@ impl<'gc> VM<'gc> {
         });
         self.ip = ip;
         let saved_try_stack = std::mem::take(&mut self.try_stack);
+        // Regular calls (not via `new`) should not expose new.target
+        self.new_target_stack.push(Value::Undefined);
         let result = self.run_inner(ctx, target_depth + 1);
+        self.new_target_stack.pop();
         self.try_stack = saved_try_stack;
         self.ip = saved_ip;
         self.frames.truncate(target_depth);

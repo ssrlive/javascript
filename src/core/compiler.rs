@@ -84,7 +84,7 @@ struct LoopContext {
     body_saved_locals: Option<usize>, // locals count at start of loop body (for cleaning up block-scoped lets on continue/break)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct TryFinallyContext {
     action_id_var: String,            // synthetic variable name for pending control-flow action id
     return_value_var: String,         // synthetic variable name for pending return value
@@ -982,6 +982,9 @@ impl<'gc> Compiler<'gc> {
                     // Per spec, `var x;` (no initializer) is a no-op when the
                     // binding already exists (from a parameter or hoisted function
                     // declaration).  Only `var x = expr` updates the binding.
+                    if init_opt.is_none() && self.scope_depth == 0 {
+                        continue;
+                    }
                     if init_opt.is_none() && self.scope_depth > 0 && self.locals.iter().any(|l| l == name) {
                         continue;
                     }
@@ -1011,8 +1014,9 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.declared_globals.insert(name.clone());
                         let name_u16 = crate::unicode::utf8_to_utf16(name);
                         let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_opcode(Opcode::SetGlobal);
                         self.chunk.write_u16(name_idx);
+                        self.chunk.write_opcode(Opcode::Pop);
                     }
                 }
                 if is_last {
@@ -2739,6 +2743,32 @@ impl<'gc> Compiler<'gc> {
                 };
                 self.loop_stack.push(ctx);
 
+                // In strict mode at global scope, function declarations inside
+                // switch cases are block-scoped (AnnexB not honored).
+                let mut pushed_switch_aliases = false;
+                if self.scope_depth == 0 && self.current_strict {
+                    let mut block_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
+                    for case in &sw.cases {
+                        let body_stmts = match case {
+                            crate::core::statement::SwitchCase::Case(_, body) => body,
+                            crate::core::statement::SwitchCase::Default(body) => body,
+                        };
+                        for s in body_stmts {
+                            if let StatementKind::FunctionDeclaration(name, ..) = &*s.kind
+                                && !block_aliases.contains_key(name)
+                            {
+                                let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                self.forin_counter = self.forin_counter.saturating_add(1);
+                                block_aliases.insert(name.clone(), (alias, false));
+                            }
+                        }
+                    }
+                    if !block_aliases.is_empty() {
+                        self.top_level_block_aliases.push(block_aliases);
+                        pushed_switch_aliases = true;
+                    }
+                }
+
                 // For each case: test → jump to body if match, else next case
                 let mut case_body_patches: Vec<(usize, usize)> = Vec::new(); // (body_start_idx in cases, jump_patch)
                 let mut default_idx: Option<usize> = None;
@@ -2805,6 +2835,10 @@ impl<'gc> Compiler<'gc> {
                 let delete_idx = self.chunk.add_constant(Value::from(&switch_name));
                 self.chunk.write_opcode(Opcode::DeleteGlobal);
                 self.chunk.write_u16(delete_idx);
+
+                if pushed_switch_aliases {
+                    self.top_level_block_aliases.pop();
+                }
 
                 if is_last {
                     self.emit_load_completion();

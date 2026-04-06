@@ -1542,18 +1542,28 @@ impl<'gc> VM<'gc> {
                 self.module_locals.insert(name_str, val);
             } else {
                 self.globals.insert(name_str.clone(), val.clone());
+                let is_lexical_binding = self.chunk.lexical_declared_globals.contains(&name_str);
                 // Per spec, script-level var/function declarations create
                 // non-configurable properties on the global object.
                 // Eval-level declarations are configurable (D=true).
-                let is_var_binding = !self.chunk.is_eval_code
-                    && self.chunk.declared_globals.contains(&name_str)
-                    && !self.chunk.lexical_declared_globals.contains(&name_str);
+                let is_var_binding = !self.chunk.is_eval_code && self.chunk.declared_globals.contains(&name_str) && !is_lexical_binding;
                 if is_var_binding {
                     let nc_key = format!("__nonconfigurable_{}__", name_str);
+                    let ro_key = format!("__readonly_{}__", name_str);
+                    let ne_key = format!("__nonenumerable_{}__", name_str);
+                    let getter_key = format!("__get_{}", name_str);
+                    let setter_key = format!("__set_{}", name_str);
+                    let is_function_binding = self.chunk.fn_declared_globals.contains(&name_str);
                     let mut gt = self.global_this.borrow_mut(ctx);
+                    if is_function_binding {
+                        gt.shift_remove(&ro_key);
+                        gt.shift_remove(&ne_key);
+                        gt.shift_remove(&getter_key);
+                        gt.shift_remove(&setter_key);
+                    }
                     gt.insert(name_str, val);
                     gt.insert(nc_key, Value::Boolean(true));
-                } else {
+                } else if !is_lexical_binding {
                     self.global_this.borrow_mut(ctx).insert(name_str, val);
                 }
             }
@@ -1592,9 +1602,16 @@ impl<'gc> VM<'gc> {
                 if !self.module_locals.contains_key(&name_str) {
                     self.module_locals.insert(name_str, val);
                 }
-            } else if !self.globals.contains_key(&name_str) {
+            } else if !self.global_object_has_own_property(&name_str) {
+                let is_var_binding = !self.chunk.is_eval_code
+                    && self.chunk.declared_globals.contains(&name_str)
+                    && !self.chunk.lexical_declared_globals.contains(&name_str);
                 self.globals.insert(name_str.clone(), val.clone());
-                self.global_this.borrow_mut(ctx).insert(name_str, val);
+                let mut gt = self.global_this.borrow_mut(ctx);
+                gt.insert(name_str.clone(), val);
+                if is_var_binding {
+                    gt.insert(format!("__nonconfigurable_{}__", name_str), Value::Boolean(true));
+                }
             }
         } else {
             self.stack.pop();
@@ -1921,7 +1938,9 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             }
             self.globals.insert(name_str.clone(), val.clone());
-            self.global_this.borrow_mut(ctx).insert(name_str, val);
+            if !self.chunk.lexical_declared_globals.contains(&name_str) {
+                self.global_this.borrow_mut(ctx).insert(name_str, val);
+            }
         }
         Ok(OpcodeAction::Continue)
     }

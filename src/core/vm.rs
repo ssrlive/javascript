@@ -1650,6 +1650,104 @@ impl<'gc> VM<'gc> {
         vm.run(ctx)
     }
 
+    fn global_object_has_own_property(&self, key: &str) -> bool {
+        let getter_key = format!("__get_{}", key);
+        let setter_key = format!("__set_{}", key);
+        let borrow = self.global_this.borrow();
+        borrow.contains_key(key) || borrow.contains_key(&getter_key) || borrow.contains_key(&setter_key)
+    }
+
+    fn global_object_is_extensible(&self) -> bool {
+        !matches!(self.global_this.borrow().get("__non_extensible__"), Some(Value::Boolean(true)))
+    }
+
+    fn global_object_property_flags(&self, key: &str) -> Option<(bool, bool, bool, bool)> {
+        let getter_key = format!("__get_{}", key);
+        let setter_key = format!("__set_{}", key);
+        let readonly_key = format!("__readonly_{}__", key);
+        let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
+        let nonenumerable_key = format!("__nonenumerable_{}__", key);
+        let borrow = self.global_this.borrow();
+        let has_data = borrow.contains_key(key);
+        let has_getter = borrow.contains_key(&getter_key);
+        let has_setter = borrow.contains_key(&setter_key);
+        if !has_data && !has_getter && !has_setter {
+            return None;
+        }
+        let is_accessor = has_getter || has_setter;
+        let configurable = !borrow.contains_key(&nonconfigurable_key);
+        let enumerable = !borrow.contains_key(&nonenumerable_key);
+        let writable = has_data && !borrow.contains_key(&readonly_key);
+        Some((configurable, writable, enumerable, is_accessor))
+    }
+
+    fn validate_script_global_declarations(&self, chunk: &crate::core::opcode::Chunk<'gc>) -> Result<(), JSError> {
+        for name in &chunk.lexical_declared_globals {
+            let has_var_declaration = self.chunk.declared_globals.contains(name) && !self.chunk.lexical_declared_globals.contains(name);
+            if has_var_declaration || self.chunk.lexical_declared_globals.contains(name) {
+                return Err(crate::raise_syntax_error!(format!(
+                    "Identifier '{}' has already been declared",
+                    name
+                )));
+            }
+            if self
+                .global_object_property_flags(name)
+                .is_some_and(|(configurable, _, _, _)| !configurable)
+            {
+                return Err(crate::raise_syntax_error!(format!(
+                    "Identifier '{}' has already been declared",
+                    name
+                )));
+            }
+        }
+
+        for name in &chunk.declared_globals {
+            if chunk.lexical_declared_globals.contains(name) {
+                continue;
+            }
+            if self.chunk.lexical_declared_globals.contains(name) {
+                return Err(crate::raise_syntax_error!(format!(
+                    "Identifier '{}' has already been declared",
+                    name
+                )));
+            }
+
+            if chunk.fn_declared_globals.contains(name) {
+                match self.global_object_property_flags(name) {
+                    None => {
+                        if !self.global_object_is_extensible() {
+                            return Err(crate::raise_type_error!(format!("Cannot define global function '{}'", name)));
+                        }
+                    }
+                    Some((configurable, writable, enumerable, is_accessor)) => {
+                        if !configurable && (is_accessor || !writable || !enumerable) {
+                            return Err(crate::raise_type_error!(format!("Cannot define global function '{}'", name)));
+                        }
+                    }
+                }
+            } else if !self.global_object_has_own_property(name) && !self.global_object_is_extensible() {
+                return Err(crate::raise_type_error!(format!("Cannot define global variable '{}'", name)));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run_merged_script_source(&mut self, ctx: &GcContext<'gc>, code: &str) -> Result<Value<'gc>, JSError> {
+        let tokens = crate::core::tokenize(code)?;
+        let mut index = 0;
+        let statements = crate::core::parse_statements(&tokens, &mut index)?;
+        let compiler = crate::core::Compiler::new();
+        let chunk = compiler.compile(&statements)?;
+        self.validate_script_global_declarations(&chunk)?;
+        let (code_offset, _) = self.merge_eval_chunk(&chunk);
+        let saved_ip = self.ip;
+        self.ip = code_offset;
+        let result = self.run(ctx);
+        self.ip = saved_ip;
+        result
+    }
+
     fn call_eval_function(&mut self, ctx: &GcContext<'gc>, source: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
         let func = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(source)]);
         if let Some(thrown) = self.pending_throw.take() {
@@ -2625,6 +2723,32 @@ impl<'gc> VM<'gc> {
 
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         match name {
+            "__evalScript__" => {
+                let src = if let Some(v) = args.first() {
+                    match self.vm_to_string_like_spec(ctx, v) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+
+                if src.is_empty() {
+                    return Value::Undefined;
+                }
+
+                match self.run_merged_script_source(ctx, &src) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        let thrown = self.vm_value_from_error(ctx, &err);
+                        self.pending_throw = Some(thrown);
+                        Value::Undefined
+                    }
+                }
+            }
             "__createRealm__" => {
                 let realm_id = self.child_realms.len();
                 let child = Box::new(VM::new(Chunk::default(), ctx));
@@ -2693,39 +2817,11 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                let tokens = match crate::core::tokenize(&src) {
-                    Ok(t) => t,
-                    Err(err) => {
-                        self.throw_syntax_error(ctx, &format!("realm eval parse error: {}", err.message()));
-                        return Value::Undefined;
-                    }
-                };
-                let mut index = 0;
-                let stmts = match crate::core::parse_statements(&tokens, &mut index) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        self.throw_syntax_error(ctx, &format!("realm eval parse error: {}", err.message()));
-                        return Value::Undefined;
-                    }
-                };
-                let compiler = crate::core::Compiler::new();
-                let eval_chunk = match compiler.compile(&stmts) {
-                    Ok(c) => c,
-                    Err(err) => {
-                        self.throw_syntax_error(ctx, &format!("realm eval compile error: {}", err.message()));
-                        return Value::Undefined;
-                    }
-                };
-
-                let (code_offset, _) = self.merge_eval_chunk(&eval_chunk);
-                let saved_ip = self.ip;
-                self.ip = code_offset;
-                let result = self.run(ctx);
-                self.ip = saved_ip;
-                match result {
+                match self.run_merged_script_source(ctx, &src) {
                     Ok(v) => v,
                     Err(err) => {
-                        self.set_pending_throw_from_error(&err);
+                        let thrown = self.vm_value_from_error(ctx, &err);
+                        self.pending_throw = Some(thrown);
                         Value::Undefined
                     }
                 }
@@ -12488,9 +12584,17 @@ impl<'gc> VM<'gc> {
         for (ip, name) in &eval_chunk.call_callee_names {
             self.chunk.call_callee_names.insert(ip + code_offset, name.clone());
         }
-        self.chunk
-            .lexical_declared_globals
-            .extend(eval_chunk.lexical_declared_globals.iter().cloned());
+        // Direct eval declarations are scoped to eval semantics and must not
+        // retroactively become "already-declared script globals" for later scripts.
+        if !eval_chunk.is_eval_code {
+            self.chunk.declared_globals.extend(eval_chunk.declared_globals.iter().cloned());
+            self.chunk
+                .lexical_declared_globals
+                .extend(eval_chunk.lexical_declared_globals.iter().cloned());
+            self.chunk
+                .fn_declared_globals
+                .extend(eval_chunk.fn_declared_globals.iter().cloned());
+        }
         for ip in &eval_chunk.generator_function_ips {
             self.chunk.generator_function_ips.insert(ip + code_offset);
         }
@@ -14066,6 +14170,10 @@ impl<'gc> VM<'gc> {
             "__createRealm__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__createRealm__", "__createRealm__", 0.0, false),
         );
+        self.globals.insert(
+            "__evalScript__".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
+        );
         self.global_this.borrow_mut(ctx).insert(
             "__detachArrayBuffer__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
@@ -14073,6 +14181,10 @@ impl<'gc> VM<'gc> {
         self.global_this.borrow_mut(ctx).insert(
             "__createRealm__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__createRealm__", "__createRealm__", 0.0, false),
+        );
+        self.global_this.borrow_mut(ctx).insert(
+            "__evalScript__".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
         );
         {
             let mut gt = self.global_this.borrow_mut(ctx);

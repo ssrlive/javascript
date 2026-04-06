@@ -34,7 +34,7 @@ mod deep_chain_tests {
         "#
         );
 
-        let result = evaluate_script_with_vm(&script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(&script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, depth.to_string());
     }
 
@@ -56,7 +56,7 @@ mod deep_chain_tests {
             })()
         "#;
 
-        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "25"); // 5 * 3 + 10 = 25
     }
 
@@ -101,7 +101,7 @@ mod deep_chain_tests {
                     return [success, failure, finallyCount];
                 })();
             "#;
-        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[40,\"error: negative value\",2]");
     }
 }

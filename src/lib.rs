@@ -11,7 +11,7 @@ pub(crate) mod repl;
 pub(crate) mod unicode;
 
 pub use crate::core::{Token, TokenData};
-pub use core::{Value, evaluate_script_with_vm, format_js_number, tokenize};
+pub use core::{Value, evaluate_script, evaluate_script_with_unwrap, format_js_number, tokenize};
 pub use core::{parse_object_destructuring_pattern, parse_simple_expression, parse_statement, parse_statements, read_script_file};
 pub use error::{JSError, JSErrorKind};
 // pub use js_promise::set_short_timer_threshold_ms;

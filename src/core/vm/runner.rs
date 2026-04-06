@@ -312,6 +312,7 @@ impl<'gc> VM<'gc> {
                 try_stack,
                 this_val,
                 promise: outer_promise,
+                module_key: self.current_source_path().map(str::to_owned),
             },
         );
 
@@ -1722,6 +1723,9 @@ impl<'gc> VM<'gc> {
                                 obj_map.insert(export_name.clone(), Value::Null);
                             }
                         }
+                        if let Some(sp) = self.script_path.as_deref() {
+                            obj_map.insert("__ns_module_key__".to_string(), Value::from(sp));
+                        }
                         let mut bindings_map = IndexMap::new();
                         for (export_name, local_name) in &sorted_entries {
                             bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
@@ -1744,6 +1748,9 @@ impl<'gc> VM<'gc> {
                     bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
                 }
                 ns_map.insert("__ns_bindings__".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bindings_map)));
+                if let Some(sp) = self.script_path.as_deref() {
+                    ns_map.insert("__ns_module_key__".to_string(), Value::from(sp));
+                }
                 ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
                 ns_map.insert("__proto__".to_string(), Value::Null);
                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
@@ -3756,65 +3763,17 @@ impl<'gc> VM<'gc> {
             Value::VmObject(map) => {
                 // Module namespace exotic object [[Get]] (§10.4.6.8)
                 if map.borrow().contains_key("__module_namespace__") {
-                    if key.starts_with("@@sym:") {
-                        // Symbol properties: ordinary [[Get]]
-                        let borrow = map.borrow();
-                        let val = borrow.get(&key).cloned().unwrap_or(Value::Undefined);
-                        drop(borrow);
-                        self.stack.push(val);
-                    } else {
-                        // Look up live binding via __ns_bindings__
-                        let borrow = map.borrow();
-                        let has_ns_bindings = borrow.contains_key("__ns_bindings__");
-                        let local_name = if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
-                            let bb = bindings.borrow();
-                            if let Some(Value::String(u16s)) = bb.get(&key) {
-                                Some(crate::unicode::utf16_to_utf8(u16s))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        // For loaded module namespaces (no __ns_bindings__), read directly
-                        let direct_val = if local_name.is_none() && !has_ns_bindings {
-                            borrow.get(&key).cloned()
-                        } else {
-                            None
-                        };
-                        drop(borrow);
-                        if let Some(local) = local_name {
-                            let val = self
-                                .module_locals
-                                .get(&local)
-                                .or_else(|| self.globals.get(&local))
-                                .cloned()
-                                .unwrap_or(Value::Undefined);
-                            if matches!(val, Value::Uninitialized) {
-                                let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
-                                self.handle_throw(ctx, &err)?;
-                                self.stack.push(Value::Undefined);
-                            } else {
-                                self.stack.push(val);
-                            }
-                        } else if let Some(val) = direct_val {
-                            self.stack.push(val);
-                        } else {
+                    match self.namespace_export_value(ctx, map, &key) {
+                        Ok(Some(val)) => self.stack.push(val),
+                        Ok(None) => self.stack.push(Value::Undefined),
+                        Err(err) => {
+                            self.handle_throw(ctx, &err)?;
                             self.stack.push(Value::Undefined);
                         }
                     }
                     return Ok(OpcodeAction::Continue);
                 }
                 let borrow = map.borrow();
-                if matches!(borrow.get("__dynamic_import_live__"), Some(Value::Boolean(true))) {
-                    let live = match key.as_str() {
-                        "x" | "y" => self.globals.get("x").cloned().unwrap_or(Value::Undefined),
-                        _ => Value::Undefined,
-                    };
-                    drop(borrow);
-                    self.stack.push(live);
-                    return Ok(OpcodeAction::Continue);
-                }
                 // Check for getter first
                 let getter_key = format!("__get_{}", key);
                 if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = borrow.get(&getter_key) {

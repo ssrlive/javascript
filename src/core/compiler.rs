@@ -8,6 +8,7 @@ use crate::raise_syntax_error;
 
 pub(crate) const INTERNAL_FOROF_HELPER: &str = "__forOfValues internal";
 pub(crate) const INTERNAL_GETITER_HELPER: &str = "__getIterator internal";
+pub(crate) const INTERNAL_DYNAMIC_IMPORT_HELPER: &str = "__dynamicImport internal";
 
 #[derive(Default)]
 pub struct Compiler<'gc> {
@@ -120,6 +121,12 @@ impl<'gc> Compiler<'gc> {
 
     pub fn set_script_filename(&mut self, filename: String) {
         self.script_filename = Some(filename);
+    }
+
+    fn record_function_source_path(&mut self, func_ip: usize) {
+        if let Some(path) = &self.script_filename {
+            self.chunk.fn_source_paths.insert(func_ip, path.clone());
+        }
     }
 
     /// Register exports from a loaded external module so the compiler can resolve imports.
@@ -2176,6 +2183,7 @@ impl<'gc> Compiler<'gc> {
                 // Jump over the function body in the main bytecode stream
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
+                self.record_function_source_path(func_ip);
                 if *is_async {
                     self.chunk.async_function_ips.insert(func_ip);
                 }
@@ -3599,22 +3607,14 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             Expr::DynamicImport(module_expr, options_expr) => {
-                // Minimal dynamic import support for VM path.
-                // Evaluate inputs for side effects, then produce a tagged namespace object.
+                self.emit_helper_get(INTERNAL_DYNAMIC_IMPORT_HELPER);
                 self.compile_expr(module_expr)?;
-                self.chunk.write_opcode(Opcode::Pop);
                 if let Some(opts) = options_expr {
                     self.compile_expr(opts)?;
-                    self.chunk.write_opcode(Opcode::Pop);
+                    self.emit_call_opcode(2, 0);
+                } else {
+                    self.emit_call_opcode(1, 0);
                 }
-                let marker_key = self.chunk.add_constant(Value::from("__dynamic_import_live__"));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(marker_key);
-                let marker_val = self.chunk.add_constant(Value::Boolean(true));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(marker_val);
-                self.chunk.write_opcode(Opcode::NewObject);
-                self.chunk.write_byte(1);
             }
             Expr::This => {
                 self.chunk.write_opcode(Opcode::GetThis);
@@ -4210,6 +4210,7 @@ impl<'gc> Compiler<'gc> {
                 let is_async_arrow = matches!(expr, Expr::AsyncArrowFunction(_, _));
                 let jump_over = self.emit_jump(Opcode::Jump);
                 let func_ip = self.chunk.code.len();
+                self.record_function_source_path(func_ip);
                 self.chunk.arrow_function_ips.insert(func_ip);
                 if is_async_arrow {
                     self.chunk.async_function_ips.insert(func_ip);
@@ -7142,6 +7143,7 @@ impl<'gc> Compiler<'gc> {
     ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
+        self.record_function_source_path(func_ip);
         let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
         let old_ctx = self.current_strict;
         self.current_strict = fn_is_strict;
@@ -7522,6 +7524,7 @@ impl<'gc> Compiler<'gc> {
     ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
+        self.record_function_source_path(func_ip);
         let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
         let old_ctx = self.current_strict;
         self.current_strict = fn_is_strict;
@@ -7677,6 +7680,7 @@ impl<'gc> Compiler<'gc> {
     ) -> Result<usize, JSError> {
         let jump_over = self.emit_jump(Opcode::Jump);
         let func_ip = self.chunk.code.len();
+        self.record_function_source_path(func_ip);
         let fn_is_strict = self.record_fn_strictness(func_ip, body, false);
         let old_ctx = self.current_strict;
         self.current_strict = fn_is_strict;
@@ -8674,6 +8678,7 @@ impl<'gc> Compiler<'gc> {
         // Emit jump over constructor body
         let jump_over = self.emit_jump(Opcode::Jump);
         let fn_start = self.chunk.code.len();
+        self.record_function_source_path(fn_start);
         let ctor_is_strict = self.record_fn_strictness(fn_start, &ctor_body, true);
 
         // Save and reset function-scope state for constructor compilation.
@@ -9136,6 +9141,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_get_class_ref(name, is_expr)?;
                 let g_jump = self.emit_jump(Opcode::Jump);
                 let g_start = self.chunk.code.len();
+                self.record_function_source_path(g_start);
                 let saved_locals = std::mem::take(&mut self.locals);
                 let saved_const_locals = std::mem::take(&mut self.const_locals);
                 self.scope_depth += 1;
@@ -9173,6 +9179,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_get_class_ref(name, is_expr)?;
                 let s_jump = self.emit_jump(Opcode::Jump);
                 let s_start = self.chunk.code.len();
+                self.record_function_source_path(s_start);
                 let s_arity = params.len() as u8;
                 let saved_locals = std::mem::take(&mut self.locals);
                 let saved_const_locals = std::mem::take(&mut self.const_locals);
@@ -9478,6 +9485,7 @@ impl<'gc> Compiler<'gc> {
     fn _compile_and_install_method(&mut self, mname: &str, params: &[DestructuringElement], body: &[Statement]) -> Result<(), JSError> {
         let m_jump = self.emit_jump(Opcode::Jump);
         let m_start = self.chunk.code.len();
+        self.record_function_source_path(m_start);
         let method_is_strict = self.record_fn_strictness(m_start, body, true);
         let old_strict = self.current_strict;
         self.current_strict = method_is_strict;
@@ -10002,6 +10010,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_get_class_ref(class_name, is_expr)?; // receiver for method call
                 let sf_jump = self.emit_jump(Opcode::Jump);
                 let sf_start = self.chunk.code.len();
+                self.record_function_source_path(sf_start);
                 // Save and reset locals so the mini-function has its own local frame.
                 // The class name is aliased to `this` (= the class) as local 0.
                 let saved_locals = std::mem::take(&mut self.locals);
@@ -10040,6 +10049,7 @@ impl<'gc> Compiler<'gc> {
                 self.emit_get_class_ref(class_name, is_expr)?; // receiver for method call
                 let sf_jump = self.emit_jump(Opcode::Jump);
                 let sf_start = self.chunk.code.len();
+                self.record_function_source_path(sf_start);
                 let saved_locals = std::mem::take(&mut self.locals);
                 let saved_const_locals = self.const_locals.clone();
                 self.scope_depth += 1;
@@ -10077,6 +10087,7 @@ impl<'gc> Compiler<'gc> {
                 // Compile as an IIFE, but push class as this
                 let sb_jump = self.emit_jump(Opcode::Jump);
                 let sb_start = self.chunk.code.len();
+                self.record_function_source_path(sb_start);
                 let saved_locals = std::mem::take(&mut self.locals);
                 let saved_const_locals = self.const_locals.clone();
                 self.scope_depth += 1;

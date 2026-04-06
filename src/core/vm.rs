@@ -623,6 +623,8 @@ struct GeneratorState<'gc> {
     this_val: Value<'gc>,
     /// Whether the generator was suspended at a Yield opcode (as opposed to GeneratorParamInitDone).
     paused_at_yield: bool,
+    /// Source/module path where the generator was compiled.
+    module_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -639,6 +641,43 @@ struct AsyncFunctionState<'gc> {
     this_val: Value<'gc>,
     /// Promise returned to the original caller.
     promise: Value<'gc>,
+    /// Source/module path where the async function was compiled.
+    module_key: Option<String>,
+}
+
+#[derive(Clone)]
+struct ModuleExecutionState<'gc> {
+    module_locals: IndexMap<String, Value<'gc>>,
+    const_globals: std::collections::HashSet<String>,
+    loaded_module_vars: std::collections::HashMap<String, (String, String)>,
+    const_import_bindings: std::collections::HashSet<String>,
+    self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    self_import_aliases: std::collections::HashMap<String, String>,
+    live_import_bindings: std::collections::HashMap<String, String>,
+}
+
+#[derive(Clone)]
+struct SavedModuleExecutionContext<'gc> {
+    state: ModuleExecutionState<'gc>,
+    script_path: Option<String>,
+}
+
+struct SavedRuntimeExecutionState<'gc> {
+    frames: Vec<CallFrame<'gc>>,
+    try_stack: Vec<TryFrame>,
+    this_stack: Vec<Value<'gc>>,
+    new_target_stack: Vec<Value<'gc>>,
+    super_called_stack: Vec<bool>,
+    named_fn_callee_stack: Vec<Value<'gc>>,
+    active_async_promises: Vec<Value<'gc>>,
+    pending_async_suspend: Option<usize>,
+    generator_yield_value: Option<Value<'gc>>,
+    generator_yield_direct: bool,
+    generator_return_pending: Option<Value<'gc>>,
+    generator_param_init_done: bool,
+    throw_caught_stack_depth: Option<usize>,
+    last_throw_ip: Option<usize>,
+    current_opcode_ip: usize,
 }
 
 // ── GC Collect implementations ──────────────────────────────────────────────
@@ -684,6 +723,12 @@ unsafe impl<'gc> Collect<'gc> for AsyncFunctionState<'gc> {
         self.locals.trace(cc);
         self.this_val.trace(cc);
         self.promise.trace(cc);
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for ModuleExecutionState<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.module_locals.trace(cc);
     }
 }
 
@@ -748,6 +793,13 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.regexp_home_proto_temp.trace(cc);
         self.child_realms.trace(cc);
         self.module_locals.trace(cc);
+        for state in self.loaded_module_states.values() {
+            state.trace(cc);
+        }
+        self.intrinsic_promise_ctor.trace(cc);
+        for error in self.module_load_errors.values() {
+            error.trace(cc);
+        }
         // Trace loaded module exports
         for exports in self.loaded_modules.values() {
             exports.trace(cc);
@@ -866,6 +918,7 @@ pub struct VM<'gc> {
     /// Loaded external module exports: resolved_path -> (exports IndexMap, module_locals IndexMap).
     /// Used by multi-file module loading to resolve cross-module imports.
     pub(crate) loaded_modules: std::collections::HashMap<String, IndexMap<String, Value<'gc>>>,
+    module_load_errors: std::collections::HashMap<String, Value<'gc>>,
     /// Export origin tracking: module_path -> export_name -> (origin_module_path, origin_binding_name).
     /// Used for spec-compliant ambiguous star-export detection (ResolveExport §15.2.1.16.3).
     export_origins: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
@@ -877,12 +930,17 @@ pub struct VM<'gc> {
     /// Export-name-to-local-name mapping per loaded module.
     /// Used to set up live import bindings (e.g. `import val from './m.js'` where default→fn).
     loaded_module_local_names: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// Saved execution environments for each evaluated module, used when
+    /// functions from one module are called while another module/script is active.
+    loaded_module_states: std::collections::HashMap<String, ModuleExecutionState<'gc>>,
     /// IP offset where the main module's bytecode starts (after dependency merging).
     /// Used to scope `const_import_bindings` checks to main module code only.
     pub(crate) main_module_ip_start: Option<usize>,
     /// Cross-module namespace identity cache: absolute module path → namespace Value.
     /// Ensures `GetModuleNamespace(module)` always returns the same object (spec §16.2.1.10).
     pub(crate) module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
+    /// Cached intrinsic %Promise% constructor used by dynamic import.
+    intrinsic_promise_ctor: Value<'gc>,
     /// When true, `run_opcode_await` at module top level exits early to support
     /// async module suspension (spec §16.2.1.5.2.1 InnerModuleEvaluation step 14).
     suspend_on_module_await: bool,
@@ -1065,12 +1123,15 @@ impl<'gc> VM<'gc> {
             is_module_mode: false,
             module_locals: IndexMap::new(),
             loaded_modules: std::collections::HashMap::new(),
+            module_load_errors: std::collections::HashMap::new(),
             export_origins: std::collections::HashMap::new(),
             reexport_deps: std::collections::HashMap::new(),
             ambiguous_export_keys: std::collections::HashMap::new(),
             loaded_module_local_names: std::collections::HashMap::new(),
+            loaded_module_states: std::collections::HashMap::new(),
             main_module_ip_start: None,
             module_ns_objects: std::collections::HashMap::new(),
+            intrinsic_promise_ctor: Value::Undefined,
             suspend_on_module_await: false,
             module_await_suspended: false,
             suspended_module_states: Vec::new(),
@@ -1105,6 +1166,7 @@ impl<'gc> VM<'gc> {
     pub fn pre_create_module_namespace(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
         let mut ns_map = IndexMap::new();
         ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+        ns_map.insert("__ns_module_key__".to_string(), Value::from(module_key));
         ns_map.insert("__proto__".to_string(), Value::Null);
         ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
         ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
@@ -1113,6 +1175,291 @@ impl<'gc> VM<'gc> {
         ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
         let main_ns = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
         self.module_ns_objects.insert(module_key.to_string(), main_ns);
+    }
+
+    fn current_source_path(&self) -> Option<&str> {
+        self.frames
+            .last()
+            .and_then(|frame| self.chunk.fn_source_paths.get(&frame.func_ip).map(String::as_str))
+            .or(self.script_path.as_deref())
+    }
+
+    fn snapshot_module_execution_state(&self) -> ModuleExecutionState<'gc> {
+        ModuleExecutionState {
+            module_locals: self.module_locals.clone(),
+            const_globals: self.const_globals.clone(),
+            loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+            const_import_bindings: self.chunk.const_import_bindings.clone(),
+            self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+            self_import_aliases: self.chunk.self_import_aliases.clone(),
+            live_import_bindings: self.chunk.live_import_bindings.clone(),
+        }
+    }
+
+    fn enter_module_execution_context(&mut self, module_key: Option<&str>) -> Option<SavedModuleExecutionContext<'gc>> {
+        let module_key = module_key?;
+        if self.is_module_mode && self.current_source_path() == Some(module_key) {
+            return None;
+        }
+        let state = self.loaded_module_states.get(module_key)?.clone();
+        let saved = SavedModuleExecutionContext {
+            state: self.snapshot_module_execution_state(),
+            script_path: self.script_path.clone(),
+        };
+        self.module_locals = state.module_locals;
+        self.const_globals = state.const_globals;
+        self.chunk.loaded_module_vars = state.loaded_module_vars;
+        self.chunk.const_import_bindings = state.const_import_bindings;
+        self.chunk.self_namespace_imports = state.self_namespace_imports;
+        self.chunk.self_import_aliases = state.self_import_aliases;
+        self.chunk.live_import_bindings = state.live_import_bindings;
+        self.script_path = Some(module_key.to_string());
+        Some(saved)
+    }
+
+    fn exit_module_execution_context(&mut self, module_key: Option<&str>, saved: Option<SavedModuleExecutionContext<'gc>>) {
+        let (Some(module_key), Some(saved)) = (module_key, saved) else {
+            return;
+        };
+        self.loaded_module_states
+            .insert(module_key.to_string(), self.snapshot_module_execution_state());
+        self.module_locals = saved.state.module_locals;
+        self.const_globals = saved.state.const_globals;
+        self.chunk.loaded_module_vars = saved.state.loaded_module_vars;
+        self.chunk.const_import_bindings = saved.state.const_import_bindings;
+        self.chunk.self_namespace_imports = saved.state.self_namespace_imports;
+        self.chunk.self_import_aliases = saved.state.self_import_aliases;
+        self.chunk.live_import_bindings = saved.state.live_import_bindings;
+        self.script_path = saved.script_path;
+    }
+
+    fn with_module_execution_context<T, F>(&mut self, module_key: Option<&str>, f: F) -> T
+    where
+        F: FnOnce(&mut Self) -> T,
+    {
+        let saved = self.enter_module_execution_context(module_key);
+        let out = f(self);
+        self.exit_module_execution_context(module_key, saved);
+        out
+    }
+
+    fn take_runtime_execution_state(&mut self) -> SavedRuntimeExecutionState<'gc> {
+        SavedRuntimeExecutionState {
+            frames: std::mem::take(&mut self.frames),
+            try_stack: std::mem::take(&mut self.try_stack),
+            this_stack: std::mem::take(&mut self.this_stack),
+            new_target_stack: std::mem::take(&mut self.new_target_stack),
+            super_called_stack: std::mem::take(&mut self.super_called_stack),
+            named_fn_callee_stack: std::mem::take(&mut self.named_fn_callee_stack),
+            active_async_promises: std::mem::take(&mut self.active_async_promises),
+            pending_async_suspend: self.pending_async_suspend.take(),
+            generator_yield_value: self.generator_yield_value.take(),
+            generator_yield_direct: std::mem::take(&mut self.generator_yield_direct),
+            generator_return_pending: self.generator_return_pending.take(),
+            generator_param_init_done: std::mem::take(&mut self.generator_param_init_done),
+            throw_caught_stack_depth: self.throw_caught_stack_depth.take(),
+            last_throw_ip: self.last_throw_ip.take(),
+            current_opcode_ip: self.current_opcode_ip,
+        }
+    }
+
+    fn restore_runtime_execution_state(&mut self, saved: SavedRuntimeExecutionState<'gc>) {
+        self.frames = saved.frames;
+        self.try_stack = saved.try_stack;
+        self.this_stack = saved.this_stack;
+        self.new_target_stack = saved.new_target_stack;
+        self.super_called_stack = saved.super_called_stack;
+        self.named_fn_callee_stack = saved.named_fn_callee_stack;
+        self.active_async_promises = saved.active_async_promises;
+        self.pending_async_suspend = saved.pending_async_suspend;
+        self.generator_yield_value = saved.generator_yield_value;
+        self.generator_yield_direct = saved.generator_yield_direct;
+        self.generator_return_pending = saved.generator_return_pending;
+        self.generator_param_init_done = saved.generator_param_init_done;
+        self.throw_caught_stack_depth = saved.throw_caught_stack_depth;
+        self.last_throw_ip = saved.last_throw_ip;
+        self.current_opcode_ip = saved.current_opcode_ip;
+    }
+
+    pub(crate) fn seed_module_record(
+        &mut self,
+        module_key: &str,
+        export_names: &[String],
+        export_name_to_local: &std::collections::HashMap<String, String>,
+    ) {
+        let mut exports = IndexMap::new();
+        for export_name in export_names {
+            exports.entry(export_name.clone()).or_insert(Value::Undefined);
+        }
+        for export_name in export_name_to_local.keys() {
+            exports.entry(export_name.clone()).or_insert(Value::Undefined);
+        }
+        self.loaded_modules.insert(module_key.to_string(), exports);
+        self.loaded_module_local_names
+            .insert(module_key.to_string(), export_name_to_local.clone());
+    }
+
+    pub(crate) fn finalize_active_module_record(&mut self, ctx: &GcContext<'gc>, module_key: &str, export_names: &[String]) {
+        let mut exports = IndexMap::new();
+        let export_name_to_local = self.loaded_module_local_names.get(module_key).cloned().unwrap_or_default();
+        for (export_name, local_name) in &export_name_to_local {
+            if let Some(val) = self.module_locals.get(local_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            } else if let Some(val) = self.globals.get(local_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            }
+        }
+        for export_name in export_names {
+            if exports.contains_key(export_name) {
+                continue;
+            }
+            if let Some(val) = self.module_locals.get(export_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            } else if let Some(val) = self.globals.get(export_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            }
+        }
+        self.loaded_modules.insert(module_key.to_string(), exports);
+        self.ensure_module_export_bindings(module_key);
+        self.loaded_module_states
+            .insert(module_key.to_string(), self.snapshot_module_execution_state());
+        self.module_load_errors.remove(module_key);
+        self.refresh_module_namespace_object(ctx, module_key);
+    }
+
+    fn record_module_load_error(&mut self, module_key: &str, error: Value<'gc>) {
+        self.loaded_module_states.remove(module_key);
+        self.module_load_errors.insert(module_key.to_string(), error);
+    }
+
+    fn ensure_module_export_bindings(&mut self, module_key: &str) {
+        let exports = self.loaded_modules.get(module_key).cloned().unwrap_or_default();
+        let mut synthetic_bindings = Vec::new();
+        {
+            let bindings = self.loaded_module_local_names.entry(module_key.to_string()).or_default();
+            for (export_name, value) in &exports {
+                if export_name.starts_with("__") || export_name.starts_with("@@") {
+                    continue;
+                }
+                if !bindings.contains_key(export_name) {
+                    let synthetic = format!("\x00export:{export_name}");
+                    bindings.insert(export_name.clone(), synthetic.clone());
+                    synthetic_bindings.push((synthetic, value.clone()));
+                }
+            }
+        }
+        if synthetic_bindings.is_empty() {
+            return;
+        }
+        if self.is_module_mode && self.current_source_path() == Some(module_key) {
+            for (name, value) in synthetic_bindings {
+                self.module_locals.entry(name).or_insert(value);
+            }
+        } else if let Some(state) = self.loaded_module_states.get_mut(module_key) {
+            for (name, value) in synthetic_bindings {
+                state.module_locals.entry(name).or_insert(value);
+            }
+        }
+    }
+
+    fn refresh_module_namespace_object(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
+        self.ensure_module_export_bindings(module_key);
+        if !self.module_ns_objects.contains_key(module_key) {
+            self.pre_create_module_namespace(ctx, module_key);
+        }
+        let Some(Value::VmObject(ns_obj)) = self.module_ns_objects.get(module_key).cloned() else {
+            return;
+        };
+        let exports = self.loaded_modules.get(module_key).cloned().unwrap_or_default();
+        let bindings = self.loaded_module_local_names.get(module_key).cloned().unwrap_or_default();
+        let mut sorted_entries: Vec<(String, String)> = bindings
+            .into_iter()
+            .filter(|(export_name, _)| exports.contains_key(export_name))
+            .collect();
+        sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut ns_map = ns_obj.borrow_mut(ctx);
+        ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+        ns_map.insert("__ns_module_key__".to_string(), Value::from(module_key));
+        ns_map.insert("__proto__".to_string(), Value::Null);
+        ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+        ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
+        ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
+
+        let mut bindings_map = IndexMap::new();
+        for (export_name, local_name) in sorted_entries {
+            bindings_map.insert(export_name, Value::from(local_name.as_str()));
+        }
+        ns_map.insert(
+            "__ns_bindings__".to_string(),
+            Value::VmObject(crate::core::new_gc_cell_ptr(ctx, bindings_map)),
+        );
+    }
+
+    fn namespace_module_key(map: &VmObjectHandle<'gc>) -> Option<String> {
+        let borrow = map.borrow();
+        if let Some(Value::String(u16s)) = borrow.get("__ns_module_key__") {
+            Some(crate::unicode::utf16_to_utf8(u16s))
+        } else {
+            None
+        }
+    }
+
+    fn namespace_binding_local_name(map: &VmObjectHandle<'gc>, key: &str) -> Option<String> {
+        let borrow = map.borrow();
+        let Value::VmObject(bindings) = borrow.get("__ns_bindings__")? else {
+            return None;
+        };
+        let bindings_b = bindings.borrow();
+        match bindings_b.get(key) {
+            Some(Value::String(u16s)) => Some(crate::unicode::utf16_to_utf8(u16s)),
+            _ => None,
+        }
+    }
+
+    fn lookup_module_binding_value(&self, module_key: Option<&str>, local_name: &str) -> Value<'gc> {
+        if module_key.is_none() || (self.is_module_mode && self.current_source_path() == module_key) {
+            return self
+                .module_locals
+                .get(local_name)
+                .or_else(|| self.globals.get(local_name))
+                .cloned()
+                .unwrap_or(Value::Undefined);
+        }
+        self.loaded_module_states
+            .get(module_key.unwrap())
+            .and_then(|state| state.module_locals.get(local_name))
+            .or_else(|| self.globals.get(local_name))
+            .cloned()
+            .unwrap_or(Value::Undefined)
+    }
+
+    fn namespace_export_value(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        map: &VmObjectHandle<'gc>,
+        key: &str,
+    ) -> Result<Option<Value<'gc>>, Value<'gc>> {
+        if key.starts_with("@@sym:") {
+            return Ok(map.borrow().get(key).cloned());
+        }
+
+        let module_key = Self::namespace_module_key(map);
+        if let Some(local_name) = Self::namespace_binding_local_name(map, key) {
+            let val = self.lookup_module_binding_value(module_key.as_deref(), &local_name);
+            if matches!(val, Value::Uninitialized) {
+                return Err(self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key)));
+            }
+            return Ok(Some(val));
+        }
+
+        if let Some(module_key) = module_key {
+            return Ok(self.loaded_modules.get(&module_key).and_then(|exports| exports.get(key)).cloned());
+        }
+
+        Ok(map.borrow().get(key).cloned())
     }
 
     /// Load and execute dependency modules, storing their exports in `loaded_modules`.
@@ -1140,15 +1487,25 @@ impl<'gc> VM<'gc> {
             // Read and parse the dependency module
             let dep_source = match crate::core::read_script_file(resolved_path) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(err) => {
+                    let error_value = self.vm_value_from_error(ctx, &err);
+                    self.record_module_load_error(&key, error_value);
+                    continue;
+                }
             };
             let dep_stmts = match crate::core::parse_program_statements(&dep_source, true) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(err) => {
+                    let error_value = self.vm_value_from_error(ctx, &err);
+                    self.record_module_load_error(&key, error_value);
+                    continue;
+                }
             };
+            let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
 
             // Insert sentinel to prevent circular recursion
-            self.loaded_modules.insert(key.clone(), IndexMap::new());
+            self.pre_create_module_namespace(ctx, &key);
+            self.seed_module_record(&key, &export_names, &export_name_to_local);
 
             // Recursively load any sub-dependencies first
             let dep_basename = resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1170,7 +1527,11 @@ impl<'gc> VM<'gc> {
             }
             let dep_chunk = match dep_compiler.compile(&dep_stmts) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(err) => {
+                    let error_value = self.vm_value_from_error(ctx, &err);
+                    self.record_module_load_error(&key, error_value);
+                    continue;
+                }
             };
 
             // Extract module-specific metadata before merge consumes the chunk
@@ -1197,6 +1558,7 @@ impl<'gc> VM<'gc> {
             let saved_live_import_bindings = std::mem::take(&mut self.chunk.live_import_bindings);
             let saved_main_module_ip_start = self.main_module_ip_start.take();
             let saved_const_globals = std::mem::take(&mut self.const_globals);
+            let saved_runtime_state = self.take_runtime_execution_state();
 
             self.ip = dep_ip_offset;
             self.set_module_this();
@@ -1207,7 +1569,7 @@ impl<'gc> VM<'gc> {
 
             // Execute (with TLA suspension support for async module interleaving)
             self.suspend_on_module_await = true;
-            let _dep_result = self.run(ctx);
+            let dep_result = self.run(ctx);
             let was_suspended = self.module_await_suspended;
             self.module_await_suspended = false;
 
@@ -1230,150 +1592,155 @@ impl<'gc> VM<'gc> {
                 });
             }
 
-            // Collect the dependency's exports
-            let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
-            let mut exports = IndexMap::new();
+            let dep_failed = if let Err(err) = dep_result {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(&key, error_value);
+                true
+            } else {
+                false
+            };
 
-            for (export_name, local_name) in &export_name_to_local {
-                if let Some(val) = self.module_locals.get(local_name).cloned() {
-                    exports.insert(export_name.clone(), val);
-                } else if let Some(val) = self.globals.get(local_name).cloned() {
-                    exports.insert(export_name.clone(), val);
-                }
-            }
-            for export_name in &export_names {
-                if !exports.contains_key(export_name) {
-                    if let Some(val) = self.module_locals.get(export_name).cloned() {
+            if !dep_failed {
+                // Collect the dependency's exports
+                let mut exports = IndexMap::new();
+
+                for (export_name, local_name) in &export_name_to_local {
+                    if let Some(val) = self.module_locals.get(local_name).cloned() {
                         exports.insert(export_name.clone(), val);
-                    } else if let Some(val) = self.globals.get(export_name).cloned() {
+                    } else if let Some(val) = self.globals.get(local_name).cloned() {
                         exports.insert(export_name.clone(), val);
                     }
                 }
-            }
-
-            // Build export origins for local exports
-            let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-
-            // Detect namespace imports: `import * as foo from "mod"` + `export { foo }`
-            // Per spec ParseModule §16.2.1.7.1 step 10.1.ii.2, these are indirect exports
-            // with ImportName = "all", so their origin is (mod_path, "namespace").
-            let mut ns_import_origins: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            for stmt in &dep_stmts {
-                if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
-                    for spec in specs {
-                        if let crate::core::statement::ImportSpecifier::Namespace(local_name) = spec {
-                            let imp_resolved = resolve_module_path(source, resolved_path);
-                            ns_import_origins.insert(local_name.clone(), imp_resolved.to_string_lossy().to_string());
+                for export_name in &export_names {
+                    if !exports.contains_key(export_name) {
+                        if let Some(val) = self.module_locals.get(export_name).cloned() {
+                            exports.insert(export_name.clone(), val);
+                        } else if let Some(val) = self.globals.get(export_name).cloned() {
+                            exports.insert(export_name.clone(), val);
                         }
                     }
                 }
-            }
 
-            for export_name in exports.keys() {
-                // Check if this export is a re-export of a namespace import
-                let local_name = export_name_to_local
-                    .get(export_name)
-                    .cloned()
-                    .unwrap_or_else(|| export_name.clone());
-                if let Some(ns_mod_path) = ns_import_origins.get(&local_name) {
-                    origins.insert(export_name.clone(), (ns_mod_path.clone(), "namespace".to_string()));
-                } else {
-                    origins.insert(export_name.clone(), (key.clone(), export_name.clone()));
-                }
-            }
+                // Build export origins for local exports
+                let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
 
-            // Handle re-exports — track star-exported keys for ambiguity detection
-            // Per spec §15.2.1.16.3 ResolveExport: compare (Module, BindingName) not immediate source
-            let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-            let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut all_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
-            for (reexport_src, reexport_specs) in &reexport_sources {
-                let reexport_resolved = resolve_module_path(reexport_src, resolved_path);
-                let reexport_key = reexport_resolved.to_string_lossy().to_string();
-                // Record all re-export deps for circular fixup
-                all_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
-                if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
-                    for spec in reexport_specs {
-                        match spec {
-                            crate::core::ReexportSpec::Named(name, alias) => {
-                                let ename = alias.as_deref().unwrap_or(name).to_string();
-                                if let Some(val) = source_exports.get(name).cloned() {
-                                    exports.insert(ename.clone(), val);
-                                    // Trace origin through source module
-                                    let origin = self
-                                        .export_origins
-                                        .get(&reexport_key)
-                                        .and_then(|o| o.get(name))
-                                        .cloned()
-                                        .unwrap_or_else(|| (reexport_key.clone(), name.clone()));
-                                    origins.insert(ename, origin);
-                                }
-                            }
-                            crate::core::ReexportSpec::Star => {
-                                for (k, v) in &source_exports {
-                                    if k == "default" {
-                                        continue;
-                                    }
-                                    // Local exports take precedence over star re-exports
-                                    if exports.contains_key(k) && !star_export_origins.contains_key(k) {
-                                        continue;
-                                    }
-                                    // Get the origin of this key from the source module
-                                    let cur_origin = self
-                                        .export_origins
-                                        .get(&reexport_key)
-                                        .and_then(|o| o.get(k))
-                                        .cloned()
-                                        .unwrap_or_else(|| (reexport_key.clone(), k.clone()));
-
-                                    if let Some(prev_origin) = star_export_origins.get(k) {
-                                        if prev_origin != &cur_origin {
-                                            ambiguous_keys.insert(k.clone());
-                                        }
-                                    } else {
-                                        star_export_origins.insert(k.clone(), cur_origin.clone());
-                                        if !exports.contains_key(k) {
-                                            exports.insert(k.clone(), v.clone());
-                                        }
-                                    }
-                                    origins.insert(k.clone(), cur_origin);
-                                }
-                            }
-                            crate::core::ReexportSpec::Namespace(name) => {
-                                let mut ns_map = IndexMap::new();
-                                let mut sorted_keys: Vec<&String> = source_exports.keys().collect();
-                                sorted_keys.sort();
-                                for k in &sorted_keys {
-                                    if let Some(v) = source_exports.get(*k) {
-                                        ns_map.insert((*k).clone(), v.clone());
-                                    }
-                                }
-                                ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
-                                ns_map.insert("__proto__".to_string(), Value::Null);
-                                ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
-                                ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
-                                exports.insert(name.clone(), Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map)));
-                                // Namespace origin: the referenced module with "namespace" binding
-                                origins.insert(name.clone(), (reexport_key.clone(), "namespace".to_string()));
+                // Detect namespace imports: `import * as foo from "mod"` + `export { foo }`
+                // Per spec ParseModule §16.2.1.7.1 step 10.1.ii.2, these are indirect exports
+                // with ImportName = "all", so their origin is (mod_path, "namespace").
+                let mut ns_import_origins: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                for stmt in &dep_stmts {
+                    if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
+                        for spec in specs {
+                            if let crate::core::statement::ImportSpecifier::Namespace(local_name) = spec {
+                                let imp_resolved = resolve_module_path(source, resolved_path);
+                                ns_import_origins.insert(local_name.clone(), imp_resolved.to_string_lossy().to_string());
                             }
                         }
                     }
                 }
-            }
-            // Remove ambiguous star-exported keys
-            for k in &ambiguous_keys {
-                exports.shift_remove(k);
-                origins.remove(k);
-            }
-            if !ambiguous_keys.is_empty() {
-                self.ambiguous_export_keys.insert(key.clone(), ambiguous_keys);
-            }
 
-            self.loaded_modules.insert(key.clone(), exports);
-            self.export_origins.insert(key.clone(), origins);
-            self.loaded_module_local_names.insert(key.clone(), export_name_to_local.clone());
-            if !all_reexport_deps.is_empty() {
-                self.reexport_deps.insert(key.clone(), all_reexport_deps);
+                for export_name in exports.keys() {
+                    // Check if this export is a re-export of a namespace import
+                    let local_name = export_name_to_local
+                        .get(export_name)
+                        .cloned()
+                        .unwrap_or_else(|| export_name.clone());
+                    if let Some(ns_mod_path) = ns_import_origins.get(&local_name) {
+                        origins.insert(export_name.clone(), (ns_mod_path.clone(), "namespace".to_string()));
+                    } else {
+                        origins.insert(export_name.clone(), (key.clone(), export_name.clone()));
+                    }
+                }
+
+                // Handle re-exports — track star-exported keys for ambiguity detection
+                // Per spec §15.2.1.16.3 ResolveExport: compare (Module, BindingName) not immediate source
+                let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+                let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut all_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
+                for (reexport_src, reexport_specs) in &reexport_sources {
+                    let reexport_resolved = resolve_module_path(reexport_src, resolved_path);
+                    let reexport_key = reexport_resolved.to_string_lossy().to_string();
+                    // Record all re-export deps for circular fixup
+                    all_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
+                    if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
+                        for spec in reexport_specs {
+                            match spec {
+                                crate::core::ReexportSpec::Named(name, alias) => {
+                                    let ename = alias.as_deref().unwrap_or(name).to_string();
+                                    if let Some(val) = source_exports.get(name).cloned() {
+                                        exports.insert(ename.clone(), val);
+                                        // Trace origin through source module
+                                        let origin = self
+                                            .export_origins
+                                            .get(&reexport_key)
+                                            .and_then(|o| o.get(name))
+                                            .cloned()
+                                            .unwrap_or_else(|| (reexport_key.clone(), name.clone()));
+                                        origins.insert(ename, origin);
+                                    }
+                                }
+                                crate::core::ReexportSpec::Star => {
+                                    for (k, v) in &source_exports {
+                                        if k == "default" {
+                                            continue;
+                                        }
+                                        // Local exports take precedence over star re-exports
+                                        if exports.contains_key(k) && !star_export_origins.contains_key(k) {
+                                            continue;
+                                        }
+                                        // Get the origin of this key from the source module
+                                        let cur_origin = self
+                                            .export_origins
+                                            .get(&reexport_key)
+                                            .and_then(|o| o.get(k))
+                                            .cloned()
+                                            .unwrap_or_else(|| (reexport_key.clone(), k.clone()));
+
+                                        if let Some(prev_origin) = star_export_origins.get(k) {
+                                            if prev_origin != &cur_origin {
+                                                ambiguous_keys.insert(k.clone());
+                                            }
+                                        } else {
+                                            star_export_origins.insert(k.clone(), cur_origin.clone());
+                                            if !exports.contains_key(k) {
+                                                exports.insert(k.clone(), v.clone());
+                                            }
+                                        }
+                                        origins.insert(k.clone(), cur_origin);
+                                    }
+                                }
+                                crate::core::ReexportSpec::Namespace(name) => {
+                                    self.refresh_module_namespace_object(ctx, &reexport_key);
+                                    if let Some(ns_obj) = self.module_ns_objects.get(&reexport_key).cloned() {
+                                        exports.insert(name.clone(), ns_obj);
+                                    }
+                                    // Namespace origin: the referenced module with "namespace" binding
+                                    origins.insert(name.clone(), (reexport_key.clone(), "namespace".to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Remove ambiguous star-exported keys
+                for k in &ambiguous_keys {
+                    exports.shift_remove(k);
+                    origins.remove(k);
+                }
+                if !ambiguous_keys.is_empty() {
+                    self.ambiguous_export_keys.insert(key.clone(), ambiguous_keys);
+                }
+
+                self.loaded_modules.insert(key.clone(), exports);
+                self.export_origins.insert(key.clone(), origins);
+                self.loaded_module_local_names.insert(key.clone(), export_name_to_local.clone());
+                self.ensure_module_export_bindings(&key);
+                self.loaded_module_states
+                    .insert(key.clone(), self.snapshot_module_execution_state());
+                self.module_load_errors.remove(&key);
+                self.refresh_module_namespace_object(ctx, &key);
+                if !all_reexport_deps.is_empty() {
+                    self.reexport_deps.insert(key.clone(), all_reexport_deps);
+                }
             }
 
             // Restore execution state and module-specific chunk metadata
@@ -1389,6 +1756,10 @@ impl<'gc> VM<'gc> {
             self.chunk.live_import_bindings = saved_live_import_bindings;
             self.main_module_ip_start = saved_main_module_ip_start;
             self.const_globals = saved_const_globals;
+            self.restore_runtime_execution_state(saved_runtime_state);
+            if dep_failed {
+                continue;
+            }
         }
 
         // Resume any TLA-suspended module deps now that all siblings have evaluated.
@@ -1408,33 +1779,44 @@ impl<'gc> VM<'gc> {
             let saved_live_import_bindings = std::mem::replace(&mut self.chunk.live_import_bindings, state.live_import_bindings);
             let saved_main_module_ip_start = self.main_module_ip_start.take();
             let saved_const_globals = std::mem::replace(&mut self.const_globals, state.const_globals);
+            let saved_runtime_state = self.take_runtime_execution_state();
 
             self.ip = state.ip;
             self.set_source_context(&state.dep_source, Some(state.resolved_path.as_path()));
 
             // Resume execution from where the await suspended
-            let _resume_result = self.run(ctx);
+            let resume_result = self.run(ctx);
 
-            // Update exports with any bindings defined after the await
-            if let Some(existing_exports) = self.loaded_modules.get_mut(&state.key) {
-                let (export_names, export_name_to_local, _) =
-                    collect_exports_from_ast(&crate::core::parse_program_statements(&state.dep_source, true).unwrap_or_default());
-                for (export_name, local_name) in &export_name_to_local {
-                    if let Some(val) = self.module_locals.get(local_name).cloned() {
-                        existing_exports.insert(export_name.clone(), val);
-                    } else if let Some(val) = self.globals.get(local_name).cloned() {
-                        existing_exports.insert(export_name.clone(), val);
-                    }
-                }
-                for export_name in &export_names {
-                    if !existing_exports.contains_key(export_name) {
-                        if let Some(val) = self.module_locals.get(export_name).cloned() {
+            if let Err(err) = resume_result {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(&state.key, error_value);
+            } else {
+                // Update exports with any bindings defined after the await
+                if let Some(existing_exports) = self.loaded_modules.get_mut(&state.key) {
+                    let (export_names, export_name_to_local, _) =
+                        collect_exports_from_ast(&crate::core::parse_program_statements(&state.dep_source, true).unwrap_or_default());
+                    for (export_name, local_name) in &export_name_to_local {
+                        if let Some(val) = self.module_locals.get(local_name).cloned() {
                             existing_exports.insert(export_name.clone(), val);
-                        } else if let Some(val) = self.globals.get(export_name).cloned() {
+                        } else if let Some(val) = self.globals.get(local_name).cloned() {
                             existing_exports.insert(export_name.clone(), val);
                         }
                     }
+                    for export_name in &export_names {
+                        if !existing_exports.contains_key(export_name) {
+                            if let Some(val) = self.module_locals.get(export_name).cloned() {
+                                existing_exports.insert(export_name.clone(), val);
+                            } else if let Some(val) = self.globals.get(export_name).cloned() {
+                                existing_exports.insert(export_name.clone(), val);
+                            }
+                        }
+                    }
                 }
+                self.ensure_module_export_bindings(&state.key);
+                self.loaded_module_states
+                    .insert(state.key.clone(), self.snapshot_module_execution_state());
+                self.module_load_errors.remove(&state.key);
+                self.refresh_module_namespace_object(ctx, &state.key);
             }
 
             // Restore parent state
@@ -1450,6 +1832,7 @@ impl<'gc> VM<'gc> {
             self.chunk.live_import_bindings = saved_live_import_bindings;
             self.main_module_ip_start = saved_main_module_ip_start;
             self.const_globals = saved_const_globals;
+            self.restore_runtime_execution_state(saved_runtime_state);
         }
     }
 
@@ -1526,6 +1909,10 @@ impl<'gc> VM<'gc> {
                 }
             }
         }
+        let module_keys: Vec<String> = self.loaded_modules.keys().cloned().collect();
+        for module_key in module_keys {
+            self.ensure_module_export_bindings(&module_key);
+        }
     }
 
     /// Inject loaded module bindings into `module_locals` based on `chunk.loaded_module_vars`.
@@ -1540,56 +1927,70 @@ impl<'gc> VM<'gc> {
         // for pre-created self-namespace shells (identity across modules).
         let mut ns_cache: std::collections::HashMap<String, Value<'gc>> = std::collections::HashMap::new();
         for (local, mod_path, export_name) in &vars {
+            if let Some(error) = self.module_load_errors.get(mod_path).cloned() {
+                self.pending_throw = Some(error);
+                return;
+            }
             if export_name == "*" {
                 // Namespace import — reuse cached ns for same module path
                 if let Some(cached) = ns_cache.get(mod_path) {
                     self.module_locals.insert(local.clone(), cached.clone());
                     continue;
                 }
-                // Cross-module identity: reuse pre-created self-namespace shell
+                self.refresh_module_namespace_object(ctx, mod_path);
                 if let Some(cached) = self.module_ns_objects.get(mod_path).cloned() {
                     ns_cache.insert(mod_path.clone(), cached.clone());
                     self.module_locals.insert(local.clone(), cached);
                     continue;
                 }
-                if let Some(exports) = self.loaded_modules.get(mod_path) {
-                    let mut ns_map = IndexMap::new();
-                    let mut sorted_keys: Vec<_> = exports.keys().filter(|k| !k.starts_with("__") && !k.starts_with("@@")).collect();
-                    sorted_keys.sort();
-                    for k in &sorted_keys {
-                        if let Some(v) = exports.get(*k) {
-                            ns_map.insert((*k).clone(), v.clone());
-                        }
-                    }
-                    ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
-                    ns_map.insert("__proto__".to_string(), Value::Null);
-                    ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
-                    ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
-                    ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
-                    ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-                    ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
-                    let ns_obj = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
-                    ns_cache.insert(mod_path.clone(), ns_obj.clone());
-                    self.module_locals.insert(local.clone(), ns_obj);
-                }
+                self.pending_throw =
+                    Some(self.make_syntax_error_object(ctx, &format!("Failed to resolve module namespace '{}'", mod_path)));
+                return;
             } else {
                 // Named/default import
-                if let Some(exports) = self.loaded_modules.get(mod_path) {
-                    let val = exports.get(export_name).cloned().unwrap_or(Value::Undefined);
-                    self.module_locals.insert(local.clone(), val.clone());
+                self.ensure_module_export_bindings(mod_path);
+                if self
+                    .ambiguous_export_keys
+                    .get(mod_path)
+                    .is_some_and(|keys| keys.contains(export_name))
+                {
+                    self.pending_throw = Some(self.make_syntax_error_object(
+                        ctx,
+                        &format!(
+                            "The requested module '{}' contains an ambiguous export named '{}'",
+                            mod_path, export_name
+                        ),
+                    ));
+                    return;
+                }
+                let Some(exports) = self.loaded_modules.get(mod_path) else {
+                    self.pending_throw =
+                        Some(self.make_syntax_error_object(ctx, &format!("The requested module '{}' could not be loaded", mod_path)));
+                    return;
+                };
+                let Some(val) = exports.get(export_name).cloned() else {
+                    self.pending_throw = Some(self.make_syntax_error_object(
+                        ctx,
+                        &format!(
+                            "The requested module '{}' does not provide an export named '{}'",
+                            mod_path, export_name
+                        ),
+                    ));
+                    return;
+                };
+                self.module_locals.insert(local.clone(), val.clone());
 
-                    // Set up live binding: also define the source local name so
-                    // mutations by the exporting module's closures are visible.
-                    let source_local = self
-                        .loaded_module_local_names
-                        .get(mod_path)
-                        .and_then(|m| m.get(export_name))
-                        .cloned()
-                        .unwrap_or_else(|| export_name.clone());
-                    if &source_local != local {
-                        self.module_locals.insert(source_local.clone(), val);
-                        self.chunk.live_import_bindings.insert(local.clone(), source_local);
-                    }
+                // Set up live binding: also define the source local name so
+                // mutations by the exporting module's closures are visible.
+                let source_local = self
+                    .loaded_module_local_names
+                    .get(mod_path)
+                    .and_then(|m| m.get(export_name))
+                    .cloned()
+                    .unwrap_or_else(|| export_name.clone());
+                if &source_local != local {
+                    self.module_locals.insert(source_local.clone(), val);
+                    self.chunk.live_import_bindings.insert(local.clone(), source_local);
                 }
             }
         }
@@ -2661,67 +3062,69 @@ impl<'gc> VM<'gc> {
         let Some(state) = self.async_function_states.remove(&state_id) else {
             return;
         };
+        let module_key = state.module_key.clone();
+        self.with_module_execution_context(module_key.as_deref(), |vm| {
+            let saved_ip = vm.ip;
+            let saved_stack_len = vm.stack.len();
+            let saved_frames = std::mem::take(&mut vm.frames);
+            let saved_try_stack = std::mem::take(&mut vm.try_stack);
+            let saved_this_stack_len = vm.this_stack.len();
+            let saved_pending_async_suspend = vm.pending_async_suspend.take();
 
-        let saved_ip = self.ip;
-        let saved_stack_len = self.stack.len();
-        let saved_frames = std::mem::take(&mut self.frames);
-        let saved_try_stack = std::mem::take(&mut self.try_stack);
-        let saved_this_stack_len = self.this_stack.len();
-        let saved_pending_async_suspend = self.pending_async_suspend.take();
+            vm.ip = state.ip;
 
-        self.ip = state.ip;
+            vm.stack.push(Value::Undefined);
+            let bp = vm.stack.len();
+            for local in &state.locals {
+                vm.stack.push(local.clone());
+            }
 
-        self.stack.push(Value::Undefined);
-        let bp = self.stack.len();
-        for local in &state.locals {
-            self.stack.push(local.clone());
-        }
+            let mut frame = state.frame.clone();
+            frame.bp = bp;
+            frame.return_ip = 0;
+            vm.frames.push(frame);
+            vm.try_stack = state
+                .try_stack
+                .into_iter()
+                .map(|try_frame| TryFrame {
+                    catch_ip: try_frame.catch_ip,
+                    stack_depth: bp + try_frame.stack_depth,
+                    frame_depth: 1 + try_frame.frame_depth,
+                    catch_binding: try_frame.catch_binding,
+                })
+                .collect();
+            vm.this_stack.push(state.this_val.clone());
+            vm.active_async_promises.push(state.promise.clone());
 
-        let mut frame = state.frame.clone();
-        frame.bp = bp;
-        frame.return_ip = 0;
-        self.frames.push(frame);
-        self.try_stack = state
-            .try_stack
-            .into_iter()
-            .map(|try_frame| TryFrame {
-                catch_ip: try_frame.catch_ip,
-                stack_depth: bp + try_frame.stack_depth,
-                frame_depth: 1 + try_frame.frame_depth,
-                catch_binding: try_frame.catch_binding,
-            })
-            .collect();
-        self.this_stack.push(state.this_val.clone());
-        self.active_async_promises.push(state.promise.clone());
+            if rejected {
+                vm.pending_throw = Some(resume_value.clone());
+            } else {
+                vm.stack.push(resume_value.clone());
+            }
 
-        if rejected {
-            self.pending_throw = Some(resume_value.clone());
-        } else {
-            self.stack.push(resume_value.clone());
-        }
+            let min_depth = vm.frames.len();
+            let result = vm.run_inner(ctx, min_depth);
+            let suspended = vm.pending_async_suspend.take();
 
-        let min_depth = self.frames.len();
-        let result = self.run_inner(ctx, min_depth);
-        let suspended = self.pending_async_suspend.take();
+            vm.active_async_promises.pop();
+            vm.this_stack.truncate(saved_this_stack_len);
 
-        self.active_async_promises.pop();
-        self.this_stack.truncate(saved_this_stack_len);
-
-        if suspended.is_none() {
-            match result {
-                Ok(value) => self.resolve_promise_value(ctx, &state.promise, &value),
-                Err(err) => {
-                    let reject_value = self.vm_value_from_error(ctx, &err);
-                    self.settle_promise(ctx, &state.promise, &reject_value, true);
+            if suspended.is_none() {
+                match result {
+                    Ok(value) => vm.resolve_promise_value(ctx, &state.promise, &value),
+                    Err(err) => {
+                        let reject_value = vm.vm_value_from_error(ctx, &err);
+                        vm.settle_promise(ctx, &state.promise, &reject_value, true);
+                    }
                 }
             }
-        }
 
-        self.stack.truncate(saved_stack_len);
-        self.frames = saved_frames;
-        self.try_stack = saved_try_stack;
-        self.ip = saved_ip;
-        self.pending_async_suspend = saved_pending_async_suspend;
+            vm.stack.truncate(saved_stack_len);
+            vm.frames = saved_frames;
+            vm.try_stack = saved_try_stack;
+            vm.ip = saved_ip;
+            vm.pending_async_suspend = saved_pending_async_suspend;
+        });
     }
 
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
@@ -2751,6 +3154,71 @@ impl<'gc> VM<'gc> {
                         Value::Undefined
                     }
                 }
+            }
+            "module.dynamicImport" => {
+                let promise_ctor = if matches!(self.intrinsic_promise_ctor, Value::Undefined) {
+                    self.globals.get("Promise").cloned().unwrap_or(Value::Undefined)
+                } else {
+                    self.intrinsic_promise_ctor.clone()
+                };
+                let (promise, resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
+                    Ok(capability) => capability,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+
+                let reject_with = |vm: &mut Self, value: Value<'gc>| {
+                    if let Err(err) = vm.vm_call_function_value(ctx, &reject, &Value::Undefined, std::slice::from_ref(&value)) {
+                        vm.set_pending_throw_from_error(&err);
+                    }
+                };
+
+                let specifier = args.first().cloned().unwrap_or(Value::Undefined);
+                let specifier_string = match self.vm_to_string_like_spec(ctx, &specifier) {
+                    Ok(specifier_string) => specifier_string,
+                    Err(err) => {
+                        let reject_value = self.vm_value_from_error(ctx, &err);
+                        reject_with(self, reject_value);
+                        return promise;
+                    }
+                };
+
+                let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
+                    let reject_value = self.make_type_error_object(ctx, "Dynamic import requires an active script or module");
+                    reject_with(self, reject_value);
+                    return promise;
+                };
+
+                let base_path = std::path::Path::new(&base_source);
+                let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
+                let module_key = resolved_path.to_string_lossy().to_string();
+
+                if !self.loaded_modules.contains_key(&module_key) {
+                    self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&specifier_string));
+                    self.fixup_circular_reexports();
+                }
+
+                if let Some(reject_value) = self.module_load_errors.get(&module_key).cloned() {
+                    reject_with(self, reject_value);
+                    return promise;
+                }
+
+                let module_ready = self.loaded_module_states.contains_key(&module_key)
+                    || (self.is_module_mode && self.current_source_path() == Some(module_key.as_str()));
+                if !module_ready {
+                    let reject_value = self.make_type_error_object(ctx, &format!("Failed to dynamically import '{}'", specifier_string));
+                    reject_with(self, reject_value);
+                    return promise;
+                }
+
+                self.refresh_module_namespace_object(ctx, &module_key);
+                let namespace = self.module_ns_objects.get(&module_key).cloned().unwrap_or(Value::Undefined);
+                if let Err(err) = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, std::slice::from_ref(&namespace)) {
+                    self.set_pending_throw_from_error(&err);
+                }
+                promise
             }
             "__createRealm__" => {
                 let realm_id = self.child_realms.len();
@@ -10345,14 +10813,10 @@ impl<'gc> VM<'gc> {
             let bindings_b = bindings.borrow();
             if let Some(Value::String(local_u16)) = bindings_b.get(key) {
                 let local_name = crate::unicode::utf16_to_utf8(local_u16);
+                let module_key = Self::namespace_module_key(recv_map);
                 drop(bindings_b);
                 drop(borrow);
-                let binding_val = self
-                    .module_locals
-                    .get(&local_name)
-                    .or_else(|| self.globals.get(&local_name))
-                    .cloned()
-                    .unwrap_or(Value::Undefined);
+                let binding_val = self.lookup_module_binding_value(module_key.as_deref(), &local_name);
                 if matches!(binding_val, Value::Uninitialized) {
                     let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
                     self.handle_throw(ctx, &err)?;
@@ -11628,36 +12092,13 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(map) = obj
             && map.borrow().contains_key("__module_namespace__")
         {
-            let borrow = map.borrow();
-            if !key.starts_with("@@sym:") {
-                // Look up live binding via __ns_bindings__
-                if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
-                    let bindings_b = bindings.borrow();
-                    if let Some(Value::String(local_u16)) = bindings_b.get(key) {
-                        let local_name = crate::unicode::utf16_to_utf8(local_u16);
-                        drop(bindings_b);
-                        drop(borrow);
-                        let val = self
-                            .module_locals
-                            .get(&local_name)
-                            .or_else(|| self.globals.get(&local_name))
-                            .cloned()
-                            .unwrap_or(Value::Undefined);
-                        if matches!(val, Value::Uninitialized) {
-                            let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
-                            self.pending_throw = Some(err);
-                            return Value::Undefined;
-                        }
-                        return val;
-                    }
-                } else {
-                    // Loaded module namespace: read value directly
-                    let val = borrow.get(key).cloned();
-                    drop(borrow);
-                    return val.unwrap_or(Value::Undefined);
+            match self.namespace_export_value(ctx, map, key) {
+                Ok(Some(val)) => return val,
+                Ok(None) => return Value::Undefined,
+                Err(err) => {
+                    self.pending_throw = Some(err);
+                    return Value::Undefined;
                 }
-                drop(borrow);
-                return Value::Undefined;
             }
         }
 
@@ -13621,6 +14062,11 @@ impl<'gc> VM<'gc> {
             .insert("__await__".to_string(), Self::make_host_fn(ctx, "promise.await"));
         self.globals
             .insert("__drain_microtasks__".to_string(), Self::make_host_fn(ctx, "vm.drainMicrotasks"));
+        self.globals.insert(
+            crate::core::compiler::INTERNAL_DYNAMIC_IMPORT_HELPER.to_string(),
+            Self::make_host_fn_with_name_len(ctx, "module.dynamicImport", "import", 1.0, false),
+        );
+        self.intrinsic_promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
 
         let mut proxy_map = IndexMap::new();
         proxy_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_PROXY as f64));
@@ -17545,6 +17991,25 @@ impl<'gc> VM<'gc> {
                             _ = eval_vm.globals.shift_remove(alias);
                         }
                     }
+                    eval_vm.script_path = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone());
+                    // Eval top-level strictness must be based on the eval source itself,
+                    // not the caller's surrounding script source.
+                    eval_vm.script_source = Some(code.clone());
+                    eval_vm.is_module_mode = self.is_module_mode;
+                    eval_vm.loaded_modules = self.loaded_modules.clone();
+                    eval_vm.module_load_errors = self.module_load_errors.clone();
+                    eval_vm.export_origins = self.export_origins.clone();
+                    eval_vm.reexport_deps = self.reexport_deps.clone();
+                    eval_vm.ambiguous_export_keys = self.ambiguous_export_keys.clone();
+                    eval_vm.loaded_module_local_names = self.loaded_module_local_names.clone();
+                    eval_vm.loaded_module_states = self.loaded_module_states.clone();
+                    eval_vm.module_ns_objects = self.module_ns_objects.clone();
+                    eval_vm.main_module_ip_start = self.main_module_ip_start;
+                    eval_vm.intrinsic_promise_ctor = if matches!(self.intrinsic_promise_ctor, Value::Undefined) {
+                        self.globals.get("Promise").cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        self.intrinsic_promise_ctor.clone()
+                    };
                     // Set up `this` for the eval VM
                     if self.direct_eval {
                         // Direct eval inherits caller's `this`
@@ -17673,6 +18138,16 @@ impl<'gc> VM<'gc> {
                             reject: self.adjust_value_ips(ctx, &task.reject, code_offset, &eval_fn_ips),
                         });
                     }
+                    self.loaded_modules = eval_vm.loaded_modules.clone();
+                    self.module_load_errors = eval_vm.module_load_errors.clone();
+                    self.export_origins = eval_vm.export_origins.clone();
+                    self.reexport_deps = eval_vm.reexport_deps.clone();
+                    self.ambiguous_export_keys = eval_vm.ambiguous_export_keys.clone();
+                    self.loaded_module_local_names = eval_vm.loaded_module_local_names.clone();
+                    self.loaded_module_states = eval_vm.loaded_module_states.clone();
+                    self.module_ns_objects = eval_vm.module_ns_objects.clone();
+                    self.main_module_ip_start = eval_vm.main_module_ip_start;
+                    self.intrinsic_promise_ctor = eval_vm.intrinsic_promise_ctor.clone();
                     // Adjust VmFunction IPs in the result value (only on success)
                     let result = match &eval_result {
                         Ok(r) => Some(self.adjust_value_ips(ctx, r, code_offset, &eval_fn_ips)),
@@ -19600,44 +20075,19 @@ impl<'gc> VM<'gc> {
                                 }
                                 return Value::Undefined;
                             }
-                            // Look up live binding via __ns_bindings__
-                            let local_name = if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
-                                let bindings_b = bindings.borrow();
-                                if let Some(Value::String(local_u16)) = bindings_b.get(&key) {
-                                    Some(crate::unicode::utf16_to_utf8(local_u16))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            // For loaded module namespaces (no __ns_bindings__), read directly
-                            let has_ns_bindings = borrow.contains_key("__ns_bindings__");
-                            let direct_val = if local_name.is_none() && !has_ns_bindings {
-                                borrow.get(&key).cloned()
-                            } else {
-                                None
-                            };
                             drop(borrow);
-                            if let Some(local) = local_name {
-                                let val = self
-                                    .module_locals
-                                    .get(&local)
-                                    .or_else(|| self.globals.get(&local))
-                                    .cloned()
-                                    .unwrap_or(Value::Undefined);
-                                if matches!(val, Value::Uninitialized) {
-                                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
+                            match self.namespace_export_value(ctx, obj, &key) {
+                                Ok(Some(val)) => {
+                                    return self.make_data_descriptor_object(ctx, &val, true, true, false);
+                                }
+                                Ok(None) => {
+                                    return Value::Undefined;
+                                }
+                                Err(err) => {
                                     self.pending_throw = Some(err);
                                     return Value::Undefined;
                                 }
-                                // Spec: {value, writable: true, enumerable: true, configurable: false}
-                                return self.make_data_descriptor_object(ctx, &val, true, true, false);
                             }
-                            if let Some(val) = direct_val {
-                                return self.make_data_descriptor_object(ctx, &val, true, true, false);
-                            }
-                            return Value::Undefined;
                         }
                         if let (Some(Value::String(type_name_u16)), Some(Value::String(str_u16))) =
                             (borrow.get("__type__"), borrow.get("__value__"))
@@ -26183,38 +26633,42 @@ impl<'gc> VM<'gc> {
         saved_args: Option<Vec<Value<'gc>>>,
         upvalues: &[VmUpvalueCell<'gc>],
     ) -> Result<Value<'gc>, JSError> {
-        let arg_count = saved_args.as_ref().map_or(stack_args.len(), Vec::len);
-        self.stack.push(Value::Undefined);
-        let bp = self.stack.len();
-        let saved_stack_depth = bp - 1;
-        for arg in stack_args {
-            self.stack.push(arg.clone());
-        }
-        let saved_ip = self.ip;
-        let target_depth = self.frames.len();
-        self.frames.push(CallFrame {
-            return_ip: 0,
-            bp,
-            is_method: false,
-            arg_count,
-            func_ip: ip,
-            arguments_obj: None,
-            upvalues: upvalues.to_vec(),
-            saved_args,
-            local_cells: HashMap::new(),
-            this_tdz: None,
-        });
-        self.ip = ip;
-        let saved_try_stack = std::mem::take(&mut self.try_stack);
-        // Regular calls (not via `new`) should not expose new.target
-        self.new_target_stack.push(Value::Undefined);
-        let result = self.run_inner(ctx, target_depth + 1);
-        self.new_target_stack.pop();
-        self.try_stack = saved_try_stack;
-        self.ip = saved_ip;
-        self.frames.truncate(target_depth);
-        self.stack.truncate(saved_stack_depth);
-        result
+        let module_key = self.chunk.fn_source_paths.get(&ip).cloned();
+        let active_module_key = module_key.clone();
+        self.with_module_execution_context(active_module_key.as_deref(), |vm| {
+            let arg_count = saved_args.as_ref().map_or(stack_args.len(), Vec::len);
+            vm.stack.push(Value::Undefined);
+            let bp = vm.stack.len();
+            let saved_stack_depth = bp - 1;
+            for arg in stack_args {
+                vm.stack.push(arg.clone());
+            }
+            let saved_ip = vm.ip;
+            let target_depth = vm.frames.len();
+            vm.frames.push(CallFrame {
+                return_ip: 0,
+                bp,
+                is_method: false,
+                arg_count,
+                func_ip: ip,
+                arguments_obj: None,
+                upvalues: upvalues.to_vec(),
+                saved_args,
+                local_cells: HashMap::new(),
+                this_tdz: None,
+            });
+            vm.ip = ip;
+            let saved_try_stack = std::mem::take(&mut vm.try_stack);
+            // Regular calls (not via `new`) should not expose new.target
+            vm.new_target_stack.push(Value::Undefined);
+            let result = vm.run_inner(ctx, target_depth + 1);
+            vm.new_target_stack.pop();
+            vm.try_stack = saved_try_stack;
+            vm.ip = saved_ip;
+            vm.frames.truncate(target_depth);
+            vm.stack.truncate(saved_stack_depth);
+            result
+        })
     }
 
     fn as_property_key_string(&mut self, ctx: &GcContext<'gc>, index: &Value<'gc>) -> Result<String, JSError> {
@@ -26266,6 +26720,22 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
+    fn make_syntax_error_object(&self, ctx: &GcContext<'gc>, message: &str) -> Value<'gc> {
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::from("SyntaxError"));
+        map.insert("name".to_string(), Value::from("SyntaxError"));
+        map.insert("message".to_string(), Value::from(message));
+        if let Some(ctor) = self.globals.get("SyntaxError").cloned() {
+            map.insert("constructor".to_string(), ctor.clone());
+            if let Value::VmObject(ctor_obj) = ctor
+                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
+            {
+                map.insert("__proto__".to_string(), proto);
+            }
+        }
+        Value::VmObject(new_gc_cell_ptr(ctx, map))
+    }
+
     fn make_range_error_object(&self, ctx: &GcContext<'gc>, message: &str) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__type__".to_string(), Value::from("RangeError"));
@@ -26307,19 +26777,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn throw_syntax_error(&mut self, ctx: &GcContext<'gc>, message: &str) {
-        let mut map = IndexMap::new();
-        map.insert("__type__".to_string(), Value::from("SyntaxError"));
-        map.insert("name".to_string(), Value::from("SyntaxError"));
-        map.insert("message".to_string(), Value::from(message));
-        if let Some(ctor) = self.globals.get("SyntaxError").cloned() {
-            map.insert("constructor".to_string(), ctor.clone());
-            if let Value::VmObject(ctor_obj) = ctor
-                && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
-            {
-                map.insert("__proto__".to_string(), proto);
-            }
-        }
-        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, map)));
+        self.pending_throw = Some(self.make_syntax_error_object(ctx, message));
     }
 
     fn extract_number_with_coercion(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<f64> {
@@ -26543,42 +27001,22 @@ impl<'gc> VM<'gc> {
             Value::VmObject(obj) => {
                 // Module namespace: export keys are enumerable; uninitialized → ReferenceError via [[GetOwnProperty]]
                 if obj.borrow().contains_key("__module_namespace__") {
-                    let b = obj.borrow();
-                    let mut keys = Vec::new();
-                    // Collect export→local mappings from __ns_bindings__
-                    let bindings: Vec<(String, String)> = if let Some(Value::VmObject(bmap)) = b.get("__ns_bindings__") {
-                        let bb = bmap.borrow();
-                        bb.iter()
-                            .filter_map(|(k, v)| {
-                                if let Value::String(u16s) = v {
-                                    Some((k.clone(), crate::unicode::utf16_to_utf8(u16s)))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
+                    let binding_keys: Vec<String> = if let Some(Value::VmObject(bmap)) = obj.borrow().get("__ns_bindings__") {
+                        bmap.borrow().keys().cloned().collect()
                     } else {
-                        // Loaded module namespace: enumerate direct keys
-                        let direct_keys: Vec<String> = b.keys().filter(|k| !k.starts_with("__") && !k.starts_with("@@")).cloned().collect();
-                        drop(b);
-                        return direct_keys;
+                        Vec::new()
                     };
-                    drop(b);
-                    for (export_name, local_name) in &bindings {
-                        let val = self
-                            .module_locals
-                            .get(local_name)
-                            .or_else(|| self.globals.get(local_name))
-                            .cloned()
-                            .unwrap_or(Value::Undefined);
-                        if matches!(val, Value::Uninitialized) {
-                            let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", export_name));
-                            self.pending_throw = Some(err);
-                            return Vec::new();
+                    for export_name in &binding_keys {
+                        match self.namespace_export_value(ctx, obj, export_name) {
+                            Ok(Some(_)) => {}
+                            Ok(None) => {}
+                            Err(err) => {
+                                self.pending_throw = Some(err);
+                                return Vec::new();
+                            }
                         }
-                        keys.push(export_name.clone());
                     }
-                    return keys;
+                    return binding_keys;
                 }
                 if obj.borrow().contains_key("__proxy_target__") {
                     let names = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPERTYNAMES, std::slice::from_ref(val));
@@ -30448,87 +30886,92 @@ impl<'gc> VM<'gc> {
         upvals: &[VmUpvalueCell<'gc>],
         this_val: &Value<'gc>,
     ) -> Result<GeneratorState<'gc>, JSError> {
-        let mut locals = Vec::new();
-        for i in 0..arity as usize {
-            locals.push(args.get(i).cloned().unwrap_or(Value::Undefined));
-        }
-        let arg_count = args.len();
-        let saved_args = if arg_count > arity as usize { Some(args.to_vec()) } else { None };
+        let module_key = self.chunk.fn_source_paths.get(&func_ip).cloned();
+        let active_module_key = module_key.clone();
+        self.with_module_execution_context(active_module_key.as_deref(), |vm| {
+            let mut locals = Vec::new();
+            for i in 0..arity as usize {
+                locals.push(args.get(i).cloned().unwrap_or(Value::Undefined));
+            }
+            let arg_count = args.len();
+            let saved_args = if arg_count > arity as usize { Some(args.to_vec()) } else { None };
 
-        let saved_ip = self.ip;
-        let saved_stack_len = self.stack.len();
-        let saved_frames = std::mem::take(&mut self.frames);
-        let saved_try_stack = std::mem::take(&mut self.try_stack);
-        let saved_this_stack_len = self.this_stack.len();
-        let saved_yield = self.generator_yield_value.take();
-        let saved_param_done = self.generator_param_init_done;
+            let saved_ip = vm.ip;
+            let saved_stack_len = vm.stack.len();
+            let saved_frames = std::mem::take(&mut vm.frames);
+            let saved_try_stack = std::mem::take(&mut vm.try_stack);
+            let saved_this_stack_len = vm.this_stack.len();
+            let saved_yield = vm.generator_yield_value.take();
+            let saved_param_done = vm.generator_param_init_done;
 
-        self.ip = func_ip;
-        self.try_stack = Vec::new();
-        self.generator_param_init_done = false;
+            vm.ip = func_ip;
+            vm.try_stack = Vec::new();
+            vm.generator_param_init_done = false;
 
-        self.stack.push(Value::Undefined);
-        let bp = self.stack.len();
-        for local in &locals {
-            self.stack.push(local.clone());
-        }
+            vm.stack.push(Value::Undefined);
+            let bp = vm.stack.len();
+            for local in &locals {
+                vm.stack.push(local.clone());
+            }
 
-        self.frames.push(CallFrame {
-            return_ip: 0,
-            bp,
-            is_method: false,
-            arg_count,
-            func_ip,
-            arguments_obj: None,
-            upvalues: upvals.to_vec(),
-            saved_args: saved_args.clone(),
-            local_cells: HashMap::new(),
-            this_tdz: None,
-        });
-        self.this_stack.push(this_val.clone());
+            vm.frames.push(CallFrame {
+                return_ip: 0,
+                bp,
+                is_method: false,
+                arg_count,
+                func_ip,
+                arguments_obj: None,
+                upvalues: upvals.to_vec(),
+                saved_args: saved_args.clone(),
+                local_cells: HashMap::new(),
+                this_tdz: None,
+            });
+            vm.this_stack.push(this_val.clone());
 
-        let min_depth = self.frames.len();
-        let run_result = self.run_inner(ctx, min_depth);
+            let min_depth = vm.frames.len();
+            let run_result = vm.run_inner(ctx, min_depth);
 
-        let mut out_state = GeneratorState {
-            ip: func_ip,
-            bp: 0,
-            locals,
-            arg_count,
-            saved_args,
-            upvalues: upvals.to_vec(),
-            local_cells: HashMap::new(),
-            try_stack: Vec::new(),
-            func_ip,
-            done: false,
-            this_val: this_val.clone(),
-            paused_at_yield: false,
-        };
+            let mut out_state = GeneratorState {
+                ip: func_ip,
+                bp: 0,
+                locals,
+                arg_count,
+                saved_args,
+                upvalues: upvals.to_vec(),
+                local_cells: HashMap::new(),
+                try_stack: Vec::new(),
+                func_ip,
+                done: false,
+                this_val: this_val.clone(),
+                paused_at_yield: false,
+                module_key: module_key.clone(),
+            };
 
-        if run_result.is_ok()
-            && self.generator_param_init_done
-            && let Some(frame) = self.frames.pop()
-        {
-            out_state.ip = self.ip;
-            out_state.bp = frame.bp;
-            out_state.locals = self.stack[frame.bp..].to_vec();
-            out_state.arg_count = frame.arg_count;
-            out_state.saved_args = frame.saved_args.clone();
-            out_state.upvalues = frame.upvalues;
-            out_state.local_cells = frame.local_cells;
-            out_state.try_stack = std::mem::take(&mut self.try_stack);
-        }
+            if run_result.is_ok()
+                && vm.generator_param_init_done
+                && let Some(frame) = vm.frames.pop()
+            {
+                out_state.ip = vm.ip;
+                out_state.bp = frame.bp;
+                out_state.locals = vm.stack[frame.bp..].to_vec();
+                out_state.arg_count = frame.arg_count;
+                out_state.saved_args = frame.saved_args.clone();
+                out_state.upvalues = frame.upvalues;
+                out_state.local_cells = frame.local_cells;
+                out_state.try_stack = std::mem::take(&mut vm.try_stack);
+            }
 
-        self.this_stack.truncate(saved_this_stack_len);
-        self.stack.truncate(saved_stack_len);
-        self.frames = saved_frames;
-        self.try_stack = saved_try_stack;
-        self.ip = saved_ip;
-        self.generator_yield_value = saved_yield;
-        self.generator_param_init_done = saved_param_done;
+            vm.this_stack.truncate(saved_this_stack_len);
+            vm.stack.truncate(saved_stack_len);
+            vm.frames = saved_frames;
+            vm.try_stack = saved_try_stack;
+            vm.ip = saved_ip;
+            vm.generator_yield_value = saved_yield;
+            vm.generator_param_init_done = saved_param_done;
 
-        run_result?;
-        Ok(out_state)
+            run_result?;
+            Ok(out_state)
+        })
     }
 
     /// Create a generator object for a suspendable generator function.
@@ -30620,184 +31063,141 @@ impl<'gc> VM<'gc> {
             self.generator_objects.remove(&gen_id);
             return self.make_gen_result(ctx, &Value::Undefined, true);
         }
-
-        // mode 2 = return(value): if no active try handlers, return immediately;
-        // otherwise resume with pending_throw to trigger cleanup (IteratorClose, finally).
-        if mode == 2 && state.try_stack.is_empty() {
-            // No cleanup needed — generator is completed
-            self.generator_objects.remove(&gen_id);
-            return self.make_gen_result(ctx, resume_value, true);
-
-            // Fall through to resume with pending_throw set below
-        }
-
-        // Save current VM state
-        let saved_ip = self.ip;
-        let saved_stack_len = self.stack.len();
-        let saved_frames = std::mem::take(&mut self.frames);
-        let saved_try_stack = std::mem::take(&mut self.try_stack);
-        let saved_this_stack_len = self.this_stack.len();
-
-        // Set up generator's execution context
-        self.ip = state.ip;
-
-        // Push the generator's locals onto the stack
-        // Push a dummy callee slot first (Return opcode does `truncate(bp - 1)`)
-        self.stack.push(Value::Undefined);
-        let bp = self.stack.len();
-        for local in &state.locals {
-            self.stack.push(local.clone());
-        }
-
-        // Restore try_stack and adjust stack_depth values for the new stack base.
-        // The try_stack was saved with absolute stack positions from the original
-        // execution. If the generator is resumed at a different call depth (e.g.,
-        // iter.next() from global scope but iter.return() from inside assert.throws),
-        // the stack base differs and stack_depth must be rebased.
-        self.try_stack = state.try_stack;
-        let bp_delta = bp as isize - state.bp as isize;
-        if bp_delta != 0 {
-            for try_frame in &mut self.try_stack {
-                try_frame.stack_depth = (try_frame.stack_depth as isize + bp_delta) as usize;
-            }
-        }
-
-        // Push a frame for the generator
-        self.frames.push(CallFrame {
-            return_ip: 0, // sentinel — we won't actually return via normal Return path
-            bp,
-            is_method: false,
-            arg_count: state.arg_count,
-            func_ip: state.func_ip,
-            arguments_obj: None,
-            upvalues: state.upvalues,
-            saved_args: state.saved_args.clone(),
-            local_cells: state.local_cells,
-            this_tdz: None,
-        });
-
-        // Bind this
-
-        self.this_stack.push(state.this_val);
-
-        // If this is a next() call (not the initial call), push the resume value
-        // as the result of the yield expression.
-        if state.paused_at_yield {
-            // Resuming from a yield: push resume_value as yield expression result
-            if mode == 1 {
-                // throw mode: inject the thrown value directly
-                self.stack.push(Value::Undefined); // placeholder for yield result
-                self.pending_throw = Some(resume_value.clone());
-            } else if mode == 2 {
-                // return mode: inject as throw to unwind through try handlers
-                self.stack.push(Value::Undefined); // placeholder for yield result
-                self.pending_throw = Some(resume_value.clone());
-                self.generator_return_pending = Some(resume_value.clone());
-            } else {
-                self.stack.push(resume_value.clone());
-            }
-        } else if state.ip != state.func_ip && mode == 1 {
-            // throw on a generator that has started but not yielded yet
-            self.stack.push(Value::Undefined);
-            self.pending_throw = Some(resume_value.clone());
-        } else if mode == 1 {
-            // throw on a not-yet-started generator: complete it and throw
-            self.stack.truncate(saved_stack_len);
-            self.frames = saved_frames;
-            self.try_stack = saved_try_stack;
-            self.this_stack.truncate(saved_this_stack_len);
-            self.ip = saved_ip;
-            // Generator is done
-            // Don't re-insert state — it's consumed
-            // Throw to the caller
-            let throw_val = resume_value.clone();
-            self.pending_throw = Some(throw_val);
-            self.generator_objects.remove(&gen_id);
-            return self.make_gen_result(ctx, &Value::Undefined, true);
-        }
-
-        // Run the generator body until Yield or Return
-        let min_depth = self.frames.len();
-        let result = self.run_inner(ctx, min_depth);
-
-        // Pop the generator's this binding
-        self.this_stack.truncate(saved_this_stack_len);
-
-        // Check result — yield takes precedence over pending return so that
-        // yield* delegation can re-yield when the inner iterator's .return()
-        // reports done=false.
-        let gen_result = if let Some(yielded) = self.generator_yield_value.take() {
-            // Generator yielded a value. Save state for next resumption.
-            let is_direct = self.generator_yield_direct;
-            self.generator_yield_direct = false;
-
-            if is_direct {
-                // YieldDirect (yield* delegation): the delegation is handling
-                // the return, so clear generator_return_pending — the outer
-                // generator is not done yet.
-                self.generator_return_pending = None;
+        let module_key = state.module_key.clone();
+        self.with_module_execution_context(module_key.as_deref(), |vm| {
+            // mode 2 = return(value): if no active try handlers, return immediately;
+            // otherwise resume with pending_throw to trigger cleanup (IteratorClose, finally).
+            if mode == 2 && state.try_stack.is_empty() {
+                vm.generator_objects.remove(&gen_id);
+                return vm.make_gen_result(ctx, resume_value, true);
             }
 
-            let frame = self.frames.pop().unwrap();
-            let locals: Vec<Value<'gc>> = self.stack[frame.bp..].to_vec();
-            let gen_try_stack = std::mem::take(&mut self.try_stack);
+            let saved_ip = vm.ip;
+            let saved_stack_len = vm.stack.len();
+            let saved_frames = std::mem::take(&mut vm.frames);
+            let saved_try_stack = std::mem::take(&mut vm.try_stack);
+            let saved_this_stack_len = vm.this_stack.len();
 
-            let new_state = GeneratorState {
-                ip: self.ip,
-                bp: frame.bp,
-                locals,
-                arg_count: frame.arg_count,
-                saved_args: frame.saved_args.clone(),
-                upvalues: frame.upvalues,
-                local_cells: frame.local_cells,
-                try_stack: gen_try_stack,
+            vm.ip = state.ip;
+            vm.stack.push(Value::Undefined);
+            let bp = vm.stack.len();
+            for local in &state.locals {
+                vm.stack.push(local.clone());
+            }
+
+            vm.try_stack = state.try_stack.clone();
+            let bp_delta = bp as isize - state.bp as isize;
+            if bp_delta != 0 {
+                for try_frame in &mut vm.try_stack {
+                    try_frame.stack_depth = (try_frame.stack_depth as isize + bp_delta) as usize;
+                }
+            }
+
+            vm.frames.push(CallFrame {
+                return_ip: 0,
+                bp,
+                is_method: false,
+                arg_count: state.arg_count,
                 func_ip: state.func_ip,
-                done: false,
-                this_val: generator_this.clone(),
-                paused_at_yield: true,
-            };
-            self.generator_states.insert(gen_id, new_state);
+                arguments_obj: None,
+                upvalues: state.upvalues.clone(),
+                saved_args: state.saved_args.clone(),
+                local_cells: state.local_cells.clone(),
+                this_tdz: None,
+            });
 
-            if is_direct {
-                // YieldDirect: return the inner result object as-is (for yield*)
-                yielded
+            vm.this_stack.push(state.this_val.clone());
+
+            if state.paused_at_yield {
+                if mode == 1 {
+                    vm.stack.push(Value::Undefined);
+                    vm.pending_throw = Some(resume_value.clone());
+                } else if mode == 2 {
+                    vm.stack.push(Value::Undefined);
+                    vm.pending_throw = Some(resume_value.clone());
+                    vm.generator_return_pending = Some(resume_value.clone());
+                } else {
+                    vm.stack.push(resume_value.clone());
+                }
+            } else if state.ip != state.func_ip && mode == 1 {
+                vm.stack.push(Value::Undefined);
+                vm.pending_throw = Some(resume_value.clone());
+            } else if mode == 1 {
+                vm.stack.truncate(saved_stack_len);
+                vm.frames = saved_frames;
+                vm.try_stack = saved_try_stack;
+                vm.this_stack.truncate(saved_this_stack_len);
+                vm.ip = saved_ip;
+                vm.pending_throw = Some(resume_value.clone());
+                vm.generator_objects.remove(&gen_id);
+                return vm.make_gen_result(ctx, &Value::Undefined, true);
+            }
+
+            let min_depth = vm.frames.len();
+            let result = vm.run_inner(ctx, min_depth);
+            vm.this_stack.truncate(saved_this_stack_len);
+
+            let gen_result = if let Some(yielded) = vm.generator_yield_value.take() {
+                let is_direct = vm.generator_yield_direct;
+                vm.generator_yield_direct = false;
+
+                if is_direct {
+                    vm.generator_return_pending = None;
+                }
+
+                let frame = vm.frames.pop().unwrap();
+                let locals: Vec<Value<'gc>> = vm.stack[frame.bp..].to_vec();
+                let gen_try_stack = std::mem::take(&mut vm.try_stack);
+
+                let new_state = GeneratorState {
+                    ip: vm.ip,
+                    bp: frame.bp,
+                    locals,
+                    arg_count: frame.arg_count,
+                    saved_args: frame.saved_args.clone(),
+                    upvalues: frame.upvalues,
+                    local_cells: frame.local_cells,
+                    try_stack: gen_try_stack,
+                    func_ip: state.func_ip,
+                    done: false,
+                    this_val: generator_this.clone(),
+                    paused_at_yield: true,
+                    module_key: state.module_key.clone(),
+                };
+                vm.generator_states.insert(gen_id, new_state);
+
+                if is_direct {
+                    yielded
+                } else {
+                    vm.make_gen_result(ctx, &yielded, false)
+                }
+            } else if let Some(return_val) = vm.generator_return_pending.take() {
+                vm.generator_objects.remove(&gen_id);
+                vm.make_gen_result(ctx, &return_val, true)
             } else {
-                self.make_gen_result(ctx, &yielded, false)
-            }
-        } else if let Some(return_val) = self.generator_return_pending.take() {
-            // Generator return completion (mode 2 with cleanup).
-            // The pending_throw propagated through try handlers for cleanup
-            // (IteratorClose, finally blocks). Now complete the return.
-            self.generator_objects.remove(&gen_id);
-            self.make_gen_result(ctx, &return_val, true)
-        } else {
-            self.generator_objects.remove(&gen_id);
-            match &result {
-                Ok(value) => {
-                    // Normal return from generator body (Return opcode hit)
-                    self.make_gen_result(ctx, value, true)
+                vm.generator_objects.remove(&gen_id);
+                match &result {
+                    Ok(value) => vm.make_gen_result(ctx, value, true),
+                    Err(e) => {
+                        vm.stack.truncate(saved_stack_len);
+                        vm.frames = saved_frames;
+                        vm.try_stack = saved_try_stack;
+                        vm.ip = saved_ip;
+
+                        let err_val = vm.vm_value_from_error(ctx, e);
+                        vm.pending_throw = Some(err_val);
+                        return vm.make_gen_result(ctx, &Value::Undefined, true);
+                    }
                 }
-                Err(e) => {
-                    // Generator threw an error — it's done
-                    self.stack.truncate(saved_stack_len);
-                    self.frames = saved_frames;
-                    self.try_stack = saved_try_stack;
-                    self.ip = saved_ip;
+            };
 
-                    let err_val = self.vm_value_from_error(ctx, e);
-                    self.pending_throw = Some(err_val);
-                    return self.make_gen_result(ctx, &Value::Undefined, true);
-                }
-            }
-        };
+            vm.stack.truncate(saved_stack_len);
+            vm.frames = saved_frames;
+            vm.try_stack = saved_try_stack;
+            vm.ip = saved_ip;
 
-        // Restore caller's VM state
-        self.stack.truncate(saved_stack_len);
-        self.frames = saved_frames;
-        self.try_stack = saved_try_stack;
-        self.ip = saved_ip;
-
-        gen_result
+            gen_result
+        })
     }
 
     /// Create a generator result object: { value, done }

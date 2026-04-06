@@ -20,7 +20,7 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
         f();
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "3");
 
     let script = r#"
@@ -35,6 +35,6 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
         f();
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "3");
 }

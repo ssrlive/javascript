@@ -36,6 +36,6 @@ fn test_super_newtarget_propagation() {
         if (baseNewTarget !== Child) throw new Error('baseNewTarget not propagated');
     "#;
 
-    let res = evaluate_script_with_vm(src, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(src, false, None::<&std::path::Path>).unwrap();
     println!("Result: {}", res);
 }

@@ -15,6 +15,6 @@ fn named_function_expression_has_name() {
             return o.x.name;
         })()
     "#;
-    let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "\"foo\"");
 }

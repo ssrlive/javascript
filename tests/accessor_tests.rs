@@ -1,5 +1,5 @@
 use javascript::JSErrorKind;
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -11,7 +11,7 @@ fn __init_test_logger() {
 #[test]
 fn test_write_to_read_only_accessor_throws() {
     let script = "\"use strict\"; class C { get r() { return 1 } } let c = new C(); c.r = 2";
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
+    let result = evaluate_script(script, false, None::<&std::path::Path>);
     match result {
         Err(err) => match err.kind() {
             JSErrorKind::TypeError { .. } => (),
@@ -24,6 +24,6 @@ fn test_write_to_read_only_accessor_throws() {
 #[test]
 fn test_read_write_only_accessor_returns_undefined() {
     let script = "\"use strict\"; class C { set r(v) { this._r = v } } let c = new C(); c.r = 5; c.r";
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "undefined");
 }

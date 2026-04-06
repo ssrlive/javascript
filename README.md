@@ -194,9 +194,9 @@ cargo install js --path ./js
 ### Evaluate a script (library)
 
 ```rust
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
-let result = evaluate_script_with_vm(r#"
+let result = evaluate_script(r#"
     let x = 42n;
     let y = x * 2n;
     y + 10n
@@ -208,9 +208,9 @@ assert_eq!(result, "94");
 ### Evaluate an ES module
 
 ```rust,no_run
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
-let result = evaluate_script_with_vm(r#"
+let result = evaluate_script(r#"
     const greet = (name) => `Hello, ${name}!`;
     export default greet("world");
 "#, true, None::<&std::path::Path>).unwrap();
@@ -221,8 +221,8 @@ let result = evaluate_script_with_vm(r#"
 ```rust
 #[cfg(feature = "os")]
 {
-    use javascript::evaluate_script_with_vm;
-    let result = evaluate_script_with_vm(r#"
+    use javascript::evaluate_script;
+    let result = evaluate_script(r#"
         import * as os from "os";
         let cwd = os.getcwd();
         cwd
@@ -233,9 +233,9 @@ let result = evaluate_script_with_vm(r#"
 ### Promises & async/await
 
 ```rust
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
-let result = evaluate_script_with_vm(r#"
+let result = evaluate_script(r#"
     async function fetchData() {
         return await Promise.resolve(42);
     }
@@ -248,9 +248,9 @@ assert_eq!(result, "42");
 ### Timers
 
 ```rust
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
-let result = evaluate_script_with_vm(r#"
+let result = evaluate_script(r#"
     let id = setTimeout(() => console.log("fired"), 100);
     clearTimeout(id);
     undefined

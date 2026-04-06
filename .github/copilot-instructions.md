@@ -57,7 +57,7 @@ Source → Lexer (token.rs) → Parser (parser.rs) → Compiler (compiler.rs) �
 | `src/core/vm.rs` | Executes bytecode; ~35k lines; contains all builtins |
 | `src/core/value.rs` | `Value<'gc>` enum — all JS value types |
 | `src/core/mod.rs` | Module wiring + public entry points |
-| `src/lib.rs` | Crate public API (`evaluate_script_with_vm`, `Repl`, etc.) |
+| `src/lib.rs` | Crate public API (`evaluate_script`, `Repl`, etc.) |
 | `src/error.rs` | `JSError` / `EvalError` types |
 | `src/repl.rs` | Persistent REPL environment |
 | `src/js_bigint.rs` | BigInt implementation |
@@ -69,7 +69,7 @@ Source → Lexer (token.rs) → Parser (parser.rs) → Compiler (compiler.rs) �
 
 ```rust
 // Public API
-evaluate_script_with_vm(source, run_as_module, script_path) -> Result<String, JSError>
+evaluate_script(source, run_as_module, script_path) -> Result<String, JSError>
 ```
 
 Internally: parse → create GC arena → compile → `VM::run()` → format result.
@@ -147,6 +147,6 @@ All fallible operations return `Result<_, JSError>`. `JSError` carries kind (`JS
 
 ### Test Conventions
 
-- **Rust integration tests** live in `tests/*.rs`; use the `assert_eval_eq!(js_source, expected)` macro which calls `evaluate_script_with_vm` and compares the string result.
+- **Rust integration tests** live in `tests/*.rs`; use the `assert_eval_eq!(js_source, expected)` macro which calls `evaluate_script` and compares the string result.
 - **JS self-tests** live in `js-scripts/*.js`; they `throw` on failure or rely on exit code. Run one with `cargo run -p js -- js-scripts/<file>.js`.
 - **Test262** is run via `node ci/runner.js`; feature probes in `ci/feature_probes/` auto-skip tests for unsupported features.

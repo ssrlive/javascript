@@ -23,7 +23,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "200");
     }
 
@@ -43,7 +43,7 @@ mod promise_tests {
             });
             finalResult
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "30");
     }
 
@@ -65,7 +65,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "6");
     }
 
@@ -84,7 +84,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "1");
     }
 
@@ -101,7 +101,7 @@ mod promise_tests {
             executionOrder
         "#;
 
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"sync\",\"async result\"]");
     }
 
@@ -114,7 +114,7 @@ mod promise_tests {
                 .then(function(v) { finalResult = v; });
             finalResult
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "42");
     }
 
@@ -135,7 +135,7 @@ mod promise_tests {
             });
             Promise.allSettled([p1, p2, p3])
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(
             result,
             "[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":\"error\"},{\"status\":\"fulfilled\",\"value\":3}]"
@@ -155,7 +155,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "7");
     }
 
@@ -171,7 +171,7 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"AggregateError\",\"All promises were rejected\",\"e1\",\"e2\"]");
     }
 
@@ -186,7 +186,7 @@ mod promise_tests {
                 Promise.reject("boom")
             ])
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert!(result.contains("pending"), "expected pending promise, got: {result}");
     }
 
@@ -207,7 +207,7 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"from-thenable\"");
     }
 
@@ -228,7 +228,7 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"thenable-reject\"]");
     }
 
@@ -249,7 +249,7 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         // assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"then-throw\"]");
         assert!(
             result.contains("p-reject") && result.contains("then-throw") && result.contains("AggregateError"),
@@ -275,7 +275,7 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert!(
             result.contains("p-reject") && result.contains("getter-throw") && result.contains("AggregateError"),
             "unexpected result: {result}"
@@ -290,7 +290,7 @@ mod promise_tests {
             out = [e.name, e.message, e.errors[0], e.errors[1]];
             out
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"AggregateError\",\"boom\",\"x\",\"y\"]");
     }
 
@@ -306,7 +306,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"direct test\"");
     }
 
@@ -323,7 +323,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "84");
     }
 
@@ -340,7 +340,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"caught: test error\"");
     }
 
@@ -356,7 +356,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"cleanup done\"");
     }
 
@@ -377,7 +377,7 @@ mod promise_tests {
 
             [resolveResult, rejectResult]
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "[\"resolved\",\"rejected\"]");
     }
 
@@ -391,7 +391,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script_with_vm(code, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "84");
     }
 
@@ -412,7 +412,7 @@ mod promise_tests {
         new Promise((resolve) => setTimeout(() => resolve(printed), 10));
     "#;
 
-        let res = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+        let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(res, "\"Done!\"");
     }
 }

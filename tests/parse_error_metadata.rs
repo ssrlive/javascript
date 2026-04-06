@@ -9,7 +9,7 @@ fn __init_test_logger() {
 #[test]
 fn parse_error_carries_file_and_line_defaults() {
     // Feed malformed script to trigger a parse error
-    let res = evaluate_script_with_vm("let x = { ", false, None::<&std::path::Path>);
+    let res = evaluate_script("let x = { ", false, None::<&std::path::Path>);
     match res {
         Err(err) => {
             println!("ParseError reported at \n{err}");

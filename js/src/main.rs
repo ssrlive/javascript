@@ -10,7 +10,7 @@ struct Cli {
     /// JavaScript file to execute
     file: Option<std::path::PathBuf>,
 
-    /// Milliseconds threshold for short timers which `evaluate_script_with_vm` will wait for
+    /// Milliseconds threshold for short timers which `evaluate_script` will wait for
     #[arg(long, default_value_t = 20)]
     timer_wait_ms: u64,
 
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
 fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let cli = <Cli as clap::Parser>::parse();
 
-    // Apply configured short-timer threshold so evaluate_script_with_vm can decide which
+    // Apply configured short-timer threshold so evaluate_script can decide which
     // timers to wait for before returning (default 20 ms).
     // set_short_timer_threshold_ms(cli.timer_wait_ms);
 
@@ -60,7 +60,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         return Ok(run_persistent_repl()?);
     };
 
-    // If we got here we have a script to execute. Prefer the safe evaluate_script_with_vm
+    // If we got here we have a script to execute. Prefer the safe evaluate_script
     let script_path = cli.file.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or(p.clone()));
 
     let file_ext_is_mjs = cli
@@ -72,7 +72,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         .unwrap_or(false);
     let run_as_module = cli.module || file_ext_is_mjs;
 
-    let result = evaluate_script_with_vm(&script_content, run_as_module, script_path.as_ref());
+    let result = evaluate_script(&script_content, run_as_module, script_path.as_ref());
 
     match result {
         Ok(result) => {

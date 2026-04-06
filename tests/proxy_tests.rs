@@ -10,7 +10,7 @@ fn __init_test_logger() {
 #[test]
 fn test_proxy_basic() {
     // Test basic Proxy creation
-    let result = evaluate_script_with_vm(
+    let result = evaluate_script(
         r#"
         var target = { foo: 42 };
         var handler = {
@@ -34,7 +34,7 @@ fn test_proxy_basic() {
 #[test]
 fn test_proxy_revocable() {
     // Test Proxy.revocable
-    let result = evaluate_script_with_vm(
+    let result = evaluate_script(
         r#"
         var target = { foo: 42 };
         var handler = {

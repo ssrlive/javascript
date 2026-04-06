@@ -1,11 +1,11 @@
 use javascript::*;
 
 fn eval_vm(script: &str) -> String {
-    evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap()
+    evaluate_script(script, false, None::<&std::path::Path>).unwrap()
 }
 
 fn eval_vm_result(script: &str) -> Result<String, JSError> {
-    evaluate_script_with_vm(script, false, None::<&std::path::Path>)
+    evaluate_script(script, false, None::<&std::path::Path>)
 }
 
 fn eval_vm_async_iife(body: &str) -> String {

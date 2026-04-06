@@ -278,6 +278,10 @@ pub struct Chunk<'gc> {
     pub fn_brand_upvalue: std::collections::HashMap<usize, (u8, usize)>,
     /// Map from function IP to upvalue names (for brand upvalue lookup).
     pub fn_upvalue_names: std::collections::HashMap<usize, Vec<String>>,
+    /// Map from function IP to the source file path/module path where the
+    /// function was compiled. Used for dynamic import base-path resolution and
+    /// to restore the correct module environment when cross-module functions run.
+    pub fn_source_paths: std::collections::HashMap<usize, String>,
     /// Global names declared via `var`/`function`/`class` at the top level of this chunk.
     /// Used by strict-mode eval to avoid leaking declarations back to the caller.
     pub declared_globals: std::collections::HashSet<String>,
@@ -448,6 +452,9 @@ impl<'gc> Chunk<'gc> {
         }
         for (ip, names) in dep.fn_upvalue_names {
             self.fn_upvalue_names.insert(ip + ip_offset, names);
+        }
+        for (ip, path) in dep.fn_source_paths {
+            self.fn_source_paths.insert(ip + ip_offset, path);
         }
         for ip in dep.named_fn_self_ips {
             self.named_fn_self_ips.insert(ip + ip_offset);

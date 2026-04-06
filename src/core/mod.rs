@@ -415,10 +415,20 @@ pub(crate) fn collect_module_sources(statements: &[Statement], self_basename: &s
     sources
 }
 
-pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
+pub fn evaluate_script<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script: T,
     run_as_module: bool,
     script_path: Option<P>,
+) -> Result<String, JSError> {
+    let unwrap_top_level_promise = script_path.is_none();
+    evaluate_script_with_unwrap(script, run_as_module, script_path, unwrap_top_level_promise)
+}
+
+pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
+    script: T,
+    run_as_module: bool,
+    script_path: Option<P>,
+    unwrap_top_level_promise: bool,
 ) -> Result<String, JSError> {
     let script_str = script.as_ref();
     let statements = parse_program_statements(script_str, run_as_module)?;
@@ -448,16 +458,17 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         }
 
         // Multi-file module loading: load and execute dependencies before the main module.
+        let mut main_module_record: Option<(String, Vec<String>)> = None;
         if run_as_module && let Some(ref entry_path) = script_path_buf {
+            let main_key = entry_path.to_string_lossy().to_string();
+            let (main_export_names, main_export_name_to_local, _) = collect_exports_from_ast(&statements);
+            vm.pre_create_module_namespace(ctx, &main_key);
+            vm.seed_module_record(&main_key, &main_export_names, &main_export_name_to_local);
+            main_module_record = Some((main_key, main_export_names));
+
             let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let sources = collect_module_sources(&statements, self_basename);
             if !sources.is_empty() {
-                // Pre-create the main module's namespace shell so that any
-                // dependency that circularly imports back the main module
-                // receives the same identity object (spec GetModuleNamespace).
-                let main_key = entry_path.to_string_lossy().to_string();
-                vm.pre_create_module_namespace(ctx, &main_key);
-
                 vm.load_module_dependencies(ctx, entry_path, &sources);
                 // Fixup circular re-exports
                 vm.fixup_circular_reexports();
@@ -511,42 +522,49 @@ pub fn evaluate_script_with_vm<T: AsRef<str>, P: AsRef<std::path::Path>>(
         // let mut vm = VM::new(chunk, ctx);
         vm.set_source_context(script_str, script_path_buf.as_deref());
         let mut v = vm.run(ctx)?;
+        if let Some((main_key, main_export_names)) = &main_module_record {
+            vm.finalize_active_module_record(ctx, main_key, main_export_names);
+        }
 
-        // VM helper behavior: if top-level result is a settled Promise, expose its
-        // resolved/rejected payload so tests can assert final values directly.
-        for _ in 0..8 {
-            let step = if let Value::VmObject(obj) = &v {
-                let b = obj.borrow();
-                let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
-                if is_promise {
-                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
-                    let next = b.get("__promise_value__").cloned();
-                    Some((rejected, next))
+        // Helper behavior for eval/unit-test entry points: if the top-level result
+        // is a settled Promise, expose its payload so direct callers can assert it.
+        // File execution should preserve normal script semantics and must not turn
+        // a bare `import()` completion value into a process-level failure.
+        if unwrap_top_level_promise {
+            for _ in 0..8 {
+                let step = if let Value::VmObject(obj) = &v {
+                    let b = obj.borrow();
+                    let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                    if is_promise {
+                        let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                        let next = b.get("__promise_value__").cloned();
+                        Some((rejected, next))
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            let Some((rejected, next)) = step else {
-                break;
-            };
-            let Some(next) = next else {
-                break;
-            };
+                let Some((rejected, next)) = step else {
+                    break;
+                };
+                let Some(next) = next else {
+                    break;
+                };
 
-            if rejected && let Value::VmObject(obj) = &next {
-                let b = obj.borrow();
-                if let Some(Value::String(t)) = b.get("__type__") {
-                    let tn = crate::unicode::utf16_to_utf8(t);
-                    if tn == "Error" || tn.ends_with("Error") {
-                        drop(b);
-                        return Err(vm.vm_error_to_js_error(ctx, &next));
+                if rejected && let Value::VmObject(obj) = &next {
+                    let b = obj.borrow();
+                    if let Some(Value::String(t)) = b.get("__type__") {
+                        let tn = crate::unicode::utf16_to_utf8(t);
+                        if tn == "Error" || tn.ends_with("Error") {
+                            drop(b);
+                            return Err(vm.vm_error_to_js_error(ctx, &next));
+                        }
                     }
                 }
+                v = next;
             }
-            v = next;
         }
 
         match v {

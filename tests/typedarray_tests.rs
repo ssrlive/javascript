@@ -15,7 +15,7 @@ fn test_js_arraybuffer_constructor_via_script() {
         "ArrayBuffer created successfully";
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
+    let result = evaluate_script(script, false, None::<&std::path::Path>);
     assert!(result.is_ok(), "ArrayBuffer constructor should work");
 }
 
@@ -29,7 +29,7 @@ fn test_js_dataview_constructor_via_script() {
         "DataView created successfully";
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
+    let result = evaluate_script(script, false, None::<&std::path::Path>);
     assert!(result.is_ok(), "DataView constructor should work");
 }
 
@@ -56,7 +56,7 @@ fn test_js_typedarray_constructors_via_script() {
         "All TypedArray constructors work";
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
+    let result = evaluate_script(script, false, None::<&std::path::Path>);
     assert!(result.is_ok(), "All TypedArray constructors should work");
 }
 
@@ -74,7 +74,7 @@ fn test_js_typedarray_shared_buffer_via_script() {
         result;
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "42");
 }
 
@@ -90,7 +90,7 @@ fn test_js_arraybuffer_dataview_integration_via_script() {
         "ArrayBuffer-DataView integration works";
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"ArrayBuffer-DataView integration works\"");
 }
 
@@ -116,7 +116,7 @@ fn test_js_typedarray_different_construction_patterns_via_script() {
         "Different construction patterns work";
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"Different construction patterns work\"");
 }
 
@@ -147,7 +147,7 @@ fn test_js_for_in_resizable_buffer_via_script() {
         "OK";
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"OK\"");
 }
 
@@ -156,14 +156,14 @@ fn test_typedarray_destructuring_resizable_buffer_regression() {
     let path = std::path::Path::new("js-scripts/typedarray_destructuring_resizable_buffer_regression.js");
     let script = read_script_file(path).expect("failed to read regression script");
 
-    // Append a final expression so evaluate_script_with_vm returns the script's return value as final result
+    // Append a final expression so evaluate_script returns the script's return value as final result
     let _wrapped = format!("{}\nJSON.stringify(({}));", script, "(function(){return (function(){})();})()");
 
     // Evaluate and assert
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = evaluate_script_with_vm(&script, false, Some(path)).expect("evaluate_script_with_vm failed");
+            let result = evaluate_script_with_unwrap(&script, false, Some(path), true).expect("evaluate_script failed");
             assert_eq!(result, "\"OK\"");
         })
         .expect("failed to spawn thread")

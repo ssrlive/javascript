@@ -1,4 +1,4 @@
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -14,15 +14,15 @@ mod comment_tests {
     #[test]
     fn test_comment_removal() {
         // Test single-line comments
-        let result = evaluate_script_with_vm("// This is a comment\nconsole.log('Hello');", false, None::<&std::path::Path>);
+        let result = evaluate_script("// This is a comment\nconsole.log('Hello');", false, None::<&std::path::Path>);
         assert!(result.is_ok());
 
         // Test multi-line comments
-        let result = evaluate_script_with_vm("/* Multi-line\ncomment */ console.log('World');", false, None::<&std::path::Path>);
+        let result = evaluate_script("/* Multi-line\ncomment */ console.log('World');", false, None::<&std::path::Path>);
         assert!(result.is_ok());
 
         // Test comments in strings are preserved
-        let result = evaluate_script_with_vm(
+        let result = evaluate_script(
             "console.log('// Not a comment'); console.log('/* Not a comment */');",
             false,
             None::<&std::path::Path>,
@@ -41,7 +41,7 @@ console.log('Line 2'); // just a space
 // Inline comment
 console.log('Line 3 // not a comment in line 3'); // Another comment
 "#;
-        let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>);
+        let result = evaluate_script(script, false, None::<&std::path::Path>);
         assert!(result.is_ok());
     }
 }

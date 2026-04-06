@@ -1,4 +1,4 @@
-use javascript::evaluate_script_with_vm;
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -43,6 +43,6 @@ fn test_get_invalid_language_tags_array_parsing() {
         getInvalidLanguageTags.length
     "#;
 
-    let result = evaluate_script_with_vm(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "13");
 }

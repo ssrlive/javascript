@@ -3430,15 +3430,18 @@ impl<'gc> Compiler<'gc> {
             Expr::SuperCall(args) => {
                 // super(args) → call parent constructor with current this
                 if let Some(pname) = self.current_class_parent.clone() {
-                    // Stack: [this (receiver), ParentCtor (callee), args...]
-                    // Use GetThisSuper to bypass TDZ — super() is what initializes `this`
+                    // Spec §12.3.7.1 SuperCall:
+                    //   1. GetThisBinding (bypass TDZ — super() initializes this)
+                    //   2. GetSuperConstructor
+                    //   3. ArgumentListEvaluation
+                    //   4. IsConstructor check → TypeError if false
+                    //   5. Construct
                     self.chunk.write_opcode(Opcode::GetThisSuper);
-                    let parent_expr = Expr::Var(pname, None, None);
+                    let parent_expr = Expr::Var(pname.clone(), None, None);
                     self.compile_expr(&parent_expr)?;
                     // Check for spread arguments
                     let has_spread = args.iter().any(|a| matches!(a, Expr::Spread(_)));
                     if has_spread {
-                        // Build args array, then CallSpread
                         self.chunk.write_opcode(Opcode::NewArray);
                         self.chunk.write_byte(0);
                         for arg in args {
@@ -3450,12 +3453,18 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
+                        // IsConstructor check after args eval: callee is 1 below TOS (the array)
+                        self.chunk.write_opcode(Opcode::ThrowIfNotConstructor);
+                        self.chunk.write_byte(1);
                         self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x80); // method call flag
+                        self.chunk.write_byte(0x80);
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
+                        // IsConstructor check after args eval: callee is args.len() below TOS
+                        self.chunk.write_opcode(Opcode::ThrowIfNotConstructor);
+                        self.chunk.write_byte(args.len() as u8);
                         self.emit_call_opcode(args.len(), 0x80);
                     }
                     // super() initializes `this` — clear TDZ
@@ -3845,6 +3854,8 @@ impl<'gc> Compiler<'gc> {
             Expr::Increment(inner) => {
                 if let Expr::Index(obj, idx_expr) = &**inner {
                     self.compile_update_index(obj, idx_expr, Opcode::Increment, false)?;
+                } else if let Expr::SuperComputedProperty(key_expr) = &**inner {
+                    self.compile_update_super_computed(key_expr, Opcode::Increment, false)?;
                 } else {
                     self.compile_expr(inner)?;
                     self.chunk.write_opcode(Opcode::ToNumeric);
@@ -3856,6 +3867,8 @@ impl<'gc> Compiler<'gc> {
             Expr::Decrement(inner) => {
                 if let Expr::Index(obj, idx_expr) = &**inner {
                     self.compile_update_index(obj, idx_expr, Opcode::Decrement, false)?;
+                } else if let Expr::SuperComputedProperty(key_expr) = &**inner {
+                    self.compile_update_super_computed(key_expr, Opcode::Decrement, false)?;
                 } else {
                     self.compile_expr(inner)?;
                     self.chunk.write_opcode(Opcode::ToNumeric);
@@ -3868,6 +3881,8 @@ impl<'gc> Compiler<'gc> {
             Expr::PostIncrement(inner) => {
                 if let Expr::Index(obj, idx_expr) = &**inner {
                     self.compile_update_index(obj, idx_expr, Opcode::Increment, true)?;
+                } else if let Expr::SuperComputedProperty(key_expr) = &**inner {
+                    self.compile_update_super_computed(key_expr, Opcode::Increment, true)?;
                 } else {
                     self.compile_expr(inner)?;
                     self.chunk.write_opcode(Opcode::ToNumeric);
@@ -3881,6 +3896,8 @@ impl<'gc> Compiler<'gc> {
             Expr::PostDecrement(inner) => {
                 if let Expr::Index(obj, idx_expr) = &**inner {
                     self.compile_update_index(obj, idx_expr, Opcode::Decrement, true)?;
+                } else if let Expr::SuperComputedProperty(key_expr) = &**inner {
+                    self.compile_update_super_computed(key_expr, Opcode::Decrement, true)?;
                 } else {
                     self.compile_expr(inner)?;
                     self.chunk.write_opcode(Opcode::ToNumeric);
@@ -3950,6 +3967,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(name_idx);
                 }
                 Expr::SuperComputedProperty(key_expr) => {
+                    // Spec: GetThisBinding() (TDZ check) before evaluating key
+                    self.chunk.write_opcode(Opcode::GetThis);
+                    self.chunk.write_opcode(Opcode::Pop);
                     self.compile_expr(key_expr)?;
                     self.compile_expr(right)?;
                     self.chunk.write_opcode(Opcode::SetSuperPropertyComputed);
@@ -5273,6 +5293,43 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::DeleteGlobal);
                 self.chunk.write_u16(ni);
             }
+        } else if let Expr::SuperComputedProperty(key_expr) = lhs {
+            // super[key] op= rhs: TDZ check, cache key, read, apply op, write back
+            // 1. TDZ check
+            self.chunk.write_opcode(Opcode::GetThis);
+            self.chunk.write_opcode(Opcode::Pop);
+            // 2. Evaluate key, save to temp
+            let key_temp = format!("__sca_key_{}__", self.completion_counter);
+            self.completion_counter += 1;
+            self.compile_expr(key_expr)?;
+            self.chunk.write_opcode(Opcode::Dup);
+            self.emit_define_var(&key_temp);
+            if self.scope_depth == 0 {
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+            // 3. Read super[key]
+            self.chunk.write_opcode(Opcode::GetSuperPropertyComputed);
+            // 4. Evaluate RHS and apply op
+            self.compile_expr(rhs)?;
+            self.chunk.write_opcode(op);
+            // Stack: [result]
+            // 5. Write back: key, result → SetSuperPropertyComputed
+            self.emit_helper_get(&key_temp);
+            self.chunk.write_opcode(Opcode::Swap);
+            self.chunk.write_opcode(Opcode::SetSuperPropertyComputed);
+            // Clean up temp
+            if self.scope_depth > 0 {
+                self.chunk.write_opcode(Opcode::Swap);
+                self.chunk.write_opcode(Opcode::Pop);
+                if let Some(pos) = self.locals.iter().rposition(|l| l == &key_temp) {
+                    self.locals.remove(pos);
+                }
+            } else {
+                let n = crate::unicode::utf8_to_utf16(&key_temp);
+                let ni = self.chunk.add_constant(Value::String(n));
+                self.chunk.write_opcode(Opcode::DeleteGlobal);
+                self.chunk.write_u16(ni);
+            }
         } else {
             // Non-index targets: normal path
             self.compile_expr(lhs)?;
@@ -5524,6 +5581,62 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
+    /// Compile ++/-- on a super computed property (super[key]).
+    /// Evaluates TDZ check, caches key, reads/updates/writes back.
+    fn compile_update_super_computed(&mut self, key_expr: &Expr, update_op: Opcode, is_postfix: bool) -> Result<(), JSError> {
+        // 1. TDZ check
+        self.chunk.write_opcode(Opcode::GetThis);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        // 2. Evaluate key, save to temp
+        let key_temp = format!("__scu_key_{}__", self.completion_counter);
+        self.completion_counter += 1;
+        self.compile_expr(key_expr)?;
+        self.chunk.write_opcode(Opcode::Dup);
+        self.emit_define_var(&key_temp);
+        if self.scope_depth == 0 {
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        // 3. Read super[key]
+        self.chunk.write_opcode(Opcode::GetSuperPropertyComputed);
+        // Stack: [current_val]
+
+        // 4. ToNumeric, then Dup (if postfix) + update
+        self.chunk.write_opcode(Opcode::ToNumeric);
+        if is_postfix {
+            self.chunk.write_opcode(Opcode::Dup);
+        }
+        self.chunk.write_opcode(update_op);
+        // Stack (postfix): [old_val, new_val]
+        // Stack (prefix):  [new_val]
+
+        // 5. Write back: need [key, new_val] for SetSuperPropertyComputed
+        self.emit_helper_get(&key_temp);
+        self.chunk.write_opcode(Opcode::Swap);
+        self.chunk.write_opcode(Opcode::SetSuperPropertyComputed);
+
+        // For postfix, drop the SetSuperPropertyComputed result to expose old_val
+        if is_postfix {
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        // Clean up temp
+        if self.scope_depth > 0 {
+            if let Some(pos) = self.locals.iter().rposition(|l| l == &key_temp) {
+                self.locals.remove(pos);
+                self.chunk.write_opcode(Opcode::Swap);
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+        } else {
+            let n = crate::unicode::utf8_to_utf16(&key_temp);
+            let ni = self.chunk.add_constant(Value::String(n));
+            self.chunk.write_opcode(Opcode::DeleteGlobal);
+            self.chunk.write_u16(ni);
+        }
+        Ok(())
+    }
+
     /// Write-back helper for increment/decrement: store the top-of-stack value
     /// back into the variable that `expr` represents.
     fn compile_store(&mut self, expr: &Expr) -> Result<(), JSError> {
@@ -5577,6 +5690,34 @@ impl<'gc> Compiler<'gc> {
 
                 if self.scope_depth > 0 {
                     // Local temp still sits under result value: [..., temp, result]
+                    self.chunk.write_opcode(Opcode::Swap);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    if let Some(pos) = self.locals.iter().rposition(|l| l == &temp) {
+                        self.locals.remove(pos);
+                    }
+                } else {
+                    let name_u16 = crate::unicode::utf8_to_utf16(&temp);
+                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                    self.chunk.write_opcode(Opcode::DeleteGlobal);
+                    self.chunk.write_u16(name_idx);
+                }
+            }
+            Expr::SuperProperty(key) => {
+                // Stack: [..., new_value]
+                let key_u16 = crate::unicode::utf8_to_utf16(key);
+                let key_idx = self.chunk.add_constant(Value::String(key_u16));
+                self.chunk.write_opcode(Opcode::SetSuperProperty);
+                self.chunk.write_u16(key_idx);
+            }
+            Expr::SuperComputedProperty(key_expr) => {
+                // Stack: [..., new_value] — save it, push key, restore, SetSuperPropertyComputed
+                let temp = format!("__sc_store_{}__", self.completion_counter);
+                self.completion_counter += 1;
+                self.emit_define_var(&temp);
+                self.compile_expr(key_expr)?;
+                self.emit_helper_get(&temp);
+                self.chunk.write_opcode(Opcode::SetSuperPropertyComputed);
+                if self.scope_depth > 0 {
                     self.chunk.write_opcode(Opcode::Swap);
                     self.chunk.write_opcode(Opcode::Pop);
                     if let Some(pos) = self.locals.iter().rposition(|l| l == &temp) {

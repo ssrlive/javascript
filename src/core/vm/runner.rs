@@ -56,6 +56,7 @@ impl<'gc> VM<'gc> {
                 Opcode::YieldDirect => self.run_opcode_yield_direct(ctx)?,
                 Opcode::CheckGeneratorReturn => self.run_opcode_check_generator_return()?,
                 Opcode::SetGeneratorReturn => self.run_opcode_set_generator_return()?,
+                Opcode::ThrowIfNotConstructor => self.run_opcode_throw_if_not_constructor(ctx)?,
                 Opcode::GeneratorParamInitDone => self.run_opcode_generator_param_init_done(ctx)?,
                 Opcode::Await => self.run_opcode_await(ctx)?,
                 Opcode::GetLocal => self.run_opcode_get_local(ctx)?,
@@ -1606,6 +1607,19 @@ impl<'gc> VM<'gc> {
         let top = self.stack.last().expect("VM Stack underflow on ThrowIfNullish");
         if matches!(top, Value::Null | Value::Undefined) {
             let err = self.make_type_error_object(ctx, "Cannot read properties of null or undefined");
+            self.handle_throw(ctx, &err)?;
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::ThrowIfNotConstructor — read u8 operand N, peek at stack[sp-N-1],
+    // throw TypeError if it's not a constructor. Does not modify the stack.
+    fn run_opcode_throw_if_not_constructor(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let depth = self.read_byte() as usize;
+        let idx = self.stack.len() - depth - 1;
+        let val = &self.stack[idx];
+        if !self.is_constructor_value(val) {
+            let err = self.make_type_error_object(ctx, "super expression requires a constructor");
             self.handle_throw(ctx, &err)?;
         }
         Ok(OpcodeAction::Continue)
@@ -4669,17 +4683,7 @@ impl<'gc> VM<'gc> {
     fn run_opcode_set_super_property_computed(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let val = self.stack.pop().expect("VM Stack underflow on SetSuperPropertyComputed (val)");
         let key_val = self.stack.pop().expect("VM Stack underflow on SetSuperPropertyComputed (key)");
-        let key = match self.as_property_key_string(ctx, &key_val) {
-            Ok(k) => k,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
-        };
+        // Spec: resolve super base (GetSuperBase) BEFORE ToPropertyKey
         let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
         let super_base_for_arrow = self
             .frames
@@ -4694,6 +4698,18 @@ impl<'gc> VM<'gc> {
             .filter(|v| !matches!(v, Value::Undefined | Value::Null));
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
+        };
+        // Now convert key (ToPropertyKey may have side effects)
+        let key = match self.as_property_key_string(ctx, &key_val) {
+            Ok(k) => k,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                return Err(err);
+            }
         };
         // Per spec §9.1.9: look up setter on super_base chain,
         // write data properties on receiver.
@@ -4748,17 +4764,7 @@ impl<'gc> VM<'gc> {
     // Opcode::GetSuperPropertyComputed
     fn run_opcode_get_super_property_computed(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let key_val = self.stack.pop().expect("VM Stack underflow on GetSuperPropertyComputed");
-        let key = match self.as_property_key_string(ctx, &key_val) {
-            Ok(k) => k,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
-        };
+        // Spec: resolve super base (GetSuperBase) BEFORE ToPropertyKey
         let receiver = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
         let super_base_for_arrow = self
             .frames
@@ -4773,6 +4779,18 @@ impl<'gc> VM<'gc> {
             .filter(|v| !matches!(v, Value::Undefined | Value::Null));
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
+        };
+        // Now convert key (ToPropertyKey may call toString() which can mutate prototype chain)
+        let key = match self.as_property_key_string(ctx, &key_val) {
+            Ok(k) => k,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                return Err(err);
+            }
         };
         let value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
         self.stack.push(value);

@@ -111,6 +111,7 @@ pub enum Opcode {
     YieldDirect = 105,             // like Yield but the yielded value is returned directly without make_gen_result wrapping
     CheckGeneratorReturn = 106,    // push true if generator_return_pending is set, else push false
     SetGeneratorReturn = 107,      // pop value and set generator_return_pending = Some(value)
+    ThrowIfNotConstructor = 108,   // pop TOS, throw TypeError if it's not a constructor
 }
 
 impl TryFrom<u8> for Opcode {
@@ -226,6 +227,7 @@ impl TryFrom<u8> for Opcode {
             105 => Opcode::YieldDirect,
             106 => Opcode::CheckGeneratorReturn,
             107 => Opcode::SetGeneratorReturn,
+            108 => Opcode::ThrowIfNotConstructor,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

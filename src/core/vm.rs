@@ -8015,11 +8015,12 @@ impl<'gc> VM<'gc> {
                             symbols.push(sym_val.clone());
                         }
                     }
-                } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &target {
-                    let props = self.get_fn_props(ctx, *ip, *arity);
-                    let b = props.borrow();
+                } else if let Value::VmFunction(..) | Value::VmClosure(..) = &target {
+                    let Some(props) = self.merged_fn_props_for_value(ctx, &target) else {
+                        return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(symbols)));
+                    };
                     let mut seen_sym_keys: Vec<String> = Vec::new();
-                    for k in b.keys() {
+                    for k in props.keys() {
                         let sym_key = k
                             .strip_prefix("@@sym:")
                             .map(|id| format!("@@sym:{}", id))
@@ -10172,6 +10173,26 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmFunction(ip, arity) => Some(self.get_fn_props(ctx, *ip, *arity)),
+            _ => None,
+        }
+    }
+
+    /// Build the effective own-property view for a function value.
+    /// Shared fn_props contribute the canonical built-in properties
+    /// (`length`, `name`, initial `prototype`), while per-closure overlays
+    /// override or append class-specific statics created after ResetPrototype.
+    fn merged_fn_props_for_value(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Option<IndexMap<String, Value<'gc>>> {
+        match val {
+            Value::VmFunction(ip, arity) => Some(self.get_fn_props(ctx, *ip, *arity).borrow().clone()),
+            Value::VmClosure(ip, arity, _) => {
+                let mut merged = self.get_fn_props(ctx, *ip, *arity).borrow().clone();
+                if let Some(overlay) = self.get_closure_overlay(val) {
+                    for (key, value) in overlay.borrow().iter() {
+                        merged.insert(key.clone(), value.clone());
+                    }
+                }
+                Some(merged)
+            }
             _ => None,
         }
     }
@@ -18821,13 +18842,14 @@ impl<'gc> VM<'gc> {
                         };
                         Value::Boolean(has)
                     }
-                    Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                        let props = self.get_fn_props(ctx, *ip, *arity);
-                        let borrow = props.borrow();
+                    Value::VmFunction(..) | Value::VmClosure(..) => {
+                        let Some(props) = self.merged_fn_props_for_value(ctx, &obj) else {
+                            return Value::Boolean(false);
+                        };
                         Value::Boolean(
-                            borrow.contains_key(&key)
-                                || borrow.contains_key(&format!("__get_{}", key))
-                                || borrow.contains_key(&format!("__set_{}", key)),
+                            props.contains_key(&key)
+                                || props.contains_key(&format!("__get_{}", key))
+                                || props.contains_key(&format!("__set_{}", key)),
                         )
                     }
                     Value::VmNativeFunction(id) => {
@@ -19770,28 +19792,23 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    Some(val @ Value::VmFunction(ip, arity)) | Some(val @ Value::VmClosure(ip, arity, _)) => {
-                        // Check per-closure overlay first, then shared fn_props
-                        let overlay = self.get_closure_overlay(val);
-                        let fn_props = if let Some(o) = overlay {
-                            o
-                        } else {
-                            self.get_fn_props(ctx, *ip, *arity)
+                    Some(val @ Value::VmFunction(..)) | Some(val @ Value::VmClosure(..)) => {
+                        let Some(fn_props) = self.merged_fn_props_for_value(ctx, val) else {
+                            return Value::Undefined;
                         };
-                        let borrow = fn_props.borrow();
-                        let (writable, enumerable, configurable) = Self::property_attributes(&borrow, &key);
-                        if let Some(val) = borrow.get(&key) {
+                        let (writable, enumerable, configurable) = Self::property_attributes(&fn_props, &key);
+                        if let Some(val) = fn_props.get(&key) {
                             self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable)
                         } else {
                             let getter_key = format!("__get_{}", key);
                             let setter_key = format!("__set_{}", key);
-                            let has_getter = borrow.contains_key(&getter_key);
-                            let has_setter = borrow.contains_key(&setter_key);
+                            let has_getter = fn_props.contains_key(&getter_key);
+                            let has_setter = fn_props.contains_key(&setter_key);
                             if has_getter || has_setter {
                                 self.make_accessor_descriptor_object(
                                     ctx,
-                                    borrow.get(&getter_key),
-                                    borrow.get(&setter_key),
+                                    fn_props.get(&getter_key),
+                                    fn_props.get(&setter_key),
                                     enumerable,
                                     configurable,
                                 )
@@ -20242,17 +20259,11 @@ impl<'gc> VM<'gc> {
                     let names = self.collect_array_keys(ctx, &b, false, true);
                     let keys: Vec<Value<'gc>> = names.into_iter().map(Value::from).collect();
                     mk_names_array(keys, self)
-                } else if let Some(val @ (Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _))) = args.first() {
-                    // Check per-closure overlay first, then shared fn_props
-                    let overlay = self.get_closure_overlay(val);
-                    let props = if let Some(o) = overlay {
-                        o
-                    } else {
-                        self.get_fn_props(ctx, *ip, *arity)
+                } else if let Some(val @ (Value::VmFunction(..) | Value::VmClosure(..))) = args.first() {
+                    let Some(props) = self.merged_fn_props_for_value(ctx, val) else {
+                        return mk_names_array(Vec::new(), self);
                     };
-                    let b = props.borrow();
-                    let names = self.collect_object_map_keys(&b, false);
-                    drop(b);
+                    let names = self.collect_object_map_keys(&props, false);
                     let keys: Vec<Value<'gc>> = names.into_iter().map(Value::from).collect();
                     mk_names_array(keys, self)
                 } else {
@@ -26607,7 +26618,7 @@ impl<'gc> VM<'gc> {
                 // Functions can have own properties set on them
                 // Property is stored via SetProperty on function objects
                 // Read from "function props" map
-                self.get_function_own_enumerable_keys(val)
+                self.get_function_own_enumerable_keys(ctx, val)
             }
             Value::String(s) => {
                 // String wrapper: character indices are enumerable
@@ -26618,26 +26629,10 @@ impl<'gc> VM<'gc> {
     }
 
     /// Get own enumerable property keys from a VmFunction or VmClosure
-    fn get_function_own_enumerable_keys(&self, func: &Value<'gc>) -> Vec<String> {
-        // Check per-closure overlay first, then shared fn_props
-        if let Value::VmClosure(_, _, _) = func
-            && let Some(overlay) = self.get_closure_overlay(func)
-        {
-            let b = overlay.borrow();
-            return self.collect_object_map_keys(&b, true);
-        }
-        let ip = match func {
-            Value::VmFunction(ip, _) => Some(*ip),
-            Value::VmClosure(ip, _, _) => Some(*ip),
-            _ => None,
-        };
-        if let Some(ip) = ip
-            && let Some(props) = self.fn_props.get(&ip)
-        {
-            let b = props.borrow();
-            return self.collect_object_map_keys(&b, true);
-        }
-        Vec::new()
+    fn get_function_own_enumerable_keys(&mut self, ctx: &GcContext<'gc>, func: &Value<'gc>) -> Vec<String> {
+        self.merged_fn_props_for_value(ctx, func)
+            .map(|props| self.collect_object_map_keys(&props, true))
+            .unwrap_or_default()
     }
 
     /// Convert any object-like value to a property descriptor IndexMap by reading

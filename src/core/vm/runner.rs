@@ -5420,9 +5420,10 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                let props = self.get_fn_props(ctx, *ip, *arity);
+                let shared_props = self.get_fn_props(ctx, *ip, *arity);
+                let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
                 let ne_key = format!("__nonenumerable_{}__", coerced_key);
-                let mut borrow = props.borrow_mut(ctx);
+                let mut borrow = target_props.borrow_mut(ctx);
                 borrow.shift_remove(&format!("__get_{}", coerced_key));
                 borrow.shift_remove(&format!("__set_{}", coerced_key));
                 borrow.insert(coerced_key, val.clone());
@@ -5486,9 +5487,11 @@ impl<'gc> VM<'gc> {
                     Value::VmClosure(ip, a, _) => (*ip, *a),
                     _ => unreachable!(),
                 };
-                let fn_props = self.get_fn_props(ctx, ip_val, arity_val);
+                let shared_props = self.get_fn_props(ctx, ip_val, arity_val);
+                let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
                 let nonconfigurable_key = format!("__nonconfigurable_{}__", coerced_key);
-                let has_nonconf = fn_props.borrow().contains_key(&nonconfigurable_key);
+                let has_nonconf =
+                    target_props.borrow().contains_key(&nonconfigurable_key) || shared_props.borrow().contains_key(&nonconfigurable_key);
                 if has_nonconf {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5504,7 +5507,7 @@ impl<'gc> VM<'gc> {
                 let setter_key = format!("__set_{}", coerced_key);
                 let readonly_key = format!("__readonly_{}__", coerced_key);
                 let nonenumerable_key = format!("__nonenumerable_{}__", coerced_key);
-                let mut borrow = fn_props.borrow_mut(ctx);
+                let mut borrow = target_props.borrow_mut(ctx);
                 borrow.shift_remove(&getter_key);
                 borrow.shift_remove(&setter_key);
                 borrow.shift_remove(&readonly_key);
@@ -5577,8 +5580,10 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let props = self.get_fn_props(ctx, *ip, *arity);
-            let has_nonconf = props.borrow().contains_key(&nonconfigurable_key);
+            let shared_props = self.get_fn_props(ctx, *ip, *arity);
+            let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
+            let has_nonconf =
+                target_props.borrow().contains_key(&nonconfigurable_key) || shared_props.borrow().contains_key(&nonconfigurable_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5590,7 +5595,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err_obj)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let mut borrow = props.borrow_mut(ctx);
+            let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(getter_key, val.clone());
             borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));
@@ -5656,8 +5661,10 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let props = self.get_fn_props(ctx, *ip, *arity);
-            let has_nonconf = props.borrow().contains_key(&nonconfigurable_key);
+            let shared_props = self.get_fn_props(ctx, *ip, *arity);
+            let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
+            let has_nonconf =
+                target_props.borrow().contains_key(&nonconfigurable_key) || shared_props.borrow().contains_key(&nonconfigurable_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5669,7 +5676,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err_obj)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let mut borrow = props.borrow_mut(ctx);
+            let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(setter_key, val.clone());
             borrow.insert(format!("__nonenumerable_{}__", coerced_key), Value::Boolean(true));

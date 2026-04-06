@@ -147,6 +147,7 @@ jobs:
             13)
               TITLE='"language/expressions/grouping" - "language/expressions/prefix-increment"'
               FOCUS='language/expressions/grouping,language/expressions/import.meta,language/expressions/in,language/expressions/instanceof,language/expressions/left-shift,language/expressions/right-shift,language/expressions/optional-chaining,language/expressions/member-expression,language/expressions/modulus,language/expressions/multiplication,language/expressions/new,language/expressions/new.target,language/expressions/postfix-decrement,language/expressions/postfix-increment,language/expressions/prefix-decrement,language/expressions/prefix-increment'
+              RUN_TESTS='true'
               ;;
             14)
               TITLE='"language/expressions/object"'
@@ -156,10 +157,12 @@ jobs:
             15)
               TITLE='"language/expressions/property-accessors" - "language/expressions/yield"'
               FOCUS='language/expressions/property-accessors,language/expressions/relational,language/expressions/strict-does-not-equals,language/expressions/strict-equals,language/expressions/subtraction,language/expressions/super,language/expressions/tagged-template,language/expressions/template-literal,language/expressions/this,language/expressions/typeof,language/expressions/unary-minus,language/expressions/unary-plus,language/expressions/unsigned-right-shift,language/expressions/yield,language/expressions/(filesonly)'
+              RUN_TESTS='true'
               ;;
             16)
               TITLE='"language/function-code" - "language/import"'
               FOCUS='language/function-code,language/future-reserved-words,language/global-code,language/identifier-resolution,language/identifiers,language/import'
+              RUN_TESTS='true'
               ;;
             17)
               TITLE='"language/literals"'

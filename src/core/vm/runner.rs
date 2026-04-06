@@ -4592,8 +4592,24 @@ impl<'gc> VM<'gc> {
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
         };
-        let result = self.assign_named_property(ctx, &super_base, &key, &val, Some(&receiver))?;
-        self.stack.push(result);
+        // Per spec §9.1.9 OrdinarySet: look up setter on super_base chain,
+        // but write data properties on the receiver (this), not on super_base.
+        let setter = self.lookup_setter_in_chain(&super_base, &key);
+        if let Some(setter_fn) = setter {
+            let saved = std::mem::take(&mut self.try_stack);
+            let out = self.vm_call_function_value(ctx, &setter_fn, &receiver, std::slice::from_ref(&val));
+            self.try_stack = saved;
+            if let Err(err) = out {
+                self.set_pending_throw_from_error(&err);
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
+                }
+            }
+            self.stack.push(val);
+        } else {
+            let result = self.assign_named_property(ctx, &receiver, &key, &val, None)?;
+            self.stack.push(result);
+        }
         Ok(OpcodeAction::Continue)
     }
 
@@ -4627,8 +4643,24 @@ impl<'gc> VM<'gc> {
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
             return Ok(OpcodeAction::Continue);
         };
-        let result = self.assign_named_property(ctx, &super_base, &key, &val, Some(&receiver))?;
-        self.stack.push(result);
+        // Per spec §9.1.9: look up setter on super_base chain,
+        // write data properties on receiver.
+        let setter = self.lookup_setter_in_chain(&super_base, &key);
+        if let Some(setter_fn) = setter {
+            let saved = std::mem::take(&mut self.try_stack);
+            let out = self.vm_call_function_value(ctx, &setter_fn, &receiver, std::slice::from_ref(&val));
+            self.try_stack = saved;
+            if let Err(err) = out {
+                self.set_pending_throw_from_error(&err);
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
+                }
+            }
+            self.stack.push(val);
+        } else {
+            let result = self.assign_named_property(ctx, &receiver, &key, &val, None)?;
+            self.stack.push(result);
+        }
         Ok(OpcodeAction::Continue)
     }
 

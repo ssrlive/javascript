@@ -12577,6 +12577,38 @@ impl<'gc> VM<'gc> {
         None
     }
 
+    /// Walk the prototype chain starting from `obj` looking for a setter for `key`.
+    /// Returns the setter function if found.
+    fn lookup_setter_in_chain(&self, obj: &Value<'gc>, key: &str) -> Option<Value<'gc>> {
+        let setter_key = format!("__set_{}", key);
+        let mut current = Some(obj.clone());
+        let mut depth = 0;
+        while let Some(ref p) = current {
+            if depth > 100 {
+                break;
+            }
+            depth += 1;
+            match p {
+                Value::VmObject(map) => {
+                    let borrow = map.borrow();
+                    // Check for Property descriptor with setter
+                    if let Some(Value::Property { setter: Some(s), .. }) = borrow.get(key) {
+                        return Some((**s).clone());
+                    }
+                    // Check for __set_key convention
+                    if let Some(setter_fn) = borrow.get(&setter_key) {
+                        return Some(setter_fn.clone());
+                    }
+                    let next = borrow.get("__proto__").cloned();
+                    drop(borrow);
+                    current = next;
+                }
+                _ => break,
+            }
+        }
+        None
+    }
+
     /// Walk the __proto__ chain looking for a property.
     fn lookup_proto_chain(&self, proto: Option<&Value<'gc>>, key: &str) -> Option<Value<'gc>> {
         let mut current = proto.cloned();
@@ -19671,7 +19703,12 @@ impl<'gc> VM<'gc> {
 
                 if !matches!(
                     proto,
-                    Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                    Value::Null
+                        | Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(..)
                 ) || proto.is_symbol_value()
                 {
                     self.throw_type_error(ctx, "Object prototype may only be an Object or null");
@@ -19680,7 +19717,7 @@ impl<'gc> VM<'gc> {
 
                 if !matches!(
                     target,
-                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..)
                 ) {
                     return target;
                 }

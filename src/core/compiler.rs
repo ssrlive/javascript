@@ -465,6 +465,61 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    fn collect_function_lexical_names_from_statement(stmt: &Statement, out: &mut Vec<String>) {
+        match &*stmt.kind {
+            StatementKind::Let(decls) => {
+                for (name, _) in decls {
+                    if !out.iter().any(|existing| existing == name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+            StatementKind::Const(decls) => {
+                for (name, _) in decls {
+                    if !out.iter().any(|existing| existing == name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+            StatementKind::LetDestructuringArray(elements, _) | StatementKind::ConstDestructuringArray(elements, _) => {
+                for elem in elements {
+                    Self::collect_destructuring_binding_names(elem, out);
+                }
+            }
+            StatementKind::LetDestructuringObject(elements, _) | StatementKind::ConstDestructuringObject(elements, _) => {
+                for elem in elements {
+                    Self::collect_object_destructuring_binding_names(elem, out);
+                }
+            }
+            StatementKind::Class(class_def) => {
+                if !class_def.name.is_empty() && !out.iter().any(|n| n == &class_def.name) {
+                    out.push(class_def.name.clone());
+                }
+            }
+            StatementKind::Export(_, Some(inner_stmt), _) => {
+                Self::collect_function_lexical_names_from_statement(inner_stmt, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_hoisted_function_lexical_slots(&mut self, body: &[Statement]) {
+        let mut hoisted = Vec::new();
+        for stmt in body {
+            Self::collect_function_lexical_names_from_statement(stmt, &mut hoisted);
+        }
+
+        for name in hoisted {
+            if self.locals.iter().any(|existing| existing == &name) {
+                continue;
+            }
+            let uninit_idx = self.chunk.add_constant(Value::Uninitialized);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(uninit_idx);
+            self.locals.push(name);
+        }
+    }
+
     fn emit_hoisted_global_vars(&mut self, body: &[Statement]) {
         let mut hoisted = Vec::new();
         for stmt in body {
@@ -965,8 +1020,16 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     if self.scope_depth > 0 {
-                        // let is block-scoped: always create a new local slot
-                        self.locals.push(name.clone());
+                        if self.scope_depth == 1
+                            && let Some(pos) = self.locals.iter().position(|l| l == name)
+                        {
+                            self.chunk.write_opcode(Opcode::SetLocal);
+                            self.chunk.write_byte(pos as u8);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        } else {
+                            // let is block-scoped: create a new local slot
+                            self.locals.push(name.clone());
+                        }
                     } else {
                         self.emit_define_global_binding(name, false);
                     }
@@ -1034,7 +1097,15 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
                     }
                     if self.scope_depth > 0 {
-                        self.locals.push(name.clone());
+                        if self.scope_depth == 1
+                            && let Some(pos) = self.locals.iter().position(|l| l == name)
+                        {
+                            self.chunk.write_opcode(Opcode::SetLocal);
+                            self.chunk.write_byte(pos as u8);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        } else {
+                            self.locals.push(name.clone());
+                        }
                         self.const_locals.insert(name.clone());
                     } else {
                         self.emit_define_global_binding(name, true);
@@ -2143,6 +2214,7 @@ impl<'gc> Compiler<'gc> {
                 if Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
                 }
+                self.emit_hoisted_function_lexical_slots(body);
 
                 // Hoist direct function declarations to the top of the function body.
                 // Per spec, function declarations are processed before `var` initializers
@@ -4159,6 +4231,7 @@ impl<'gc> Compiler<'gc> {
                 if Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
                 }
+                self.emit_hoisted_function_lexical_slots(body);
 
                 // Hoist function declarations in arrow body
                 self.hoisting_fn_decl = true;
@@ -7100,6 +7173,7 @@ impl<'gc> Compiler<'gc> {
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);
         }
+        self.emit_hoisted_function_lexical_slots(body);
 
         // Hoist function declarations in generator/async body
         self.hoisting_fn_decl = true;

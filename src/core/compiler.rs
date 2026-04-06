@@ -4783,9 +4783,25 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(idx);
             }
-            Expr::TaggedTemplate(tag_fn, _raw_flag, cooked_strings, raw_strings, expressions) => {
+            Expr::TaggedTemplate(tag_fn, site_id, cooked_strings, raw_strings, expressions) => {
                 // Tagged template: tagFn(strings, ...exprs), where strings.raw is an array.
-                self.compile_expr(tag_fn)?;
+                // Detect member expression for correct `this` context
+                let is_method_call = matches!(&**tag_fn, Expr::Property(_, _) | Expr::Index(_, _));
+                if let Expr::Property(obj, method_name) = &**tag_fn {
+                    // Method call: obj.method`template`
+                    self.compile_expr(obj)?;
+                    let key_u16 = crate::unicode::utf8_to_utf16(method_name);
+                    let name_idx = self.chunk.add_constant(Value::String(key_u16));
+                    self.chunk.write_opcode(Opcode::GetMethod);
+                    self.chunk.write_u16(name_idx);
+                } else if let Expr::Index(obj, index_expr) = &**tag_fn {
+                    self.compile_expr(obj)?;
+                    self.chunk.write_opcode(Opcode::Dup);
+                    self.compile_expr(index_expr)?;
+                    self.chunk.write_opcode(Opcode::GetIndex);
+                } else {
+                    self.compile_expr(tag_fn)?;
+                }
 
                 // Build cooked strings array on stack.
                 self.chunk.write_opcode(Opcode::NewArray);
@@ -4821,11 +4837,17 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_u16(raw_key_idx);
                 self.chunk.write_opcode(Opcode::Pop);
 
+                // Freeze and cache the template object (operand = site_id constant)
+                let site_id_idx = self.chunk.add_constant(Value::Number(*site_id as f64));
+                self.chunk.write_opcode(Opcode::FreezeTemplate);
+                self.chunk.write_u16(site_id_idx);
+
                 for expr in expressions {
                     self.compile_expr(expr)?;
                 }
                 let argc = 1 + expressions.len();
-                self.emit_call_opcode(argc, 0);
+                let flag = if is_method_call { 0x80 } else { 0 };
+                self.emit_call_opcode(argc, flag);
             }
             Expr::Class(class_def) => {
                 self.compile_class_definition(class_def, true)?;

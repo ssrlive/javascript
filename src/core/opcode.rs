@@ -107,6 +107,7 @@ pub enum Opcode {
     DefineGlobalSoft = 101,        // like DefineGlobal but only defines if key doesn't already exist (for var hoisting)
     ThrowIfNullish = 102,          // throw TypeError if TOS is null or undefined (does not pop)
     InitNamedFnSelf = 103,         // push the callee (named fn expression's own function) from pending stack
+    FreezeTemplate = 104,          // freeze template object and its .raw property (tagged templates)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -218,6 +219,7 @@ impl TryFrom<u8> for Opcode {
             101 => Opcode::DefineGlobalSoft,
             102 => Opcode::ThrowIfNullish,
             103 => Opcode::InitNamedFnSelf,
+            104 => Opcode::FreezeTemplate,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -512,7 +514,7 @@ impl<'gc> Chunk<'gc> {
                 }
 
                 // u16 constant index — add const_offset
-                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 => {
+                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 | 104 => {
                     Self::adjust_u16_at(code, i, const_offset);
                     i += 2;
                 }

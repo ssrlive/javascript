@@ -155,6 +155,7 @@ impl<'gc> VM<'gc> {
                 Opcode::AssertIterResult => self.run_opcode_assert_iter_result(ctx)?,
                 Opcode::BoxLocal => self.run_opcode_box_local(ctx)?,
                 Opcode::InitNamedFnSelf => self.run_opcode_init_named_fn_self(ctx)?,
+                Opcode::FreezeTemplate => self.run_opcode_freeze_template(ctx)?,
             };
             // If a throw was caught by handle_throw during this opcode, the
             // handler may have pushed extra values onto the stack afterwards.
@@ -8371,5 +8372,65 @@ impl<'gc> VM<'gc> {
         let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
         self.stack.insert(bp, callee);
         Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::FreezeTemplate — freeze the template array on TOS and its .raw property, with caching
+    fn run_opcode_freeze_template(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let site_id_idx = self.read_u16() as usize;
+        let site_id = if let Value::Number(n) = &self.chunk.constants[site_id_idx] {
+            *n as u64
+        } else {
+            0
+        };
+        // Check cache first
+        if let Some(cached) = self.template_cache.get(&site_id) {
+            // Replace TOS (freshly built array) with cached template
+            let len = self.stack.len();
+            if len > 0 {
+                self.stack[len - 1] = cached.clone();
+            }
+            return Ok(OpcodeAction::Continue);
+        }
+
+        let template = self.stack.last().cloned().unwrap_or(Value::Undefined);
+        if let Value::VmArray(arr) = &template {
+            // Freeze .raw first
+            let raw = arr.borrow().props.get("raw").cloned();
+            if let Some(Value::VmArray(raw_arr)) = raw {
+                Self::freeze_vm_array(ctx, &raw_arr);
+            }
+            // Mark .raw as non-enumerable
+            arr.borrow_mut(ctx)
+                .props
+                .insert("__nonenumerable_raw__".to_string(), Value::Boolean(true));
+            // Freeze the template array itself
+            Self::freeze_vm_array(ctx, arr);
+            // Cache the template
+            self.template_cache.insert(site_id, template);
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    /// Freeze a VmArray in-place: mark all elements and props as readonly+nonconfigurable.
+    fn freeze_vm_array(ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) {
+        let len = arr.borrow().elements.len();
+        let mut b = arr.borrow_mut(ctx);
+        for i in 0..len {
+            let key = i.to_string();
+            b.props.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+            b.props.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+        }
+        let prop_keys: Vec<String> = b.props.keys().filter(|k: &&String| !k.starts_with("__")).cloned().collect();
+        for key in prop_keys {
+            b.props.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+            let has_accessor = b.props.contains_key(&format!("__get_{}", key)) || b.props.contains_key(&format!("__set_{}", key));
+            if !has_accessor {
+                b.props.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+            }
+        }
+        b.props.insert("__readonly_length__".to_string(), Value::Boolean(true));
+        b.props.insert("__nonconfigurable_length__".to_string(), Value::Boolean(true));
+        b.props.insert("__non_extensible__".to_string(), Value::Boolean(true));
+        b.props.insert("__frozen__".to_string(), Value::Boolean(true));
     }
 }

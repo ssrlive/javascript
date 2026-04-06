@@ -886,6 +886,8 @@ pub struct VM<'gc> {
     module_await_suspended: bool,
     /// Suspended module states for TLA modules awaiting resumption.
     suspended_module_states: Vec<SuspendedModuleState<'gc>>,
+    /// Template cache: site_id → frozen template array (GetTemplateObject §13.2.8.3)
+    template_cache: HashMap<u64, Value<'gc>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1067,6 +1069,7 @@ impl<'gc> VM<'gc> {
             suspend_on_module_await: false,
             module_await_suspended: false,
             suspended_module_states: Vec::new(),
+            template_cache: HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -12361,7 +12364,8 @@ impl<'gc> VM<'gc> {
                     | Opcode::TypeOfGlobal
                     | Opcode::DeleteGlobal
                     | Opcode::DeleteProperty
-                    | Opcode::InitProperty,
+                    | Opcode::InitProperty
+                    | Opcode::FreezeTemplate,
                 ) => {
                     if pc + 1 < ec.len() {
                         let idx = ec[pc] as u16 | ((ec[pc + 1] as u16) << 8);
@@ -17280,7 +17284,8 @@ impl<'gc> VM<'gc> {
                                         | Opcode::GetSuperProperty
                                         | Opcode::GetMethod
                                         | Opcode::TypeOfGlobal
-                                        | Opcode::DeleteGlobal,
+                                        | Opcode::DeleteGlobal
+                                        | Opcode::FreezeTemplate,
                                     ) => pc += 2,
                                     Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => pc += 2,
                                     Ok(Opcode::SetupTry) => pc += 4,

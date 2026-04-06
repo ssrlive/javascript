@@ -53,6 +53,7 @@ impl<'gc> VM<'gc> {
             let action = match instruction {
                 Opcode::Return => self.run_opcode_return(ctx, min_depth)?,
                 Opcode::Yield => self.run_opcode_yield(ctx)?,
+                Opcode::YieldDirect => self.run_opcode_yield_direct(ctx)?,
                 Opcode::GeneratorParamInitDone => self.run_opcode_generator_param_init_done(ctx)?,
                 Opcode::Await => self.run_opcode_await(ctx)?,
                 Opcode::GetLocal => self.run_opcode_get_local(ctx)?,
@@ -222,6 +223,15 @@ impl<'gc> VM<'gc> {
         // resume_generator() will check generator_yield_value to detect this.
         let yielded = self.stack.pop().unwrap_or(Value::Undefined);
         self.generator_yield_value = Some(yielded);
+        Ok(OpcodeAction::Exit(Value::Undefined))
+    }
+
+    // Opcode::YieldDirect — like Yield but marks the value as "direct" (for yield*)
+    // so resume_generator returns it as-is without wrapping in {value, done}.
+    fn run_opcode_yield_direct(&mut self, _ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let yielded = self.stack.pop().unwrap_or(Value::Undefined);
+        self.generator_yield_value = Some(yielded);
+        self.generator_yield_direct = true;
         Ok(OpcodeAction::Exit(Value::Undefined))
     }
 
@@ -6128,6 +6138,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::String(_) => match key.as_str() {
+                "@@sym:1" => Self::make_bound_host_fn(ctx, "string.symbolIterator", &obj),
                 "split" => Value::VmNativeFunction(BUILTIN_STRING_SPLIT),
                 "indexOf" => Value::VmNativeFunction(BUILTIN_STRING_INDEXOF),
                 "slice" => Value::VmNativeFunction(BUILTIN_STRING_SLICE),

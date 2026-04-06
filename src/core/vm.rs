@@ -805,6 +805,7 @@ pub struct VM<'gc> {
     next_async_function_id: usize,
     // Set by Opcode::Yield to signal generator suspension
     generator_yield_value: Option<Value<'gc>>,
+    generator_yield_direct: bool,
     generator_return_pending: Option<Value<'gc>>,
     // Set by Opcode::GeneratorParamInitDone during generator call-time preflight.
     generator_param_init_done: bool,
@@ -1035,6 +1036,7 @@ impl<'gc> VM<'gc> {
             next_generator_id: 1,
             next_async_function_id: 1,
             generator_yield_value: None,
+            generator_yield_direct: false,
             generator_return_pending: None,
             generator_param_init_done: false,
             named_fn_callee_stack: Vec::new(),
@@ -30570,6 +30572,8 @@ impl<'gc> VM<'gc> {
             self.make_gen_result(ctx, &return_val, true)
         } else if let Some(yielded) = self.generator_yield_value.take() {
             // Generator yielded a value. Save state for next resumption.
+            let is_direct = self.generator_yield_direct;
+            self.generator_yield_direct = false;
             let frame = self.frames.pop().unwrap();
             let locals: Vec<Value<'gc>> = self.stack[frame.bp..].to_vec();
             let gen_try_stack = std::mem::take(&mut self.try_stack);
@@ -30589,7 +30593,12 @@ impl<'gc> VM<'gc> {
             };
             self.generator_states.insert(gen_id, new_state);
 
-            self.make_gen_result(ctx, &yielded, false)
+            if is_direct {
+                // YieldDirect: return the inner result object as-is (for yield*)
+                yielded
+            } else {
+                self.make_gen_result(ctx, &yielded, false)
+            }
         } else {
             self.generator_objects.remove(&gen_id);
             match &result {

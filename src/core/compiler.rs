@@ -4235,54 +4235,188 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(undef_idx);
                 } else if let Some(items_name) = self.generator_items_stack.last().cloned() {
                     if items_name == "__gen_yield_marker__" {
-                        // Suspendable generator: approximate yield* by iterating values
-                        // from __forOfValues(inner) and yielding each value.
-                        let ys_arr = format!("__yieldstar_arr_{}__", self.forin_counter);
+                        // Suspendable generator: yield* with lazy iteration and delegation.
+                        // Uses local variables instead of stack for inner result to avoid
+                        // stack depth confusion with SetupTry during generator suspend/resume.
+                        //
+                        // Compiled as (pseudocode):
+                        //   let iter = inner[Symbol.iterator]();
+                        //   let received = undefined;
+                        //   let ys_result;
+                        //   loop:
+                        //     ys_result = iter.next(received);
+                        //     // falls through to result_check
+                        //   result_check:
+                        //     if (ys_result.done) { push ys_result.value; break; }
+                        //     try { YieldDirect ys_result; received = <resume>; }
+                        //     catch (e) {
+                        //       if (iter.throw) {
+                        //         ys_result = iter.throw(e);
+                        //         if (ys_result.done) { push ys_result.value; break; }
+                        //         goto result_check; // re-yield with SetupTry wrapping
+                        //       } else { iter.return?.(); throw TypeError; }
+                        //     }
+                        //   goto loop
+
+                        let ys_iter = format!("__yieldstar_iter_{}__", self.forin_counter);
                         self.forin_counter = self.forin_counter.saturating_add(1);
-                        let ys_idx = format!("__yieldstar_idx_{}__", self.forin_counter);
+                        let ys_recv = format!("__yieldstar_recv_{}__", self.forin_counter);
+                        self.forin_counter = self.forin_counter.saturating_add(1);
+                        let ys_result = format!("__yieldstar_result_{}__", self.forin_counter);
+                        self.forin_counter = self.forin_counter.saturating_add(1);
+                        let ys_thrown = format!("__yieldstar_thrown_{}__", self.forin_counter);
                         self.forin_counter = self.forin_counter.saturating_add(1);
 
-                        self.emit_helper_get(INTERNAL_FOROF_HELPER);
+                        // Get iterator: inner[Symbol.iterator]()
                         self.compile_expr(inner)?;
-                        self.emit_call_opcode(1, 0);
-                        self.emit_define_var(&ys_arr);
-
-                        let zero_idx = self.chunk.add_constant(Value::Number(0.0));
-                        self.chunk.write_opcode(Opcode::Constant);
-                        self.chunk.write_u16(zero_idx);
-                        self.emit_define_var(&ys_idx);
-
-                        let loop_start = self.chunk.code.len();
-                        self.emit_helper_get(&ys_idx);
-                        self.emit_helper_get(&ys_arr);
-                        let len_key = crate::unicode::utf8_to_utf16("length");
-                        let len_idx = self.chunk.add_constant(Value::String(len_key));
-                        self.chunk.write_opcode(Opcode::GetProperty);
-                        self.chunk.write_u16(len_idx);
-                        self.chunk.write_opcode(Opcode::LessThan);
-                        let loop_exit = self.emit_jump(Opcode::JumpIfFalse);
-
-                        self.emit_helper_get(&ys_arr);
-                        self.emit_helper_get(&ys_idx);
-                        self.chunk.write_opcode(Opcode::GetIndex);
-                        self.chunk.write_opcode(Opcode::Yield);
-                        self.chunk.write_opcode(Opcode::Pop);
-
-                        self.emit_helper_get(&ys_idx);
-                        self.chunk.write_opcode(Opcode::Increment);
-                        self.emit_helper_set(&ys_idx);
-                        self.chunk.write_opcode(Opcode::Pop);
-
-                        self.emit_loop(loop_start);
-                        self.patch_jump(loop_exit);
-
-                        if self.scope_depth > 0 {
-                            self.locals.retain(|l| l != &ys_arr && l != &ys_idx);
+                        let sym_iter_key = crate::unicode::utf8_to_utf16("@@sym:1");
+                        let sym_idx = self.chunk.add_constant(Value::String(sym_iter_key));
+                        self.chunk.write_opcode(Opcode::GetMethod);
+                        self.chunk.write_u16(sym_idx);
+                        self.emit_call_opcode(0, 0x80);
+                        // Use DefineGlobal (not local) so stack slots aren't leaked
+                        // when yield* completes — avoids corruption for sequential yield*.
+                        {
+                            let n = crate::unicode::utf8_to_utf16(&ys_iter);
+                            let ni = self.chunk.add_constant(Value::String(n));
+                            self.chunk.write_opcode(Opcode::DefineGlobal);
+                            self.chunk.write_u16(ni);
                         }
 
-                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        // received = undefined
+                        self.emit_define_helper_slot(&ys_recv);
+
+                        // ys_result = undefined (placeholder)
+                        self.emit_define_helper_slot(&ys_result);
+
+                        // Pre-define ys_thrown as a global (handle_throw writes to globals)
+                        self.emit_define_helper_slot(&ys_thrown);
+
+                        // Loop start: ys_result = iter.next(received)
+                        let loop_start = self.chunk.code.len();
+
+                        self.emit_helper_get(&ys_iter);
+                        let next_key = crate::unicode::utf8_to_utf16("next");
+                        let next_idx = self.chunk.add_constant(Value::String(next_key));
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(next_idx);
+                        self.emit_helper_get(&ys_recv);
+                        self.emit_call_opcode(1, 0x80);
+
+                        // Validate: result must be an object (spec §14.4.7 step 7.a.iv)
+                        self.chunk.write_opcode(Opcode::AssertIterResult);
+
+                        // Store result in ys_result
+                        self.emit_helper_set(&ys_result);
+                        self.chunk.write_opcode(Opcode::Pop);
+
+                        // result_check: check ys_result.done, yield if not done
+                        let result_check = self.chunk.code.len();
+
+                        self.emit_helper_get(&ys_result);
+                        let done_key = crate::unicode::utf8_to_utf16("done");
+                        let done_idx = self.chunk.add_constant(Value::String(done_key));
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(done_idx);
+                        let done_jump = self.emit_jump(Opcode::JumpIfTrue);
+
+                        // Not done: yield the entire inner result object directly
+                        // SetupTry for catch during yield (throw/return delegation)
+                        let binding_u16 = crate::unicode::utf8_to_utf16(&ys_thrown);
+                        let binding_const = self.chunk.add_constant(Value::String(binding_u16));
+                        self.chunk.write_opcode(Opcode::SetupTry);
+                        let catch_placeholder = self.chunk.code.len();
+                        self.chunk.write_u16(0xffff);
+                        self.chunk.write_u16(binding_const);
+
+                        // YieldDirect ys_result (the entire inner result, not just .value)
+                        // ys_result is already on the stack from the Dup above
+                        self.chunk.write_opcode(Opcode::YieldDirect);
+                        // After yield resume, resume value is on stack
+                        self.emit_helper_set(&ys_recv);
+                        self.chunk.write_opcode(Opcode::Pop);
+
+                        self.chunk.write_opcode(Opcode::TeardownTry);
+                        self.emit_loop(loop_start);
+
+                        // Catch handler: thrown value stored in globals[ys_thrown]
+                        let catch_start = self.chunk.code.len();
+                        self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
+                        self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+
+                        // Check if iter.throw exists
+                        self.emit_helper_get(&ys_iter);
+                        let throw_key = crate::unicode::utf8_to_utf16("throw");
+                        let throw_idx = self.chunk.add_constant(Value::String(throw_key));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(throw_idx);
+                        let null_check_idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
-                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_u16(null_check_idx);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let no_throw_method = self.emit_jump(Opcode::JumpIfTrue);
+
+                        // Has .throw method: ys_result = iter.throw(thrown)
+                        self.emit_helper_get(&ys_iter);
+                        let throw_key2 = crate::unicode::utf8_to_utf16("throw");
+                        let throw_idx2 = self.chunk.add_constant(Value::String(throw_key2));
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(throw_idx2);
+                        self.emit_helper_get(&ys_thrown);
+                        self.emit_call_opcode(1, 0x80);
+
+                        // Validate: throw result must be an object
+                        self.chunk.write_opcode(Opcode::AssertIterResult);
+
+                        // Store in ys_result and jump to result_check
+                        // (result_check does done check, then SetupTry + YieldDirect)
+                        self.emit_helper_set(&ys_result);
+                        self.chunk.write_opcode(Opcode::Pop);
+
+                        // Jump to result_check (which has SetupTry wrapping)
+                        self.chunk.write_opcode(Opcode::Jump);
+                        let target = result_check as u16;
+                        self.chunk.write_u16(target);
+
+                        // No .throw method: close iterator then throw TypeError
+                        self.patch_jump(no_throw_method);
+                        self.emit_helper_get(&ys_iter);
+                        let return_key = crate::unicode::utf8_to_utf16("return");
+                        let return_idx = self.chunk.add_constant(Value::String(return_key));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(return_idx);
+                        let null_check2_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(null_check2_idx);
+                        self.chunk.write_opcode(Opcode::Equal);
+                        let no_return_method = self.emit_jump(Opcode::JumpIfTrue);
+                        self.emit_helper_get(&ys_iter);
+                        let return_key2 = crate::unicode::utf8_to_utf16("return");
+                        let return_idx2 = self.chunk.add_constant(Value::String(return_key2));
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(return_idx2);
+                        self.emit_call_opcode(0, 0x80);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        self.patch_jump(no_return_method);
+                        let te_msg = "The iterator does not provide a 'throw' method";
+                        let te_msg_idx = self.chunk.add_constant(Value::from(te_msg));
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(te_msg_idx);
+                        self.chunk.write_opcode(Opcode::ThrowTypeError);
+
+                        // Done: ys_result is on stack (from the Dup before done check)
+                        // Get .value from it
+                        self.patch_jump(done_jump);
+                        let value_key_done = crate::unicode::utf8_to_utf16("value");
+                        let value_idx_done = self.chunk.add_constant(Value::String(value_key_done));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(value_idx_done);
+
+                        // yield* temp vars use globals, no local cleanup needed
                     } else {
                         self.emit_helper_get(&items_name);
                         self.compile_expr(inner)?;

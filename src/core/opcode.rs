@@ -108,6 +108,7 @@ pub enum Opcode {
     ThrowIfNullish = 102,          // throw TypeError if TOS is null or undefined (does not pop)
     InitNamedFnSelf = 103,         // push the callee (named fn expression's own function) from pending stack
     FreezeTemplate = 104,          // freeze template object and its .raw property (tagged templates)
+    YieldDirect = 105,             // like Yield but the yielded value is returned directly without make_gen_result wrapping
 }
 
 impl TryFrom<u8> for Opcode {
@@ -220,6 +221,7 @@ impl TryFrom<u8> for Opcode {
             102 => Opcode::ThrowIfNullish,
             103 => Opcode::InitNamedFnSelf,
             104 => Opcode::FreezeTemplate,
+            105 => Opcode::YieldDirect,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -487,7 +489,8 @@ impl<'gc> Chunk<'gc> {
                 | 74..=77
                 | 79..=95
                 | 97..=100
-                | 102..=103 => {}
+                | 102..=103
+                | 105 => {}
 
                 // u8 operand, no adjustment needed
                 16 | 17 | 69 | 70 | 50 | 96 => {

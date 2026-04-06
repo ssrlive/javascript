@@ -4619,10 +4619,27 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(name_idx);
 
-                    for arg in args {
-                        self.compile_expr(arg)?;
+                    let has_spread = args.iter().any(|a| matches!(a, Expr::Spread(_)));
+                    if has_spread {
+                        self.chunk.write_opcode(Opcode::NewArray);
+                        self.chunk.write_byte(0);
+                        for arg in args {
+                            if let Expr::Spread(inner) = arg {
+                                self.compile_expr(inner)?;
+                                self.chunk.write_opcode(Opcode::ArraySpread);
+                            } else {
+                                self.compile_expr(arg)?;
+                                self.chunk.write_opcode(Opcode::ArrayPush);
+                            }
+                        }
+                        self.chunk.write_opcode(Opcode::CallSpread);
+                        self.chunk.write_byte(0x80);
+                    } else {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit_call_opcode(args.len(), 0x80);
                     }
-                    self.emit_call_opcode(args.len(), 0x80);
                     let end_jump = self.emit_jump(Opcode::Jump);
 
                     self.patch_jump(recv_is_null);
@@ -4738,10 +4755,27 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(undef_idx);
                     self.chunk.write_opcode(Opcode::Equal);
                     let is_undef = self.emit_jump(Opcode::JumpIfTrue);
-                    for arg in args {
-                        self.compile_expr(arg)?;
+                    let has_spread = args.iter().any(|a| matches!(a, Expr::Spread(_)));
+                    if has_spread {
+                        self.chunk.write_opcode(Opcode::NewArray);
+                        self.chunk.write_byte(0);
+                        for arg in args {
+                            if let Expr::Spread(inner) = arg {
+                                self.compile_expr(inner)?;
+                                self.chunk.write_opcode(Opcode::ArraySpread);
+                            } else {
+                                self.compile_expr(arg)?;
+                                self.chunk.write_opcode(Opcode::ArrayPush);
+                            }
+                        }
+                        self.chunk.write_opcode(Opcode::CallSpread);
+                        self.chunk.write_byte(0);
+                    } else {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        self.emit_call_opcode(args.len(), 0);
                     }
-                    self.emit_call_opcode(args.len(), 0);
                     let end_jump = self.emit_jump(Opcode::Jump);
                     self.patch_jump(is_null);
                     self.patch_jump(is_undef);

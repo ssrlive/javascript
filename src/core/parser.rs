@@ -5105,7 +5105,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
                 *index += 1;
-                expr = Expr::Index(Box::new(expr), Box::new(index_expr));
+                if contains_optional_chain(&expr) {
+                    expr = Expr::OptionalIndex(Box::new(expr), Box::new(index_expr));
+                } else {
+                    expr = Expr::Index(Box::new(expr), Box::new(index_expr));
+                }
             }
             Token::Dot => {
                 *index += 1;
@@ -5117,7 +5121,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 }
                 if let Some(prop) = tokens[*index].token.as_identifier_string() {
                     *index += 1;
-                    expr = Expr::Property(Box::new(expr), prop);
+                    if contains_optional_chain(&expr) {
+                        expr = Expr::OptionalProperty(Box::new(expr), prop);
+                    } else {
+                        expr = Expr::Property(Box::new(expr), prop);
+                    }
                 } else if let Token::PrivateIdentifier(prop) = &tokens[*index].token {
                     let invalid = PRIVATE_NAME_STACK.with(|s| {
                         let stack = s.borrow();
@@ -5282,7 +5290,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     let new_args = flatten_commas(first);
                     args.extend(new_args);
                 }
-                expr = Expr::Call(Box::new(expr), args);
+                if contains_optional_chain(&expr) {
+                    expr = Expr::OptionalCall(Box::new(expr), args);
+                } else {
+                    expr = Expr::Call(Box::new(expr), args);
+                }
             }
             Token::Increment => {
                 *index += 1;

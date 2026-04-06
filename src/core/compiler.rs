@@ -9448,19 +9448,19 @@ impl<'gc> Compiler<'gc> {
             // Fallback: try by name
             self.emit_helper_get(name);
         } else {
-            if self.scope_depth == 0 {
-                // Check if there's a block alias for this class name
-                if let Some((alias, _)) = self.lookup_top_level_block_alias(name) {
-                    let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
-                    let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(alias_idx);
-                } else {
-                    let name_u16 = crate::unicode::utf8_to_utf16(name);
-                    let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(name_idx);
-                }
+            // Top-level block-scoped class declarations are lowered to hidden
+            // global aliases so nested closures/methods must keep using the
+            // alias even when compiled inside a function body.
+            if let Some((alias, _)) = self.lookup_top_level_block_alias(name) {
+                let alias_u16 = crate::unicode::utf8_to_utf16(&alias);
+                let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(alias_idx);
+            } else if self.scope_depth == 0 {
+                let name_u16 = crate::unicode::utf8_to_utf16(name);
+                let name_idx = self.chunk.add_constant(Value::String(name_u16));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(name_idx);
             } else {
                 self.emit_helper_get(name);
             }

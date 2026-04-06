@@ -4542,18 +4542,21 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_byte(args.len() as u8);
                         }
                         "Function" => {
-                            // new Function(body) → compile to: push native_fn, push body, Call(1)
+                            // new Function(p1, p2, ..., body) → push native_fn + all args, Call(N)
                             let fn_idx = self.chunk.add_constant(Value::VmNativeFunction(72));
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(fn_idx);
-                            if let Some(body_arg) = args.last() {
-                                self.compile_expr(body_arg)?;
-                            } else {
+                            if args.is_empty() {
                                 let idx = self.chunk.add_constant(Value::String(Vec::new()));
                                 self.chunk.write_opcode(Opcode::Constant);
                                 self.chunk.write_u16(idx);
+                                self.emit_call_opcode(1, 0);
+                            } else {
+                                for a in args {
+                                    self.compile_expr(a)?;
+                                }
+                                self.emit_call_opcode(args.len(), 0);
                             }
-                            self.emit_call_opcode(1, 0);
                         }
                         _ => {
                             // Generic constructor: create object, call constructor with this

@@ -4595,6 +4595,11 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                if key == "__proto__" {
+                    let _ = self.assign_named_property(ctx, &obj, &key, &val, None)?;
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
                 // For closures with a per-evaluation overlay (class constructors after
                 // ResetPrototype), write ALL properties to the overlay so that factory-
                 // pattern re-evaluations don't share/overwrite each other's statics.

@@ -23,7 +23,7 @@ pub struct Compiler<'gc> {
     pending_label: Option<String>,                        // label to attach to the next loop
     forin_counter: u32,                                   // unique ID for for-in synthetic variables
     current_class_parent: Option<String>,                 // parent class name for super resolution
-    current_class_bindings: Vec<(String, bool)>,          // active class binding name + whether class is an expression
+    current_class_bindings: Vec<String>,                  // active class binding names for super()
     current_class_instance_fields: Vec<Vec<ClassMember>>, // instance fields to init after super()
     current_class_expr_refs: Vec<String>,                 // temp bindings for class expressions
     current_class_expr_names: Vec<String>,                // names of in-flight class expressions (for Var resolution)
@@ -3621,7 +3621,7 @@ impl<'gc> Compiler<'gc> {
             }
             Expr::SuperCall(args) => {
                 // super(args) → call parent constructor with current this
-                if let Some((class_name, class_is_expr)) = self.current_class_bindings.last().cloned() {
+                if let Some(class_name) = self.current_class_bindings.last().cloned() {
                     // Spec §12.3.7.1 SuperCall:
                     //   1. GetThisBinding (bypass TDZ — super() initializes this)
                     //   2. GetSuperConstructor (current class constructor's [[Prototype]])
@@ -3629,10 +3629,23 @@ impl<'gc> Compiler<'gc> {
                     //   4. IsConstructor check → TypeError if false
                     //   5. Construct
                     self.chunk.write_opcode(Opcode::GetThisSuper);
-                    self.emit_get_class_ref(&class_name, class_is_expr)?;
-                    let proto_key = self.chunk.add_constant(Value::from("__proto__"));
-                    self.chunk.write_opcode(Opcode::GetProperty);
-                    self.chunk.write_u16(proto_key);
+                    if !class_name.is_empty() {
+                        let get_proto = Expr::Call(
+                            Box::new(Expr::Property(
+                                Box::new(Expr::Var("Object".to_string(), None, None)),
+                                "getPrototypeOf".to_string(),
+                            )),
+                            vec![Expr::Var(class_name, None, None)],
+                        );
+                        self.compile_expr(&get_proto)?;
+                    } else if let Some(pname) = self.current_class_parent.clone() {
+                        let parent_expr = Expr::Var(pname, None, None);
+                        self.compile_expr(&parent_expr)?;
+                    } else {
+                        self.chunk.write_opcode(Opcode::Constant);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_u16(undef_idx);
+                    }
                     // Check for spread arguments
                     let has_spread = args.iter().any(|a| matches!(a, Expr::Spread(_)));
                     if has_spread {
@@ -8414,7 +8427,7 @@ impl<'gc> Compiler<'gc> {
         // Save/set class parent context for super resolution
         let prev_parent = self.current_class_parent.take();
         self.current_class_parent = parent_name.clone();
-        self.current_class_bindings.push((name.clone(), is_expr));
+        self.current_class_bindings.push(name.clone());
 
         // Assign a compile-time unique ID for this class and collect its private names
         let class_id = self.class_privns_counter;
@@ -8457,14 +8470,43 @@ impl<'gc> Compiler<'gc> {
         self.current_class_brand_info
             .push(brand_local_name.as_ref().map(|n| (n.clone(), class_id)));
 
-        // Separate instance fields, static members, and methods
-        let mut instance_fields: Vec<&crate::core::statement::ClassMember> = Vec::new();
-        let mut static_members: Vec<&crate::core::statement::ClassMember> = Vec::new();
-
-        for member in &class_def.members {
+        // Pre-compute ALL computed property keys in source order at class definition time (spec step 27)
+        // Both static and instance computed keys are evaluated here.
+        let mut computed_key_counter = 0usize;
+        let mut cloned_members: Vec<crate::core::statement::ClassMember> = class_def.members.clone();
+        for member in &mut cloned_members {
+            match member {
+                ClassMember::PropertyComputed(key_expr, _)
+                | ClassMember::StaticPropertyComputed(key_expr, _)
+                | ClassMember::MethodComputed(key_expr, ..)
+                | ClassMember::StaticMethodComputed(key_expr, ..)
+                | ClassMember::MethodComputedGenerator(key_expr, ..)
+                | ClassMember::StaticMethodComputedGenerator(key_expr, ..)
+                | ClassMember::MethodComputedAsync(key_expr, ..)
+                | ClassMember::StaticMethodComputedAsync(key_expr, ..)
+                | ClassMember::MethodComputedAsyncGenerator(key_expr, ..)
+                | ClassMember::StaticMethodComputedAsyncGenerator(key_expr, ..)
+                | ClassMember::GetterComputed(key_expr, _)
+                | ClassMember::StaticGetterComputed(key_expr, _)
+                | ClassMember::SetterComputed(key_expr, ..)
+                | ClassMember::StaticSetterComputed(key_expr, ..) => {
+                    let local_name = format!("__ck_{}__", computed_key_counter);
+                    computed_key_counter += 1;
+                    let original_key = key_expr.clone();
+                    self.compile_expr(&original_key)?;
+                    self.chunk.write_opcode(Opcode::ToPropertyKey);
+                    self.locals.push(local_name.clone());
+                    *key_expr = Expr::Var(local_name, None, None);
+                }
+                _ => {}
+            }
+        }
+        let mut cloned_instance_fields: Vec<crate::core::statement::ClassMember> = Vec::new();
+        let mut cloned_static_members: Vec<crate::core::statement::ClassMember> = Vec::new();
+        for member in &cloned_members {
             match member {
                 ClassMember::Property(..) | ClassMember::PrivateProperty(..) | ClassMember::PropertyComputed(..) => {
-                    instance_fields.push(member);
+                    cloned_instance_fields.push(member.clone());
                 }
                 // Non-static private methods/getters/setters are installed per-instance
                 // (spec: InitializeInstanceElements → PrivateMethodOrAccessorAdd)
@@ -8474,65 +8516,13 @@ impl<'gc> Compiler<'gc> {
                 | ClassMember::PrivateMethodAsyncGenerator(..)
                 | ClassMember::PrivateGetter(..)
                 | ClassMember::PrivateSetter(..) => {
-                    instance_fields.push(member);
+                    cloned_instance_fields.push(member.clone());
                 }
                 ClassMember::StaticProperty(..)
                 | ClassMember::PrivateStaticProperty(..)
                 | ClassMember::StaticBlock(..)
                 | ClassMember::StaticPropertyComputed(..) => {
-                    static_members.push(member);
-                }
-                _ => {}
-            }
-        }
-
-        // Pre-compute ALL computed property keys in source order at class definition time (spec step 27)
-        // Both static and instance computed keys are evaluated here.
-        let mut computed_key_counter = 0usize;
-        let mut cloned_instance_fields: Vec<crate::core::statement::ClassMember> = instance_fields.iter().map(|m| (*m).clone()).collect();
-        let mut cloned_static_members: Vec<crate::core::statement::ClassMember> = static_members.iter().map(|m| (*m).clone()).collect();
-
-        // Track instance and static field indices separately
-        let mut inst_idx = 0usize;
-        let mut stat_idx = 0usize;
-        for member in &class_def.members {
-            match member {
-                ClassMember::PropertyComputed(_key_expr, _) => {
-                    let local_name = format!("__ck_{}__", computed_key_counter);
-                    computed_key_counter += 1;
-                    if let ClassMember::PropertyComputed(key_expr, val_expr) = &cloned_instance_fields[inst_idx] {
-                        self.compile_expr(key_expr)?;
-                        self.chunk.write_opcode(Opcode::ToPropertyKey);
-                        self.locals.push(local_name.clone());
-                        cloned_instance_fields[inst_idx] =
-                            ClassMember::PropertyComputed(Expr::Var(local_name, None, None), val_expr.clone());
-                    }
-                    inst_idx += 1;
-                }
-                ClassMember::StaticPropertyComputed(_key_expr, _) => {
-                    let local_name = format!("__ck_{}__", computed_key_counter);
-                    computed_key_counter += 1;
-                    if let ClassMember::StaticPropertyComputed(key_expr, val_expr) = &cloned_static_members[stat_idx] {
-                        self.compile_expr(key_expr)?;
-                        self.chunk.write_opcode(Opcode::ToPropertyKey);
-                        self.locals.push(local_name.clone());
-                        cloned_static_members[stat_idx] =
-                            ClassMember::StaticPropertyComputed(Expr::Var(local_name, None, None), val_expr.clone());
-                    }
-                    stat_idx += 1;
-                }
-                ClassMember::Property(..)
-                | ClassMember::PrivateProperty(..)
-                | ClassMember::PrivateMethod(..)
-                | ClassMember::PrivateMethodGenerator(..)
-                | ClassMember::PrivateMethodAsync(..)
-                | ClassMember::PrivateMethodAsyncGenerator(..)
-                | ClassMember::PrivateGetter(..)
-                | ClassMember::PrivateSetter(..) => {
-                    inst_idx += 1;
-                }
-                ClassMember::StaticProperty(..) | ClassMember::PrivateStaticProperty(..) | ClassMember::StaticBlock(..) => {
-                    stat_idx += 1;
+                    cloned_static_members.push(member.clone());
                 }
                 _ => {}
             }
@@ -8559,7 +8549,7 @@ impl<'gc> Compiler<'gc> {
         let mut ctor_params = Vec::new();
         let mut ctor_body = Vec::new();
         let mut has_explicit_ctor = false;
-        for member in &class_def.members {
+        for member in &cloned_members {
             if let ClassMember::Constructor(params, body) = member {
                 ctor_params = params.clone();
                 ctor_body = body.clone();
@@ -8623,7 +8613,7 @@ impl<'gc> Compiler<'gc> {
         // sensitivity that locals have at scope_depth 0.
         let class_id = self.class_privns_stack.last().map(|(id, _)| *id).unwrap_or(0);
         let mut priv_method_locals: Vec<(String, String)> = Vec::new(); // (private_key, global_name)
-        for member in &class_def.members {
+        for member in &cloned_members {
             match member {
                 ClassMember::PrivateMethod(mname, params, body)
                 | ClassMember::PrivateMethodGenerator(mname, params, body)
@@ -8969,7 +8959,7 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_u16(proto_key);
             // stack: [proto]
 
-            for member in &class_def.members {
+            for member in &cloned_members {
                 match member {
                     ClassMember::Method(mname, params, body) => {
                         self.compile_and_install_method_with_kind(mname, params, body, 0)?;
@@ -9027,7 +9017,7 @@ impl<'gc> Compiler<'gc> {
             || computed_getters.iter().any(|(_, _, s)| *s)
             || computed_setters.iter().any(|(_, _, _, s)| *s);
         if has_static_methods {
-            for member in &class_def.members {
+            for member in &cloned_members {
                 match member {
                     ClassMember::StaticMethod(mname, params, body) => {
                         self.emit_get_class_ref(name, is_expr)?;
@@ -9218,11 +9208,6 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
-        // Install static fields and static blocks
-        for sm in &cloned_static_members {
-            self.compile_class_static_member(name, sm, is_expr)?;
-        }
-
         // Stamp runtime brand on the class object itself (for static private access)
         if let Some(ref brand_name) = brand_local_name
             && let Some(local_idx) = self.locals.iter().rposition(|l| l == brand_name)
@@ -9270,11 +9255,25 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::Pop);
 
             // Set Child.__proto__ = Parent
-            self.emit_get_class_ref(name, is_expr)?;
-            self.compile_expr(&parent_expr)?;
-            let dunder_proto2 = self.chunk.add_constant(Value::from("__proto__"));
-            self.chunk.write_opcode(Opcode::SetProperty);
-            self.chunk.write_u16(dunder_proto2);
+            let set_class_proto = Expr::Call(
+                Box::new(Expr::Property(
+                    Box::new(Expr::Var("Object".to_string(), None, None)),
+                    "setPrototypeOf".to_string(),
+                )),
+                vec![
+                    if is_expr {
+                        Expr::Var(
+                            self.current_class_expr_refs.last().cloned().unwrap_or_else(|| name.to_string()),
+                            None,
+                            None,
+                        )
+                    } else {
+                        Expr::Var(name.to_string(), None, None)
+                    },
+                    parent_expr.clone(),
+                ],
+            );
+            self.compile_expr(&set_class_proto)?;
             self.chunk.write_opcode(Opcode::Pop);
 
             let end_extends_jump = self.emit_jump(Opcode::Jump);
@@ -9296,6 +9295,13 @@ impl<'gc> Compiler<'gc> {
             // Child.__proto__ stays as Function.prototype (default)
 
             self.patch_jump(end_extends_jump);
+        }
+
+        // Install static fields and static blocks after the constructor's
+        // prototype chain is wired so `super` inside static initializers/blocks
+        // observes the parent class.
+        for sm in &cloned_static_members {
+            self.compile_class_static_member(name, sm, is_expr)?;
         }
 
         // Pop instance fields stack

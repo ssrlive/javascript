@@ -611,6 +611,8 @@ struct GeneratorState<'gc> {
     saved_args: Option<Vec<Value<'gc>>>,
     /// Upvalue cells for the generator's closure.
     upvalues: Vec<VmUpvalueCell<'gc>>,
+    /// Boxed locals captured by nested closures within the generator frame.
+    local_cells: HashMap<usize, VmUpvalueCell<'gc>>,
     /// Try stack at the point of suspension.
     try_stack: Vec<TryFrame>,
     /// Function IP of the generator body.
@@ -671,6 +673,7 @@ unsafe impl<'gc> Collect<'gc> for GeneratorState<'gc> {
         self.locals.trace(cc);
         self.saved_args.trace(cc);
         self.upvalues.trace(cc);
+        self.local_cells.trace(cc);
         self.this_val.trace(cc);
     }
 }
@@ -11665,38 +11668,45 @@ impl<'gc> VM<'gc> {
                         Some(Value::Number(n)) => Some(*n as usize),
                         _ => None,
                     };
-                    if key == "__proto__"
-                        && let Some(val) = borrow.get(OWN_DUNDER_PROTO_DATA_KEY).cloned()
-                    {
-                        match val {
-                            Value::Property { getter: Some(g), .. } => {
-                                drop(borrow);
-                                let g = *g;
-                                let g = if let Some(rid) = realm_id {
-                                    self.remap_cross_realm_value(ctx, g, rid)
-                                } else {
-                                    g
-                                };
-                                return self.invoke_getter_with_receiver(ctx, &g, receiver);
+                    if key == "__proto__" {
+                        if let Some(val) = borrow.get(OWN_DUNDER_PROTO_DATA_KEY).cloned() {
+                            match val {
+                                Value::Property { getter: Some(g), .. } => {
+                                    drop(borrow);
+                                    let g = *g;
+                                    let g = if let Some(rid) = realm_id {
+                                        self.remap_cross_realm_value(ctx, g, rid)
+                                    } else {
+                                        g
+                                    };
+                                    return self.invoke_getter_with_receiver(ctx, &g, receiver);
+                                }
+                                Value::Property { value: Some(v), .. } => {
+                                    let value = v.borrow().clone();
+                                    return if let Some(rid) = realm_id {
+                                        self.remap_cross_realm_value(ctx, value, rid)
+                                    } else {
+                                        value
+                                    };
+                                }
+                                Value::Property { value: None, .. } => {
+                                    return Value::Undefined;
+                                }
+                                other => {
+                                    return if let Some(rid) = realm_id {
+                                        self.remap_cross_realm_value(ctx, other, rid)
+                                    } else {
+                                        other
+                                    };
+                                }
                             }
-                            Value::Property { value: Some(v), .. } => {
-                                let value = v.borrow().clone();
-                                return if let Some(rid) = realm_id {
-                                    self.remap_cross_realm_value(ctx, value, rid)
-                                } else {
-                                    value
-                                };
-                            }
-                            Value::Property { value: None, .. } => {
-                                return Value::Undefined;
-                            }
-                            other => {
-                                return if let Some(rid) = realm_id {
-                                    self.remap_cross_realm_value(ctx, other, rid)
-                                } else {
-                                    other
-                                };
-                            }
+                        }
+                        if let Some(proto) = borrow.get("__proto__").cloned() {
+                            return if let Some(rid) = realm_id {
+                                self.remap_cross_realm_value(ctx, proto, rid)
+                            } else {
+                                proto
+                            };
                         }
                     }
                     if key != "__proto__"
@@ -19044,8 +19054,13 @@ impl<'gc> VM<'gc> {
                         Value::Null
                     }
                 } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = target {
-                    let props = self.get_fn_props(ctx, *ip, *arity);
-                    props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
+                    let shared = self.get_fn_props(ctx, *ip, *arity);
+                    let overlay_proto = self
+                        .get_closure_overlay(target)
+                        .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                    overlay_proto
+                        .or_else(|| shared.borrow().get("__proto__").cloned())
+                        .unwrap_or(Value::Null)
                 } else if let Value::VmNativeFunction(id) = target {
                     let props = self.get_native_fn_props(ctx, *id);
                     props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
@@ -29801,7 +29816,8 @@ impl<'gc> VM<'gc> {
             }
             Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => self
-                .get_fn_props(ctx, *ip, *arity)
+                .get_fn_props_for_value(ctx, target)
+                .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity))
                 .borrow()
                 .get("__proto__")
                 .cloned()
@@ -29824,7 +29840,10 @@ impl<'gc> VM<'gc> {
             Value::VmArray(arr) => matches!(arr.borrow().props.get("__non_extensible__"), Some(Value::Boolean(true))),
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 matches!(
-                    self.get_fn_props(ctx, *ip, *arity).borrow().get("__non_extensible__"),
+                    self.get_fn_props_for_value(ctx, target)
+                        .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity))
+                        .borrow()
+                        .get("__non_extensible__"),
                     Some(Value::Boolean(true))
                 )
             }
@@ -29886,7 +29905,9 @@ impl<'gc> VM<'gc> {
                 arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto.clone());
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let props = self.get_fn_props(ctx, *ip, *arity);
+                let props = self
+                    .get_fn_props_for_value(ctx, target)
+                    .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
                 props.borrow_mut(ctx).insert("__proto__".to_string(), proto.clone());
             }
             _ => {}
@@ -30481,6 +30502,7 @@ impl<'gc> VM<'gc> {
             arg_count,
             saved_args,
             upvalues: upvals.to_vec(),
+            local_cells: HashMap::new(),
             try_stack: Vec::new(),
             func_ip,
             done: false,
@@ -30498,6 +30520,7 @@ impl<'gc> VM<'gc> {
             out_state.arg_count = frame.arg_count;
             out_state.saved_args = frame.saved_args.clone();
             out_state.upvalues = frame.upvalues;
+            out_state.local_cells = frame.local_cells;
             out_state.try_stack = std::mem::take(&mut self.try_stack);
         }
 
@@ -30654,7 +30677,7 @@ impl<'gc> VM<'gc> {
             arguments_obj: None,
             upvalues: state.upvalues,
             saved_args: state.saved_args.clone(),
-            local_cells: HashMap::new(),
+            local_cells: state.local_cells,
             this_tdz: None,
         });
 
@@ -30731,6 +30754,7 @@ impl<'gc> VM<'gc> {
                 arg_count: frame.arg_count,
                 saved_args: frame.saved_args.clone(),
                 upvalues: frame.upvalues,
+                local_cells: frame.local_cells,
                 try_stack: gen_try_stack,
                 func_ip: state.func_ip,
                 done: false,

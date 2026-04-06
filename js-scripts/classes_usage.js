@@ -711,3 +711,11 @@ function assert(condition, message) {
     // console.log("count=", count_side);
     assert(count_side === 1, "The value of `count_side` is `1`, because S7 of `SuperCall : super Arguments` will call the super constructor.");
 }
+
+{
+    class Foo_14_5_14 extends null {}
+
+    assert(Object.getPrototypeOf(Foo_14_5_14.prototype) === null, "The prototype of Foo_14_5_14.prototype should be null");
+    assert(Object.getPrototypeOf(Foo_14_5_14.prototype.constructor) === Function.prototype, "The prototype of Foo_14_5_14.prototype.constructor should be Function.prototype");
+    assert(Foo_14_5_14 === Foo_14_5_14.prototype.constructor, "Foo_14_5_14 should be equal to Foo_14_5_14.prototype.constructor");
+}

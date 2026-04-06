@@ -59,6 +59,8 @@ pub struct Compiler<'gc> {
     // Eval context flags for PerformEval restrictions in class field initializers
     // Bit 0: in class field initializer, Bit 1: in method, Bit 2: in constructor
     eval_context_flags: u8,
+    // True when compiling hoisted function declarations at the top of a function body
+    hoisting_fn_decl: bool,
     // Brand info for classes with private members: stack of Option<(brand_local_name, class_id)>
     current_class_brand_info: Vec<Option<(String, usize)>>,
     /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
@@ -897,6 +899,31 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    /// Define the binding for a function declaration.
+    /// At top level (scope_depth == 0): define a global.
+    /// Inside a function body, when hoisting: reuse existing local slot or
+    /// create a new function-scoped local.
+    /// Inside a block (not hoisting): create a block-scoped local.
+    fn emit_fn_decl_binding(&mut self, name: &str) {
+        if self.scope_depth > 0 {
+            if self.hoisting_fn_decl {
+                // Hoisted to function scope: reuse existing slot if found
+                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(pos as u8);
+                    self.chunk.write_opcode(Opcode::Pop);
+                } else {
+                    self.locals.push(name.to_string());
+                }
+            } else {
+                // Block-scoped function declaration (strict mode)
+                self.locals.push(name.to_string());
+            }
+        } else {
+            self.emit_define_global_binding(name, false);
+        }
+    }
+
     fn compile_statement(&mut self, stmt: &Statement, is_last: bool) -> Result<(), JSError> {
         self.chunk.record_line(stmt.line, stmt.column);
         match &*stmt.kind {
@@ -952,6 +979,13 @@ impl<'gc> Compiler<'gc> {
             }
             StatementKind::Var(decls) => {
                 for (name, init_opt) in decls {
+                    // Per spec, `var x;` (no initializer) is a no-op when the
+                    // binding already exists (from a parameter or hoisted function
+                    // declaration).  Only `var x = expr` updates the binding.
+                    if init_opt.is_none() && self.scope_depth > 0 && self.locals.iter().any(|l| l == name) {
+                        continue;
+                    }
+
                     if let Some(init) = init_opt {
                         let func_ip = self.peek_func_ip(init);
                         self.compile_expr(init)?;
@@ -2023,11 +2057,13 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::FunctionDeclaration(name, params, body, is_gen, is_async) => {
-                self.chunk.fn_declared_globals.insert(name.clone());
+                if self.scope_depth == 0 {
+                    self.chunk.fn_declared_globals.insert(name.clone());
+                }
                 if *is_gen && !*is_async {
                     let func_ip = self.compile_generator_function_body(Some(name.as_str()), params, body, false)?;
                     self.chunk.fn_names.insert(func_ip, name.clone());
-                    self.emit_define_global_binding(name, false);
+                    self.emit_fn_decl_binding(name);
                     return Ok(());
                 }
 
@@ -2036,7 +2072,7 @@ impl<'gc> Compiler<'gc> {
                     if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone())) {
                         self.chunk.fn_names.insert(func_ip, name.clone());
                     }
-                    self.emit_define_global_binding(name, false);
+                    self.emit_fn_decl_binding(name);
                     return Ok(());
                 }
 
@@ -2104,7 +2140,22 @@ impl<'gc> Compiler<'gc> {
                     self.emit_hoisted_var_slots(body);
                 }
 
+                // Hoist direct function declarations to the top of the function body.
+                // Per spec, function declarations are processed before `var` initializers
+                // and their bindings take precedence.
+                self.hoisting_fn_decl = true;
+                for s in body.iter() {
+                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                        self.compile_statement(s, false)?;
+                    }
+                }
+                self.hoisting_fn_decl = false;
+
                 for (i, s) in body.iter().enumerate() {
+                    // Skip function declarations (already hoisted above)
+                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                        continue;
+                    }
                     self.compile_statement(s, i == body.len() - 1)?;
                 }
 
@@ -2163,7 +2214,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.fn_names.insert(func_ip, name.clone());
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
 
-                self.emit_define_global_binding(name, false);
+                self.emit_fn_decl_binding(name);
             }
             StatementKind::ForOf(decl_kind, var_name, iterable_expr, body)
             | StatementKind::ForAwaitOf(decl_kind, var_name, iterable_expr, body) => {
@@ -2681,7 +2732,11 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_u16(ni);
 
                 // We need break patches
-                let ctx = LoopContext::default();
+                let switch_saved_locals = if self.scope_depth > 0 { Some(self.locals.len()) } else { None };
+                let ctx = LoopContext {
+                    body_saved_locals: switch_saved_locals,
+                    ..LoopContext::default()
+                };
                 self.loop_stack.push(ctx);
 
                 // For each case: test → jump to body if match, else next case
@@ -2731,6 +2786,13 @@ impl<'gc> Compiler<'gc> {
                     self.patch_jump_to(default_jump, body_ips[di]);
                 } else {
                     self.patch_jump(default_jump);
+                }
+
+                // Clean up block-scoped locals from the switch body (for fall-through path)
+                if let Some(saved) = switch_saved_locals
+                    && self.locals.len() > saved
+                {
+                    self.end_block_scope(saved);
                 }
 
                 // Patch break statements
@@ -4064,6 +4126,15 @@ impl<'gc> Compiler<'gc> {
                     self.emit_hoisted_var_slots(body);
                 }
 
+                // Hoist function declarations in arrow body
+                self.hoisting_fn_decl = true;
+                for s in body.iter() {
+                    if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                        self.compile_statement(s, false)?;
+                    }
+                }
+                self.hoisting_fn_decl = false;
+
                 if body.len() == 1 {
                     if let StatementKind::Return(ret_expr) = &*body[0].kind {
                         // Parser encodes concise arrow body as a synthetic Return(expr).
@@ -4101,6 +4172,9 @@ impl<'gc> Compiler<'gc> {
                     }
                 } else {
                     for (i, s) in body.iter().enumerate() {
+                        if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                            continue;
+                        }
                         self.compile_statement(s, i == body.len() - 1)?;
                     }
                     if is_async_arrow {
@@ -6993,7 +7067,19 @@ impl<'gc> Compiler<'gc> {
             self.emit_hoisted_var_slots(body);
         }
 
+        // Hoist function declarations in generator/async body
+        self.hoisting_fn_decl = true;
+        for s in body.iter() {
+            if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                self.compile_statement(s, false)?;
+            }
+        }
+        self.hoisting_fn_decl = false;
+
         for (i, s) in body.iter().enumerate() {
+            if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                continue;
+            }
             self.compile_statement(s, i == body.len() - 1)?;
         }
 

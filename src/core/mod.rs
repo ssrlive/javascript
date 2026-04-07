@@ -394,6 +394,7 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
 }
 
 /// Extract external import/export-from sources from the AST.
+#[allow(dead_code)]
 pub(crate) fn collect_module_sources(statements: &[Statement], self_basename: &str) -> Vec<String> {
     let mut sources = Vec::new();
     let known_builtins = ["math", "console", "os", "std", "./es6_module_export.js"];
@@ -435,10 +436,7 @@ pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &
     for stmt in statements {
         let maybe_request = match &*stmt.kind {
             StatementKind::Import(specifiers, source) => {
-                let phase = if specifiers
-                    .iter()
-                    .any(|spec| matches!(spec, ImportSpecifier::DeferredNamespace(_)))
-                {
+                let phase = if specifiers.iter().any(|spec| matches!(spec, ImportSpecifier::DeferredNamespace(_))) {
                     ModuleRequestPhase::Defer
                 } else {
                     ModuleRequestPhase::Evaluation
@@ -495,9 +493,7 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
             | Expr::Binary(lhs, _, rhs)
             | Expr::Comma(lhs, rhs) => expr_has_top_level_await(lhs) || expr_has_top_level_await(rhs),
             Expr::Conditional(test, cons, alt) => {
-                expr_has_top_level_await(test)
-                    || expr_has_top_level_await(cons)
-                    || expr_has_top_level_await(alt)
+                expr_has_top_level_await(test) || expr_has_top_level_await(cons) || expr_has_top_level_await(alt)
             }
             Expr::TypeOf(inner)
             | Expr::Delete(inner)
@@ -520,40 +516,29 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
             | Expr::Property(inner, _)
             | Expr::PrivateMember(inner, _)
             | Expr::SuperComputedProperty(inner) => expr_has_top_level_await(inner),
-            Expr::OptionalIndex(obj, idx) | Expr::Index(obj, idx) => {
-                expr_has_top_level_await(obj) || expr_has_top_level_await(idx)
-            }
+            Expr::OptionalIndex(obj, idx) | Expr::Index(obj, idx) => expr_has_top_level_await(obj) || expr_has_top_level_await(idx),
             Expr::OptionalCall(callee, args)
             | Expr::Call(callee, args)
             | Expr::New(callee, args)
-            | Expr::SuperComputedMethod(callee, args) => {
-                expr_has_top_level_await(callee) || args.iter().any(expr_has_top_level_await)
-            }
+            | Expr::SuperComputedMethod(callee, args) => expr_has_top_level_await(callee) || args.iter().any(expr_has_top_level_await),
             Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(expr_has_top_level_await),
             Expr::Array(items) => items.iter().flatten().any(expr_has_top_level_await),
             Expr::Object(props) => props
                 .iter()
                 .any(|(k, v, _, _)| expr_has_top_level_await(k) || expr_has_top_level_await(v)),
-            Expr::TaggedTemplate(tag, _, _, _, exprs) => {
-                expr_has_top_level_await(tag) || exprs.iter().any(expr_has_top_level_await)
-            }
+            Expr::TaggedTemplate(tag, _, _, _, exprs) => expr_has_top_level_await(tag) || exprs.iter().any(expr_has_top_level_await),
             Expr::TemplateString(_parts) => false,
             Expr::DynamicImport(spec, attrs) => {
-                expr_has_top_level_await(spec)
-                    || attrs.as_ref().is_some_and(|attrs| expr_has_top_level_await(attrs))
+                expr_has_top_level_await(spec) || attrs.as_ref().is_some_and(|attrs| expr_has_top_level_await(attrs))
             }
             Expr::Class(class_def) => {
-                class_def
-                    .extends
-                    .as_ref()
-                    .is_some_and(expr_has_top_level_await)
+                class_def.extends.as_ref().is_some_and(expr_has_top_level_await)
                     || class_def.members.iter().any(|member| match member {
                         ClassMember::Property(_, value)
                         | ClassMember::StaticProperty(_, value)
                         | ClassMember::PrivateProperty(_, value)
                         | ClassMember::PrivateStaticProperty(_, value) => expr_has_top_level_await(value),
-                        ClassMember::PropertyComputed(key, value)
-                        | ClassMember::StaticPropertyComputed(key, value) => {
+                        ClassMember::PropertyComputed(key, value) | ClassMember::StaticPropertyComputed(key, value) => {
                             expr_has_top_level_await(key) || expr_has_top_level_await(value)
                         }
                         ClassMember::StaticBlock(body) => module_has_top_level_await(body),
@@ -567,8 +552,7 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
                         | ClassMember::StaticMethodComputedAsyncGenerator(key, _, _)
                         | ClassMember::SetterComputed(key, _, _)
                         | ClassMember::StaticSetterComputed(key, _, _) => expr_has_top_level_await(key),
-                        ClassMember::GetterComputed(key, _)
-                        | ClassMember::StaticGetterComputed(key, _) => expr_has_top_level_await(key),
+                        ClassMember::GetterComputed(key, _) | ClassMember::StaticGetterComputed(key, _) => expr_has_top_level_await(key),
                         _ => false,
                     })
             }
@@ -599,9 +583,9 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
     fn stmt_has_top_level_await(stmt: &Statement) -> bool {
         match &*stmt.kind {
             StatementKind::Expr(expr) => expr_has_top_level_await(expr),
-            StatementKind::Let(decls) | StatementKind::Var(decls) => decls
-                .iter()
-                .any(|(_, init)| init.as_ref().is_some_and(expr_has_top_level_await)),
+            StatementKind::Let(decls) | StatementKind::Var(decls) => {
+                decls.iter().any(|(_, init)| init.as_ref().is_some_and(expr_has_top_level_await))
+            }
             StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
                 decls.iter().any(|(_, init)| expr_has_top_level_await(init))
             }
@@ -639,26 +623,15 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
             }
             StatementKind::Class(class_def) => expr_has_top_level_await(&Expr::Class(class_def.clone())),
             StatementKind::For(for_stmt) => {
-                for_stmt
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| stmt_has_top_level_await(init))
-                    || for_stmt
-                        .test
-                        .as_ref()
-                        .is_some_and(expr_has_top_level_await)
-                    || for_stmt
-                        .update
-                        .as_ref()
-                        .is_some_and(|update| stmt_has_top_level_await(update))
+                for_stmt.init.as_ref().is_some_and(|init| stmt_has_top_level_await(init))
+                    || for_stmt.test.as_ref().is_some_and(expr_has_top_level_await)
+                    || for_stmt.update.as_ref().is_some_and(|update| stmt_has_top_level_await(update))
                     || module_has_top_level_await(&for_stmt.body)
             }
             StatementKind::ForOf(_, _, expr, body)
             | StatementKind::ForIn(_, _, expr, body)
             | StatementKind::ForAwaitOf(_, _, expr, body) => {
-                matches!(&*stmt.kind, StatementKind::ForAwaitOf(..))
-                    || expr_has_top_level_await(expr)
-                    || module_has_top_level_await(body)
+                matches!(&*stmt.kind, StatementKind::ForAwaitOf(..)) || expr_has_top_level_await(expr) || module_has_top_level_await(body)
             }
             StatementKind::ForOfExpr(lhs, rhs, body)
             | StatementKind::ForInExpr(lhs, rhs, body)
@@ -676,23 +649,18 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
             | StatementKind::ForAwaitOfDestructuringArray(_, _, expr, body) => {
                 matches!(
                     &*stmt.kind,
-                    StatementKind::ForAwaitOfDestructuringObject(..)
-                        | StatementKind::ForAwaitOfDestructuringArray(..)
+                    StatementKind::ForAwaitOfDestructuringObject(..) | StatementKind::ForAwaitOfDestructuringArray(..)
                 ) || expr_has_top_level_await(expr)
                     || module_has_top_level_await(body)
             }
             StatementKind::Switch(switch_stmt) => {
                 expr_has_top_level_await(&switch_stmt.expr)
                     || switch_stmt.cases.iter().any(|case| match case {
-                        SwitchCase::Case(expr, body) => {
-                            expr_has_top_level_await(expr) || module_has_top_level_await(body)
-                        }
+                        SwitchCase::Case(expr, body) => expr_has_top_level_await(expr) || module_has_top_level_await(body),
                         SwitchCase::Default(body) => module_has_top_level_await(body),
                     })
             }
-            StatementKind::With(expr, body) => {
-                expr_has_top_level_await(expr) || module_has_top_level_await(body)
-            }
+            StatementKind::With(expr, body) => expr_has_top_level_await(expr) || module_has_top_level_await(body),
             StatementKind::Label(_, inner) => stmt_has_top_level_await(inner),
             StatementKind::FunctionDeclaration(..)
             | StatementKind::Import(..)
@@ -705,6 +673,62 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
 
     statements.iter().any(stmt_has_top_level_await)
 }
+
+fn collect_hoisted_function_names(statements: &[Statement]) -> Vec<String> {
+    let mut out = Vec::new();
+    for stmt in statements {
+        match &*stmt.kind {
+            StatementKind::FunctionDeclaration(name, ..) => {
+                out.push(name.clone());
+            }
+            StatementKind::Export(_, Some(inner), _) => {
+                if let StatementKind::FunctionDeclaration(name, ..) = &*inner.kind {
+                    out.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_hoisted_function_defs<'gc>(chunk: &crate::core::opcode::Chunk<'gc>, hoisted_locals: &[String]) -> HashMap<String, (usize, u8)> {
+    let wanted: std::collections::HashSet<&str> = hoisted_locals.iter().map(String::as_str).collect();
+    let mut defs = HashMap::new();
+    for constant in &chunk.constants {
+        if let Value::VmFunction(ip, arity) = constant
+            && let Some(name) = chunk.fn_names.get(ip)
+            && wanted.contains(name.as_str())
+            && !defs.contains_key(name)
+        {
+            defs.insert(name.clone(), (*ip, *arity));
+        }
+    }
+    defs
+}
+
+fn collect_hoisted_export_function_defs(
+    hoisted_defs: &HashMap<String, (usize, u8)>,
+    export_name_to_local: &HashMap<String, String>,
+) -> HashMap<String, (usize, u8)> {
+    let mut seeded = HashMap::new();
+    for (export_name, local_name) in export_name_to_local {
+        if let Some((ip, arity)) = hoisted_defs.get(local_name) {
+            seeded.insert(export_name.clone(), (*ip, *arity));
+        }
+    }
+    seeded
+}
+
+type MainModuleRecord = (
+    String,
+    Vec<String>,
+    HashMap<String, String>,
+    Vec<(String, Vec<ReexportSpec>)>,
+    Vec<ModuleRequest>,
+    bool,
+    std::path::PathBuf,
+);
 
 pub fn evaluate_script<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script: T,
@@ -747,17 +771,13 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         if run_as_module && let Some(ref p) = script_path_buf {
             compiler.set_script_filename(p.to_string_lossy().to_string());
         }
+        let mut main_hoisted_local_defs: Option<HashMap<String, (usize, u8)>> = None;
+        let mut main_hoisted_export_defs: Option<HashMap<String, (usize, u8)>> = None;
+        let mut main_code_offset: Option<usize> = None;
 
-        // Multi-file module loading: load and execute dependencies before the main module.
-        let mut main_module_record: Option<(
-            String,
-            Vec<String>,
-            HashMap<String, String>,
-            Vec<(String, Vec<ReexportSpec>)>,
-            Vec<ModuleRequest>,
-            bool,
-            std::path::PathBuf,
-        )> = None;
+        // Multi-file module loading: load dependency graphs before compiling the main
+        // module so import/re-export metadata is available during compilation.
+        let mut main_module_record: Option<MainModuleRecord> = None;
         if run_as_module && let Some(ref entry_path) = script_path_buf {
             let main_key = entry_path.to_string_lossy().to_string();
             let (main_export_names, main_export_name_to_local, main_reexport_sources) = collect_exports_from_ast(&statements);
@@ -802,7 +822,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                 vm.mark_module_record_evaluating(main_key);
             }
             if !requests.is_empty() {
-                vm.load_module_dependencies(ctx, entry_path, &requests);
+                vm.load_module_graph(ctx, entry_path, &requests);
                 // Fixup circular re-exports
                 vm.fixup_circular_reexports();
                 // Pass loaded module info to the main compiler
@@ -817,11 +837,21 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         }
 
         let chunk = compiler.compile(&statements)?;
+        if let Some((_, _, main_export_name_to_local, _, _, _, _)) = &main_module_record {
+            let hoisted_locals = collect_hoisted_function_names(&statements);
+            if !hoisted_locals.is_empty() {
+                let hoisted_defs = collect_hoisted_function_defs(&chunk, &hoisted_locals);
+                main_hoisted_export_defs = Some(collect_hoisted_export_function_defs(&hoisted_defs, main_export_name_to_local));
+                main_hoisted_local_defs = Some(hoisted_defs);
+            }
+        }
 
         // If dependency code was already merged into vm.chunk, merge the main
         // module's chunk too so all code shares one unified bytecode buffer.
         if run_as_module && vm.chunk.code.is_empty() {
+            main_code_offset = Some(0);
             vm.chunk = chunk;
+            vm.main_module_ip_start = Some(0);
         } else if run_as_module && !vm.chunk.code.is_empty() {
             // Save module-specific metadata before merge consumes the chunk
             let main_loaded_module_vars = chunk.loaded_module_vars.clone();
@@ -831,6 +861,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
             let main_const_import_bindings = chunk.const_import_bindings.clone();
 
             let main_ip = vm.chunk.merge_dependency_chunk(chunk);
+            main_code_offset = Some(main_ip);
             vm.ip = main_ip;
             vm.main_module_ip_start = Some(main_ip);
 
@@ -872,6 +903,29 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                 *main_has_tla,
             );
             vm.mark_module_record_evaluating(main_key);
+            if let Some(defs) = &main_hoisted_local_defs
+                && !defs.is_empty()
+            {
+                let code_offset = main_code_offset.unwrap_or(0);
+                let seeded_locals = defs
+                    .iter()
+                    .map(|(local_name, (ip, arity))| (local_name.clone(), Value::VmFunction(ip + code_offset, *arity)))
+                    .collect::<HashMap<_, _>>();
+                vm.seed_module_locals(main_key, &seeded_locals);
+            }
+            if let Some(defs) = &main_hoisted_export_defs
+                && !defs.is_empty()
+            {
+                let code_offset = main_code_offset.unwrap_or(0);
+                let seeded_exports = defs
+                    .iter()
+                    .map(|(export_name, (ip, arity))| (export_name.clone(), Value::VmFunction(ip + code_offset, *arity)))
+                    .collect::<HashMap<_, _>>();
+                vm.seed_module_exports(ctx, main_key, &seeded_exports);
+            }
+            if !main_requests.is_empty() {
+                vm.evaluate_module_requests(ctx, entry_path, main_requests);
+            }
         }
 
         // Inject loaded module bindings into module_locals before execution.

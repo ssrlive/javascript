@@ -519,6 +519,11 @@ impl<'gc> Compiler<'gc> {
                     out.push(class_def.name.clone());
                 }
             }
+            StatementKind::FunctionDeclaration(name, ..) => {
+                if !name.is_empty() && !out.iter().any(|n| n == name) {
+                    out.push(name.clone());
+                }
+            }
             StatementKind::Export(_, Some(inner_stmt), _) => {
                 Self::collect_function_lexical_names_from_statement(inner_stmt, out);
             }
@@ -541,6 +546,8 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_u16(uninit_idx);
             self.hoisted_function_lexicals.insert(name.clone());
             self.locals.push(name);
+            self.chunk.write_opcode(Opcode::BoxLocal);
+            self.chunk.write_byte((self.locals.len() - 1) as u8);
         }
     }
 
@@ -921,9 +928,7 @@ impl<'gc> Compiler<'gc> {
                                 }
                             }
 
-                            self.chunk
-                                .self_deferred_namespace_imports
-                                .push((local.clone(), entries));
+                            self.chunk.self_deferred_namespace_imports.push((local.clone(), entries));
                             self.chunk.const_import_bindings.insert(local.clone());
                         }
                     }
@@ -1936,10 +1941,8 @@ impl<'gc> Compiler<'gc> {
                     self.patch_jump(bp);
                 }
 
-                // Clean up synthetic locals
-                if self.scope_depth > 0 {
-                    self.locals.retain(|l| *l != keys_name && *l != idx_name && *l != obj_name);
-                }
+                // Keep synthetic function-scope loop locals in the locals table so
+                // later local indices stay aligned with the runtime stack slots.
 
                 if is_last {
                     self.emit_load_completion();
@@ -2234,6 +2237,7 @@ impl<'gc> Compiler<'gc> {
                 let old_upvalues = std::mem::take(&mut self.upvalues);
                 let old_const_locals = std::mem::take(&mut self.const_locals);
                 let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
+                let old_hoisting_fn_decl = self.hoisting_fn_decl;
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
                 let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
@@ -2241,9 +2245,14 @@ impl<'gc> Compiler<'gc> {
                 self.parent_upvalues = old_upvalues.clone();
                 self.parent_const_locals = old_const_locals.clone();
 
-                // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+                // Eagerly capture parent locals/upvalues so deeper nested closures can
+                // resolve transitive captures through intermediate functions that do
+                // not reference those bindings directly.
                 for (idx, name) in self.parent_locals.clone().iter().enumerate() {
                     self.add_upvalue(name, idx as u8, true);
+                }
+                for (idx, uv) in self.parent_upvalues.clone().iter().enumerate() {
+                    self.add_upvalue(&uv.name, idx as u8, false);
                 }
 
                 self.current_strict = fn_is_strict;
@@ -2331,6 +2340,7 @@ impl<'gc> Compiler<'gc> {
                 self.upvalues = old_upvalues;
                 self.const_locals = old_const_locals;
                 self.hoisted_function_lexicals = old_hoisted_function_lexicals;
+                self.hoisting_fn_decl = old_hoisting_fn_decl;
                 self.parent_const_locals = old_parent_const_locals;
                 self.function_depth = old_function_depth;
 
@@ -2850,9 +2860,8 @@ impl<'gc> Compiler<'gc> {
                 for bp in ctx.break_patches {
                     self.patch_jump(bp);
                 }
-                if self.scope_depth > 0 {
-                    self.locals.retain(|l| l != &obj_name && l != &keys_name && l != &idx_name);
-                }
+                // Keep synthetic function-scope loop locals in the locals table so
+                // later local indices stay aligned with the runtime stack slots.
                 if is_last {
                     self.emit_load_completion();
                 } else {
@@ -3148,9 +3157,7 @@ impl<'gc> Compiler<'gc> {
                                         (exp_name.clone(), local_name)
                                     })
                                     .collect();
-                                self.chunk
-                                    .self_deferred_namespace_imports
-                                    .push((local.clone(), entries));
+                                self.chunk.self_deferred_namespace_imports.push((local.clone(), entries));
                                 self.chunk.const_import_bindings.insert(local.clone());
                                 continue;
                             }
@@ -3261,10 +3268,9 @@ impl<'gc> Compiler<'gc> {
                             if let Some(resolved_str) = self.resolve_import_path(source) {
                                 self.chunk.write_opcode(Opcode::NewObject);
                                 self.chunk.write_byte(0);
-                                self.chunk.loaded_module_vars.insert(
-                                    local.clone(),
-                                    (resolved_str, "\x00defer:*".to_string()),
-                                );
+                                self.chunk
+                                    .loaded_module_vars
+                                    .insert(local.clone(), (resolved_str, "\x00defer:*".to_string()));
                                 self.chunk.const_import_bindings.insert(local.clone());
                             } else {
                                 self.chunk.write_opcode(Opcode::NewObject);
@@ -4330,6 +4336,7 @@ impl<'gc> Compiler<'gc> {
                 let old_upvalues = std::mem::take(&mut self.upvalues);
                 let old_const_locals = std::mem::take(&mut self.const_locals);
                 let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
+                let old_hoisting_fn_decl = self.hoisting_fn_decl;
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
                 let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
@@ -4337,9 +4344,14 @@ impl<'gc> Compiler<'gc> {
                 self.parent_upvalues = old_upvalues.clone();
                 self.parent_const_locals = old_const_locals.clone();
 
-                // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+                // Eagerly capture parent locals/upvalues so deeper nested closures can
+                // resolve transitive captures through intermediate functions that do
+                // not reference those bindings directly.
                 for (idx, name) in self.parent_locals.clone().iter().enumerate() {
                     self.add_upvalue(name, idx as u8, true);
+                }
+                for (idx, uv) in self.parent_upvalues.clone().iter().enumerate() {
+                    self.add_upvalue(&uv.name, idx as u8, false);
                 }
 
                 self.current_strict = fn_is_strict;
@@ -4470,6 +4482,7 @@ impl<'gc> Compiler<'gc> {
                 self.upvalues = old_upvalues;
                 self.const_locals = old_const_locals;
                 self.hoisted_function_lexicals = old_hoisted_function_lexicals;
+                self.hoisting_fn_decl = old_hoisting_fn_decl;
                 self.parent_const_locals = old_parent_const_locals;
                 self.function_depth = old_function_depth;
 
@@ -7039,9 +7052,8 @@ impl<'gc> Compiler<'gc> {
             self.patch_jump(bp);
         }
 
-        if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &arr_name && l != &idx_name);
-        }
+        // Keep synthetic function-scope loop locals in the locals table so later
+        // local indices stay aligned with the runtime stack slots.
         Ok(())
     }
 
@@ -7107,9 +7119,8 @@ impl<'gc> Compiler<'gc> {
             self.patch_jump(bp);
         }
 
-        if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &arr_name && l != &idx_name);
-        }
+        // Keep synthetic function-scope loop locals in the locals table so later
+        // local indices stay aligned with the runtime stack slots.
         Ok(())
     }
 
@@ -7173,9 +7184,8 @@ impl<'gc> Compiler<'gc> {
             self.patch_jump(bp);
         }
 
-        if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &keys_name && l != &idx_name);
-        }
+        // Keep synthetic function-scope loop locals in the locals table so later
+        // local indices stay aligned with the runtime stack slots.
         Ok(())
     }
 
@@ -7237,9 +7247,8 @@ impl<'gc> Compiler<'gc> {
             self.patch_jump(bp);
         }
 
-        if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &keys_name && l != &idx_name);
-        }
+        // Keep synthetic function-scope loop locals in the locals table so later
+        // local indices stay aligned with the runtime stack slots.
         Ok(())
     }
 
@@ -7267,6 +7276,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
+        let old_hoisting_fn_decl = self.hoisting_fn_decl;
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -7279,9 +7289,14 @@ impl<'gc> Compiler<'gc> {
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
 
-        // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+        // Eagerly capture parent locals/upvalues so deeper nested closures can
+        // resolve transitive captures through intermediate functions that do
+        // not reference those bindings directly.
         for (idx, name) in self.parent_locals.clone().iter().enumerate() {
             self.add_upvalue(name, idx as u8, true);
+        }
+        for (idx, uv) in self.parent_upvalues.clone().iter().enumerate() {
+            self.add_upvalue(&uv.name, idx as u8, false);
         }
 
         // Named function expression: the function name is an immutable const
@@ -7387,6 +7402,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.hoisted_function_lexicals = old_hoisted_function_lexicals;
+        self.hoisting_fn_decl = old_hoisting_fn_decl;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
 
@@ -7647,6 +7663,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
+        let old_hoisting_fn_decl = self.hoisting_fn_decl;
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -7654,9 +7671,14 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_upvalues.clone();
         self.parent_const_locals = old_const_locals.clone();
 
-        // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+        // Eagerly capture parent locals/upvalues so deeper nested closures can
+        // resolve transitive captures through intermediate functions that do
+        // not reference those bindings directly.
         for (idx, name) in self.parent_locals.clone().iter().enumerate() {
             self.add_upvalue(name, idx as u8, true);
+        }
+        for (idx, uv) in self.parent_upvalues.clone().iter().enumerate() {
+            self.add_upvalue(&uv.name, idx as u8, false);
         }
 
         self.allow_super_call = false;
@@ -7761,6 +7783,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.hoisted_function_lexicals = old_hoisted_function_lexicals;
+        self.hoisting_fn_decl = old_hoisting_fn_decl;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
         self.current_strict = old_ctx;
@@ -7803,6 +7826,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
+        let old_hoisting_fn_decl = self.hoisting_fn_decl;
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -7810,9 +7834,14 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_upvalues.clone();
         self.parent_const_locals = old_const_locals.clone();
 
-        // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+        // Eagerly capture parent locals/upvalues so deeper nested closures can
+        // resolve transitive captures through intermediate functions that do
+        // not reference those bindings directly.
         for (idx, name) in self.parent_locals.clone().iter().enumerate() {
             self.add_upvalue(name, idx as u8, true);
+        }
+        for (idx, uv) in self.parent_upvalues.clone().iter().enumerate() {
+            self.add_upvalue(&uv.name, idx as u8, false);
         }
 
         self.allow_super_call = false;
@@ -7916,6 +7945,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.hoisted_function_lexicals = old_hoisted_function_lexicals;
+        self.hoisting_fn_decl = old_hoisting_fn_decl;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
         self.current_strict = old_ctx;
@@ -8800,6 +8830,7 @@ impl<'gc> Compiler<'gc> {
         let old_upvalues = std::mem::take(&mut self.upvalues);
         let old_const_locals = std::mem::take(&mut self.const_locals);
         let old_hoisted_function_lexicals = std::mem::take(&mut self.hoisted_function_lexicals);
+        let old_hoisting_fn_decl = self.hoisting_fn_decl;
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
@@ -8807,9 +8838,14 @@ impl<'gc> Compiler<'gc> {
         self.parent_upvalues = old_upvalues.clone();
         self.parent_const_locals = old_const_locals.clone();
 
-        // Eagerly capture parent locals so deeper nested closures can resolve transitive captures.
+        // Eagerly capture parent locals/upvalues so deeper nested closures can
+        // resolve transitive captures through intermediate functions that do
+        // not reference those bindings directly.
         for (idx, local_name) in self.parent_locals.clone().iter().enumerate() {
             self.add_upvalue(local_name, idx as u8, true);
+        }
+        for (idx, uv) in self.parent_upvalues.clone().iter().enumerate() {
+            self.add_upvalue(&uv.name, idx as u8, false);
         }
 
         self.current_strict = ctor_is_strict;
@@ -8891,6 +8927,7 @@ impl<'gc> Compiler<'gc> {
         self.upvalues = old_upvalues;
         self.const_locals = old_const_locals;
         self.hoisted_function_lexicals = old_hoisted_function_lexicals;
+        self.hoisting_fn_decl = old_hoisting_fn_decl;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
 

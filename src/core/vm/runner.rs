@@ -1854,12 +1854,10 @@ impl<'gc> VM<'gc> {
                 ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
                 ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
-                self.module_locals
-                    .insert("__self_deferred_ns_cached__".to_string(), ns_obj.clone());
+                self.module_locals.insert("__self_deferred_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
                 if let Some(ref sp) = self.script_path {
-                    self.deferred_module_ns_objects
-                        .insert(sp.clone(), ns_obj.clone());
+                    self.deferred_module_ns_objects.insert(sp.clone(), ns_obj.clone());
                 }
                 self.stack.push(ns_obj);
                 return Ok(OpcodeAction::Continue);
@@ -3651,11 +3649,7 @@ impl<'gc> VM<'gc> {
         // Check self-import namespace bindings (they return "object")
         if self.is_module_mode
             && (self.chunk.self_namespace_imports.iter().any(|(local, _)| local == &name)
-                || self
-                    .chunk
-                    .self_deferred_namespace_imports
-                    .iter()
-                    .any(|(local, _)| local == &name))
+                || self.chunk.self_deferred_namespace_imports.iter().any(|(local, _)| local == &name))
         {
             self.stack.push(Value::from("object"));
             return Ok(OpcodeAction::Continue);
@@ -8625,6 +8619,14 @@ impl<'gc> VM<'gc> {
     // Opcode::BoxLocal
     fn run_opcode_box_local(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let index = self.read_byte() as usize;
+        if let Some(frame) = self.frames.last()
+            && frame.local_cells.contains_key(&index)
+        {
+            return Ok(OpcodeAction::Continue);
+        }
+        if self.frames.is_empty() && self.top_level_cells.contains_key(&index) {
+            return Ok(OpcodeAction::Continue);
+        }
         let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
         let val = if bp + index < self.stack.len() {
             self.stack[bp + index].clone()

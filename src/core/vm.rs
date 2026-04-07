@@ -1211,12 +1211,7 @@ impl<'gc> VM<'gc> {
         self.is_module_mode = true;
     }
 
-    fn pre_create_module_namespace_with_phase(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        module_key: &str,
-        deferred: bool,
-    ) {
+    fn pre_create_module_namespace_with_phase(&mut self, ctx: &GcContext<'gc>, module_key: &str, deferred: bool) {
         let mut ns_map = IndexMap::new();
         ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
         if deferred {
@@ -1234,8 +1229,7 @@ impl<'gc> VM<'gc> {
         ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
         let main_ns = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
         if deferred {
-            self.deferred_module_ns_objects
-                .insert(module_key.to_string(), main_ns);
+            self.deferred_module_ns_objects.insert(module_key.to_string(), main_ns);
         } else {
             self.module_ns_objects.insert(module_key.to_string(), main_ns);
         }
@@ -1405,6 +1399,38 @@ impl<'gc> VM<'gc> {
             .insert(module_key.to_string(), export_name_to_local.clone());
     }
 
+    pub(crate) fn seed_module_exports(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        module_key: &str,
+        seeded_exports: &std::collections::HashMap<String, Value<'gc>>,
+    ) {
+        let mut exports = self.loaded_modules.remove(module_key).unwrap_or_default();
+        let export_locals = self.loaded_module_local_names.get(module_key).cloned().unwrap_or_default();
+        let mut seeded_locals = std::collections::HashMap::new();
+        for (export_name, val) in seeded_exports {
+            exports.insert(export_name.clone(), val.clone());
+            let local_name = export_locals.get(export_name).cloned().unwrap_or_else(|| export_name.clone());
+            seeded_locals.insert(local_name, val.clone());
+        }
+        self.loaded_modules.insert(module_key.to_string(), exports);
+        self.ensure_module_export_bindings(module_key);
+        self.seed_module_locals(module_key, &seeded_locals);
+        self.refresh_module_namespace_object(ctx, module_key);
+        self.refresh_deferred_module_namespace_object(ctx, module_key);
+    }
+
+    pub(crate) fn seed_module_locals(&mut self, module_key: &str, seeded_locals: &std::collections::HashMap<String, Value<'gc>>) {
+        let mut state = self
+            .loaded_module_states
+            .remove(module_key)
+            .unwrap_or_else(|| self.snapshot_module_execution_state());
+        for (local_name, val) in seeded_locals {
+            state.module_locals.insert(local_name.clone(), val.clone());
+        }
+        self.loaded_module_states.insert(module_key.to_string(), state);
+    }
+
     pub(crate) fn seed_module_export_metadata(
         &mut self,
         module_key: &str,
@@ -1445,6 +1471,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_current_module_record(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -1483,6 +1510,7 @@ impl<'gc> VM<'gc> {
         self.refresh_deferred_module_namespace_object(ctx, module_key);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn seed_pending_module_record(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -1610,12 +1638,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn refresh_module_namespace_object_with_phase(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        module_key: &str,
-        deferred: bool,
-    ) {
+    fn refresh_module_namespace_object_with_phase(&mut self, ctx: &GcContext<'gc>, module_key: &str, deferred: bool) {
         self.ensure_module_export_bindings(module_key);
         if deferred {
             if !self.deferred_module_ns_objects.contains_key(module_key) {
@@ -1674,12 +1697,7 @@ impl<'gc> VM<'gc> {
         self.refresh_module_namespace_object_with_phase(ctx, module_key, true);
     }
 
-    fn get_module_namespace_object(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        module_key: &str,
-        deferred: bool,
-    ) -> Option<Value<'gc>> {
+    fn get_module_namespace_object(&mut self, ctx: &GcContext<'gc>, module_key: &str, deferred: bool) -> Option<Value<'gc>> {
         if deferred {
             self.refresh_deferred_module_namespace_object(ctx, module_key);
             self.deferred_module_ns_objects.get(module_key).cloned()
@@ -1699,21 +1717,14 @@ impl<'gc> VM<'gc> {
     }
 
     fn namespace_is_deferred(map: &VmObjectHandle<'gc>) -> bool {
-        matches!(
-            map.borrow().get("__deferred_module_namespace__"),
-            Some(Value::Boolean(true))
-        )
+        matches!(map.borrow().get("__deferred_module_namespace__"), Some(Value::Boolean(true)))
     }
 
     fn namespace_is_symbol_like_key(map: &VmObjectHandle<'gc>, key: &str) -> bool {
         key.starts_with("@@sym:") || (Self::namespace_is_deferred(map) && key == "then")
     }
 
-    fn ready_for_sync_execution(
-        &self,
-        module_key: &str,
-        seen: &mut std::collections::HashSet<String>,
-    ) -> bool {
+    fn ready_for_sync_execution(&self, module_key: &str, seen: &mut std::collections::HashSet<String>) -> bool {
         if !seen.insert(module_key.to_string()) {
             return true;
         }
@@ -1739,11 +1750,7 @@ impl<'gc> VM<'gc> {
         true
     }
 
-    fn ensure_deferred_namespace_evaluation(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        map: &VmObjectHandle<'gc>,
-    ) -> Result<(), Value<'gc>> {
+    fn ensure_deferred_namespace_evaluation(&mut self, ctx: &GcContext<'gc>, map: &VmObjectHandle<'gc>) -> Result<(), Value<'gc>> {
         if !Self::namespace_is_deferred(map) {
             return Ok(());
         }
@@ -1755,17 +1762,15 @@ impl<'gc> VM<'gc> {
         }
         let mut seen = std::collections::HashSet::new();
         if !self.ready_for_sync_execution(&module_key, &mut seen) {
-            return Err(self.make_type_error_object(
-                ctx,
-                "Deferred module namespace is not ready for synchronous evaluation",
-            ));
+            return Err(self.make_type_error_object(ctx, "Deferred module namespace is not ready for synchronous evaluation"));
         }
         if self.ensure_module_evaluated(ctx, &module_key) {
             Ok(())
         } else {
-            Err(self.pending_throw.take().unwrap_or_else(|| {
-                self.make_type_error_object(ctx, "Deferred module namespace evaluation failed")
-            }))
+            Err(self
+                .pending_throw
+                .take()
+                .unwrap_or_else(|| self.make_type_error_object(ctx, "Deferred module namespace evaluation failed")))
         }
     }
 
@@ -1974,12 +1979,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn collect_async_transitive_dependencies(
-        &self,
-        module_key: &str,
-        seen: &mut std::collections::HashSet<String>,
-        out: &mut Vec<String>,
-    ) {
+    fn collect_async_transitive_dependencies(&self, module_key: &str, seen: &mut std::collections::HashSet<String>, out: &mut Vec<String>) {
         if !seen.insert(module_key.to_string()) {
             return;
         }
@@ -2001,11 +2001,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn module_has_async_dependency(
-        &self,
-        entry_path: &std::path::Path,
-        requests: &[crate::core::ModuleRequest],
-    ) -> bool {
+    fn module_has_async_dependency(&self, entry_path: &std::path::Path, requests: &[crate::core::ModuleRequest]) -> bool {
         requests.iter().any(|request| {
             let dep_key = crate::core::resolve_module_path(&request.specifier, entry_path)
                 .to_string_lossy()
@@ -2016,7 +2012,54 @@ impl<'gc> VM<'gc> {
         })
     }
 
-    fn load_module_graph(
+    fn module_reaches_module(&self, start_key: &str, target_key: &str, visited: &mut std::collections::HashSet<String>) -> bool {
+        if start_key == target_key {
+            return true;
+        }
+        if !visited.insert(start_key.to_string()) {
+            return false;
+        }
+        let Some(record) = self.module_records.get(start_key) else {
+            return false;
+        };
+        record.requests.iter().any(|request| {
+            let dep_key = crate::core::resolve_module_path(&request.specifier, &record.resolved_path)
+                .to_string_lossy()
+                .to_string();
+            self.module_reaches_module(&dep_key, target_key, visited)
+        })
+    }
+
+    fn modules_share_async_cycle(&self, left_key: &str, right_key: &str) -> bool {
+        let mut left_seen = std::collections::HashSet::new();
+        if !self.module_reaches_module(left_key, right_key, &mut left_seen) {
+            return false;
+        }
+        let mut right_seen = std::collections::HashSet::new();
+        self.module_reaches_module(right_key, left_key, &mut right_seen)
+    }
+
+    fn module_cycle_has_evaluating_async(&self, module_key: &str) -> bool {
+        self.module_records.iter().any(|(candidate_key, record)| {
+            record.status == ModuleStatus::EvaluatingAsync && self.modules_share_async_cycle(module_key, candidate_key)
+        })
+    }
+
+    fn module_has_external_async_dependency(
+        &self,
+        module_key: &str,
+        entry_path: &std::path::Path,
+        requests: &[crate::core::ModuleRequest],
+    ) -> bool {
+        requests.iter().any(|request| {
+            let dep_key = crate::core::resolve_module_path(&request.specifier, entry_path)
+                .to_string_lossy()
+                .to_string();
+            !self.modules_share_async_cycle(module_key, &dep_key) && self.module_cycle_has_evaluating_async(&dep_key)
+        })
+    }
+
+    pub(crate) fn load_module_graph(
         &mut self,
         ctx: &GcContext<'gc>,
         entry_path: &std::path::Path,
@@ -2146,22 +2189,14 @@ impl<'gc> VM<'gc> {
         let mut ns_import_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
         for stmt in &record.statements {
             if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
-                let imp_resolved = resolve_module_path(source, &record.resolved_path)
-                    .to_string_lossy()
-                    .to_string();
+                let imp_resolved = resolve_module_path(source, &record.resolved_path).to_string_lossy().to_string();
                 for spec in specs {
                     match spec {
                         crate::core::statement::ImportSpecifier::Namespace(local_name) => {
-                            ns_import_origins.insert(
-                                local_name.clone(),
-                                (imp_resolved.clone(), "namespace".to_string()),
-                            );
+                            ns_import_origins.insert(local_name.clone(), (imp_resolved.clone(), "namespace".to_string()));
                         }
                         crate::core::statement::ImportSpecifier::DeferredNamespace(local_name) => {
-                            ns_import_origins.insert(
-                                local_name.clone(),
-                                (imp_resolved.clone(), "deferred-namespace".to_string()),
-                            );
+                            ns_import_origins.insert(local_name.clone(), (imp_resolved.clone(), "deferred-namespace".to_string()));
                         }
                         _ => {}
                     }
@@ -2249,8 +2284,7 @@ impl<'gc> VM<'gc> {
             origins.remove(k);
         }
         if !ambiguous_keys.is_empty() {
-            self.ambiguous_export_keys
-                .insert(key.clone(), ambiguous_keys);
+            self.ambiguous_export_keys.insert(key.clone(), ambiguous_keys);
         }
 
         self.loaded_modules.insert(key.clone(), exports);
@@ -2272,17 +2306,25 @@ impl<'gc> VM<'gc> {
     fn resume_suspended_module_states(&mut self, ctx: &GcContext<'gc>) {
         while !self.suspended_module_states.is_empty() {
             let suspended = std::mem::take(&mut self.suspended_module_states);
+            let mut resumed_any = false;
             for state in suspended {
+                let still_waiting =
+                    self.module_records.get(&state.key).cloned().is_some_and(|record| {
+                        self.module_has_external_async_dependency(&state.key, &record.resolved_path, &record.requests)
+                    });
+                if still_waiting {
+                    self.suspended_module_states.push(state);
+                    continue;
+                }
+                resumed_any = true;
                 let saved_ip = self.ip;
                 let saved_module_locals = std::mem::replace(&mut self.module_locals, state.module_locals);
                 let saved_script_path = self.script_path.take();
                 let saved_stack = std::mem::replace(&mut self.stack, state.stack);
                 let saved_top_level_cells = std::mem::replace(&mut self.top_level_cells, state.top_level_cells);
                 let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, state.loaded_module_vars);
-                let saved_const_import_bindings =
-                    std::mem::replace(&mut self.chunk.const_import_bindings, state.const_import_bindings);
-                let saved_self_namespace_imports =
-                    std::mem::replace(&mut self.chunk.self_namespace_imports, state.self_namespace_imports);
+                let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, state.const_import_bindings);
+                let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, state.self_namespace_imports);
                 let saved_self_deferred_namespace_imports = std::mem::replace(
                     &mut self.chunk.self_deferred_namespace_imports,
                     state.self_deferred_namespace_imports,
@@ -2341,6 +2383,9 @@ impl<'gc> VM<'gc> {
                 self.const_globals = saved_const_globals;
                 self.restore_runtime_execution_state(saved_runtime_state);
             }
+            if !resumed_any {
+                break;
+            }
         }
     }
 
@@ -2371,18 +2416,14 @@ impl<'gc> VM<'gc> {
         let saved_script_path = self.script_path.take();
         let saved_stack = std::mem::take(&mut self.stack);
         let saved_top_level_cells = std::mem::take(&mut self.top_level_cells);
-        let saved_loaded_module_vars =
-            std::mem::replace(&mut self.chunk.loaded_module_vars, record.loaded_module_vars.clone());
-        let saved_const_import_bindings =
-            std::mem::replace(&mut self.chunk.const_import_bindings, record.const_import_bindings.clone());
-        let saved_self_namespace_imports =
-            std::mem::replace(&mut self.chunk.self_namespace_imports, record.self_namespace_imports.clone());
+        let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, record.loaded_module_vars.clone());
+        let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, record.const_import_bindings.clone());
+        let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, record.self_namespace_imports.clone());
         let saved_self_deferred_namespace_imports = std::mem::replace(
             &mut self.chunk.self_deferred_namespace_imports,
             record.self_deferred_namespace_imports.clone(),
         );
-        let saved_self_import_aliases =
-            std::mem::replace(&mut self.chunk.self_import_aliases, record.self_import_aliases.clone());
+        let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, record.self_import_aliases.clone());
         let saved_live_import_bindings = std::mem::take(&mut self.chunk.live_import_bindings);
         let saved_main_module_ip_start = self.main_module_ip_start.take();
         let saved_const_globals = std::mem::take(&mut self.const_globals);
@@ -2412,35 +2453,35 @@ impl<'gc> VM<'gc> {
             });
             self.set_module_record_status(module_key, ModuleStatus::EvaluatingAsync);
         } else {
-        self.suspend_on_module_await = true;
-        let dep_result = self.run(ctx);
-        let was_suspended = self.module_await_suspended;
-        self.module_await_suspended = false;
+            self.suspend_on_module_await = true;
+            let dep_result = self.run(ctx);
+            let was_suspended = self.module_await_suspended;
+            self.module_await_suspended = false;
 
-        if was_suspended {
-            self.suspended_module_states.push(SuspendedModuleState {
-                ip: self.ip,
-                module_locals: self.module_locals.clone(),
-                stack: self.stack.clone(),
-                top_level_cells: self.top_level_cells.clone(),
-                const_globals: self.const_globals.clone(),
-                loaded_module_vars: self.chunk.loaded_module_vars.clone(),
-                const_import_bindings: self.chunk.const_import_bindings.clone(),
-                self_namespace_imports: self.chunk.self_namespace_imports.clone(),
-                self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
-                self_import_aliases: self.chunk.self_import_aliases.clone(),
-                live_import_bindings: self.chunk.live_import_bindings.clone(),
-                dep_source: record.source.clone(),
-                resolved_path: record.resolved_path.clone(),
-                key: module_key.to_string(),
-            });
-            self.set_module_record_status(module_key, ModuleStatus::EvaluatingAsync);
-        } else if let Err(err) = dep_result {
-            let error_value = self.vm_value_from_error(ctx, &err);
-            self.record_module_load_error(module_key, error_value);
-        } else {
-            self.finalize_dependency_module_record(ctx, &record);
-        }
+            if was_suspended {
+                self.suspended_module_states.push(SuspendedModuleState {
+                    ip: self.ip,
+                    module_locals: self.module_locals.clone(),
+                    stack: self.stack.clone(),
+                    top_level_cells: self.top_level_cells.clone(),
+                    const_globals: self.const_globals.clone(),
+                    loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+                    const_import_bindings: self.chunk.const_import_bindings.clone(),
+                    self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+                    self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
+                    self_import_aliases: self.chunk.self_import_aliases.clone(),
+                    live_import_bindings: self.chunk.live_import_bindings.clone(),
+                    dep_source: record.source.clone(),
+                    resolved_path: record.resolved_path.clone(),
+                    key: module_key.to_string(),
+                });
+                self.set_module_record_status(module_key, ModuleStatus::EvaluatingAsync);
+            } else if let Err(err) = dep_result {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(module_key, error_value);
+            } else {
+                self.finalize_dependency_module_record(ctx, &record);
+            }
         }
 
         self.ip = saved_ip;
@@ -2465,7 +2506,7 @@ impl<'gc> VM<'gc> {
         true
     }
 
-    fn evaluate_module_requests(
+    pub(crate) fn evaluate_module_requests(
         &mut self,
         ctx: &GcContext<'gc>,
         entry_path: &std::path::Path,
@@ -3858,12 +3899,15 @@ impl<'gc> VM<'gc> {
         let module_key = resolved_path.to_string_lossy().to_string();
 
         if !self.loaded_modules.contains_key(&module_key)
-            || self.module_records.get(&module_key).is_some_and(|record| record.status != ModuleStatus::Evaluated)
+            || self
+                .module_records
+                .get(&module_key)
+                .is_some_and(|record| record.status != ModuleStatus::Evaluated)
         {
             let request = crate::core::ModuleRequest {
                 specifier: specifier_string.clone(),
-                        phase: crate::core::ModuleRequestPhase::Evaluation,
-                    };
+                phase: crate::core::ModuleRequestPhase::Evaluation,
+            };
             self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
             self.fixup_circular_reexports();
         }
@@ -11613,11 +11657,11 @@ impl<'gc> VM<'gc> {
         if !recv_map.borrow().contains_key("__module_namespace__") {
             return Ok(false);
         }
-        if !Self::namespace_is_symbol_like_key(recv_map, key) {
-            if let Err(err) = self.namespace_export_value(ctx, recv_map, key) {
-                self.handle_throw(ctx, &err)?;
-                return Ok(true);
-            }
+        if !Self::namespace_is_symbol_like_key(recv_map, key)
+            && let Err(err) = self.namespace_export_value(ctx, recv_map, key)
+        {
+            self.handle_throw(ctx, &err)?;
+            return Ok(true);
         }
         // Namespace [[Set]] always returns false → TypeError in strict mode
         let err = self.make_type_error_object(
@@ -16640,19 +16684,40 @@ impl<'gc> VM<'gc> {
     }
 
     fn annotate_error_object(&mut self, ctx: &GcContext<'gc>, map: &VmObjectHandle<'gc>) {
-        let (error_name, message, has_stack, has_line) = {
+        let (explicit_name, message, has_stack, has_line) = {
             let borrow = map.borrow();
             (
                 borrow
                     .get("__type__")
                     .map(value_to_string)
-                    .or_else(|| borrow.get("name").map(value_to_string))
-                    .unwrap_or_else(|| "Error".to_string()),
+                    .or_else(|| borrow.get("name").map(value_to_string)),
                 borrow.get("message").map(value_to_string).unwrap_or_default(),
                 borrow.contains_key("stack"),
                 borrow.contains_key("__line__"),
             )
         };
+        let inferred_ctor_name = if explicit_name.is_none() {
+            let thrown = Value::VmObject(*map);
+            let ctor = self.read_named_property(ctx, &thrown, "constructor");
+            let ctor_name = self.read_named_property(ctx, &ctor, "name");
+            if let Value::String(s) = ctor_name {
+                let name = crate::unicode::utf16_to_utf8(&s);
+                if name.is_empty() { None } else { Some(name) }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let error_name = explicit_name
+            .clone()
+            .or_else(|| inferred_ctor_name.clone())
+            .unwrap_or_else(|| "Error".to_string());
+        let is_error_like = error_name == "Error" || error_name.ends_with("Error");
+
+        if !is_error_like {
+            return;
+        }
 
         if has_stack && has_line {
             return;

@@ -2384,6 +2384,28 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Check if a VmArray is a TypedArray backed by a resizable buffer.
+    pub(super) fn is_ta_resizable(arr: &VmArrayHandle<'gc>) -> bool {
+        let b = arr.borrow();
+        b.props.contains_key("__typedarray_name__")
+            && matches!(
+                b.props.get("__typedarray_buffer__"),
+                Some(Value::VmObject(buf)) if matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+            )
+    }
+
+    /// Read element `index` from a TypedArray, syncing from buffer first if resizable.
+    /// Returns Undefined when out of bounds (e.g. buffer was shrunk).
+    pub(super) fn ta_get_element(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>, index: usize) -> Value<'gc> {
+        self.maybe_sync_resizable_ta(ctx, arr);
+        let borrow = arr.borrow();
+        if index < borrow.elements.len() {
+            borrow.elements[index].clone()
+        } else {
+            Value::Undefined
+        }
+    }
+
     /// For resizable-buffer-backed TypedArrays, sync the elements vector
     /// to reflect the current buffer state (dynamic length after resize).
     /// Returns the new length, or None if not a resizable TA (caller uses elements.len()).

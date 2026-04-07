@@ -13970,6 +13970,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmArray(arr) => {
+                self.maybe_sync_resizable_ta(ctx, arr);
                 let borrow = arr.borrow();
                 let logical_len = self.vm_array_logical_length_u64(&borrow) as usize;
                 if key == "length" {
@@ -23427,6 +23428,7 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
             let len = match &target {
                 Value::VmArray(arr) => {
                     let b = arr.borrow();
@@ -23471,42 +23473,45 @@ impl<'gc> VM<'gc> {
 
             for k in 0..len {
                 let key = k.to_string();
-                let present = match &target {
-                    Value::VmArray(arr) => {
-                        let b = arr.borrow();
-                        let dense_present = if k < b.elements.len() {
-                            !b.props.contains_key(&format!("__deleted_{}", k))
-                                || b.props.contains_key(&key)
+                // TypedArray spec uses Get(O, Pk) directly, no HasProperty check
+                if !is_typed_array {
+                    let present = match &target {
+                        Value::VmArray(arr) => {
+                            let b = arr.borrow();
+                            let dense_present = if k < b.elements.len() {
+                                !b.props.contains_key(&format!("__deleted_{}", k))
+                                    || b.props.contains_key(&key)
+                                    || b.props.contains_key(&format!("__get_{}", key))
+                                    || b.props.contains_key(&format!("__set_{}", key))
+                            } else {
+                                false
+                            };
+                            let own_prop_present = b.props.contains_key(&key)
                                 || b.props.contains_key(&format!("__get_{}", key))
-                                || b.props.contains_key(&format!("__set_{}", key))
-                        } else {
-                            false
-                        };
-                        let own_prop_present = b.props.contains_key(&key)
-                            || b.props.contains_key(&format!("__get_{}", key))
-                            || b.props.contains_key(&format!("__set_{}", key));
-                        if dense_present || own_prop_present {
-                            true
-                        } else {
-                            let proto = b.props.get("__proto__").cloned();
-                            drop(b);
-                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                                || b.props.contains_key(&format!("__set_{}", key));
+                            if dense_present || own_prop_present {
+                                true
+                            } else {
+                                let proto = b.props.get("__proto__").cloned();
+                                drop(b);
+                                self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                            }
                         }
+                        Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
+                            Ok(Some(v)) => v,
+                            Ok(None) => self.has_property_in_chain(ctx, &target, &key),
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        },
+                        _ => self.has_property_in_chain(ctx, &target, &key),
+                    };
+                    if !present {
+                        continue;
                     }
-                    Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
-                        Ok(Some(v)) => v,
-                        Ok(None) => self.has_property_in_chain(ctx, &target, &key),
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
-                    },
-                    _ => self.has_property_in_chain(ctx, &target, &key),
-                };
-                if !present {
-                    continue;
                 }
 
                 let value = self.read_named_property(ctx, &target, &key);
@@ -23536,6 +23541,7 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
             let len = match &target {
                 Value::VmArray(arr) => {
                     let b = arr.borrow();
@@ -23585,42 +23591,44 @@ impl<'gc> VM<'gc> {
             let mut to = 0usize;
             for k in 0..len {
                 let key = k.to_string();
-                let present = match &target {
-                    Value::VmArray(arr) => {
-                        let b = arr.borrow();
-                        let dense_present = if k < b.elements.len() {
-                            !b.props.contains_key(&format!("__deleted_{}", k))
-                                || b.props.contains_key(&key)
+                if !is_typed_array {
+                    let present = match &target {
+                        Value::VmArray(arr) => {
+                            let b = arr.borrow();
+                            let dense_present = if k < b.elements.len() {
+                                !b.props.contains_key(&format!("__deleted_{}", k))
+                                    || b.props.contains_key(&key)
+                                    || b.props.contains_key(&format!("__get_{}", key))
+                                    || b.props.contains_key(&format!("__set_{}", key))
+                            } else {
+                                false
+                            };
+                            let own_prop_present = b.props.contains_key(&key)
                                 || b.props.contains_key(&format!("__get_{}", key))
-                                || b.props.contains_key(&format!("__set_{}", key))
-                        } else {
-                            false
-                        };
-                        let own_prop_present = b.props.contains_key(&key)
-                            || b.props.contains_key(&format!("__get_{}", key))
-                            || b.props.contains_key(&format!("__set_{}", key));
-                        if dense_present || own_prop_present {
-                            true
-                        } else {
-                            let proto = b.props.get("__proto__").cloned();
-                            drop(b);
-                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                                || b.props.contains_key(&format!("__set_{}", key));
+                            if dense_present || own_prop_present {
+                                true
+                            } else {
+                                let proto = b.props.get("__proto__").cloned();
+                                drop(b);
+                                self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
+                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                            }
                         }
+                        Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
+                            Ok(Some(v)) => v,
+                            Ok(None) => self.has_property_in_chain(ctx, &target, &key),
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        },
+                        _ => self.has_property_in_chain(ctx, &target, &key),
+                    };
+                    if !present {
+                        continue;
                     }
-                    Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
-                        Ok(Some(v)) => v,
-                        Ok(None) => self.has_property_in_chain(ctx, &target, &key),
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
-                    },
-                    _ => self.has_property_in_chain(ctx, &target, &key),
-                };
-                if !present {
-                    continue;
                 }
 
                 let value = self.read_named_property(ctx, &target, &key);
@@ -23904,6 +23912,8 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
+
             let len = match &target {
                 Value::VmArray(arr) => {
                     let b = arr.borrow();
@@ -23991,9 +24001,13 @@ impl<'gc> VM<'gc> {
                 let mut found = None;
                 while k < len {
                     let key = k.to_string();
-                    let present = match is_present(self, &target, &key, k) {
-                        Ok(v) => v,
-                        Err(v) => return v,
+                    let present = if is_typed_array {
+                        true
+                    } else {
+                        match is_present(self, &target, &key, k) {
+                            Ok(v) => v,
+                            Err(v) => return v,
+                        }
                     };
                     if present {
                         let value = self.read_named_property(ctx, &target, &key);
@@ -24015,9 +24029,13 @@ impl<'gc> VM<'gc> {
 
             while k < len {
                 let key = k.to_string();
-                let present = match is_present(self, &target, &key, k) {
-                    Ok(v) => v,
-                    Err(v) => return v,
+                let present = if is_typed_array {
+                    true
+                } else {
+                    match is_present(self, &target, &key, k) {
+                        Ok(v) => v,
+                        Err(v) => return v,
+                    }
                 };
                 if present {
                     let value = self.read_named_property(ctx, &target, &key);
@@ -24055,6 +24073,7 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
                 return Value::Undefined;
             };
@@ -24069,12 +24088,15 @@ impl<'gc> VM<'gc> {
 
             for index in 0..len {
                 let key = index.to_string();
-                let present = match self.array_like_has_index(ctx, &target, &key, index) {
-                    Ok(v) => v,
-                    Err(v) => return v,
-                };
-                if !present {
-                    continue;
+                // TypedArray spec uses Get(O, Pk) directly, no HasProperty check
+                if !is_typed_array {
+                    let present = match self.array_like_has_index(ctx, &target, &key, index) {
+                        Ok(v) => v,
+                        Err(v) => return v,
+                    };
+                    if !present {
+                        continue;
+                    }
                 }
                 let value = self.read_named_property(ctx, &target, &key);
                 if self.pending_throw.is_some() {
@@ -24204,6 +24226,7 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
                 return Value::Undefined;
             };
@@ -24227,9 +24250,13 @@ impl<'gc> VM<'gc> {
                     while k > 0 {
                         k -= 1;
                         let key = k.to_string();
-                        let present = match self.array_like_has_index(ctx, &target, &key, k) {
-                            Ok(v) => v,
-                            Err(v) => return v,
+                        let present = if is_typed_array {
+                            true
+                        } else {
+                            match self.array_like_has_index(ctx, &target, &key, k) {
+                                Ok(v) => v,
+                                Err(v) => return v,
+                            }
                         };
                         if !present {
                             continue;
@@ -24244,9 +24271,13 @@ impl<'gc> VM<'gc> {
                 } else {
                     while k < len {
                         let key = k.to_string();
-                        let present = match self.array_like_has_index(ctx, &target, &key, k) {
-                            Ok(v) => v,
-                            Err(v) => return v,
+                        let present = if is_typed_array {
+                            true
+                        } else {
+                            match self.array_like_has_index(ctx, &target, &key, k) {
+                                Ok(v) => v,
+                                Err(v) => return v,
+                            }
                         };
                         if !present {
                             k += 1;
@@ -24272,9 +24303,13 @@ impl<'gc> VM<'gc> {
                 while k > 0 {
                     k -= 1;
                     let key = k.to_string();
-                    let present = match self.array_like_has_index(ctx, &target, &key, k) {
-                        Ok(v) => v,
-                        Err(v) => return v,
+                    let present = if is_typed_array {
+                        true
+                    } else {
+                        match self.array_like_has_index(ctx, &target, &key, k) {
+                            Ok(v) => v,
+                            Err(v) => return v,
+                        }
                     };
                     if !present {
                         continue;
@@ -24299,9 +24334,13 @@ impl<'gc> VM<'gc> {
             } else {
                 while k < len {
                     let key = k.to_string();
-                    let present = match self.array_like_has_index(ctx, &target, &key, k) {
-                        Ok(v) => v,
-                        Err(v) => return v,
+                    let present = if is_typed_array {
+                        true
+                    } else {
+                        match self.array_like_has_index(ctx, &target, &key, k) {
+                            Ok(v) => v,
+                            Err(v) => return v,
+                        }
                     };
                     if !present {
                         k += 1;
@@ -24870,6 +24909,7 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
                 return Value::Undefined;
             };
@@ -24893,12 +24933,14 @@ impl<'gc> VM<'gc> {
 
             for index in 0..len {
                 let key = index.to_string();
-                let present = match self.array_like_has_index(ctx, &target, &key, index) {
-                    Ok(v) => v,
-                    Err(v) => return v,
-                };
-                if !present {
-                    continue;
+                if !is_typed_array {
+                    let present = match self.array_like_has_index(ctx, &target, &key, index) {
+                        Ok(v) => v,
+                        Err(v) => return v,
+                    };
+                    if !present {
+                        continue;
+                    }
                 }
 
                 let element = self.read_named_property(ctx, &target, &key);
@@ -25573,7 +25615,9 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_REDUCE => {
                     if let Some(callback @ (Value::VmFunction(_, _) | Value::VmClosure(_, _, _))) = args.first() {
+                        let is_resizable_ta = Self::is_ta_resizable(arr);
                         let elements = arr.borrow().elements.clone();
+                        let len = elements.len();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
                         } else if !elements.is_empty() {
@@ -25582,13 +25626,14 @@ impl<'gc> VM<'gc> {
                             Value::Undefined
                         };
                         let start_i = if args.len() > 1 { 0 } else { 1 };
-                        for (i, element) in elements.iter().enumerate().skip(start_i) {
-                            acc = match self.vm_call_function_value(
-                                ctx,
-                                callback,
-                                &Value::Undefined,
-                                &[acc, element.clone(), Value::Number(i as f64)],
-                            ) {
+                        for i in start_i..len {
+                            let elem = if is_resizable_ta {
+                                self.ta_get_element(ctx, arr, i)
+                            } else {
+                                elements[i].clone()
+                            };
+                            acc = match self.vm_call_function_value(ctx, callback, &Value::Undefined, &[acc, elem, Value::Number(i as f64)])
+                            {
                                 Ok(v) => v,
                                 Err(_) => Value::Undefined,
                             };
@@ -25733,13 +25778,20 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
+                        let is_resizable_ta = Self::is_ta_resizable(arr);
                         let elements = arr.borrow().elements.clone();
-                        for (i, elem) in elements.iter().enumerate() {
+                        let len = elements.len();
+                        for i in 0..len {
+                            let elem = if is_resizable_ta {
+                                self.ta_get_element(ctx, arr, i)
+                            } else {
+                                elements[i].clone()
+                            };
                             let result = self
                                 .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
                                 .unwrap_or(Value::Undefined);
                             if result.to_truthy() {
-                                return elem.clone();
+                                return elem;
                             }
                         }
                     }
@@ -25752,13 +25804,20 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
+                        let is_resizable_ta = Self::is_ta_resizable(arr);
                         let elements = arr.borrow().elements.clone();
-                        for (i, elem) in elements.iter().enumerate().rev() {
+                        let len = elements.len();
+                        for i in (0..len).rev() {
+                            let elem = if is_resizable_ta {
+                                self.ta_get_element(ctx, arr, i)
+                            } else {
+                                elements[i].clone()
+                            };
                             let result = self
                                 .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
                                 .unwrap_or(Value::Undefined);
                             if result.to_truthy() {
-                                return elem.clone();
+                                return elem;
                             }
                         }
                     }
@@ -25771,10 +25830,17 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
+                        let is_resizable_ta = Self::is_ta_resizable(arr);
                         let elements = arr.borrow().elements.clone();
-                        for (i, elem) in elements.iter().enumerate() {
+                        let len = elements.len();
+                        for i in 0..len {
+                            let elem = if is_resizable_ta {
+                                self.ta_get_element(ctx, arr, i)
+                            } else {
+                                elements[i].clone()
+                            };
                             let result = self
-                                .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
+                                .call_vm_function_result(ctx, *ip, &[elem, Value::Number(i as f64)], None, &__cb_uv)
                                 .unwrap_or(Value::Undefined);
                             if result.to_truthy() {
                                 return Value::Number(i as f64);
@@ -25790,10 +25856,17 @@ impl<'gc> VM<'gc> {
                         } else {
                             Vec::new()
                         };
+                        let is_resizable_ta = Self::is_ta_resizable(arr);
                         let elements = arr.borrow().elements.clone();
-                        for (i, elem) in elements.iter().enumerate().rev() {
+                        let len = elements.len();
+                        for i in (0..len).rev() {
+                            let elem = if is_resizable_ta {
+                                self.ta_get_element(ctx, arr, i)
+                            } else {
+                                elements[i].clone()
+                            };
                             let result = self
-                                .call_vm_function_result(ctx, *ip, &[elem.clone(), Value::Number(i as f64)], None, &__cb_uv)
+                                .call_vm_function_result(ctx, *ip, &[elem, Value::Number(i as f64)], None, &__cb_uv)
                                 .unwrap_or(Value::Undefined);
                             if result.to_truthy() {
                                 return Value::Number(i as f64);
@@ -25876,7 +25949,9 @@ impl<'gc> VM<'gc> {
                     }
                     let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let receiver_value = Value::VmArray(*arr);
+                    let is_resizable_ta = Self::is_ta_resizable(arr);
                     let borrow = arr.borrow();
+                    let len = borrow.elements.len();
                     let elements = borrow.elements.clone();
                     let holes: std::collections::HashSet<usize> = borrow
                         .props
@@ -25884,15 +25959,20 @@ impl<'gc> VM<'gc> {
                         .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
                         .collect();
                     drop(borrow);
-                    for (i, elem) in elements.iter().enumerate() {
-                        if holes.contains(&i) {
+                    for i in 0..len {
+                        if !is_resizable_ta && holes.contains(&i) {
                             continue;
                         }
+                        let elem = if is_resizable_ta {
+                            self.ta_get_element(ctx, arr, i)
+                        } else {
+                            elements[i].clone()
+                        };
                         let result = match self.vm_call_function_value(
                             ctx,
                             &callback,
                             &this_arg,
-                            &[elem.clone(), Value::Number(i as f64), receiver_value.clone()],
+                            &[elem, Value::Number(i as f64), receiver_value.clone()],
                         ) {
                             Ok(v) => v,
                             Err(err) => {
@@ -25914,7 +25994,9 @@ impl<'gc> VM<'gc> {
                     }
                     let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let receiver_value = Value::VmArray(*arr);
+                    let is_resizable_ta = Self::is_ta_resizable(arr);
                     let borrow = arr.borrow();
+                    let len = borrow.elements.len();
                     let elements = borrow.elements.clone();
                     let holes: std::collections::HashSet<usize> = borrow
                         .props
@@ -25922,15 +26004,20 @@ impl<'gc> VM<'gc> {
                         .filter_map(|k| k.strip_prefix("__deleted_").and_then(|s| s.parse::<usize>().ok()))
                         .collect();
                     drop(borrow);
-                    for (i, elem) in elements.iter().enumerate() {
-                        if holes.contains(&i) {
+                    for i in 0..len {
+                        if !is_resizable_ta && holes.contains(&i) {
                             continue;
                         }
+                        let elem = if is_resizable_ta {
+                            self.ta_get_element(ctx, arr, i)
+                        } else {
+                            elements[i].clone()
+                        };
                         let result = match self.vm_call_function_value(
                             ctx,
                             &callback,
                             &this_arg,
-                            &[elem.clone(), Value::Number(i as f64), receiver_value.clone()],
+                            &[elem, Value::Number(i as f64), receiver_value.clone()],
                         ) {
                             Ok(v) => v,
                             Err(err) => {
@@ -26025,23 +26112,26 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_REDUCERIGHT => {
                     if let Some(callback @ (Value::VmFunction(_, _) | Value::VmClosure(_, _, _))) = args.first() {
+                        let is_resizable_ta = Self::is_ta_resizable(arr);
                         let elements = arr.borrow().elements.clone();
+                        let len = elements.len();
                         let mut acc = if args.len() > 1 {
                             args[1].clone()
                         } else if !elements.is_empty() {
-                            elements[elements.len() - 1].clone()
+                            elements[len - 1].clone()
                         } else {
                             Value::Undefined
                         };
                         let skip_last = if args.len() <= 1 { 1 } else { 0 };
-                        let end = elements.len().saturating_sub(skip_last);
+                        let end = len.saturating_sub(skip_last);
                         for i in (0..end).rev() {
-                            acc = match self.vm_call_function_value(
-                                ctx,
-                                callback,
-                                &Value::Undefined,
-                                &[acc, elements[i].clone(), Value::Number(i as f64)],
-                            ) {
+                            let elem = if is_resizable_ta {
+                                self.ta_get_element(ctx, arr, i)
+                            } else {
+                                elements[i].clone()
+                            };
+                            acc = match self.vm_call_function_value(ctx, callback, &Value::Undefined, &[acc, elem, Value::Number(i as f64)])
+                            {
                                 Ok(v) => v,
                                 Err(_) => Value::Undefined,
                             };
@@ -31989,6 +32079,7 @@ impl<'gc> VM<'gc> {
     fn array_like_has_index(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>, key: &str, index: usize) -> Result<bool, Value<'gc>> {
         let present = match target {
             Value::VmArray(arr) => {
+                self.maybe_sync_resizable_ta(ctx, arr);
                 let b = arr.borrow();
                 let logical_len = self.vm_array_logical_length_u64(&b) as usize;
                 let dense_present = if index < logical_len && index < b.elements.len() {

@@ -6882,9 +6882,7 @@ impl<'gc> VM<'gc> {
                                     && let Some(type_proto) = ctor.borrow().get("prototype").cloned()
                                 {
                                     drop(b);
-                                    self.lookup_proto_chain(Some(&type_proto), &key).is_some()
-                                        || self.lookup_proto_chain(Some(&type_proto), &format!("__get_{}", key)).is_some()
-                                        || self.lookup_proto_chain(Some(&type_proto), &format!("__set_{}", key)).is_some()
+                                    self.has_property_in_chain(ctx, &type_proto, &key)
                                 } else {
                                     false
                                 }
@@ -6899,9 +6897,11 @@ impl<'gc> VM<'gc> {
                                         Ok(OpcodeAction::Continue)
                                     };
                                 }
-                                self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__get_{}", key)).is_some()
-                                    || self.lookup_proto_chain(proto.as_ref(), &format!("__set_{}", key)).is_some()
+                                if let Some(ref proto_val) = proto {
+                                    self.has_property_in_chain(ctx, proto_val, &key)
+                                } else {
+                                    false
+                                }
                             }
                         }
                     }

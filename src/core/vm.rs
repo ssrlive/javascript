@@ -11541,6 +11541,12 @@ impl<'gc> VM<'gc> {
         if !recv_map.borrow().contains_key("__module_namespace__") {
             return Ok(false);
         }
+        if !Self::namespace_is_symbol_like_key(recv_map, key) {
+            if let Err(err) = self.namespace_export_value(ctx, recv_map, key) {
+                self.handle_throw(ctx, &err)?;
+                return Ok(true);
+            }
+        }
         // Namespace [[Set]] always returns false → TypeError in strict mode
         let err = self.make_type_error_object(
             ctx,

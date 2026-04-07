@@ -317,6 +317,9 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "set") {
                     return Value::Undefined;
                 }
+                if let Value::VmArray(arr) = &this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
+                }
                 let source = args.first().cloned().unwrap_or(Value::Undefined);
 
                 // ToInteger for offset
@@ -602,6 +605,7 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                 }
+                self.sync_resizable_ta_elements(ctx, arr);
                 let a = arr.borrow();
                 let len = a.elements.len();
                 let ta_name = match a.props.get("__typedarray_name__") {
@@ -863,6 +867,9 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "values") {
                     return Value::Undefined;
                 }
+                if let Value::VmArray(arr) = &this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
+                }
                 // Create a "value" iterator directly
                 let mut obj = IndexMap::new();
                 obj.insert("__iter_target__".to_string(), this_val);
@@ -879,6 +886,9 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "entries") {
                     return Value::Undefined;
                 }
+                if let Value::VmArray(arr) = &this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
+                }
                 // Create an "entry" iterator directly (key+value pairs)
                 let mut obj = IndexMap::new();
                 obj.insert("__iter_target__".to_string(), this_val);
@@ -894,6 +904,9 @@ impl<'gc> VM<'gc> {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
                 if !self.validate_typed_array(ctx, &this_val, "keys") {
                     return Value::Undefined;
+                }
+                if let Value::VmArray(arr) = &this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
                 }
                 // Create a "key" iterator directly
                 let mut obj = IndexMap::new();
@@ -926,6 +939,10 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, this_val, method) {
                     return Value::Undefined;
                 }
+                // Sync elements for resizable buffer before delegating
+                if let Value::VmArray(arr) = this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
+                }
                 // Map to corresponding Array builtin
                 let builtin_id = match name {
                     "typedarray.join" => BUILTIN_ARRAY_JOIN,
@@ -954,6 +971,7 @@ impl<'gc> VM<'gc> {
                 let Value::VmArray(arr) = &this_val else {
                     return Value::Undefined;
                 };
+                self.sync_resizable_ta_elements(ctx, arr);
                 let (ta_name, _bpe) = {
                     let a = arr.borrow();
                     let name = match a.props.get("__typedarray_name__") {
@@ -1091,6 +1109,7 @@ impl<'gc> VM<'gc> {
                 let Value::VmArray(arr) = &this_val else {
                     return Value::Undefined;
                 };
+                self.sync_resizable_ta_elements(ctx, arr);
 
                 let (ta_name, _bpe) = {
                     let a = arr.borrow();
@@ -1278,6 +1297,7 @@ impl<'gc> VM<'gc> {
                 let Value::VmArray(arr) = &this_val else {
                     return Value::Undefined;
                 };
+                self.sync_resizable_ta_elements(ctx, arr);
                 let (ta_name, bpe) = {
                     let a = arr.borrow();
                     let name = match a.props.get("__typedarray_name__") {
@@ -1324,6 +1344,7 @@ impl<'gc> VM<'gc> {
                 };
                 let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let len = if let Value::VmArray(arr) = &this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
                     arr.borrow().elements.len()
                 } else {
                     return Value::Undefined;
@@ -1391,6 +1412,9 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, this_val, "filter") {
                     return Value::Undefined;
                 }
+                if let Value::VmArray(arr) = this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
+                }
                 let filtered = self.call_method_builtin(ctx, BUILTIN_ARRAY_FILTER, this_val, args);
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
@@ -1445,6 +1469,7 @@ impl<'gc> VM<'gc> {
                 }
                 // Get source info
                 let (len, ta_name, bpe) = if let Value::VmArray(arr) = &this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
                     let a = arr.borrow();
                     let name = a.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
                     let bpe = match a.props.get("__bytes_per_element__") {
@@ -1609,6 +1634,7 @@ impl<'gc> VM<'gc> {
                 let Value::VmArray(arr) = &this_val else {
                     return Value::Undefined;
                 };
+                self.sync_resizable_ta_elements(ctx, arr);
                 let len = arr.borrow().elements.len() as i128;
 
                 let to_integer_or_infinity = |n: f64| -> i128 {
@@ -1751,6 +1777,9 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, this_val, "toLocaleString") {
                     return Value::Undefined;
                 }
+                if let Value::VmArray(arr) = this_val {
+                    self.sync_resizable_ta_elements(ctx, arr);
+                }
                 self.call_host_fn(ctx, "array.toLocaleString", Some(this_val), args)
             }
             _ => Value::Undefined,
@@ -1775,6 +1804,38 @@ impl<'gc> VM<'gc> {
                     drop(a);
                     self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
                     return false;
+                }
+                // IsTypedArrayOutOfBounds — resizable buffer
+                if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                    && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                {
+                    let bpe = match a.props.get("__bytes_per_element__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 1,
+                    };
+                    let byte_offset = match a.props.get("__byte_offset__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    };
+                    let buf_byte_len = match buf.borrow().get("byteLength") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    };
+                    let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                    let out_of_bounds = if is_auto {
+                        byte_offset > buf_byte_len
+                    } else {
+                        let fixed_len = match a.props.get("__fixed_length__") {
+                            Some(Value::Number(n)) => *n as usize,
+                            _ => 0,
+                        };
+                        byte_offset + fixed_len * bpe > buf_byte_len
+                    };
+                    if out_of_bounds {
+                        drop(a);
+                        self.throw_type_error(ctx, "Cannot perform operation on an out-of-bounds TypedArray");
+                        return false;
+                    }
                 }
                 true
             }
@@ -2304,6 +2365,71 @@ impl<'gc> VM<'gc> {
                 }
             }
         }
+    }
+
+    /// For resizable-buffer-backed TypedArrays, sync the elements vector
+    /// to reflect the current buffer state (dynamic length after resize).
+    /// Returns the new length, or None if not a resizable TA (caller uses elements.len()).
+    pub(super) fn sync_resizable_ta_elements(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) -> Option<usize> {
+        let a = arr.borrow();
+        let buf = match a.props.get("__typedarray_buffer__") {
+            Some(Value::VmObject(b)) => b.clone(),
+            _ => return None,
+        };
+        if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {
+            return None;
+        }
+        let ta_name = match a.props.get("__typedarray_name__") {
+            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+            _ => return None,
+        };
+        let bpe = match a.props.get("__bytes_per_element__") {
+            Some(Value::Number(n)) => (*n as usize).max(1),
+            _ => 1,
+        };
+        let byte_offset = match a.props.get("__byte_offset__") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 0,
+        };
+        let buf_byte_len = match buf.borrow().get("byteLength") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 0,
+        };
+        let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+        let new_len = if is_auto {
+            if byte_offset > buf_byte_len {
+                0
+            } else {
+                (buf_byte_len - byte_offset) / bpe
+            }
+        } else {
+            let fixed_len = match a.props.get("__fixed_length__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => a.elements.len(),
+            };
+            if byte_offset + fixed_len * bpe > buf_byte_len {
+                0
+            } else {
+                fixed_len
+            }
+        };
+        let buf_bytes_val = buf.borrow().get("__buffer_bytes__").cloned();
+        drop(a);
+        if let Some(Value::VmArray(buf_bytes)) = buf_bytes_val {
+            let bb = buf_bytes.borrow();
+            let mut a = arr.borrow_mut(ctx);
+            a.elements.resize(new_len, Value::Number(0.0));
+            for i in 0..new_len {
+                let base = byte_offset + i * bpe;
+                if base + bpe <= bb.elements.len() {
+                    a.elements[i] = Self::decode_typed_element(&bb.elements, base, bpe, &ta_name);
+                }
+            }
+        } else {
+            let mut a = arr.borrow_mut(ctx);
+            a.elements.resize(new_len, Value::Number(0.0));
+        }
+        Some(new_len)
     }
 
     /// Convert a numeric value to the type-specific element value for a TypedArray.

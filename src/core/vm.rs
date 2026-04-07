@@ -14217,7 +14217,9 @@ impl<'gc> VM<'gc> {
                     | Opcode::CollectRest
                     | Opcode::GetArguments
                     | Opcode::NewCall
-                    | Opcode::BoxLocal,
+                    | Opcode::BoxLocal
+                    | Opcode::CallSpread
+                    | Opcode::ThrowIfNotConstructor,
                 ) => {
                     if pc < ec.len() {
                         self.chunk.code.push(ec[pc]);
@@ -19289,7 +19291,9 @@ impl<'gc> VM<'gc> {
                                         | Opcode::SetUpvalue
                                         | Opcode::CollectRest
                                         | Opcode::GetArguments
-                                        | Opcode::BoxLocal,
+                                        | Opcode::BoxLocal
+                                        | Opcode::CallSpread
+                                        | Opcode::ThrowIfNotConstructor,
                                     ) => pc += 1,
                                     Ok(Opcode::MakeClosure) => {
                                         pc += 2; // const idx
@@ -19678,9 +19682,17 @@ impl<'gc> VM<'gc> {
                     Ok(v) => {
                         match v {
                             Value::VmFunction(..) | Value::VmClosure(..) => {
+                                // Class constructors should NOT be re-wrapped: they
+                                // carry fn_props (prototype, static methods) that must
+                                // be preserved.  The eval chunk was already merged into
+                                // the host chunk, so VmFunction IPs are valid.
+                                let is_class_ctor = match &v {
+                                    Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => self.chunk.class_constructor_ips.contains(ip),
+                                    _ => false,
+                                };
                                 let trimmed = code.trim().trim_end_matches(';').trim();
                                 let tail = trimmed.rsplit(';').next().unwrap_or(trimmed).trim();
-                                if tail.contains("=>") || tail.starts_with("function") || tail.starts_with("(") {
+                                if !is_class_ctor && (tail.contains("=>") || tail.starts_with("function") || tail.starts_with("(")) {
                                     // Function values produced by a temporary eval VM cannot be called safely
                                     // in the current VM. Re-wrap as a callable body executed in current context.
                                     let mut map = IndexMap::new();

@@ -1240,7 +1240,7 @@ impl<'gc> Compiler<'gc> {
                     let binding_idx = self.chunk.add_constant(Value::String(binding_u16));
                     self.chunk.write_opcode(Opcode::SetupTry);
                     let catch_placeholder = self.chunk.code.len();
-                    self.chunk.write_u16(0xffff); // placeholder
+                    self.chunk.write_u32(0xffff_ffff); // placeholder
                     self.chunk.write_u16(binding_idx as u16);
                     Some((var_name, catch_placeholder))
                 } else {
@@ -2001,10 +2001,10 @@ impl<'gc> Compiler<'gc> {
                     None
                 };
 
-                // SetupTry <catch_ip:u16> <binding_idx:u16>
+                // SetupTry <catch_ip:u32> <binding_idx:u16>
                 self.chunk.write_opcode(Opcode::SetupTry);
                 let catch_placeholder = self.chunk.code.len();
-                self.chunk.write_u16(0xffff); // placeholder for catch ip
+                self.chunk.write_u32(0xffff_ffff); // placeholder for catch ip
                 self.chunk.write_u16(binding_idx);
 
                 // Try body (block-scoped)
@@ -2022,6 +2022,8 @@ impl<'gc> Compiler<'gc> {
                 let catch_start = self.chunk.code.len();
                 self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
                 self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+                self.chunk.code[catch_placeholder + 2] = ((catch_start >> 16) & 0xff) as u8;
+                self.chunk.code[catch_placeholder + 3] = ((catch_start >> 24) & 0xff) as u8;
 
                 // If this try has a finally block, gen.return() uses Throw to
                 // propagate through try handlers. Skip the catch body (only run
@@ -3043,6 +3045,10 @@ impl<'gc> Compiler<'gc> {
                         match spec {
                             ImportSpecifier::Named(name, alias) => {
                                 let local = alias.as_deref().unwrap_or(name).to_string();
+                                if self.chunk.loaded_module_vars.contains_key(&local) {
+                                    self.chunk.const_import_bindings.insert(local);
+                                    continue;
+                                }
                                 // Resolve export name -> local binding via export_name_to_local
                                 let target = self.export_name_to_local.get(name).cloned().unwrap_or_else(|| name.clone());
                                 self.self_import_aliases.insert(local.clone(), target.clone());
@@ -3052,6 +3058,10 @@ impl<'gc> Compiler<'gc> {
                                 continue;
                             }
                             ImportSpecifier::Default(local) => {
+                                if self.chunk.loaded_module_vars.contains_key(local) {
+                                    self.chunk.const_import_bindings.insert(local.clone());
+                                    continue;
+                                }
                                 // import X from './self.js' => X aliases "*default*"
                                 self.self_import_aliases.insert(local.clone(), "*default*".to_string());
                                 self.chunk.self_import_aliases.insert(local.clone(), "*default*".to_string());
@@ -3059,6 +3069,10 @@ impl<'gc> Compiler<'gc> {
                                 continue;
                             }
                             ImportSpecifier::Namespace(local) => {
+                                if self.chunk.self_namespace_imports.iter().any(|(existing, _)| existing == local) {
+                                    self.chunk.const_import_bindings.insert(local.clone());
+                                    continue;
+                                }
                                 // import * as ns from './self.js' => build namespace object at runtime
                                 let entries: Vec<(String, String)> = self
                                     .module_export_names
@@ -4586,7 +4600,7 @@ impl<'gc> Compiler<'gc> {
                         let binding_const = self.chunk.add_constant(Value::String(binding_u16));
                         self.chunk.write_opcode(Opcode::SetupTry);
                         let catch_placeholder = self.chunk.code.len();
-                        self.chunk.write_u16(0xffff);
+                        self.chunk.write_u32(0xffff_ffff);
                         self.chunk.write_u16(binding_const);
 
                         // YieldDirect ys_result (the entire inner result, not just .value)
@@ -4603,6 +4617,8 @@ impl<'gc> Compiler<'gc> {
                         let catch_start = self.chunk.code.len();
                         self.chunk.code[catch_placeholder] = (catch_start & 0xff) as u8;
                         self.chunk.code[catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+                        self.chunk.code[catch_placeholder + 2] = ((catch_start >> 16) & 0xff) as u8;
+                        self.chunk.code[catch_placeholder + 3] = ((catch_start >> 24) & 0xff) as u8;
 
                         // Check if this is a return completion (gen.return() called)
                         self.chunk.write_opcode(Opcode::CheckGeneratorReturn);
@@ -6481,7 +6497,7 @@ impl<'gc> Compiler<'gc> {
         let cb_idx = self.chunk.add_constant(Value::String(cb_u16));
         self.chunk.write_opcode(Opcode::SetupTry);
         let placeholder = self.chunk.code.len();
-        self.chunk.write_u16(0xffff);
+        self.chunk.write_u32(0xffff_ffff);
         self.chunk.write_u16(cb_idx);
         (placeholder, catch_binding)
     }
@@ -6494,6 +6510,8 @@ impl<'gc> Compiler<'gc> {
         let catch_start = self.chunk.code.len();
         self.chunk.code[placeholder] = (catch_start & 0xff) as u8;
         self.chunk.code[placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+        self.chunk.code[placeholder + 2] = ((catch_start >> 16) & 0xff) as u8;
+        self.chunk.code[placeholder + 3] = ((catch_start >> 24) & 0xff) as u8;
 
         // Set done_temp = true
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
@@ -6671,7 +6689,7 @@ impl<'gc> Compiler<'gc> {
         let catch_binding_idx = self.chunk.add_constant(Value::String(catch_binding_u16));
         self.chunk.write_opcode(Opcode::SetupTry);
         let dstr_catch_placeholder = self.chunk.code.len();
-        self.chunk.write_u16(0xffff);
+        self.chunk.write_u32(0xffff_ffff);
         self.chunk.write_u16(catch_binding_idx);
 
         for elem in elems.iter() {
@@ -6826,6 +6844,8 @@ impl<'gc> Compiler<'gc> {
         let catch_start = self.chunk.code.len();
         self.chunk.code[dstr_catch_placeholder] = (catch_start & 0xff) as u8;
         self.chunk.code[dstr_catch_placeholder + 1] = ((catch_start >> 8) & 0xff) as u8;
+        self.chunk.code[dstr_catch_placeholder + 2] = ((catch_start >> 16) & 0xff) as u8;
+        self.chunk.code[dstr_catch_placeholder + 3] = ((catch_start >> 24) & 0xff) as u8;
 
         // If iterator not done, call IteratorCloseAbrupt (best-effort, never throws).
         self.emit_helper_get(&done_temp);

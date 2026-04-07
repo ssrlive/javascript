@@ -482,7 +482,7 @@ impl<'gc> Chunk<'gc> {
     ///   SetProperty, GetMethod, DeleteProperty, TypeOfGlobal, DeleteGlobal,
     ///   GetSuperProperty, SetSuperProperty, InitProperty
     /// - Jump target (u32, needs ip_offset): Jump, JumpIfFalse, JumpIfTrue
-    /// - SetupTry: u16 jump + u16 const
+    /// - SetupTry: u32 jump + u16 const
     /// - MakeClosure: u16 const + u8 count + count×2 bytes
     /// - Call: u8 flags, conditionally +u16 (arg count, no adjustment)
     fn adjust_bytecode_offsets(code: &mut [u8], ip_offset: usize, const_offset: usize) {
@@ -497,7 +497,6 @@ impl<'gc> Chunk<'gc> {
                 | 2..=6
                 | 12..=14
                 | 18..=25
-                | 27..=28
                 | 31..=35
                 | 37..=39
                 | 41..=44
@@ -510,10 +509,10 @@ impl<'gc> Chunk<'gc> {
                 | 79..=95
                 | 97..=100
                 | 102..=103
-                | 105..=107 => {}
+                | 105..=108 => {}
 
                 // u8 operand, no adjustment needed
-                16 | 17 | 69 | 70 | 50 | 96 => {
+                16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 => {
                     i += 1;
                 }
 
@@ -548,10 +547,10 @@ impl<'gc> Chunk<'gc> {
                     i += 4;
                 }
 
-                // SetupTry (36): u16 catch_ip (jump) + u16 binding_idx (const)
+                // SetupTry (36): u32 catch_ip (jump) + u16 binding_idx (const)
                 36 => {
-                    Self::adjust_u16_at(code, i, ip_offset);
-                    i += 2;
+                    Self::adjust_u32_at(code, i, ip_offset);
+                    i += 4;
                     Self::adjust_u16_at(code, i, const_offset);
                     i += 2;
                 }
@@ -565,8 +564,7 @@ impl<'gc> Chunk<'gc> {
                     i += capture_count * 2;
                 }
 
-                // Unknown opcode — should not happen with valid bytecode
-                _ => {}
+                _ => panic!("Unhandled opcode {opcode} while adjusting merged bytecode at offset {}", i - 1),
             }
         }
     }

@@ -47,7 +47,17 @@ impl<'gc> VM<'gc> {
             // Fetch instruction
             self.current_opcode_ip = self.ip;
             let instruction_byte = self.read_byte();
-            let instruction = Opcode::try_from(instruction_byte)?;
+            let instruction = Opcode::try_from(instruction_byte).map_err(|_| {
+                let location = self
+                    .chunk
+                    .get_line_col_for_ip(self.current_opcode_ip)
+                    .map(|(line, col)| format!(" line {} column {}", line, col))
+                    .unwrap_or_default();
+                crate::raise_syntax_error!(format!(
+                    "Unknown opcode: {} at ip {}{}",
+                    instruction_byte, self.current_opcode_ip, location
+                ))
+            })?;
 
             // Execute action based on instruction
             let action = match instruction {
@@ -178,7 +188,7 @@ impl<'gc> VM<'gc> {
     // Opcode::Return
     fn run_opcode_return(&mut self, ctx: &GcContext<'gc>, min_depth: usize) -> Result<OpcodeAction<'gc>, JSError> {
         let result = self.stack.pop().unwrap_or(Value::Undefined);
-        if let Some(frame) = self.frames.pop() {
+        if let Some(frame) = self.pop_call_frame_with_context() {
             if self.chunk.async_function_ips.contains(&frame.func_ip)
                 && self.chunk.generator_function_ips.contains(&frame.func_ip)
                 && let Value::VmArray(arr) = &result
@@ -580,7 +590,7 @@ impl<'gc> VM<'gc> {
                         local_cells: HashMap::new(),
                         this_tdz: derived_tdz,
                     };
-                    self.frames.push(frame);
+                    self.push_call_frame_for_function(frame);
                 } else {
                     // In strict mode, non-method calls get `this = undefined`
                     let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
@@ -605,7 +615,7 @@ impl<'gc> VM<'gc> {
                         local_cells: HashMap::new(),
                         this_tdz: None,
                     };
-                    self.frames.push(frame);
+                    self.push_call_frame_for_function(frame);
                 }
                 if self.chunk.named_fn_self_ips.contains(&target_ip) {
                     self.named_fn_callee_stack.push(callee.clone());
@@ -778,7 +788,7 @@ impl<'gc> VM<'gc> {
                         local_cells: HashMap::new(),
                         this_tdz: derived_tdz,
                     };
-                    self.frames.push(frame);
+                    self.push_call_frame_for_function(frame);
                 } else {
                     let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
                     let is_arrow = self.chunk.arrow_function_ips.contains(&target_ip);
@@ -802,7 +812,7 @@ impl<'gc> VM<'gc> {
                         local_cells: HashMap::new(),
                         this_tdz: None,
                     };
-                    self.frames.push(frame);
+                    self.push_call_frame_for_function(frame);
                 }
                 if self.chunk.named_fn_self_ips.contains(&target_ip) {
                     self.named_fn_callee_stack.push(callee.clone());
@@ -1671,6 +1681,18 @@ impl<'gc> VM<'gc> {
         let name_val = &self.chunk.constants[name_idx];
         if let Value::String(s) = name_val {
             let name_str = crate::unicode::utf16_to_utf8(s);
+            if let Some(binding_target) = self.chunk.live_import_bindings.get(&name_str).cloned()
+                && let Some((target_module, target_local)) = Self::decode_live_binding_target(&binding_target)
+            {
+                let val = self.lookup_module_binding_value(Some(target_module), target_local);
+                if matches!(val, Value::Uninitialized) {
+                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
+                    self.handle_throw(ctx, &err)?;
+                } else {
+                    self.stack.push(val);
+                }
+                return Ok(OpcodeAction::Continue);
+            }
             // Live import binding resolution: aliased imports redirect to source name
             let resolved_name = self
                 .chunk
@@ -2855,7 +2877,7 @@ impl<'gc> VM<'gc> {
                     let receiver = self.stack.remove(callee_idx - 1);
                     self.this_stack.push(receiver);
                     let callee_idx = callee_idx - 1;
-                    self.frames.push(CallFrame {
+                    self.push_call_frame_for_function(CallFrame {
                         return_ip: self.ip,
                         bp: callee_idx + 1,
                         is_method: true,
@@ -2868,7 +2890,7 @@ impl<'gc> VM<'gc> {
                         this_tdz: derived_tdz,
                     });
                 } else {
-                    self.frames.push(CallFrame {
+                    self.push_call_frame_for_function(CallFrame {
                         return_ip: self.ip,
                         bp: callee_idx + 1,
                         is_method: false,
@@ -2909,7 +2931,7 @@ impl<'gc> VM<'gc> {
                     let receiver = self.stack.remove(callee_idx - 1);
                     self.this_stack.push(receiver);
                     let callee_idx = callee_idx - 1;
-                    self.frames.push(CallFrame {
+                    self.push_call_frame_for_function(CallFrame {
                         return_ip: self.ip,
                         bp: callee_idx + 1,
                         is_method: true,
@@ -2922,7 +2944,7 @@ impl<'gc> VM<'gc> {
                         this_tdz: derived_tdz,
                     });
                 } else {
-                    self.frames.push(CallFrame {
+                    self.push_call_frame_for_function(CallFrame {
                         return_ip: self.ip,
                         bp: callee_idx + 1,
                         is_method: false,
@@ -3090,7 +3112,7 @@ impl<'gc> VM<'gc> {
                     local_cells: HashMap::new(),
                     this_tdz: None,
                 };
-                self.frames.push(frame);
+                self.push_call_frame_for_function(frame);
                 self.ip = target_ip;
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
                 let result = self.run_inner(ctx, self.frames.len());
@@ -3525,6 +3547,18 @@ impl<'gc> VM<'gc> {
         } else {
             String::new()
         };
+        if let Some(binding_target) = self.chunk.live_import_bindings.get(&name).cloned()
+            && let Some((target_module, target_local)) = Self::decode_live_binding_target(&binding_target)
+        {
+            let val = self.lookup_module_binding_value(Some(target_module), target_local);
+            if matches!(val, Value::Uninitialized) {
+                let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name));
+                self.handle_throw(ctx, &err)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            self.stack.push(Value::from(val.typeof_value()));
+            return Ok(OpcodeAction::Continue);
+        }
         // Live import binding resolution
         let resolved = self.chunk.live_import_bindings.get(&name).cloned().unwrap_or_else(|| name.clone());
         // In module mode, check module_locals first
@@ -5713,7 +5747,7 @@ impl<'gc> VM<'gc> {
     // Opcode::SetupTry
     fn run_opcode_setup_try(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
-        let catch_ip = self.read_u16() as usize;
+        let catch_ip = self.read_u32() as usize;
         let binding_idx = self.read_u16();
         let catch_binding = if binding_idx == 0xffff {
             None
@@ -7460,7 +7494,7 @@ impl<'gc> VM<'gc> {
                     local_cells: HashMap::new(),
                     this_tdz: if is_derived_ctor { Some(true) } else { None },
                 };
-                self.frames.push(frame);
+                self.push_call_frame_for_function(frame);
                 self.ip = target_ip;
                 if is_derived_ctor {
                     self.super_called_stack.push(false);

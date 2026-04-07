@@ -664,6 +664,7 @@ struct SavedModuleExecutionContext<'gc> {
 
 struct SavedRuntimeExecutionState<'gc> {
     frames: Vec<CallFrame<'gc>>,
+    call_saved_module_contexts: Vec<Option<SavedModuleExecutionContext<'gc>>>,
     try_stack: Vec<TryFrame>,
     this_stack: Vec<Value<'gc>>,
     new_target_stack: Vec<Value<'gc>>,
@@ -732,6 +733,12 @@ unsafe impl<'gc> Collect<'gc> for ModuleExecutionState<'gc> {
     }
 }
 
+unsafe impl<'gc> Collect<'gc> for SavedModuleExecutionContext<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
+        self.state.trace(cc);
+    }
+}
+
 /// State saved when a module's top-level `await` causes it to suspend,
 /// allowing sibling module deps to evaluate before the async module resumes.
 struct SuspendedModuleState<'gc> {
@@ -764,6 +771,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.stack.trace(cc);
         self.globals.trace(cc);
         self.frames.trace(cc);
+        self.call_saved_module_contexts.trace(cc);
         self.this_stack.trace(cc);
         self.new_target_stack.trace(cc);
         self.fn_props.trace(cc);
@@ -819,6 +827,7 @@ pub struct VM<'gc> {
     globals: IndexMap<String, Value<'gc>>,
     const_globals: std::collections::HashSet<String>,
     frames: Vec<CallFrame<'gc>>,
+    call_saved_module_contexts: Vec<Option<SavedModuleExecutionContext<'gc>>>,
     try_stack: Vec<TryFrame>,
     this_stack: Vec<Value<'gc>>,       // this binding stack
     new_target_stack: Vec<Value<'gc>>, // new.target binding stack
@@ -1068,6 +1077,7 @@ impl<'gc> VM<'gc> {
             globals: IndexMap::new(),
             const_globals: std::collections::HashSet::new(),
             frames: Vec::new(),
+            call_saved_module_contexts: Vec::new(),
             try_stack: Vec::new(),
             this_stack: vec![Value::VmObject(global_this)],
             new_target_stack: Vec::new(),
@@ -1243,9 +1253,35 @@ impl<'gc> VM<'gc> {
         out
     }
 
+    fn push_call_frame_with_context(&mut self, frame: CallFrame<'gc>, saved_context: Option<SavedModuleExecutionContext<'gc>>) {
+        self.frames.push(frame);
+        self.call_saved_module_contexts.push(saved_context);
+    }
+
+    fn push_call_frame_for_function(&mut self, frame: CallFrame<'gc>) {
+        let module_key = self.chunk.fn_source_paths.get(&frame.func_ip).cloned();
+        let saved = self.enter_module_execution_context(module_key.as_deref());
+        self.push_call_frame_with_context(frame, saved);
+    }
+
+    fn pop_call_frame_with_context(&mut self) -> Option<CallFrame<'gc>> {
+        let frame = self.frames.pop()?;
+        let saved = self.call_saved_module_contexts.pop().unwrap_or(None);
+        let module_key = self.chunk.fn_source_paths.get(&frame.func_ip).cloned();
+        self.exit_module_execution_context(module_key.as_deref(), saved);
+        Some(frame)
+    }
+
+    fn truncate_call_frames_with_context(&mut self, len: usize) {
+        while self.frames.len() > len {
+            let _ = self.pop_call_frame_with_context();
+        }
+    }
+
     fn take_runtime_execution_state(&mut self) -> SavedRuntimeExecutionState<'gc> {
         SavedRuntimeExecutionState {
             frames: std::mem::take(&mut self.frames),
+            call_saved_module_contexts: std::mem::take(&mut self.call_saved_module_contexts),
             try_stack: std::mem::take(&mut self.try_stack),
             this_stack: std::mem::take(&mut self.this_stack),
             new_target_stack: std::mem::take(&mut self.new_target_stack),
@@ -1265,6 +1301,7 @@ impl<'gc> VM<'gc> {
 
     fn restore_runtime_execution_state(&mut self, saved: SavedRuntimeExecutionState<'gc>) {
         self.frames = saved.frames;
+        self.call_saved_module_contexts = saved.call_saved_module_contexts;
         self.try_stack = saved.try_stack;
         self.this_stack = saved.this_stack;
         self.new_target_stack = saved.new_target_stack;
@@ -1297,6 +1334,46 @@ impl<'gc> VM<'gc> {
         self.loaded_modules.insert(module_key.to_string(), exports);
         self.loaded_module_local_names
             .insert(module_key.to_string(), export_name_to_local.clone());
+    }
+
+    pub(crate) fn seed_module_export_metadata(
+        &mut self,
+        module_key: &str,
+        export_name_to_local: &std::collections::HashMap<String, String>,
+        reexport_sources: &[(String, Vec<crate::core::ReexportSpec>)],
+        base_path: &std::path::Path,
+    ) {
+        let mut origins = self.export_origins.remove(module_key).unwrap_or_default();
+        for export_name in export_name_to_local.keys() {
+            origins
+                .entry(export_name.clone())
+                .or_insert((module_key.to_string(), export_name.clone()));
+        }
+
+        let mut resolved_reexports = Vec::new();
+        for (source, specs) in reexport_sources {
+            let resolved = crate::core::resolve_module_path(source, base_path).to_string_lossy().to_string();
+            for spec in specs {
+                match spec {
+                    crate::core::ReexportSpec::Named(name, alias) => {
+                        let export_name = alias.as_deref().unwrap_or(name).to_string();
+                        origins.insert(export_name, (resolved.clone(), name.clone()));
+                    }
+                    crate::core::ReexportSpec::Namespace(name) => {
+                        origins.insert(name.clone(), (resolved.clone(), "namespace".to_string()));
+                    }
+                    crate::core::ReexportSpec::Star => {}
+                }
+            }
+            resolved_reexports.push((resolved, specs.clone()));
+        }
+
+        if !origins.is_empty() {
+            self.export_origins.insert(module_key.to_string(), origins);
+        }
+        if !resolved_reexports.is_empty() {
+            self.reexport_deps.insert(module_key.to_string(), resolved_reexports);
+        }
     }
 
     pub(crate) fn finalize_active_module_record(&mut self, ctx: &GcContext<'gc>, module_key: &str, export_names: &[String]) {
@@ -1332,32 +1409,46 @@ impl<'gc> VM<'gc> {
         self.module_load_errors.insert(module_key.to_string(), error);
     }
 
-    fn ensure_module_export_bindings(&mut self, module_key: &str) {
+    pub(crate) fn ensure_module_export_bindings(&mut self, module_key: &str) {
         let exports = self.loaded_modules.get(module_key).cloned().unwrap_or_default();
         let mut synthetic_bindings = Vec::new();
         {
             let bindings = self.loaded_module_local_names.entry(module_key.to_string()).or_default();
-            for (export_name, value) in &exports {
-                if export_name.starts_with("__") || export_name.starts_with("@@") {
-                    continue;
-                }
-                if !bindings.contains_key(export_name) {
-                    let synthetic = format!("\x00export:{export_name}");
-                    bindings.insert(export_name.clone(), synthetic.clone());
-                    synthetic_bindings.push((synthetic, value.clone()));
-                }
+            let missing_exports: Vec<(String, Value<'gc>)> = exports
+                .iter()
+                .filter(|(export_name, _)| !export_name.starts_with("__") && !export_name.starts_with("@@"))
+                .filter(|(export_name, _)| !bindings.contains_key(*export_name))
+                .map(|(export_name, value)| (export_name.clone(), value.clone()))
+                .collect();
+            for (export_name, value) in missing_exports {
+                let synthetic = format!("\x00export:{export_name}");
+                bindings.insert(export_name.clone(), synthetic.clone());
+                synthetic_bindings.push((export_name, synthetic, value));
             }
         }
+        let synthetic_bindings: Vec<(String, Value<'gc>, Option<String>)> = synthetic_bindings
+            .into_iter()
+            .map(|(export_name, synthetic, value)| {
+                let live_target = self.resolve_live_binding_target(module_key, &export_name);
+                (synthetic, value, live_target)
+            })
+            .collect();
         if synthetic_bindings.is_empty() {
             return;
         }
         if self.is_module_mode && self.current_source_path() == Some(module_key) {
-            for (name, value) in synthetic_bindings {
-                self.module_locals.entry(name).or_insert(value);
+            for (name, value, live_target) in synthetic_bindings {
+                self.module_locals.entry(name.clone()).or_insert(value);
+                if let Some(target) = live_target {
+                    self.chunk.live_import_bindings.entry(name).or_insert(target);
+                }
             }
         } else if let Some(state) = self.loaded_module_states.get_mut(module_key) {
-            for (name, value) in synthetic_bindings {
-                state.module_locals.entry(name).or_insert(value);
+            for (name, value, live_target) in synthetic_bindings {
+                state.module_locals.entry(name.clone()).or_insert(value);
+                if let Some(target) = live_target {
+                    state.live_import_bindings.entry(name).or_insert(target);
+                }
             }
         }
     }
@@ -1419,8 +1510,139 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn encode_live_binding_target(module_key: &str, local_name: &str) -> String {
+        let mut encoded = String::from("\0live:");
+        encoded.push_str(module_key);
+        encoded.push('\0');
+        encoded.push_str(local_name);
+        encoded
+    }
+
+    fn decode_live_binding_target(encoded: &str) -> Option<(&str, &str)> {
+        let rest = encoded.strip_prefix("\0live:")?;
+        rest.split_once('\0')
+    }
+
+    fn resolve_live_binding_target(&self, module_key: &str, binding_name: &str) -> Option<String> {
+        let mut seen = std::collections::HashSet::new();
+        self.resolve_live_binding_target_inner(module_key, binding_name, &mut seen)
+    }
+
+    fn current_live_binding_target(&self, module_key: &str, binding_name: &str) -> Option<String> {
+        if self.is_module_mode && self.current_source_path() == Some(module_key) {
+            return self.chunk.live_import_bindings.get(binding_name).cloned();
+        }
+        self.loaded_module_states
+            .get(module_key)
+            .and_then(|state| state.live_import_bindings.get(binding_name))
+            .cloned()
+    }
+
+    fn resolve_live_binding_target_inner(
+        &self,
+        module_key: &str,
+        binding_name: &str,
+        seen: &mut std::collections::HashSet<(String, String)>,
+    ) -> Option<String> {
+        if let Some((target_module, target_local)) = Self::decode_live_binding_target(binding_name) {
+            return self
+                .resolve_live_binding_target_inner(target_module, target_local, seen)
+                .or_else(|| Some(Self::encode_live_binding_target(target_module, target_local)));
+        }
+
+        if !seen.insert((module_key.to_string(), binding_name.to_string())) {
+            return None;
+        }
+
+        if let Some(export_name) = binding_name.strip_prefix("\x00export:") {
+            if let Some(existing_target) = self.current_live_binding_target(module_key, binding_name) {
+                if let Some((target_module, target_local)) = Self::decode_live_binding_target(&existing_target) {
+                    if target_module == module_key && target_local == binding_name {
+                        return None;
+                    }
+                    return self
+                        .resolve_live_binding_target_inner(target_module, target_local, seen)
+                        .or(Some(existing_target));
+                }
+                return Some(existing_target);
+            }
+
+            if let Some((origin_module, origin_binding)) = self
+                .export_origins
+                .get(module_key)
+                .and_then(|origins| origins.get(export_name))
+                .cloned()
+                && origin_binding != "namespace"
+            {
+                let origin_local = self
+                    .loaded_module_local_names
+                    .get(&origin_module)
+                    .and_then(|locals| locals.get(&origin_binding))
+                    .cloned()
+                    .unwrap_or_else(|| origin_binding.clone());
+                if origin_module != module_key || origin_local != binding_name {
+                    if let Some(target) = self.resolve_live_binding_target_inner(&origin_module, &origin_local, seen) {
+                        return Some(target);
+                    }
+                    if !origin_local.starts_with("\x00export:") {
+                        return Some(Self::encode_live_binding_target(&origin_module, &origin_local));
+                    }
+                }
+            }
+        }
+
+        if let Some((origin_module, origin_binding)) = self
+            .export_origins
+            .get(module_key)
+            .and_then(|origins| origins.get(binding_name))
+            .cloned()
+            && origin_binding != "namespace"
+        {
+            let origin_local = self
+                .loaded_module_local_names
+                .get(&origin_module)
+                .and_then(|locals| locals.get(&origin_binding))
+                .cloned()
+                .unwrap_or_else(|| origin_binding.clone());
+            if origin_module != module_key || origin_local != binding_name {
+                if let Some(target) = self.resolve_live_binding_target_inner(&origin_module, &origin_local, seen) {
+                    return Some(target);
+                }
+                if !origin_local.starts_with("\x00export:") {
+                    return Some(Self::encode_live_binding_target(&origin_module, &origin_local));
+                }
+            }
+        }
+
+        if let Some(local_name) = self
+            .loaded_module_local_names
+            .get(module_key)
+            .and_then(|locals| locals.get(binding_name))
+            .cloned()
+            && local_name != binding_name
+        {
+            if let Some(target) = self.resolve_live_binding_target_inner(module_key, &local_name, seen) {
+                return Some(target);
+            }
+            if !local_name.starts_with("\x00export:") {
+                return Some(Self::encode_live_binding_target(module_key, &local_name));
+            }
+        }
+
+        None
+    }
+
     fn lookup_module_binding_value(&self, module_key: Option<&str>, local_name: &str) -> Value<'gc> {
+        if let Some((target_module, target_local)) = Self::decode_live_binding_target(local_name) {
+            return self.lookup_module_binding_value(Some(target_module), target_local);
+        }
+
         if module_key.is_none() || (self.is_module_mode && self.current_source_path() == module_key) {
+            if let Some(target) = self.chunk.live_import_bindings.get(local_name)
+                && let Some((target_module, target_local)) = Self::decode_live_binding_target(target)
+            {
+                return self.lookup_module_binding_value(Some(target_module), target_local);
+            }
             return self
                 .module_locals
                 .get(local_name)
@@ -1430,9 +1652,19 @@ impl<'gc> VM<'gc> {
         }
         self.loaded_module_states
             .get(module_key.unwrap())
-            .and_then(|state| state.module_locals.get(local_name))
-            .or_else(|| self.globals.get(local_name))
-            .cloned()
+            .map(|state| {
+                if let Some(target) = state.live_import_bindings.get(local_name)
+                    && let Some((target_module, target_local)) = Self::decode_live_binding_target(target)
+                {
+                    return self.lookup_module_binding_value(Some(target_module), target_local);
+                }
+                state
+                    .module_locals
+                    .get(local_name)
+                    .or_else(|| self.globals.get(local_name))
+                    .cloned()
+                    .unwrap_or(Value::Undefined)
+            })
             .unwrap_or(Value::Undefined)
     }
 
@@ -1980,18 +2212,16 @@ impl<'gc> VM<'gc> {
                 };
                 self.module_locals.insert(local.clone(), val.clone());
 
-                // Set up live binding: also define the source local name so
-                // mutations by the exporting module's closures are visible.
                 let source_local = self
                     .loaded_module_local_names
                     .get(mod_path)
                     .and_then(|m| m.get(export_name))
                     .cloned()
                     .unwrap_or_else(|| export_name.clone());
-                if &source_local != local {
-                    self.module_locals.insert(source_local.clone(), val);
-                    self.chunk.live_import_bindings.insert(local.clone(), source_local);
-                }
+                let live_target = self
+                    .resolve_live_binding_target(mod_path, export_name)
+                    .unwrap_or_else(|| Self::encode_live_binding_target(mod_path, &source_local));
+                self.chunk.live_import_bindings.insert(local.clone(), live_target);
             }
         }
     }
@@ -12958,13 +13188,15 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 Ok(Opcode::SetupTry) => {
-                    if pc + 3 < ec.len() {
-                        let target = ec[pc] as u16 | ((ec[pc + 1] as u16) << 8);
-                        let new_target = target + code_offset as u16;
+                    if pc + 5 < ec.len() {
+                        let target = ec[pc] as u32 | ((ec[pc + 1] as u32) << 8) | ((ec[pc + 2] as u32) << 16) | ((ec[pc + 3] as u32) << 24);
+                        let new_target = target + code_offset as u32;
                         self.chunk.code.push((new_target & 0xff) as u8);
                         self.chunk.code.push(((new_target >> 8) & 0xff) as u8);
+                        self.chunk.code.push(((new_target >> 16) & 0xff) as u8);
+                        self.chunk.code.push(((new_target >> 24) & 0xff) as u8);
 
-                        let binding_idx = ec[pc + 2] as u16 | ((ec[pc + 3] as u16) << 8);
+                        let binding_idx = ec[pc + 4] as u16 | ((ec[pc + 5] as u16) << 8);
                         let new_binding_idx = if binding_idx == 0xffff {
                             binding_idx
                         } else {
@@ -12972,7 +13204,7 @@ impl<'gc> VM<'gc> {
                         };
                         self.chunk.code.push((new_binding_idx & 0xff) as u8);
                         self.chunk.code.push(((new_binding_idx >> 8) & 0xff) as u8);
-                        pc += 4;
+                        pc += 6;
                     }
                 }
                 // Call: 1 byte (possibly extended with u16)
@@ -16059,6 +16291,16 @@ impl<'gc> VM<'gc> {
                 }
             }
         }
+        if self.is_module_mode {
+            if let Some(target) = self.chunk.live_import_bindings.get(name)
+                && let Some((target_module, target_local)) = Self::decode_live_binding_target(target)
+            {
+                return Some(self.lookup_module_binding_value(Some(target_module), target_local));
+            }
+            if let Some(val) = self.module_locals.get(name).cloned() {
+                return Some(val);
+            }
+        }
         self.globals.get(name).cloned()
     }
 
@@ -17881,7 +18123,7 @@ impl<'gc> VM<'gc> {
                                         | Opcode::FreezeTemplate,
                                     ) => pc += 2,
                                     Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => pc += 4,
-                                    Ok(Opcode::SetupTry) => pc += 4,
+                                    Ok(Opcode::SetupTry) => pc += 6,
                                     Ok(Opcode::Call) => {
                                         if pc < code.len() {
                                             let raw_arg_byte = code[pc];
@@ -26645,18 +26887,21 @@ impl<'gc> VM<'gc> {
             }
             let saved_ip = vm.ip;
             let target_depth = vm.frames.len();
-            vm.frames.push(CallFrame {
-                return_ip: 0,
-                bp,
-                is_method: false,
-                arg_count,
-                func_ip: ip,
-                arguments_obj: None,
-                upvalues: upvalues.to_vec(),
-                saved_args,
-                local_cells: HashMap::new(),
-                this_tdz: None,
-            });
+            vm.push_call_frame_with_context(
+                CallFrame {
+                    return_ip: 0,
+                    bp,
+                    is_method: false,
+                    arg_count,
+                    func_ip: ip,
+                    arguments_obj: None,
+                    upvalues: upvalues.to_vec(),
+                    saved_args,
+                    local_cells: HashMap::new(),
+                    this_tdz: None,
+                },
+                None,
+            );
             vm.ip = ip;
             let saved_try_stack = std::mem::take(&mut vm.try_stack);
             // Regular calls (not via `new`) should not expose new.target
@@ -26665,7 +26910,7 @@ impl<'gc> VM<'gc> {
             vm.new_target_stack.pop();
             vm.try_stack = saved_try_stack;
             vm.ip = saved_ip;
-            vm.frames.truncate(target_depth);
+            vm.truncate_call_frames_with_context(target_depth);
             vm.stack.truncate(saved_stack_depth);
             result
         })
@@ -28971,18 +29216,21 @@ impl<'gc> VM<'gc> {
                 for arg in &stack_args {
                     self.stack.push(arg.clone());
                 }
-                self.frames.push(CallFrame {
-                    return_ip: 0,
-                    bp,
-                    is_method: false,
-                    arg_count,
-                    func_ip: target_ip,
-                    arguments_obj: None,
-                    upvalues: closure_uv,
-                    saved_args,
-                    local_cells: HashMap::new(),
-                    this_tdz: self.chunk.derived_constructor_ips.contains(&target_ip).then_some(true),
-                });
+                self.push_call_frame_with_context(
+                    CallFrame {
+                        return_ip: 0,
+                        bp,
+                        is_method: false,
+                        arg_count,
+                        func_ip: target_ip,
+                        arguments_obj: None,
+                        upvalues: closure_uv,
+                        saved_args,
+                        local_cells: HashMap::new(),
+                        this_tdz: self.chunk.derived_constructor_ips.contains(&target_ip).then_some(true),
+                    },
+                    None,
+                );
                 self.new_target_stack.push(ctor_new_target);
                 self.ip = target_ip;
                 let saved_try_stack = std::mem::take(&mut self.try_stack);
@@ -28992,7 +29240,7 @@ impl<'gc> VM<'gc> {
                 self.new_target_stack.pop();
                 let bound_this = self.this_stack.last().cloned().unwrap_or(Value::VmObject(new_obj));
                 self.this_stack.pop();
-                self.frames.truncate(target_depth);
+                self.truncate_call_frames_with_context(target_depth);
                 self.stack.truncate(saved_stack_depth);
                 let function_proto = new_obj.borrow().get("__proto__").cloned();
                 match result? {
@@ -30781,7 +31029,7 @@ impl<'gc> VM<'gc> {
             }
             // Unwind stack and call frames
             self.stack.truncate(try_frame.stack_depth);
-            self.frames.truncate(try_frame.frame_depth);
+            self.truncate_call_frames_with_context(try_frame.frame_depth);
             self.ip = try_frame.catch_ip;
             // If catch has a binding, store thrown value as global
             if let Some(name) = try_frame.catch_binding {
@@ -30914,18 +31162,21 @@ impl<'gc> VM<'gc> {
                 vm.stack.push(local.clone());
             }
 
-            vm.frames.push(CallFrame {
-                return_ip: 0,
-                bp,
-                is_method: false,
-                arg_count,
-                func_ip,
-                arguments_obj: None,
-                upvalues: upvals.to_vec(),
-                saved_args: saved_args.clone(),
-                local_cells: HashMap::new(),
-                this_tdz: None,
-            });
+            vm.push_call_frame_with_context(
+                CallFrame {
+                    return_ip: 0,
+                    bp,
+                    is_method: false,
+                    arg_count,
+                    func_ip,
+                    arguments_obj: None,
+                    upvalues: upvals.to_vec(),
+                    saved_args: saved_args.clone(),
+                    local_cells: HashMap::new(),
+                    this_tdz: None,
+                },
+                None,
+            );
             vm.this_stack.push(this_val.clone());
 
             let min_depth = vm.frames.len();
@@ -30949,7 +31200,7 @@ impl<'gc> VM<'gc> {
 
             if run_result.is_ok()
                 && vm.generator_param_init_done
-                && let Some(frame) = vm.frames.pop()
+                && let Some(frame) = vm.pop_call_frame_with_context()
             {
                 out_state.ip = vm.ip;
                 out_state.bp = frame.bp;
@@ -31093,18 +31344,21 @@ impl<'gc> VM<'gc> {
                 }
             }
 
-            vm.frames.push(CallFrame {
-                return_ip: 0,
-                bp,
-                is_method: false,
-                arg_count: state.arg_count,
-                func_ip: state.func_ip,
-                arguments_obj: None,
-                upvalues: state.upvalues.clone(),
-                saved_args: state.saved_args.clone(),
-                local_cells: state.local_cells.clone(),
-                this_tdz: None,
-            });
+            vm.push_call_frame_with_context(
+                CallFrame {
+                    return_ip: 0,
+                    bp,
+                    is_method: false,
+                    arg_count: state.arg_count,
+                    func_ip: state.func_ip,
+                    arguments_obj: None,
+                    upvalues: state.upvalues.clone(),
+                    saved_args: state.saved_args.clone(),
+                    local_cells: state.local_cells.clone(),
+                    this_tdz: None,
+                },
+                None,
+            );
 
             vm.this_stack.push(state.this_val.clone());
 
@@ -31145,7 +31399,7 @@ impl<'gc> VM<'gc> {
                     vm.generator_return_pending = None;
                 }
 
-                let frame = vm.frames.pop().unwrap();
+                let frame = vm.pop_call_frame_with_context().unwrap();
                 let locals: Vec<Value<'gc>> = vm.stack[frame.bp..].to_vec();
                 let gen_try_stack = std::mem::take(&mut vm.try_stack);
 

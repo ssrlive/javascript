@@ -64,6 +64,15 @@ function createComposedTarget(testPath) {
   return {tmpDir: testDir, tmpPath};
 }
 
+function createModuleBootstrapTarget(testPath) {
+  const testDir = path.dirname(path.resolve(testPath));
+  const base = path.basename(testPath, path.extname(testPath));
+  const ext = path.extname(testPath);
+  const tmpName = `.test262_bootstrap_${base}${ext}`;
+  const tmpPath = path.join(testDir, tmpName);
+  return {tmpDir: testDir, tmpPath};
+}
+
 const realmFeatureName = 'cross-realm';
 const realmMarker = '// Inject: unified $262 shim - idempotent';
 function get262StubLines() {
@@ -369,7 +378,40 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   PREPEND_FILES = ensureArrayDistinct(PREPEND_FILES);
 
   const meta = extractMeta(testPath);
+  const isModule = hasFlag(meta, 'module');
   inject262Shim(outLines, testPath, meta, PREPEND_FILES, needsAgent);
+
+  let moduleBootstrapPath = null;
+  if (isModule) {
+    const bootstrapPrepends = ensureArrayDistinct(
+      PREPEND_FILES.filter((p) => {
+        const base = path.basename(p);
+        return base === 'sta.js' || base === 'assert.js';
+      })
+    );
+    if (bootstrapPrepends.length > 0) {
+      moduleBootstrapPath = createModuleBootstrapTarget(testPath).tmpPath;
+      const bootstrapLines = [];
+      for (const p of bootstrapPrepends) {
+        const absP = path.resolve(p);
+        bootstrapLines.push(`// Inject: ${absP}`);
+        bootstrapLines.push(fs.readFileSync(p, 'utf8'));
+        bootstrapLines.push('');
+      }
+      bootstrapLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
+      bootstrapLines.push('if (typeof globalThis !== "undefined") {');
+      bootstrapLines.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
+      bootstrapLines.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
+      bootstrapLines.push('}');
+      bootstrapLines.push('');
+      fs.writeFileSync(moduleBootstrapPath, bootstrapLines.join('\n'));
+    }
+  }
+
+  if (moduleBootstrapPath) {
+    outLines.push(`import ${JSON.stringify(`./${path.basename(moduleBootstrapPath)}`)};`);
+    outLines.push('');
+  }
 
   // Inject $262.agent shim BEFORE harness files (atomicsHelper.js extends $262.agent)
   if (needsAgent) {

@@ -66,6 +66,12 @@ function cleanupComposedArtifacts(tmpPath){
     if (tmpPath && fs.existsSync(tmpPath)) {
       fs.unlinkSync(tmpPath);
     }
+    if (tmpPath) {
+      const bootstrapPath = tmpPath.replace('/.test262_composed_', '/.test262_bootstrap_');
+      if (bootstrapPath !== tmpPath && fs.existsSync(bootstrapPath)) {
+        fs.unlinkSync(bootstrapPath);
+      }
+    }
   } catch (e) {
     // ignore
   }

@@ -461,9 +461,10 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         let mut main_module_record: Option<(String, Vec<String>)> = None;
         if run_as_module && let Some(ref entry_path) = script_path_buf {
             let main_key = entry_path.to_string_lossy().to_string();
-            let (main_export_names, main_export_name_to_local, _) = collect_exports_from_ast(&statements);
+            let (main_export_names, main_export_name_to_local, main_reexport_sources) = collect_exports_from_ast(&statements);
             vm.pre_create_module_namespace(ctx, &main_key);
             vm.seed_module_record(&main_key, &main_export_names, &main_export_name_to_local);
+            vm.seed_module_export_metadata(&main_key, &main_export_name_to_local, &main_reexport_sources, entry_path);
             main_module_record = Some((main_key, main_export_names));
 
             let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");

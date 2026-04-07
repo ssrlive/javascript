@@ -382,6 +382,7 @@ impl<'gc> VM<'gc> {
         Self::stamp_regexp_getters_with_home_proto(ctx, regexp_proto_obj);
         let mut regexp_ctor = IndexMap::new();
         Self::init_native_ctor_header(&mut regexp_ctor, BUILTIN_CTOR_REGEXP, "RegExp", 2.0);
+        Self::insert_species_getter(&mut regexp_ctor, ctx);
         let regexp_ctor_val = Self::finalize_ctor_with_prototype(ctx, regexp_ctor, regexp_proto_obj);
         self.globals.insert("RegExp".to_string(), regexp_ctor_val);
     }

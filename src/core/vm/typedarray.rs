@@ -560,23 +560,8 @@ impl<'gc> VM<'gc> {
                 let new_byte_offset = byte_offset + begin * bpe;
                 // Use TypedArraySpeciesCreate
                 if let Some(buf_val) = buffer {
-                    let Some(ctor) = self.typed_array_species_constructor(ctx, &this_val) else {
-                        return Value::Undefined;
-                    };
-                    let result = self.construct_value(
-                        ctx,
-                        &ctor,
-                        &[buf_val, Value::Number(new_byte_offset as f64), Value::Number(count as f64)],
-                        None,
-                    );
-                    match result {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let msg = e.message();
-                            self.throw_type_error(ctx, &msg);
-                            Value::Undefined
-                        }
-                    }
+                    let args = [buf_val, Value::Number(new_byte_offset as f64), Value::Number(count as f64)];
+                    self.typed_array_species_create(ctx, &this_val, &args).unwrap_or(Value::Undefined)
                 } else {
                     // No buffer, just slice elements
                     let a = arr.borrow();
@@ -1775,44 +1760,34 @@ impl<'gc> VM<'gc> {
     fn typed_array_species_create(&mut self, ctx: &GcContext<'gc>, this_val: &Value<'gc>, args: &[Value<'gc>]) -> Option<Value<'gc>> {
         let ctor = self.typed_array_species_constructor(ctx, this_val)?;
 
-        // Check if ctor is the default constructor for this TypedArray type
-        let ta_name = if let Value::VmArray(arr) = this_val {
-            arr.borrow()
-                .props
-                .get("__typedarray_name__")
-                .map(value_to_string)
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let default_ctor = self.globals.get(&ta_name).cloned().unwrap_or(Value::Undefined);
-        let is_default = self.same_constructor_identity(&ctor, &default_ctor);
-
-        if is_default {
-            // Use the default constructor
-            match self.construct_value(ctx, &ctor, args, None) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    self.set_pending_throw_from_error(&e);
-                    None
-                }
+        let result = match self.construct_value(ctx, &ctor, args, None) {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return None;
             }
-        } else {
-            // Species constructor — call it as a function (it might not be a native ctor)
-            match self.construct_value(ctx, &ctor, args, None) {
-                Ok(v) => Some(v),
-                Err(_) => {
-                    // Fall back to calling as a function
-                    match self.vm_call_function_value(ctx, &ctor, &Value::Undefined, args) {
-                        Ok(v) => Some(v),
-                        Err(e) => {
-                            self.set_pending_throw_from_error(&e);
-                            None
-                        }
-                    }
-                }
+        };
+
+        if !self.validate_typed_array(ctx, &result, "species constructor") {
+            return None;
+        }
+
+        if args.len() == 1
+            && let Some(Value::Number(requested_len)) = args.first()
+            && requested_len.is_finite()
+            && *requested_len >= 0.0
+        {
+            let actual_len = match &result {
+                Value::VmArray(arr) => arr.borrow().elements.len(),
+                _ => 0,
+            };
+            if actual_len < requested_len.trunc() as usize {
+                self.throw_type_error(ctx, "Derived TypedArray constructor created an array which was too small");
+                return None;
             }
         }
+
+        Some(result)
     }
 
     /// Wrap a plain Array result as the same TypedArray type as `source`.
@@ -3289,6 +3264,7 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "typedarray.of", "of", 0.0, false),
         );
         typed_array_ctor_map.insert("__nonenumerable_of__".to_string(), Value::Boolean(true));
+        Self::insert_species_getter(&mut typed_array_ctor_map, ctx);
         // Set constructor backref on prototype
         let typed_array_ctor = Value::VmObject(new_gc_cell_ptr(ctx, typed_array_ctor_map));
         if let Value::VmObject(p) = &ta_proto {

@@ -2995,6 +2995,49 @@ impl<'gc> VM<'gc> {
         Ok(species_ctor)
     }
 
+    fn array_buffer_species_constructor(&mut self, ctx: &GcContext<'gc>, array_buffer: &Value<'gc>) -> Option<Value<'gc>> {
+        let default_ctor = self.globals.get("ArrayBuffer").cloned().unwrap_or(Value::Undefined);
+        let ctor = self.read_named_property(ctx, array_buffer, "constructor");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        if matches!(ctor, Value::Undefined) {
+            return Some(default_ctor);
+        }
+
+        if !matches!(
+            ctor,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) || ctor.is_symbol_value()
+        {
+            self.throw_type_error(ctx, "ArrayBuffer constructor property is not an object");
+            return None;
+        }
+
+        let mut species_ctor = ctor.clone();
+        if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
+            && let Some(species_symbol) = symbol_ctor.borrow().get("species").cloned()
+            && let Some(species_key) = self.symbol_key_string(&species_symbol)
+        {
+            let species = self.read_named_property(ctx, &ctor, &species_key);
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            if matches!(species, Value::Undefined | Value::Null) {
+                return Some(default_ctor);
+            }
+            species_ctor = species;
+        }
+
+        if !self.is_constructor_value(&species_ctor) {
+            self.throw_type_error(ctx, "ArrayBuffer species constructor is not a constructor");
+            return None;
+        }
+
+        Some(species_ctor)
+    }
+
     fn get_promise_resolve_method(&mut self, ctx: &GcContext<'gc>, constructor: &Value<'gc>) -> Result<Value<'gc>, JSError> {
         let promise_resolve = self.read_named_property(ctx, constructor, "resolve");
         if let Some(thrown) = self.pending_throw.take() {
@@ -3189,6 +3232,27 @@ impl<'gc> VM<'gc> {
         map.insert("__native_id__".to_string(), Value::Number(native_id as f64));
         Self::insert_property_with_attributes(map, "length", &Value::Number(length), false, false, true);
         Self::insert_property_with_attributes(map, "name", &Value::from(name), false, false, true);
+    }
+
+    fn insert_getter_property_with_attributes(
+        map: &mut IndexMap<String, Value<'gc>>,
+        key: &str,
+        getter: &Value<'gc>,
+        enumerable: bool,
+        configurable: bool,
+    ) {
+        map.insert(format!("__get_{}", key), getter.clone());
+        if !enumerable {
+            map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+        }
+        if !configurable {
+            map.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+        }
+    }
+
+    fn insert_species_getter(map: &mut IndexMap<String, Value<'gc>>, ctx: &GcContext<'gc>) {
+        let getter = Self::make_host_fn_with_name_len(ctx, "species.getter", "get [Symbol.species]", 0.0, false);
+        Self::insert_getter_property_with_attributes(map, "@@sym:5", &getter, false, true);
     }
 
     fn native_function_name(id: FunctionID) -> &'static str {
@@ -4467,40 +4531,6 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                let ctor_v = self.read_named_property(ctx, &Value::VmObject(*buf_obj), "constructor");
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.pending_throw = Some(thrown);
-                    return Value::Undefined;
-                }
-                if ctor_v.is_symbol_value() {
-                    let mut err_map = IndexMap::new();
-                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                    err_map.insert(
-                        "message".to_string(),
-                        Value::from("ArrayBuffer constructor property is not an object"),
-                    );
-                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                    return Value::Undefined;
-                }
-                if !matches!(
-                    ctor_v,
-                    Value::Undefined
-                        | Value::VmObject(_)
-                        | Value::VmFunction(_, _)
-                        | Value::VmClosure(_, _, _)
-                        | Value::VmNativeFunction(_)
-                        | Value::Function(_)
-                ) {
-                    let mut err_map = IndexMap::new();
-                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                    err_map.insert(
-                        "message".to_string(),
-                        Value::from("ArrayBuffer constructor property is not an object"),
-                    );
-                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                    return Value::Undefined;
-                }
-
                 let (len, bytes_arr) = {
                     let b = buf_obj.borrow();
                     let len = b.get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
@@ -4611,33 +4641,62 @@ impl<'gc> VM<'gc> {
                 };
                 let new_len = final_idx.saturating_sub(first);
 
-                let mut out_bytes = vec![Value::Number(0.0); new_len];
+                let Some(species_ctor) = self.array_buffer_species_constructor(ctx, &Value::VmObject(*buf_obj)) else {
+                    return Value::Undefined;
+                };
+
+                let new_buffer = match self.construct_value(ctx, &species_ctor, &[Value::Number(new_len as f64)], None) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+
+                let Value::VmObject(new_buf_obj) = &new_buffer else {
+                    self.throw_type_error(ctx, "ArrayBuffer species constructor must return an ArrayBuffer");
+                    return Value::Undefined;
+                };
+
+                let is_new_array_buffer = matches!(
+                    new_buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer"
+                );
+                if !is_new_array_buffer {
+                    self.throw_type_error(ctx, "ArrayBuffer species constructor must return an ArrayBuffer");
+                    return Value::Undefined;
+                }
+
+                if Gc::ptr_eq(*new_buf_obj, *buf_obj) {
+                    self.throw_type_error(ctx, "ArrayBuffer species constructor returned the source buffer");
+                    return Value::Undefined;
+                }
+
+                let target_len = new_buf_obj.borrow().get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
+                if target_len < new_len {
+                    self.throw_type_error(ctx, "Derived ArrayBuffer constructor created a buffer which was too small");
+                    return Value::Undefined;
+                }
+
+                let Some(Value::VmArray(target_bytes)) = new_buf_obj.borrow().get("__buffer_bytes__").cloned() else {
+                    self.throw_type_error(ctx, "ArrayBuffer species constructor must return an ArrayBuffer");
+                    return Value::Undefined;
+                };
+
                 if let Some(Value::VmArray(src_arr)) = bytes_arr {
                     let src = src_arr.borrow();
-                    for (i, out_bytes_i) in out_bytes.iter_mut().enumerate().take(new_len) {
+                    let mut dst = target_bytes.borrow_mut(ctx);
+                    for i in 0..new_len {
+                        if i >= dst.elements.len() {
+                            break;
+                        }
                         if let Some(v) = src.get(first + i).cloned() {
-                            *out_bytes_i = v;
+                            dst.elements[i] = v;
                         }
                     }
                 }
 
-                let mut out_map = IndexMap::new();
-                out_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-                out_map.insert("byteLength".to_string(), Value::Number(new_len as f64));
-                out_map.insert("maxByteLength".to_string(), Value::Number(new_len as f64));
-                out_map.insert("resize".to_string(), Value::VmNativeFunction(BUILTIN_ARRAYBUFFER_RESIZE));
-                out_map.insert(
-                    "__buffer_bytes__".to_string(),
-                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(out_bytes))),
-                );
-                if let Some(proto) = buf_obj.borrow().get("__proto__").cloned() {
-                    out_map.insert("__proto__".to_string(), proto);
-                } else if let Some(Value::VmObject(ab_ctor)) = self.globals.get("ArrayBuffer").cloned()
-                    && let Some(proto) = ab_ctor.borrow().get("prototype").cloned()
-                {
-                    out_map.insert("__proto__".to_string(), proto);
-                }
-                Value::VmObject(new_gc_cell_ptr(ctx, out_map))
+                new_buffer
             }
             "atomics.load" => {
                 let Some(target) = args.first().cloned() else {
@@ -14434,6 +14493,7 @@ impl<'gc> VM<'gc> {
         array_obj.insert("__nonenumerable_isArray__".to_string(), Value::Boolean(true));
         array_obj.insert("__nonenumerable_of__".to_string(), Value::Boolean(true));
         array_obj.insert("__nonenumerable_from__".to_string(), Value::Boolean(true));
+        Self::insert_species_getter(&mut array_obj, ctx);
         let mut array_iter_proto = IndexMap::new();
         array_iter_proto.insert(
             "next".to_string(),
@@ -14681,6 +14741,7 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.isView", "isView", 1.0, false),
         );
         array_buffer_map.insert("__nonenumerable_isView__".to_string(), Value::Boolean(true));
+        Self::insert_species_getter(&mut array_buffer_map, ctx);
         array_buffer_map.insert("prototype".to_string(), array_buffer_proto_val);
         array_buffer_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
         array_buffer_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
@@ -14880,12 +14941,7 @@ impl<'gc> VM<'gc> {
             false,
             true,
         );
-        // get [Symbol.species]() { return this; }
-        promise_map.insert(
-            "__get_@@sym:5".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "species.getter", "get [Symbol.species]", 0.0, false),
-        );
-        promise_map.insert("__nonenumerable___get_@@sym:5__".to_string(), Value::Boolean(true));
+        Self::insert_species_getter(&mut promise_map, ctx);
         let promise_ctor_obj = Value::VmObject(new_gc_cell_ptr(ctx, promise_map));
         if let Value::VmObject(proto_obj) = &promise_proto_obj {
             Self::insert_nonenumerable_property(&mut proto_obj.borrow_mut(ctx), "constructor", &promise_ctor_obj);
@@ -15815,6 +15871,11 @@ impl<'gc> VM<'gc> {
         let mut async_iterator_proto = IndexMap::new();
         async_iterator_proto.insert(async_iterator_key.clone(), async_iterator_method);
         async_iterator_proto.insert(format!("__nonenumerable_{}__", async_iterator_key), Value::Boolean(true));
+        if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+            && let Some(obj_proto) = object_ctor.borrow().get("prototype").cloned()
+        {
+            async_iterator_proto.insert("__proto__".to_string(), obj_proto);
+        }
         let async_iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, async_iterator_proto));
         self.globals
             .insert("__AsyncIteratorPrototype__".to_string(), async_iterator_proto_val.clone());
@@ -24651,11 +24712,6 @@ impl<'gc> VM<'gc> {
                 clamped as u64
             };
 
-            if actual_delete_count > 4_294_967_295 {
-                self.throw_range_error_object(ctx, "Invalid array length");
-                return Value::Undefined;
-            }
-
             if len.saturating_add(insert_count).saturating_sub(actual_delete_count) > max_len {
                 self.throw_type_error(ctx, "Invalid array length");
                 return Value::Undefined;
@@ -30771,11 +30827,15 @@ impl<'gc> VM<'gc> {
     }
 
     fn array_species_create(&mut self, ctx: &GcContext<'gc>, original: &Value<'gc>, length: u64) -> Option<Value<'gc>> {
-        let make_fallback = |vm: &Self| {
+        let make_fallback = |vm: &mut Self| {
+            if length > 4_294_967_295 {
+                vm.throw_range_error_object(ctx, "Invalid array length");
+                return None;
+            }
             if length == 0 {
-                vm.create_vm_array(ctx, Vec::new())
+                Some(vm.create_vm_array(ctx, Vec::new()))
             } else {
-                vm.create_vm_sparse_array(ctx, length as usize)
+                Some(vm.create_vm_sparse_array(ctx, length as usize))
             }
         };
 
@@ -30784,7 +30844,7 @@ impl<'gc> VM<'gc> {
             Value::Boolean(true)
         );
         if !is_array {
-            return Some(make_fallback(self));
+            return make_fallback(self);
         }
 
         let ctor = self.read_named_property(ctx, original, "constructor");
@@ -30792,7 +30852,7 @@ impl<'gc> VM<'gc> {
             return None;
         }
         if matches!(ctor, Value::Undefined) {
-            return Some(make_fallback(self));
+            return make_fallback(self);
         }
 
         // Spec step 7: "If Type(C) is Object" — only true spec-level Objects,
@@ -30802,6 +30862,15 @@ impl<'gc> VM<'gc> {
             Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
             _ => false,
         };
+
+        if self.is_constructor_value(&ctor)
+            && let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, &ctor)
+            && !Gc::ptr_eq(origin_global, self.global_this)
+            && let Some(intrinsic_array) = origin_global.borrow().get("Array").cloned()
+            && self.same_constructor_identity(&ctor, &intrinsic_array)
+        {
+            return make_fallback(self);
+        }
 
         let mut species_ctor = ctor.clone();
         if ctor_is_object
@@ -30814,7 +30883,7 @@ impl<'gc> VM<'gc> {
                 return None;
             }
             match species {
-                Value::Undefined | Value::Null => return Some(make_fallback(self)),
+                Value::Undefined | Value::Null => return make_fallback(self),
                 _ => species_ctor = species,
             }
         }
@@ -30907,9 +30976,51 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn register_cross_realm_fn(&mut self, ctx: &GcContext<'gc>, child: &mut VM<'gc>, value: Value<'gc>, realm_id: usize) -> Value<'gc> {
+        let offset = Self::realm_ip_offset(realm_id);
+        match value {
+            Value::VmFunction(ip, arity) => {
+                let remapped = ip + offset;
+                let handle = child.get_fn_props(ctx, ip, arity);
+                self.fn_props.insert(remapped, handle);
+                self.fn_realm.insert(remapped, realm_id);
+                Value::VmFunction(remapped, arity)
+            }
+            Value::VmClosure(ip, arity, upvals) => {
+                let remapped = ip + offset;
+                let handle = child.get_fn_props(ctx, ip, arity);
+                self.fn_props.insert(remapped, handle);
+                self.fn_realm.insert(remapped, realm_id);
+                Value::VmClosure(remapped, arity, upvals)
+            }
+            other => self.remap_cross_realm_value(ctx, other, realm_id),
+        }
+    }
+
+    fn callable_originates_in_current_realm(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> bool {
+        let (ip, arity) = match value {
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => (*ip, *arity),
+            _ => return false,
+        };
+
+        if self.fn_realm.contains_key(&ip) || !self.chunk.fn_lengths.contains_key(&ip) {
+            return false;
+        }
+
+        let props = self.get_fn_props(ctx, ip, arity);
+        match props.borrow().get("__origin_global") {
+            Some(Value::VmObject(origin)) => Gc::ptr_eq(*origin, self.global_this),
+            Some(_) => false,
+            None => true,
+        }
+    }
+
     fn remap_cross_realm_value(&mut self, ctx: &GcContext<'gc>, value: Value<'gc>, realm_id: usize) -> Value<'gc> {
         match value {
             Value::VmFunction(..) | Value::VmClosure(..) => {
+                if self.callable_originates_in_current_realm(ctx, &value) {
+                    return value;
+                }
                 if let Some(mut child) = self.child_realms.get_mut(realm_id).and_then(Option::take) {
                     let remapped = self.register_cross_realm_fn(ctx, &mut child, value, realm_id);
                     self.child_realms[realm_id] = Some(child);
@@ -30930,27 +31041,6 @@ impl<'gc> VM<'gc> {
                 Value::VmArray(arr)
             }
             _ => value,
-        }
-    }
-
-    fn register_cross_realm_fn(&mut self, ctx: &GcContext<'gc>, child: &mut VM<'gc>, value: Value<'gc>, realm_id: usize) -> Value<'gc> {
-        let offset = Self::realm_ip_offset(realm_id);
-        match value {
-            Value::VmFunction(ip, arity) => {
-                let remapped = ip + offset;
-                let handle = child.get_fn_props(ctx, ip, arity);
-                self.fn_props.insert(remapped, handle);
-                self.fn_realm.insert(remapped, realm_id);
-                Value::VmFunction(remapped, arity)
-            }
-            Value::VmClosure(ip, arity, upvals) => {
-                let remapped = ip + offset;
-                let handle = child.get_fn_props(ctx, ip, arity);
-                self.fn_props.insert(remapped, handle);
-                self.fn_realm.insert(remapped, realm_id);
-                Value::VmClosure(remapped, arity, upvals)
-            }
-            other => self.remap_cross_realm_value(ctx, other, realm_id),
         }
     }
 

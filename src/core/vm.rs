@@ -17764,7 +17764,7 @@ impl<'gc> VM<'gc> {
                             to_number(&mbl_val)
                         };
                         let int_index = if mbl_num.is_nan() { 0.0 } else { mbl_num.trunc() };
-                        if !int_index.is_finite() || int_index < 0.0 || int_index > 9007199254740991.0 {
+                        if !int_index.is_finite() || !(0.0..=9007199254740991.0).contains(&int_index) {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("RangeError"));
                             err_map.insert("message".to_string(), Value::from("Invalid SharedArrayBuffer maxByteLength"));
@@ -18277,7 +18277,7 @@ impl<'gc> VM<'gc> {
                             to_number(&mbl_val)
                         };
                         let int_index = if mbl_num.is_nan() { 0.0 } else { mbl_num.trunc() };
-                        if !int_index.is_finite() || int_index < 0.0 || int_index > 9007199254740991.0 {
+                        if !int_index.is_finite() || !(0.0..=9007199254740991.0).contains(&int_index) {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("RangeError"));
                             err_map.insert("message".to_string(), Value::from("Invalid ArrayBuffer maxByteLength"));

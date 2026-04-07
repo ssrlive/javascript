@@ -2373,7 +2373,7 @@ impl<'gc> VM<'gc> {
     pub(super) fn sync_resizable_ta_elements(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) -> Option<usize> {
         let a = arr.borrow();
         let buf = match a.props.get("__typedarray_buffer__") {
-            Some(Value::VmObject(b)) => b.clone(),
+            Some(Value::VmObject(b)) => *b,
             _ => return None,
         };
         if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {

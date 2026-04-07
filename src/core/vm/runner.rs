@@ -5006,14 +5006,12 @@ impl<'gc> VM<'gc> {
                     };
 
                     if out_of_bounds {
-                        // Only throw for numeric element access, not for property access
+                        // Out-of-bounds TypedArray: numeric index access returns
+                        // undefined per spec (IntegerIndexedElementGet / IsValidIntegerIndex).
                         if let Value::Number(n) = &index {
                             let i = *n as usize;
                             if *n >= 0.0 && *n == (i as f64) {
-                                let mut err_map = IndexMap::new();
-                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                                err_map.insert("message".to_string(), Value::from("TypedArray view is out of bounds"));
-                                self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+                                self.stack.push(Value::Undefined);
                                 return Ok(OpcodeAction::Continue);
                             }
                         }
@@ -6914,7 +6912,9 @@ impl<'gc> VM<'gc> {
             }
             Value::VmArray(arr) => {
                 let is_ta = arr.borrow().props.contains_key("__typedarray_name__");
-
+                if is_ta {
+                    self.maybe_sync_resizable_ta(ctx, arr);
+                }
                 // TypedArray [[HasProperty]]: canonical numeric index strings are
                 // never looked up on the prototype chain — only valid integer indices
                 // within bounds return true; all other canonical numeric indices

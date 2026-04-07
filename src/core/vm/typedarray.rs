@@ -2367,6 +2367,23 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// If `arr` is a TypedArray backed by a resizable buffer, sync its
+    /// elements vector so that `elements.len()` reflects the current
+    /// dynamic length after any buffer resize.  No-op for non-resizable TAs.
+    pub(super) fn maybe_sync_resizable_ta(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) {
+        let needs_sync = {
+            let b = arr.borrow();
+            b.props.contains_key("__typedarray_name__")
+                && matches!(
+                    b.props.get("__typedarray_buffer__"),
+                    Some(Value::VmObject(buf)) if matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                )
+        };
+        if needs_sync {
+            self.sync_resizable_ta_elements(ctx, arr);
+        }
+    }
+
     /// For resizable-buffer-backed TypedArrays, sync the elements vector
     /// to reflect the current buffer state (dynamic length after resize).
     /// Returns the new length, or None if not a resizable TA (caller uses elements.len()).

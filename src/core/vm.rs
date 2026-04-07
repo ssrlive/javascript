@@ -8505,6 +8505,7 @@ impl<'gc> VM<'gc> {
                     && arr.borrow().props.contains_key("__typedarray_name__")
                     && let Some(numeric_index) = Self::canonical_numeric_index_string(&key)
                 {
+                    self.maybe_sync_resizable_ta(ctx, arr);
                     let arr_len = arr.borrow().elements.len();
                     let is_valid = numeric_index >= 0.0
                         && numeric_index.fract() == 0.0
@@ -12306,6 +12307,7 @@ impl<'gc> VM<'gc> {
                 && proto_arr.borrow().props.contains_key("__typedarray_name__")
                 && let Some(numeric_index) = Self::canonical_numeric_index_string(key)
             {
+                self.maybe_sync_resizable_ta(ctx, proto_arr);
                 let proto_borrow = proto_arr.borrow();
                 let proto_len = proto_borrow.elements.len();
                 let is_valid = numeric_index >= 0.0
@@ -12448,6 +12450,7 @@ impl<'gc> VM<'gc> {
             // TypedArray [[Set]] internal method per spec 10.4.5.5:
             // If key is a canonical numeric index, check receiver identity.
             if is_ta && let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                self.maybe_sync_resizable_ta(ctx, arr);
                 let is_valid_integer_index = numeric_index >= 0.0
                     && numeric_index.fract() == 0.0
                     && !numeric_index.is_nan()
@@ -12590,6 +12593,7 @@ impl<'gc> VM<'gc> {
                                 && ta_arr.borrow().props.contains_key("__typedarray_name__")
                             {
                                 if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
+                                    self.maybe_sync_resizable_ta(ctx, ta_arr);
                                     let ta_len = ta_arr.borrow().elements.len();
                                     let ta_is_valid = numeric_index >= 0.0
                                         && numeric_index.fract() == 0.0
@@ -13713,6 +13717,7 @@ impl<'gc> VM<'gc> {
                     current = borrow.get("__proto__").cloned();
                 }
                 Value::VmArray(arr) => {
+                    self.maybe_sync_resizable_ta(ctx, &arr);
                     let borrow = arr.borrow();
                     let realm_id = match borrow.props.get("__realm_id__") {
                         Some(Value::Number(n)) => Some(*n as usize),

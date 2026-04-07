@@ -984,6 +984,9 @@ pub struct VM<'gc> {
     deferred_module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
     /// Parsed/compiled module records, including modules that are linked but not yet evaluated.
     module_records: std::collections::HashMap<String, StoredModuleRecord>,
+    /// Nesting depth for module-request evaluation walks so suspended TLA modules
+    /// are only resumed after the outermost dependency walk finishes.
+    module_request_depth: usize,
     /// Cached intrinsic %Promise% constructor used by dynamic import.
     intrinsic_promise_ctor: Value<'gc>,
     /// When true, `run_opcode_await` at module top level exits early to support
@@ -1179,6 +1182,7 @@ impl<'gc> VM<'gc> {
             module_ns_objects: std::collections::HashMap::new(),
             deferred_module_ns_objects: std::collections::HashMap::new(),
             module_records: std::collections::HashMap::new(),
+            module_request_depth: 0,
             intrinsic_promise_ctor: Value::Undefined,
             suspend_on_module_await: false,
             module_await_suspended: false,
@@ -1997,6 +2001,21 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn module_has_async_dependency(
+        &self,
+        entry_path: &std::path::Path,
+        requests: &[crate::core::ModuleRequest],
+    ) -> bool {
+        requests.iter().any(|request| {
+            let dep_key = crate::core::resolve_module_path(&request.specifier, entry_path)
+                .to_string_lossy()
+                .to_string();
+            self.module_records
+                .get(&dep_key)
+                .is_some_and(|record| record.status == ModuleStatus::EvaluatingAsync)
+        })
+    }
+
     fn load_module_graph(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -2251,52 +2270,77 @@ impl<'gc> VM<'gc> {
     }
 
     fn resume_suspended_module_states(&mut self, ctx: &GcContext<'gc>) {
-        let suspended = std::mem::take(&mut self.suspended_module_states);
-        for state in suspended {
-            let saved_ip = self.ip;
-            let saved_module_locals = std::mem::replace(&mut self.module_locals, state.module_locals);
-            let saved_script_path = self.script_path.take();
-            let saved_stack = std::mem::replace(&mut self.stack, state.stack);
-            let saved_top_level_cells = std::mem::replace(&mut self.top_level_cells, state.top_level_cells);
-            let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, state.loaded_module_vars);
-            let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, state.const_import_bindings);
-            let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, state.self_namespace_imports);
-            let saved_self_deferred_namespace_imports = std::mem::replace(
-                &mut self.chunk.self_deferred_namespace_imports,
-                state.self_deferred_namespace_imports,
-            );
-            let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, state.self_import_aliases);
-            let saved_live_import_bindings = std::mem::replace(&mut self.chunk.live_import_bindings, state.live_import_bindings);
-            let saved_main_module_ip_start = self.main_module_ip_start.take();
-            let saved_const_globals = std::mem::replace(&mut self.const_globals, state.const_globals);
-            let saved_runtime_state = self.take_runtime_execution_state();
+        while !self.suspended_module_states.is_empty() {
+            let suspended = std::mem::take(&mut self.suspended_module_states);
+            for state in suspended {
+                let saved_ip = self.ip;
+                let saved_module_locals = std::mem::replace(&mut self.module_locals, state.module_locals);
+                let saved_script_path = self.script_path.take();
+                let saved_stack = std::mem::replace(&mut self.stack, state.stack);
+                let saved_top_level_cells = std::mem::replace(&mut self.top_level_cells, state.top_level_cells);
+                let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, state.loaded_module_vars);
+                let saved_const_import_bindings =
+                    std::mem::replace(&mut self.chunk.const_import_bindings, state.const_import_bindings);
+                let saved_self_namespace_imports =
+                    std::mem::replace(&mut self.chunk.self_namespace_imports, state.self_namespace_imports);
+                let saved_self_deferred_namespace_imports = std::mem::replace(
+                    &mut self.chunk.self_deferred_namespace_imports,
+                    state.self_deferred_namespace_imports,
+                );
+                let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, state.self_import_aliases);
+                let saved_live_import_bindings = std::mem::replace(&mut self.chunk.live_import_bindings, state.live_import_bindings);
+                let saved_main_module_ip_start = self.main_module_ip_start.take();
+                let saved_const_globals = std::mem::replace(&mut self.const_globals, state.const_globals);
+                let saved_runtime_state = self.take_runtime_execution_state();
 
-            self.ip = state.ip;
-            self.set_source_context(&state.dep_source, Some(state.resolved_path.as_path()));
+                self.ip = state.ip;
+                self.set_source_context(&state.dep_source, Some(state.resolved_path.as_path()));
 
-            let resume_result = self.run(ctx);
+                self.suspend_on_module_await = true;
+                let resume_result = self.run(ctx);
+                let was_suspended = self.module_await_suspended;
+                self.module_await_suspended = false;
 
-            if let Err(err) = resume_result {
-                let error_value = self.vm_value_from_error(ctx, &err);
-                self.record_module_load_error(&state.key, error_value);
-            } else if let Some(record) = self.module_records.get(&state.key).cloned() {
-                self.finalize_dependency_module_record(ctx, &record);
+                if was_suspended {
+                    self.suspended_module_states.push(SuspendedModuleState {
+                        ip: self.ip,
+                        module_locals: self.module_locals.clone(),
+                        stack: self.stack.clone(),
+                        top_level_cells: self.top_level_cells.clone(),
+                        const_globals: self.const_globals.clone(),
+                        loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+                        const_import_bindings: self.chunk.const_import_bindings.clone(),
+                        self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+                        self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
+                        self_import_aliases: self.chunk.self_import_aliases.clone(),
+                        live_import_bindings: self.chunk.live_import_bindings.clone(),
+                        dep_source: state.dep_source.clone(),
+                        resolved_path: state.resolved_path.clone(),
+                        key: state.key.clone(),
+                    });
+                    self.set_module_record_status(&state.key, ModuleStatus::EvaluatingAsync);
+                } else if let Err(err) = resume_result {
+                    let error_value = self.vm_value_from_error(ctx, &err);
+                    self.record_module_load_error(&state.key, error_value);
+                } else if let Some(record) = self.module_records.get(&state.key).cloned() {
+                    self.finalize_dependency_module_record(ctx, &record);
+                }
+
+                self.ip = saved_ip;
+                self.module_locals = saved_module_locals;
+                self.script_path = saved_script_path;
+                self.stack = saved_stack;
+                self.top_level_cells = saved_top_level_cells;
+                self.chunk.loaded_module_vars = saved_loaded_module_vars;
+                self.chunk.const_import_bindings = saved_const_import_bindings;
+                self.chunk.self_namespace_imports = saved_self_namespace_imports;
+                self.chunk.self_deferred_namespace_imports = saved_self_deferred_namespace_imports;
+                self.chunk.self_import_aliases = saved_self_import_aliases;
+                self.chunk.live_import_bindings = saved_live_import_bindings;
+                self.main_module_ip_start = saved_main_module_ip_start;
+                self.const_globals = saved_const_globals;
+                self.restore_runtime_execution_state(saved_runtime_state);
             }
-
-            self.ip = saved_ip;
-            self.module_locals = saved_module_locals;
-            self.script_path = saved_script_path;
-            self.stack = saved_stack;
-            self.top_level_cells = saved_top_level_cells;
-            self.chunk.loaded_module_vars = saved_loaded_module_vars;
-            self.chunk.const_import_bindings = saved_const_import_bindings;
-            self.chunk.self_namespace_imports = saved_self_namespace_imports;
-            self.chunk.self_deferred_namespace_imports = saved_self_deferred_namespace_imports;
-            self.chunk.self_import_aliases = saved_self_import_aliases;
-            self.chunk.live_import_bindings = saved_live_import_bindings;
-            self.main_module_ip_start = saved_main_module_ip_start;
-            self.const_globals = saved_const_globals;
-            self.restore_runtime_execution_state(saved_runtime_state);
         }
     }
 
@@ -2349,6 +2393,25 @@ impl<'gc> VM<'gc> {
         self.set_source_context(&record.source, Some(record.resolved_path.as_path()));
         self.inject_loaded_module_bindings(ctx);
 
+        if self.module_has_async_dependency(&record.resolved_path, &record.requests) {
+            self.suspended_module_states.push(SuspendedModuleState {
+                ip: self.ip,
+                module_locals: self.module_locals.clone(),
+                stack: self.stack.clone(),
+                top_level_cells: self.top_level_cells.clone(),
+                const_globals: self.const_globals.clone(),
+                loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+                const_import_bindings: self.chunk.const_import_bindings.clone(),
+                self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+                self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
+                self_import_aliases: self.chunk.self_import_aliases.clone(),
+                live_import_bindings: self.chunk.live_import_bindings.clone(),
+                dep_source: record.source.clone(),
+                resolved_path: record.resolved_path.clone(),
+                key: module_key.to_string(),
+            });
+            self.set_module_record_status(module_key, ModuleStatus::EvaluatingAsync);
+        } else {
         self.suspend_on_module_await = true;
         let dep_result = self.run(ctx);
         let was_suspended = self.module_await_suspended;
@@ -2378,6 +2441,7 @@ impl<'gc> VM<'gc> {
         } else {
             self.finalize_dependency_module_record(ctx, &record);
         }
+        }
 
         self.ip = saved_ip;
         self.module_locals = saved_module_locals;
@@ -2394,7 +2458,6 @@ impl<'gc> VM<'gc> {
         self.const_globals = saved_const_globals;
         self.restore_runtime_execution_state(saved_runtime_state);
 
-        self.resume_suspended_module_states(ctx);
         if let Some(error) = self.module_load_errors.get(module_key).cloned() {
             self.pending_throw = Some(error);
             return false;
@@ -2408,33 +2471,42 @@ impl<'gc> VM<'gc> {
         entry_path: &std::path::Path,
         requests: &[crate::core::ModuleRequest],
     ) {
+        self.module_request_depth += 1;
+
+        let mut evaluation_list = Vec::new();
+        let mut scheduled = std::collections::HashSet::new();
         for request in requests {
-            if request.phase != crate::core::ModuleRequestPhase::Evaluation {
-                continue;
-            }
             let key = crate::core::resolve_module_path(&request.specifier, entry_path)
                 .to_string_lossy()
                 .to_string();
-            if !self.ensure_module_evaluated(ctx, &key) {
-                return;
+            match request.phase {
+                crate::core::ModuleRequestPhase::Evaluation => {
+                    if scheduled.insert(key.clone()) {
+                        evaluation_list.push(key);
+                    }
+                }
+                crate::core::ModuleRequestPhase::Defer => {
+                    let mut gather_seen = std::collections::HashSet::new();
+                    let mut async_deps = Vec::new();
+                    self.collect_async_transitive_dependencies(&key, &mut gather_seen, &mut async_deps);
+                    for module_key in async_deps {
+                        if scheduled.insert(module_key.clone()) {
+                            evaluation_list.push(module_key);
+                        }
+                    }
+                }
             }
         }
 
-        let mut seen = std::collections::HashSet::new();
-        let mut async_deps = Vec::new();
-        for request in requests {
-            if request.phase != crate::core::ModuleRequestPhase::Defer {
-                continue;
-            }
-            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
-                .to_string_lossy()
-                .to_string();
-            self.collect_async_transitive_dependencies(&key, &mut seen, &mut async_deps);
-        }
-        for module_key in async_deps {
+        for module_key in evaluation_list {
             if !self.ensure_module_evaluated(ctx, &module_key) {
-                return;
+                break;
             }
+        }
+
+        self.module_request_depth -= 1;
+        if self.module_request_depth == 0 && self.pending_throw.is_none() {
+            self.resume_suspended_module_states(ctx);
         }
     }
 

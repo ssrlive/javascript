@@ -4544,6 +4544,10 @@ impl<'gc> VM<'gc> {
                     ));
                     return Value::Undefined;
                 }
+                // If detached, return +0
+                if matches!(b.get("__detached__"), Some(Value::Boolean(true))) {
+                    return Value::Number(0.0);
+                }
                 if matches!(b.get("__resizable__"), Some(Value::Boolean(true))) {
                     let max = b.get("__maxByteLength__").map(to_number).unwrap_or(0.0);
                     Value::Number(max)
@@ -4579,30 +4583,49 @@ impl<'gc> VM<'gc> {
                         Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.resize called on incompatible receiver"));
                     return Value::Undefined;
                 };
-                let is_ab = matches!(buf_obj.borrow().get("__type__"),
-                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
-                if !is_ab {
-                    self.pending_throw =
-                        Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.resize called on incompatible receiver"));
-                    return Value::Undefined;
+                {
+                    let b = buf_obj.borrow();
+                    let is_ab = matches!(b.get("__type__"),
+                        Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
+                    if !is_ab {
+                        drop(b);
+                        self.pending_throw =
+                            Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.resize called on incompatible receiver"));
+                        return Value::Undefined;
+                    }
+                    let is_resizable = matches!(b.get("__resizable__"), Some(Value::Boolean(true)));
+                    if !is_resizable {
+                        drop(b);
+                        self.pending_throw = Some(self.make_type_error_object(ctx, "ArrayBuffer is not resizable"));
+                        return Value::Undefined;
+                    }
                 }
 
-                let new_len_f = match args.first() {
-                    Some(v) => to_number(v),
-                    _ => 0.0,
+                // ToIntegerOrInfinity(newLength) - must coerce before checking bounds
+                let raw_arg = args.first().cloned().unwrap_or(Value::Number(0.0));
+                let new_len_f = if matches!(raw_arg, Value::VmObject(_) | Value::VmArray(_)) {
+                    let coerced = self.try_to_primitive(ctx, &raw_arg, "number");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    to_number(&coerced)
+                } else {
+                    to_number(&raw_arg)
                 };
+                let new_len_int = if new_len_f.is_nan() { 0.0 } else { new_len_f.trunc() };
+                if !new_len_int.is_finite() || new_len_int < 0.0 {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                    err_map.insert("message".to_string(), Value::from("Invalid length for ArrayBuffer.resize"));
+                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                }
 
                 let mut b = buf_obj.borrow_mut(ctx);
-                let is_detached = matches!(b.get("__detached__"), Some(Value::Boolean(true)));
-                if is_detached {
+                // Re-check detached after coercion (coercion may have detached)
+                if matches!(b.get("__detached__"), Some(Value::Boolean(true))) {
                     drop(b);
                     self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot resize a detached ArrayBuffer"));
-                    return Value::Undefined;
-                }
-                let is_resizable = matches!(b.get("__resizable__"), Some(Value::Boolean(true)));
-                if !is_resizable {
-                    drop(b);
-                    self.pending_throw = Some(self.make_type_error_object(ctx, "ArrayBuffer is not resizable"));
                     return Value::Undefined;
                 }
                 let max_byte_len = b
@@ -4610,7 +4633,8 @@ impl<'gc> VM<'gc> {
                     .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
                     .unwrap_or(0);
 
-                if new_len_f.is_nan() || new_len_f < 0.0 || !new_len_f.is_finite() || (new_len_f as usize) > max_byte_len {
+                let new_len = new_len_int as usize;
+                if new_len > max_byte_len {
                     drop(b);
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("RangeError"));
@@ -4618,7 +4642,6 @@ impl<'gc> VM<'gc> {
                     self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
                     return Value::Undefined;
                 }
-                let new_len = new_len_f as usize;
                 b.insert("byteLength".to_string(), Value::Number(new_len as f64));
                 if let Some(Value::VmArray(bytes)) = b.get("__buffer_bytes__") {
                     let mut bytes_mut = bytes.borrow_mut(ctx);
@@ -14962,7 +14985,6 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getByteLength", "get byteLength", 0.0, false),
         );
         array_buffer_proto.insert("__nonenumerable_byteLength__".to_string(), Value::Boolean(true));
-        array_buffer_proto.insert("__nonconfigurable_byteLength__".to_string(), Value::Boolean(false));
         array_buffer_proto.insert(
             "__get_maxByteLength".to_string(),
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getMaxByteLength", "get maxByteLength", 0.0, false),
@@ -17718,26 +17740,59 @@ impl<'gc> VM<'gc> {
                     Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as usize,
                     _ => 0,
                 };
-                let max_len = match args.get(1) {
-                    Some(Value::VmObject(opts)) => opts
-                        .borrow()
-                        .get("maxByteLength")
-                        .and_then(|v| {
-                            if let Value::Number(n) = v {
-                                Some((*n).max(len as f64) as usize)
-                            } else {
-                                None
+                // GetArrayBufferMaxByteLengthOption(options)
+                let opts_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let is_opts_object = matches!(&opts_arg, Value::VmObject(_) | Value::VmArray(_));
+                let mut growable = false;
+                let mut max_byte_length = len;
+
+                if is_opts_object {
+                    let mbl_val = self.read_named_property(ctx, &opts_arg, "maxByteLength");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if !matches!(mbl_val, Value::Undefined) {
+                        let mbl_num = if matches!(mbl_val, Value::VmObject(_) | Value::VmArray(_)) {
+                            let coerced = self.try_to_primitive(ctx, &mbl_val, "number");
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
                             }
-                        })
-                        .unwrap_or(len),
-                    _ => len,
-                };
+                            to_number(&coerced)
+                        } else {
+                            to_number(&mbl_val)
+                        };
+                        let int_index = if mbl_num.is_nan() { 0.0 } else { mbl_num.trunc() };
+                        if !int_index.is_finite() || int_index < 0.0 || int_index > 9007199254740991.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Invalid SharedArrayBuffer maxByteLength"));
+                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+                        let mbl = int_index as usize;
+                        if mbl < len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::from("SharedArrayBuffer maxByteLength must be >= byteLength"),
+                            );
+                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+                        growable = true;
+                        max_byte_length = mbl;
+                    }
+                }
+
                 let bytes = vec![Value::Number(0.0); len];
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
                 map.insert("byteLength".to_string(), Value::Number(len as f64));
-                map.insert("maxByteLength".to_string(), Value::Number(max_len as f64));
-                map.insert("grow".to_string(), Value::VmNativeFunction(BUILTIN_SHAREDARRAYBUFFER_GROW));
+                if growable {
+                    map.insert("__growable__".to_string(), Value::Boolean(true));
+                    map.insert("__maxByteLength__".to_string(), Value::Number(max_byte_length as f64));
+                }
                 map.insert(
                     "__buffer_bytes__".to_string(),
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
@@ -18193,6 +18248,58 @@ impl<'gc> VM<'gc> {
                     int_index as usize
                 };
 
+                // GetArrayBufferMaxByteLengthOption(options) — must happen before OrdinaryCreateFromConstructor
+                const VM_MAX_ARRAYBUFFER_LENGTH: usize = 16 * 1024 * 1024;
+                let opts_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let is_opts_object = matches!(&opts_arg, Value::VmObject(_) | Value::VmArray(_));
+                let mut resizable = false;
+                let mut max_byte_length = len;
+
+                if is_opts_object {
+                    let mbl_val = self.read_named_property(ctx, &opts_arg, "maxByteLength");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if !matches!(mbl_val, Value::Undefined) {
+                        // ToIndex(maxByteLength)
+                        let mbl_num = if mbl_val.is_symbol_value() {
+                            self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number"));
+                            return Value::Undefined;
+                        } else if matches!(mbl_val, Value::VmObject(_) | Value::VmArray(_)) {
+                            let coerced = self.try_to_primitive(ctx, &mbl_val, "number");
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            to_number(&coerced)
+                        } else {
+                            to_number(&mbl_val)
+                        };
+                        let int_index = if mbl_num.is_nan() { 0.0 } else { mbl_num.trunc() };
+                        if !int_index.is_finite() || int_index < 0.0 || int_index > 9007199254740991.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Invalid ArrayBuffer maxByteLength"));
+                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+                        let mbl = int_index as usize;
+                        resizable = true;
+                        max_byte_length = mbl;
+                    }
+                }
+
+                // AllocateArrayBuffer: if resizable, byteLength > maxByteLength → RangeError (before OrdinaryCreateFromConstructor)
+                if resizable && len > max_byte_length {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::from("ArrayBuffer byteLength must be <= maxByteLength"),
+                    );
+                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                }
+
                 let selected_proto = {
                     let proto_candidate = if let Value::VmObject(nt_obj) = &new_target {
                         let getter = nt_obj.borrow().get("__get_prototype").cloned();
@@ -18228,36 +18335,23 @@ impl<'gc> VM<'gc> {
                     }
                 };
 
-                // Safety cap to avoid allocator aborts on intentionally huge Test262 lengths.
-                const VM_MAX_ARRAYBUFFER_LENGTH: usize = 16 * 1024 * 1024;
-                if len > VM_MAX_ARRAYBUFFER_LENGTH {
+                // CreateByteDataBlock: safety cap after OrdinaryCreateFromConstructor (spec step 5)
+                if len > VM_MAX_ARRAYBUFFER_LENGTH || (resizable && max_byte_length > VM_MAX_ARRAYBUFFER_LENGTH) {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                    err_map.insert("message".to_string(), Value::from("Invalid ArrayBuffer length"));
+                    err_map.insert("message".to_string(), Value::from("ArrayBuffer allocation failed"));
                     self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
                     return Value::Undefined;
                 }
 
-                let max_len = match args.get(1) {
-                    Some(Value::VmObject(opts)) => opts
-                        .borrow()
-                        .get("maxByteLength")
-                        .and_then(|v| {
-                            if let Value::Number(n) = v {
-                                Some((*n).max(len as f64) as usize)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(len),
-                    _ => len,
-                };
                 let bytes = vec![Value::Number(0.0); len];
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
                 map.insert("byteLength".to_string(), Value::Number(len as f64));
-                map.insert("maxByteLength".to_string(), Value::Number(max_len as f64));
-                map.insert("resize".to_string(), Value::VmNativeFunction(BUILTIN_ARRAYBUFFER_RESIZE));
+                if resizable {
+                    map.insert("__resizable__".to_string(), Value::Boolean(true));
+                    map.insert("__maxByteLength__".to_string(), Value::Number(max_byte_length as f64));
+                }
                 map.insert(
                     "__buffer_bytes__".to_string(),
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
@@ -30522,6 +30616,18 @@ impl<'gc> VM<'gc> {
                     return self.construct_dataview(ctx, target, args, new_target);
                 }
 
+                // ArrayBuffer: spec requires maxByteLength validation BEFORE OrdinaryCreateFromConstructor
+                if id == BUILTIN_CTOR_ARRAYBUFFER {
+                    let ctor_new_target = new_target.cloned().unwrap_or(target.clone());
+                    self.new_target_stack.push(ctor_new_target);
+                    let out = self.call_builtin(ctx, id, args);
+                    self.new_target_stack.pop();
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
+                    return Ok(out);
+                }
+
                 // TypedArray: spec requires ToIndex(firstArgument) BEFORE AllocateTypedArray
                 // (which calls GetPrototypeFromConstructor) when firstArgument is not an Object.
                 let is_ta_ctor = matches!(
@@ -30563,16 +30669,7 @@ impl<'gc> VM<'gc> {
                     self.get_prototype_from_constructor_with_intrinsic(ctx, new_target.unwrap_or(target), intrinsic_default_proto)?
                 };
 
-                let result = if id == BUILTIN_CTOR_ARRAYBUFFER {
-                    let ctor_new_target = new_target.cloned().unwrap_or(target.clone());
-                    self.new_target_stack.push(ctor_new_target);
-                    let out = self.call_builtin(ctx, id, args);
-                    self.new_target_stack.pop();
-                    if let Some(thrown) = self.pending_throw.take() {
-                        return Err(self.vm_error_to_js_error(ctx, &thrown));
-                    }
-                    out
-                } else if id == BUILTIN_CTOR_DATE {
+                let result = if id == BUILTIN_CTOR_DATE {
                     // Date constructor: compute ms and create Date object with correct proto
                     let ms = self.date_construct_ms_with_coercion(ctx, args).unwrap_or(f64::NAN);
                     if let Some(thrown) = self.pending_throw.take() {

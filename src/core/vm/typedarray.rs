@@ -376,6 +376,9 @@ impl<'gc> VM<'gc> {
                     // TypedArray source path
                     let Value::VmArray(src_arr) = &source else { unreachable!() };
 
+                    // Sync source if backed by resizable buffer
+                    self.sync_resizable_ta_elements(ctx, src_arr);
+
                     // Check if source buffer is detached (step 12)
                     {
                         let s = src_arr.borrow();
@@ -387,6 +390,18 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     }
+
+                    // Check if source is out of bounds (resizable buffer)
+                    if self.is_typed_array_oob(src_arr) {
+                        self.throw_type_error(
+                            ctx,
+                            "Cannot perform %TypedArray%.prototype.set - source TypedArray is out of bounds",
+                        );
+                        return Value::Undefined;
+                    }
+
+                    // Re-sync target too (source and target may share the same buffer)
+                    self.sync_resizable_ta_elements(ctx, target_arr);
 
                     let (src_name, src_bpe, src_len, src_byte_offset) = {
                         let s = src_arr.borrow();
@@ -444,6 +459,10 @@ impl<'gc> VM<'gc> {
                         let src_base = src_byte_offset + i * src_bpe;
                         let val = Self::decode_typed_element(&src_bytes, src_base, src_bpe, &src_name);
                         let target_idx = offset + i;
+                        // Bounds check after potential sync
+                        if target_idx >= target_arr.borrow().elements.len() {
+                            break;
+                        }
                         if target_is_bigint {
                             let bi = match &val {
                                 Value::BigInt(b) => (**b).clone(),
@@ -531,7 +550,10 @@ impl<'gc> VM<'gc> {
                         _ => source.clone(),
                     };
 
-                    // Get length from source
+                    // Save original target length BEFORE source.length getter
+                    let original_target_len = target_arr.borrow().elements.len();
+
+                    // Get length from source (may trigger resize via Proxy getter)
                     let len_val = self.read_named_property(ctx, &src_obj, "length");
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
@@ -545,18 +567,29 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
 
-                    let target_len = target_arr.borrow().elements.len();
-                    if offset + src_len > target_len {
+                    // Re-validate target after source.length getter (may have resized buffer)
+                    if Self::is_ta_resizable(target_arr) {
+                        self.sync_resizable_ta_elements(ctx, target_arr);
+                        if self.is_typed_array_oob(target_arr) {
+                            return Value::Undefined;
+                        }
+                    }
+
+                    // Check using ORIGINAL target length per spec
+                    if offset + src_len > original_target_len {
                         self.throw_range_error_object(ctx, "offset is out of bounds");
                         return Value::Undefined;
                     }
 
                     let target_is_bigint = is_bigint_typed_array(&ta_name);
                     for i in 0..src_len {
+                        // Step b: Get value from source (may resize via Proxy)
                         let v = self.read_named_property(ctx, &src_obj, &i.to_string());
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
+
+                        // Step d: TypedArraySetElement — coerce then check bounds
                         if target_is_bigint {
                             let bi = match self.value_to_bigint(ctx, &v) {
                                 Some(b) => b,
@@ -565,12 +598,19 @@ impl<'gc> VM<'gc> {
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
-                            let coerced = coerce_bigint_for_ta(&bi, &ta_name);
-                            {
-                                let mut t = target_arr.borrow_mut(ctx);
-                                t.elements[offset + i] = Value::BigInt(Box::new(coerced));
+                            // After coercion, sync and check IsValidIntegerIndex
+                            if Self::is_ta_resizable(target_arr) {
+                                self.sync_resizable_ta_elements(ctx, target_arr);
                             }
-                            self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, 0.0, &ta_name);
+                            let cur_len = target_arr.borrow().elements.len();
+                            if offset + i < cur_len {
+                                let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                                {
+                                    let mut t = target_arr.borrow_mut(ctx);
+                                    t.elements[offset + i] = Value::BigInt(Box::new(coerced));
+                                }
+                                self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, 0.0, &ta_name);
+                            }
                         } else {
                             let num = match self.extract_number_with_coercion(ctx, &v) {
                                 Some(n) => n,
@@ -579,12 +619,19 @@ impl<'gc> VM<'gc> {
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
-                            let converted = Self::typed_array_coerce_value(num, &ta_name);
-                            {
-                                let mut t = target_arr.borrow_mut(ctx);
-                                t.elements[offset + i] = Value::Number(converted);
+                            // After coercion, sync and check IsValidIntegerIndex
+                            if Self::is_ta_resizable(target_arr) {
+                                self.sync_resizable_ta_elements(ctx, target_arr);
                             }
-                            self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, num, &ta_name);
+                            let cur_len = target_arr.borrow().elements.len();
+                            if offset + i < cur_len {
+                                let converted = Self::typed_array_coerce_value(num, &ta_name);
+                                {
+                                    let mut t = target_arr.borrow_mut(ctx);
+                                    t.elements[offset + i] = Value::Number(converted);
+                                }
+                                self.sync_ta_element_to_buffer(ctx, target_arr, offset + i, num, &ta_name);
+                            }
                         }
                     }
                 }
@@ -847,18 +894,56 @@ impl<'gc> VM<'gc> {
                             self.throw_type_error(ctx, "TypedArray is too small");
                             return Value::Undefined;
                         }
+                        // Per spec, each Set call coerces the value, which may resize the buffer.
+                        // After coercion, if the index is out of bounds, the Set is a no-op.
+                        let ta_name = if let Value::VmArray(a) = &ta {
+                            match a.borrow().props.get("__typedarray_name__") {
+                                Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                                _ => "Uint8Array".to_string(),
+                            }
+                        } else {
+                            "Uint8Array".to_string()
+                        };
+                        let is_bigint = is_bigint_typed_array(&ta_name);
                         for (i, v) in args.iter().enumerate() {
                             if v.is_symbol_value() {
                                 self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                                 return Value::Undefined;
                             }
-                            let key = i.to_string();
-                            if let Err(e) = self.assign_named_property(ctx, &ta, &key, v, None) {
-                                self.set_pending_throw_from_error(&e);
-                                return Value::Undefined;
-                            }
-                            if self.pending_throw.is_some() {
-                                return Value::Undefined;
+                            if is_bigint {
+                                let bi = match self.value_to_bigint(ctx, v) {
+                                    Some(b) => b,
+                                    None => return Value::Undefined,
+                                };
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                // After coercion, sync and check bounds
+                                if let Value::VmArray(a) = &ta {
+                                    self.sync_resizable_ta_elements(ctx, a);
+                                    if i < a.borrow().elements.len() {
+                                        let coerced = coerce_bigint_for_ta(&bi, &ta_name);
+                                        a.borrow_mut(ctx).elements[i] = Value::BigInt(Box::new(coerced));
+                                        self.sync_ta_element_to_buffer(ctx, a, i, 0.0, &ta_name);
+                                    }
+                                }
+                            } else {
+                                let num = match self.extract_number_with_coercion(ctx, v) {
+                                    Some(n) => n,
+                                    None => return Value::Undefined,
+                                };
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                // After coercion, sync and check bounds
+                                if let Value::VmArray(a) = &ta {
+                                    self.sync_resizable_ta_elements(ctx, a);
+                                    if i < a.borrow().elements.len() {
+                                        let converted = Self::typed_array_coerce_value(num, &ta_name);
+                                        a.borrow_mut(ctx).elements[i] = Value::Number(converted);
+                                        self.sync_ta_element_to_buffer(ctx, a, i, num, &ta_name);
+                                    }
+                                }
                             }
                         }
                         ta
@@ -975,7 +1060,11 @@ impl<'gc> VM<'gc> {
                     "typedarray.reduceRight" => BUILTIN_ARRAY_REDUCERIGHT,
                     _ => unreachable!(),
                 };
-                self.call_method_builtin(ctx, builtin_id, this_val, args)
+                let old_ta_method = self.in_typed_array_method;
+                self.in_typed_array_method = true;
+                let result = self.call_method_builtin(ctx, builtin_id, this_val, args);
+                self.in_typed_array_method = old_ta_method;
+                result
             }
             "typedarray.fill" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
@@ -1446,7 +1535,10 @@ impl<'gc> VM<'gc> {
                 if let Value::VmArray(arr) = this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
+                let old_ta_method = self.in_typed_array_method;
+                self.in_typed_array_method = true;
                 let filtered = self.call_method_builtin(ctx, BUILTIN_ARRAY_FILTER, this_val, args);
+                self.in_typed_array_method = old_ta_method;
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
@@ -1843,6 +1935,118 @@ impl<'gc> VM<'gc> {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 self.call_host_fn(ctx, "array.toLocaleString", Some(this_val), args)
+            }
+            "typedarray.with" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined).clone();
+                if !self.validate_typed_array(ctx, &this_val, "with") {
+                    return Value::Undefined;
+                }
+                let Value::VmArray(arr) = &this_val else {
+                    return Value::Undefined;
+                };
+                self.sync_resizable_ta_elements(ctx, arr);
+                let original_len = arr.borrow().elements.len();
+
+                // ToIntegerOrInfinity(index)
+                let index_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let relative_index = match self.extract_number_with_coercion(ctx, &index_arg) {
+                    Some(n) if n.is_nan() => 0i64,
+                    Some(n) => n as i64,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let actual_index = if relative_index < 0 {
+                    original_len as i64 + relative_index
+                } else {
+                    relative_index
+                };
+
+                // Coerce value (may trigger resize)
+                let value_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let ta_name = {
+                    match arr.borrow().props.get("__typedarray_name__") {
+                        Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                        _ => "Uint8Array".to_string(),
+                    }
+                };
+                let is_bigint = is_bigint_typed_array(&ta_name);
+                let numeric_value = if is_bigint {
+                    let bi = match self.value_to_bigint(ctx, &value_arg) {
+                        Some(b) => b,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    Value::BigInt(Box::new(coerce_bigint_for_ta(&bi, &ta_name)))
+                } else {
+                    let num = match self.extract_number_with_coercion(ctx, &value_arg) {
+                        Some(n) => n,
+                        None => return Value::Undefined,
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    Value::Number(Self::typed_array_coerce_value(num, &ta_name))
+                };
+
+                // Re-validate after coercion (buffer may have been detached/resized)
+                if !self.validate_typed_array(ctx, &this_val, "with") {
+                    return Value::Undefined;
+                }
+                // Re-sync and get current length for index validation
+                self.sync_resizable_ta_elements(ctx, arr);
+                let current_len = arr.borrow().elements.len();
+
+                // Validate index against current length
+                if actual_index < 0 || actual_index as usize >= current_len {
+                    self.throw_range_error_object(ctx, "Invalid index");
+                    return Value::Undefined;
+                }
+
+                // Create new TypedArray of same type with ORIGINAL length
+                let result = match self.typed_array_species_create(ctx, &this_val, &[Value::Number(original_len as f64)]) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let Value::VmArray(res_arr) = &result else {
+                    return result;
+                };
+
+                // Copy elements from source, replacing at actual_index
+                let res_ta_name = match res_arr.borrow().props.get("__typedarray_name__") {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    _ => ta_name.clone(),
+                };
+                for k in 0..original_len {
+                    let from_value = if k == actual_index as usize {
+                        numeric_value.clone()
+                    } else {
+                        self.ta_get_element(ctx, arr, k)
+                    };
+                    if k < res_arr.borrow().elements.len() {
+                        if is_bigint_typed_array(&res_ta_name) {
+                            let bi = match &from_value {
+                                Value::BigInt(b) => (**b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
+                            res_arr.borrow_mut(ctx).elements[k] = Value::BigInt(Box::new(coerced));
+                            self.sync_ta_element_to_buffer(ctx, res_arr, k, 0.0, &res_ta_name);
+                        } else {
+                            let num = to_number(&from_value);
+                            let coerced = Self::typed_array_coerce_value(num, &res_ta_name);
+                            res_arr.borrow_mut(ctx).elements[k] = Value::Number(coerced);
+                            self.sync_ta_element_to_buffer(ctx, res_arr, k, num, &res_ta_name);
+                        }
+                    }
+                }
+                result
             }
             _ => Value::Undefined,
         }
@@ -2500,7 +2704,7 @@ impl<'gc> VM<'gc> {
             return false;
         }
         let buf = match b.props.get("__typedarray_buffer__") {
-            Some(Value::VmObject(o)) => o.clone(),
+            Some(Value::VmObject(o)) => *o,
             _ => return false,
         };
         if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {
@@ -2571,10 +2775,13 @@ impl<'gc> VM<'gc> {
             _ => 0,
         };
         let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+        let is_oob;
         let new_len = if is_auto {
             if byte_offset > buf_byte_len {
+                is_oob = true;
                 0
             } else {
+                is_oob = false;
                 (buf_byte_len - byte_offset) / bpe
             }
         } else {
@@ -2583,8 +2790,10 @@ impl<'gc> VM<'gc> {
                 _ => a.elements.len(),
             };
             if byte_offset + fixed_len * bpe > buf_byte_len {
+                is_oob = true;
                 0
             } else {
+                is_oob = false;
                 fixed_len
             }
         };
@@ -2600,9 +2809,19 @@ impl<'gc> VM<'gc> {
                     a.elements[i] = Self::decode_typed_element(&bb.elements, base, bpe, &ta_name);
                 }
             }
+            if is_oob {
+                a.props.insert("__out_of_bounds__".to_string(), Value::Boolean(true));
+            } else {
+                a.props.shift_remove("__out_of_bounds__");
+            }
         } else {
             let mut a = arr.borrow_mut(ctx);
             a.elements.resize(new_len, Value::Number(0.0));
+            if is_oob {
+                a.props.insert("__out_of_bounds__".to_string(), Value::Boolean(true));
+            } else {
+                a.props.shift_remove("__out_of_bounds__");
+            }
         }
         Some(new_len)
     }
@@ -2714,6 +2933,15 @@ impl<'gc> VM<'gc> {
         if let Some(Value::VmArray(src_arr)) = args.first()
             && src_arr.borrow().props.contains_key("__typedarray_name__")
         {
+            // Sync resizable source TA and check for out-of-bounds (ValidateTypedArray)
+            self.sync_resizable_ta_elements(ctx, src_arr);
+            {
+                let sb = src_arr.borrow();
+                if matches!(sb.props.get("__out_of_bounds__"), Some(Value::Boolean(true))) {
+                    self.throw_type_error(ctx, "Source TypedArray is out of bounds");
+                    return Value::Undefined;
+                }
+            }
             let src_ta_name = src_arr
                 .borrow()
                 .props
@@ -3576,6 +3804,10 @@ impl<'gc> VM<'gc> {
             "reduceRight".to_string(),
             Self::make_host_fn_with_name_len(ctx, "typedarray.reduceRight", "reduceRight", 1.0, false),
         );
+        ta_proto_map.insert(
+            "with".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "typedarray.with", "with", 2.0, false),
+        );
         // TypedArray-specific methods
         ta_proto_map.insert(
             "set".to_string(),
@@ -3642,6 +3874,7 @@ impl<'gc> VM<'gc> {
             "reduceRight",
             "set",
             "subarray",
+            "with",
         ] {
             ta_proto_map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
         }

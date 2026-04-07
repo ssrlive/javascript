@@ -1950,6 +1950,9 @@ impl<'gc> Compiler<'gc> {
                 if let Some(ctx) = self.loop_stack.last_mut() {
                     ctx.body_saved_locals = Some(body_saved);
                 }
+                if self.scope_depth > 0 {
+                    self.emit_hoisted_function_lexical_slots(body);
+                }
                 if let Some(ref key_name) = current_key_name {
                     self.emit_helper_get(key_name);
                     self.locals.push(var_name.clone());
@@ -2548,6 +2551,7 @@ impl<'gc> Compiler<'gc> {
                     }
                     if self.scope_depth > 0 {
                         self.emit_hoisted_var_slots(body);
+                        self.emit_hoisted_function_lexical_slots(body);
                     }
                     let loop_start = self.chunk.code.len();
                     let ctx = self.make_loop_context(loop_start);
@@ -2659,6 +2663,7 @@ impl<'gc> Compiler<'gc> {
 
                     if self.scope_depth > 0 {
                         self.emit_hoisted_var_slots(body);
+                        self.emit_hoisted_function_lexical_slots(body);
                     }
 
                     // Loop start: call iterator.next()
@@ -8881,13 +8886,23 @@ impl<'gc> Compiler<'gc> {
         // Only for class statements (not expressions) — expression names are scoped
         // to the class body only and must not leak to the enclosing scope.
         let class_name_pre_slot = if !name.is_empty() && self.scope_depth > 0 && !is_expr {
-            // Push undefined onto stack as placeholder for the class name slot
-            let undef_idx = self.chunk.add_constant(Value::Undefined);
-            self.chunk.write_opcode(Opcode::Constant);
-            self.chunk.write_u16(undef_idx);
-            self.locals.push(name.to_string());
-            self.const_locals.insert(name.to_string());
-            Some(self.locals.len() - 1)
+            if let Some(existing) = self.locals.iter().rposition(|l| l == name) {
+                // Reuse existing hoisted slot (already BoxLocal'd for upvalue capture)
+                self.const_locals.insert(name.to_string());
+                Some(existing)
+            } else {
+                // Push undefined onto stack as placeholder for the class name slot
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.locals.push(name.to_string());
+                self.const_locals.insert(name.to_string());
+                let slot = self.locals.len() - 1;
+                // BoxLocal so closures (e.g. constructor) capture the shared cell
+                self.chunk.write_opcode(Opcode::BoxLocal);
+                self.chunk.write_byte(slot as u8);
+                Some(slot)
+            }
         } else {
             None
         };

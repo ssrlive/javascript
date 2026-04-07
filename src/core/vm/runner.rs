@@ -1533,6 +1533,17 @@ impl<'gc> VM<'gc> {
     // Opcode::Pop
     fn run_opcode_pop(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let _ = ctx;
+        if let Some(top_index) = self.stack.len().checked_sub(1) {
+            let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+            if top_index >= bp {
+                let local_index = top_index - bp;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.local_cells.remove(&local_index);
+                } else {
+                    self.top_level_cells.remove(&local_index);
+                }
+            }
+        }
         self.stack.pop();
         Ok(OpcodeAction::Continue)
     }

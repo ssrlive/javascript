@@ -282,4 +282,36 @@ mod control_flow_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "2");
     }
+
+    #[test]
+    fn test_for_in_let_closure_gets_per_iteration_binding() {
+        let script = r#"
+            function collectKeys(obj) {
+                let fns = [];
+                for (let key in obj) {
+                    fns.push(function () { return key; });
+                }
+                return fns.map(fn => fn()).join(",");
+            }
+            collectKeys({a: 1, b: 2, c: 3})
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"a,b,c\"");
+    }
+
+    #[test]
+    fn test_for_of_let_closure_gets_per_iteration_binding() {
+        let script = r#"
+            function collectValues(values) {
+                let fns = [];
+                for (let value of values) {
+                    fns.push(function () { return value; });
+                }
+                return fns.map(fn => fn()).join(",");
+            }
+            collectValues([1, 2, 3])
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"1,2,3\"");
+    }
 }

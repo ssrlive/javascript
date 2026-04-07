@@ -1754,10 +1754,45 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
             }
-            StatementKind::ForIn(_decl_kind, var_name, obj_expr, body) => {
+            StatementKind::ForIn(decl_kind, var_name, obj_expr, body) => {
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
+                }
+                let is_lexical_binding = matches!(
+                    decl_kind,
+                    Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+                );
+                let forced_local = self.scope_depth == 0 && is_lexical_binding;
+                let forced_local_base = if forced_local {
+                    Some(format!("__forin_scope_base_{}__", self.forin_counter))
+                } else {
+                    None
+                };
+                if forced_local_base.is_some() {
+                    self.forin_counter = self.forin_counter.saturating_add(1);
+                }
+                let saved_loop_locals = self.locals.len();
+                if forced_local {
+                    self.scope_depth = 1;
+                    let base_pos = self.locals.len() as u8;
+                    self.locals.push(forced_local_base.clone().unwrap());
+                    let undef = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef);
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(base_pos);
+                }
+                let restore_const_tracking =
+                    matches!(decl_kind, Some(crate::core::VarDeclKind::Const)) && !self.const_locals.contains(var_name.as_str());
+                if matches!(decl_kind, Some(crate::core::VarDeclKind::Const)) {
+                    self.const_locals.insert(var_name.clone());
+                }
+                if is_lexical_binding {
+                    let uninit = self.chunk.add_constant(Value::Uninitialized);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(uninit);
+                    self.locals.push(var_name.clone());
                 }
                 // Generate unique names for each for-in loop's synthetic variables
                 let fid = self.forin_counter;
@@ -1765,6 +1800,11 @@ impl<'gc> Compiler<'gc> {
                 let obj_name = format!("__forin_obj_{}__", fid);
                 let keys_name = format!("__keys_{}__", fid);
                 let idx_name = format!("__idx_{}__", fid);
+                let current_key_name = if is_lexical_binding {
+                    Some(format!("__forin_key_{}__", fid))
+                } else {
+                    None
+                };
 
                 self.compile_expr(obj_expr)?;
                 self.chunk.write_opcode(Opcode::Dup);
@@ -1797,9 +1837,15 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::DefineGlobal);
                     self.chunk.write_u16(ni);
                 };
+                if let Some(ref key_name) = current_key_name {
+                    let undef = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef);
+                    self.locals.push(key_name.clone());
+                }
 
                 // Pre-allocate loop variable slot if it's a new local
-                if self.scope_depth > 0 && !self.locals.iter().any(|l| l == var_name) {
+                if !is_lexical_binding && self.scope_depth > 0 && !self.locals.iter().any(|l| l == var_name) {
                     let undef = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(undef);
@@ -1861,14 +1907,15 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(ni);
                 }
                 self.chunk.write_opcode(Opcode::GetIndex);
-                // Store in var_name
+                let key_binding_name = current_key_name.as_deref().unwrap_or(var_name);
+                // Store in loop binding/current key temp
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == var_name).unwrap();
+                    let pos = self.locals.iter().position(|l| l == key_binding_name).unwrap();
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
                     self.chunk.write_opcode(Opcode::Pop);
                 } else {
-                    let vn = crate::unicode::utf8_to_utf16(var_name);
+                    let vn = crate::unicode::utf8_to_utf16(key_binding_name);
                     let vni = self.chunk.add_constant(Value::String(vn));
                     self.chunk.write_opcode(Opcode::DefineGlobal);
                     self.chunk.write_u16(vni);
@@ -1876,11 +1923,11 @@ impl<'gc> Compiler<'gc> {
 
                 // Check if key still exists in the original object (handles deletion during iteration)
                 if self.scope_depth > 0 {
-                    let pos = self.locals.iter().position(|l| l == var_name).unwrap();
+                    let pos = self.locals.iter().position(|l| l == key_binding_name).unwrap();
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let vn = crate::unicode::utf8_to_utf16(var_name);
+                    let vn = crate::unicode::utf8_to_utf16(key_binding_name);
                     let vni = self.chunk.add_constant(Value::String(vn));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(vni);
@@ -1899,8 +1946,19 @@ impl<'gc> Compiler<'gc> {
                 let skip_body_jump = self.emit_jump(Opcode::JumpIfFalse);
 
                 // Body
+                let body_saved = self.locals.len();
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.body_saved_locals = Some(body_saved);
+                }
+                if let Some(ref key_name) = current_key_name {
+                    self.emit_helper_get(key_name);
+                    self.locals.push(var_name.clone());
+                }
                 for s in body {
                     self.compile_statement(s, false)?;
+                }
+                if is_lexical_binding {
+                    self.end_block_scope(body_saved);
                 }
 
                 // continue target: i++ update
@@ -1941,8 +1999,18 @@ impl<'gc> Compiler<'gc> {
                     self.patch_jump(bp);
                 }
 
-                // Keep synthetic function-scope loop locals in the locals table so
-                // later local indices stay aligned with the runtime stack slots.
+                if is_lexical_binding {
+                    self.end_block_scope(saved_loop_locals);
+                    if forced_local {
+                        self.scope_depth = 0;
+                    }
+                    if restore_const_tracking {
+                        self.const_locals.remove(var_name);
+                    }
+                } else {
+                    // Keep synthetic function-scope loop locals in the locals table so
+                    // later local indices stay aligned with the runtime stack slots.
+                }
 
                 if is_last {
                     self.emit_load_completion();
@@ -2421,6 +2489,13 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_byte(var_pos);
                     }
                 }
+                let current_value_name = if is_tdz {
+                    let name = format!("__forof_value_{}__", self.forin_counter);
+                    self.forin_counter = self.forin_counter.saturating_add(1);
+                    Some(name)
+                } else {
+                    None
+                };
 
                 let is_for_await = matches!(*stmt.kind, StatementKind::ForAwaitOf(..));
 
@@ -2459,7 +2534,13 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(ni);
                     }
-                    if self.scope_depth > 0 && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
+                    if let Some(ref value_name) = current_value_name {
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                        self.locals.push(value_name.clone());
+                    }
+                    if self.scope_depth > 0 && !is_tdz && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
                         let undef = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(undef);
@@ -2490,18 +2571,26 @@ impl<'gc> Compiler<'gc> {
                     self.emit_helper_get("__forofIdx__");
                     self.chunk.write_opcode(Opcode::GetIndex);
                     self.chunk.write_opcode(Opcode::Await);
+                    let loop_value_name = current_value_name.as_deref().unwrap_or(var_name);
                     if self.scope_depth > 0 {
-                        let pos = self.locals.iter().rposition(|l| l == var_name).unwrap();
+                        let pos = self.locals.iter().rposition(|l| l == loop_value_name).unwrap();
                         self.chunk.write_opcode(Opcode::SetLocal);
                         self.chunk.write_byte(pos as u8);
                         self.chunk.write_opcode(Opcode::Pop);
                     } else {
-                        let vn = crate::unicode::utf8_to_utf16(var_name);
+                        let vn = crate::unicode::utf8_to_utf16(loop_value_name);
                         let vni = self.chunk.add_constant(Value::String(vn));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(vni);
                     }
                     let body_locals_start = self.locals.len();
+                    if let Some(ctx) = self.loop_stack.last_mut() {
+                        ctx.body_saved_locals = Some(body_locals_start);
+                    }
+                    if let Some(ref value_name) = current_value_name {
+                        self.emit_helper_get(value_name);
+                        self.locals.push(var_name.clone());
+                    }
                     for s in body {
                         self.compile_statement(s, false)?;
                     }
@@ -2526,7 +2615,7 @@ impl<'gc> Compiler<'gc> {
                     for bp in ctx.break_patches {
                         self.patch_jump(bp);
                     }
-                    if self.scope_depth > 0 && !forced_local {
+                    if self.scope_depth > 0 && !forced_local && !is_tdz {
                         self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
                     }
                 } else {
@@ -2556,7 +2645,13 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     // Pre-allocate loop variable slot
-                    if self.scope_depth > 0 && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
+                    if let Some(ref value_name) = current_value_name {
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                        self.locals.push(value_name.clone());
+                    }
+                    if self.scope_depth > 0 && !is_tdz && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
                         let undef = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(undef);
@@ -2599,13 +2694,14 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(val_idx);
 
                     // Assign value to loop variable
+                    let loop_value_name = current_value_name.as_deref().unwrap_or(var_name);
                     if self.scope_depth > 0 {
-                        let pos = self.locals.iter().rposition(|l| l == var_name).unwrap();
+                        let pos = self.locals.iter().rposition(|l| l == loop_value_name).unwrap();
                         self.chunk.write_opcode(Opcode::SetLocal);
                         self.chunk.write_byte(pos as u8);
                         self.chunk.write_opcode(Opcode::Pop);
                     } else {
-                        let vn = crate::unicode::utf8_to_utf16(var_name);
+                        let vn = crate::unicode::utf8_to_utf16(loop_value_name);
                         let vni = self.chunk.add_constant(Value::String(vn));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(vni);
@@ -2613,6 +2709,13 @@ impl<'gc> Compiler<'gc> {
 
                     // Body
                     let body_locals_start = self.locals.len();
+                    if let Some(ctx) = self.loop_stack.last_mut() {
+                        ctx.body_saved_locals = Some(body_locals_start);
+                    }
+                    if let Some(ref value_name) = current_value_name {
+                        self.emit_helper_get(value_name);
+                        self.locals.push(var_name.clone());
+                    }
                     for s in body {
                         self.compile_statement(s, false)?;
                     }
@@ -2643,13 +2746,18 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     // Clean up for-of temporary locals (TDZ var, iterator, hoisted vars)
-                    if self.scope_depth > 0 && !forced_local {
+                    if self.scope_depth > 0 && !forced_local && !is_tdz {
                         self.end_block_scope(saved_locals);
                     }
                 }
 
                 // Restore scope_depth and clean up forced-local stack slots
-                if forced_local {
+                if is_tdz {
+                    self.end_block_scope(saved_locals);
+                    if forced_local {
+                        self.scope_depth = 0;
+                    }
+                } else if forced_local {
                     self.end_block_scope(saved_locals);
                     self.scope_depth = 0;
                 }

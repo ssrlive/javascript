@@ -3,8 +3,8 @@ try {
   if (typeof Symbol === 'function' && typeof Symbol.asyncIterator === 'symbol') {
     console.log('OK');
   } else {
-    console.log('NO');
+    throw new Error('Symbol.asyncIterator not supported');
   }
 } catch (e) {
-  console.log('NO');
+  console.log('NO, reason: ' + e.message);
 }

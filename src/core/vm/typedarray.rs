@@ -151,6 +151,36 @@ impl<'gc> VM<'gc> {
                         {
                             return Value::Number(0.0);
                         }
+                        // Resizable buffer: compute dynamic length
+                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                            && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                        {
+                            let byte_offset = match a.props.get("__byte_offset__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let buf_byte_len = match buf.borrow().get("byteLength") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                            if is_auto {
+                                if byte_offset > buf_byte_len {
+                                    return Value::Number(0.0);
+                                }
+                                let remainder = buf_byte_len - byte_offset;
+                                return Value::Number((remainder - remainder % bpe) as f64);
+                            } else {
+                                let fixed_len = match a.props.get("__fixed_length__") {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => a.elements.len(),
+                                };
+                                if byte_offset + fixed_len * bpe > buf_byte_len {
+                                    return Value::Number(0.0);
+                                }
+                                return Value::Number((fixed_len * bpe) as f64);
+                            }
+                        }
                         Value::Number((a.elements.len() * bpe) as f64)
                     }
                     _ => {
@@ -174,7 +204,38 @@ impl<'gc> VM<'gc> {
                         {
                             return Value::Number(0.0);
                         }
-                        a.props.get("__byte_offset__").cloned().unwrap_or(Value::Number(0.0))
+                        let byte_offset = match a.props.get("__byte_offset__") {
+                            Some(Value::Number(n)) => *n as usize,
+                            _ => 0,
+                        };
+                        // Resizable buffer: out-of-bounds check
+                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                            && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                        {
+                            let bpe = match a.props.get("__bytes_per_element__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 1,
+                            };
+                            let buf_byte_len = match buf.borrow().get("byteLength") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                            if is_auto {
+                                if byte_offset > buf_byte_len {
+                                    return Value::Number(0.0);
+                                }
+                            } else {
+                                let fixed_len = match a.props.get("__fixed_length__") {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => 0,
+                                };
+                                if byte_offset + fixed_len * bpe > buf_byte_len {
+                                    return Value::Number(0.0);
+                                }
+                            }
+                        }
+                        Value::Number(byte_offset as f64)
                     }
                     _ => {
                         self.throw_type_error(ctx, "get TypedArray.prototype.byteOffset called on incompatible receiver");
@@ -196,6 +257,39 @@ impl<'gc> VM<'gc> {
                             && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                         {
                             return Value::Number(0.0);
+                        }
+                        // Resizable buffer: compute dynamic length
+                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                            && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                        {
+                            let bpe = match a.props.get("__bytes_per_element__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 1,
+                            };
+                            let byte_offset = match a.props.get("__byte_offset__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let buf_byte_len = match buf.borrow().get("byteLength") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                            if is_auto {
+                                if byte_offset > buf_byte_len {
+                                    return Value::Number(0.0);
+                                }
+                                return Value::Number(((buf_byte_len - byte_offset) / bpe) as f64);
+                            } else {
+                                let fixed_len = match a.props.get("__fixed_length__") {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => a.elements.len(),
+                                };
+                                if byte_offset + fixed_len * bpe > buf_byte_len {
+                                    return Value::Number(0.0);
+                                }
+                                return Value::Number(fixed_len as f64);
+                            }
                         }
                         Value::Number(a.elements.len() as f64)
                     }

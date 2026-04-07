@@ -31,6 +31,39 @@ impl<'gc> VM<'gc> {
                             self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
                             return Value::Undefined;
                         }
+                        // Resizable buffer: dynamic byteLength
+                        if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                            && matches!(GcCell::borrow(buf).get("__resizable__"), Some(Value::Boolean(true)))
+                        {
+                            let byte_offset = match b.get("__dv_byteOffset__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let buf_byte_len = match GcCell::borrow(buf).get("byteLength") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let is_auto = matches!(b.get("__dv_auto_length__"), Some(Value::Boolean(true)));
+                            if is_auto {
+                                if byte_offset > buf_byte_len {
+                                    drop(b);
+                                    self.throw_type_error(ctx, "DataView is out of bounds");
+                                    return Value::Undefined;
+                                }
+                                return Value::Number((buf_byte_len - byte_offset) as f64);
+                            } else {
+                                let fixed_len = match b.get("__dv_byteLength__") {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => 0,
+                                };
+                                if byte_offset + fixed_len > buf_byte_len {
+                                    drop(b);
+                                    self.throw_type_error(ctx, "DataView is out of bounds");
+                                    return Value::Undefined;
+                                }
+                                return Value::Number(fixed_len as f64);
+                            }
+                        }
                         return b.get("__dv_byteLength__").cloned().unwrap_or(Value::Number(0.0));
                     }
                 }
@@ -47,6 +80,37 @@ impl<'gc> VM<'gc> {
                             drop(b);
                             self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
                             return Value::Undefined;
+                        }
+                        // Resizable buffer: out-of-bounds check
+                        if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                            && matches!(GcCell::borrow(buf).get("__resizable__"), Some(Value::Boolean(true)))
+                        {
+                            let byte_offset = match b.get("__dv_byteOffset__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let buf_byte_len = match GcCell::borrow(buf).get("byteLength") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let is_auto = matches!(b.get("__dv_auto_length__"), Some(Value::Boolean(true)));
+                            if is_auto {
+                                if byte_offset > buf_byte_len {
+                                    drop(b);
+                                    self.throw_type_error(ctx, "DataView is out of bounds");
+                                    return Value::Undefined;
+                                }
+                            } else {
+                                let fixed_len = match b.get("__dv_byteLength__") {
+                                    Some(Value::Number(n)) => *n as usize,
+                                    _ => 0,
+                                };
+                                if byte_offset + fixed_len > buf_byte_len {
+                                    drop(b);
+                                    self.throw_type_error(ctx, "DataView is out of bounds");
+                                    return Value::Undefined;
+                                }
+                            }
                         }
                         return b.get("__dv_byteOffset__").cloned().unwrap_or(Value::Number(0.0));
                     }
@@ -427,8 +491,31 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
                     return Value::Undefined;
                 }
+                // Resizable buffer: compute effective byte_length dynamically
+                let effective_byte_length = if matches!(GcCell::borrow(&buffer).get("__resizable__"), Some(Value::Boolean(true))) {
+                    let buf_byte_len = match GcCell::borrow(&buffer).get("byteLength") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    };
+                    let is_auto = matches!(view.borrow().get("__dv_auto_length__"), Some(Value::Boolean(true)));
+                    if is_auto {
+                        if byte_offset > buf_byte_len {
+                            self.throw_type_error(ctx, "DataView is out of bounds");
+                            return Value::Undefined;
+                        }
+                        buf_byte_len - byte_offset
+                    } else {
+                        if byte_offset + byte_length > buf_byte_len {
+                            self.throw_type_error(ctx, "DataView is out of bounds");
+                            return Value::Undefined;
+                        }
+                        byte_length
+                    }
+                } else {
+                    byte_length
+                };
                 let base = byte_offset + get_index;
-                if get_index + 8 > byte_length {
+                if get_index + 8 > effective_byte_length {
                     let err = self.make_range_error_object(ctx, "Offset is outside the bounds of the DataView");
                     let _ = self.handle_throw(ctx, &err);
                     return Value::Undefined;
@@ -597,6 +684,10 @@ impl<'gc> VM<'gc> {
         map.insert("__buffer__".to_string(), Value::Boolean(true));
         map.insert("__dv_byteLength__".to_string(), Value::Number(view_byte_len as f64));
         map.insert("__dv_byteOffset__".to_string(), Value::Number(byte_offset as f64));
+        let is_auto_length = matches!(raw_len, Value::Undefined);
+        if is_auto_length {
+            map.insert("__dv_auto_length__".to_string(), Value::Boolean(true));
+        }
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
@@ -684,7 +775,8 @@ impl<'gc> VM<'gc> {
             return Err(self.vm_error_to_js_error(ctx, &err));
         }
         let raw_len = args.get(2).cloned().unwrap_or(Value::Undefined);
-        let view_byte_len = if matches!(raw_len, Value::Undefined) {
+        let is_auto_length = matches!(raw_len, Value::Undefined);
+        let view_byte_len = if is_auto_length {
             buf_byte_len - byte_offset
         } else {
             let len = self.to_index_result(ctx, &raw_len)?;
@@ -695,18 +787,44 @@ impl<'gc> VM<'gc> {
             len
         };
         let ctor_prototype = self.get_prototype_from_constructor_with_intrinsic(ctx, new_target.unwrap_or(target), "DataView")?;
+        // Re-check after OrdinaryCreateFromConstructor (prototype getter may have resized/detached)
         if let Value::VmObject(buf_obj) = &buffer
             && matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true)))
         {
             let err = self.make_type_error_object(ctx, "Cannot construct DataView with a detached ArrayBuffer");
             return Err(self.vm_error_to_js_error(ctx, &err));
         }
+        // Re-read buffer byte length (may have changed due to resize in prototype getter)
+        let buf_byte_len2 = if let Value::VmObject(obj) = &buffer {
+            match obj.borrow().get("byteLength") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        if byte_offset > buf_byte_len2 {
+            let err = self.make_range_error_object(ctx, "Start offset is outside the bounds of the buffer");
+            return Err(self.vm_error_to_js_error(ctx, &err));
+        }
+        let view_byte_len = if is_auto_length {
+            buf_byte_len2 - byte_offset
+        } else {
+            if byte_offset + view_byte_len > buf_byte_len2 {
+                let err = self.make_range_error_object(ctx, "Invalid DataView length");
+                return Err(self.vm_error_to_js_error(ctx, &err));
+            }
+            view_byte_len
+        };
         let mut map = IndexMap::new();
         map.insert("__type__".to_string(), Value::from("DataView"));
         map.insert("__dv_buffer__".to_string(), buffer);
         map.insert("__buffer__".to_string(), Value::Boolean(true));
         map.insert("__dv_byteLength__".to_string(), Value::Number(view_byte_len as f64));
         map.insert("__dv_byteOffset__".to_string(), Value::Number(byte_offset as f64));
+        if is_auto_length {
+            map.insert("__dv_auto_length__".to_string(), Value::Boolean(true));
+        }
         if let Some(proto) = ctor_prototype {
             map.insert("__proto__".to_string(), proto);
         }
@@ -809,12 +927,35 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
             return None;
         }
-        if get_index + element_size > byte_length {
+        // Resizable buffer: compute effective byte_length dynamically
+        let effective_byte_length = if matches!(GcCell::borrow(&buffer).get("__resizable__"), Some(Value::Boolean(true))) {
+            let buf_byte_len = match GcCell::borrow(&buffer).get("byteLength") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            let is_auto = matches!(view.borrow().get("__dv_auto_length__"), Some(Value::Boolean(true)));
+            if is_auto {
+                if byte_offset > buf_byte_len {
+                    self.throw_type_error(ctx, "DataView is out of bounds");
+                    return None;
+                }
+                buf_byte_len - byte_offset
+            } else {
+                if byte_offset + byte_length > buf_byte_len {
+                    self.throw_type_error(ctx, "DataView is out of bounds");
+                    return None;
+                }
+                byte_length
+            }
+        } else {
+            byte_length
+        };
+        if get_index + element_size > effective_byte_length {
             let err = self.make_range_error_object(ctx, "Offset is outside the bounds of the DataView");
             let _ = self.handle_throw(ctx, &err);
             return None;
         }
-        Some((byte_offset + get_index, byte_length, buffer))
+        Some((byte_offset + get_index, effective_byte_length, buffer))
     }
 
     /// Validate for set methods: same as get, plus coerce value via ToNumber.
@@ -867,12 +1008,35 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
             return None;
         }
-        if get_index + element_size > byte_length {
+        // Resizable buffer: compute effective byte_length dynamically
+        let effective_byte_length = if matches!(GcCell::borrow(&buffer).get("__resizable__"), Some(Value::Boolean(true))) {
+            let buf_byte_len = match GcCell::borrow(&buffer).get("byteLength") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            let is_auto = matches!(view.borrow().get("__dv_auto_length__"), Some(Value::Boolean(true)));
+            if is_auto {
+                if byte_offset > buf_byte_len {
+                    self.throw_type_error(ctx, "DataView is out of bounds");
+                    return None;
+                }
+                buf_byte_len - byte_offset
+            } else {
+                if byte_offset + byte_length > buf_byte_len {
+                    self.throw_type_error(ctx, "DataView is out of bounds");
+                    return None;
+                }
+                byte_length
+            }
+        } else {
+            byte_length
+        };
+        if get_index + element_size > effective_byte_length {
             let err = self.make_range_error_object(ctx, "Offset is outside the bounds of the DataView");
             let _ = self.handle_throw(ctx, &err);
             return None;
         }
-        Some((byte_offset + get_index, byte_length, buffer, coerced_val))
+        Some((byte_offset + get_index, effective_byte_length, buffer, coerced_val))
     }
 
     fn js_to_uint8(val: f64) -> u8 {

@@ -606,22 +606,26 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 self.sync_resizable_ta_elements(ctx, arr);
-                let a = arr.borrow();
-                let len = a.elements.len();
-                let ta_name = match a.props.get("__typedarray_name__") {
-                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
-                    _ => "Int8Array".to_string(),
+                let (len, ta_name, buffer, byte_offset, bpe, is_auto_length) = {
+                    let a = arr.borrow();
+                    let len = a.elements.len();
+                    let ta_name = match a.props.get("__typedarray_name__") {
+                        Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                        _ => "Int8Array".to_string(),
+                    };
+                    let buffer = a.props.get("__typedarray_buffer__").or_else(|| a.props.get("buffer")).cloned();
+                    let byte_offset = match a.props.get("__byte_offset__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    };
+                    let bpe = match a.props.get("__bytes_per_element__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 1,
+                    };
+                    let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+                    (len, ta_name, buffer, byte_offset, bpe, is_auto)
                 };
-                let buffer = a.props.get("__typedarray_buffer__").or_else(|| a.props.get("buffer")).cloned();
-                let byte_offset = match a.props.get("__byte_offset__") {
-                    Some(Value::Number(n)) => *n as usize,
-                    _ => 0,
-                };
-                let bpe = match a.props.get("__bytes_per_element__") {
-                    Some(Value::Number(n)) => *n as usize,
-                    _ => 1,
-                };
-                drop(a);
+                let end_is_undefined = matches!(args.get(1), Some(Value::Undefined) | None);
                 let begin_raw = match args.first() {
                     None | Some(Value::Undefined) => 0i64,
                     Some(v) => match self.extract_number_with_coercion(ctx, v) {
@@ -633,13 +637,17 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                let end_raw = match args.get(1) {
-                    Some(Value::Undefined) | None => len as i64,
-                    Some(v) => match self.extract_number_with_coercion(ctx, v) {
-                        Some(n) if n.is_nan() => 0,
-                        Some(n) => n as i64,
-                        None => return Value::Undefined,
-                    },
+                let end_raw = if end_is_undefined {
+                    len as i64
+                } else {
+                    match args.get(1) {
+                        Some(v) => match self.extract_number_with_coercion(ctx, v) {
+                            Some(n) if n.is_nan() => 0,
+                            Some(n) => n as i64,
+                            None => return Value::Undefined,
+                        },
+                        None => len as i64,
+                    }
                 };
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
@@ -656,14 +664,20 @@ impl<'gc> VM<'gc> {
                 };
                 let count = end.saturating_sub(begin);
                 let new_byte_offset = byte_offset + begin * bpe;
-                // Use TypedArraySpeciesCreate
+                // Per spec step 14: if source is auto-length and end is undefined,
+                // create auto-length subarray (no length argument)
                 if let Some(buf_val) = buffer {
-                    let args = [buf_val, Value::Number(new_byte_offset as f64), Value::Number(count as f64)];
-                    self.typed_array_species_create(ctx, &this_val, &args).unwrap_or(Value::Undefined)
+                    if is_auto_length && end_is_undefined {
+                        let args = [buf_val, Value::Number(new_byte_offset as f64)];
+                        self.typed_array_species_create(ctx, &this_val, &args).unwrap_or(Value::Undefined)
+                    } else {
+                        let args = [buf_val, Value::Number(new_byte_offset as f64), Value::Number(count as f64)];
+                        self.typed_array_species_create(ctx, &this_val, &args).unwrap_or(Value::Undefined)
+                    }
                 } else {
                     // No buffer, just slice elements
                     let a = arr.borrow();
-                    let elems: Vec<Value<'gc>> = a.elements[begin..end].to_vec();
+                    let elems: Vec<Value<'gc>> = a.elements[begin..end.min(a.elements.len())].to_vec();
                     drop(a);
                     let mut data = VmArrayData::new(elems);
                     data.props.insert("__typedarray_name__".to_string(), Value::from(ta_name.as_str()));
@@ -1189,14 +1203,20 @@ impl<'gc> VM<'gc> {
                         bi_elements.sort();
                     }
 
+                    // Re-sync after sort (comparefn may have resized buffer)
+                    self.sync_resizable_ta_elements(ctx, arr);
+                    let new_len = arr.borrow().elements.len();
                     {
                         let mut a = arr.borrow_mut(ctx);
                         for (i, bi) in bi_elements.iter().enumerate() {
+                            if i >= new_len {
+                                break;
+                            }
                             let coerced = coerce_bigint_for_ta(bi, &ta_name);
                             a.elements[i] = Value::BigInt(Box::new(coerced));
                         }
                     }
-                    for i in 0..bi_elements.len() {
+                    for i in 0..new_len.min(bi_elements.len()) {
                         self.sync_ta_element_to_buffer(ctx, arr, i, 0.0, &ta_name);
                     }
                 } else {
@@ -1275,15 +1295,25 @@ impl<'gc> VM<'gc> {
                         });
                     }
 
+                    // Re-sync after sort (comparefn may have resized buffer)
+                    self.sync_resizable_ta_elements(ctx, arr);
+                    let new_len = arr.borrow().elements.len();
+
                     // Write back sorted elements and sync to buffer
                     {
                         let mut a = arr.borrow_mut(ctx);
                         for (i, &num) in elements.iter().enumerate() {
+                            if i >= new_len {
+                                break;
+                            }
                             let converted = Self::typed_array_coerce_value(num, &ta_name);
                             a.elements[i] = Value::Number(converted);
                         }
                     }
                     for (i, &num) in elements.iter().enumerate() {
+                        if i >= new_len {
+                            break;
+                        }
                         self.sync_ta_element_to_buffer(ctx, arr, i, num, &ta_name);
                     }
                 }
@@ -1365,6 +1395,7 @@ impl<'gc> VM<'gc> {
                 };
                 for k in 0..len {
                     let k_value = if let Value::VmArray(arr) = &this_val {
+                        self.maybe_sync_resizable_ta(ctx, arr);
                         arr.borrow().elements.get(k).cloned().unwrap_or(Value::Undefined)
                     } else {
                         Value::Undefined
@@ -1529,16 +1560,35 @@ impl<'gc> VM<'gc> {
                     return result;
                 }
 
-                // Check if source buffer is detached after species create
-                if let Value::VmArray(src_arr) = &this_val
-                    && let Some(Value::VmObject(buf)) = src_arr.borrow().props.get("__typedarray_buffer__")
-                    && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
-                {
-                    self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
-                    return Value::Undefined;
+                // Step 15.a-b: Re-check OOB after species create (buffer may have been
+                // resized during argument coercion or species constructor)
+                if let Value::VmArray(src_arr) = &this_val {
+                    // Check detached
+                    if let Some(Value::VmObject(buf)) = src_arr.borrow().props.get("__typedarray_buffer__")
+                        && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
+                    {
+                        self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
+                        return Value::Undefined;
+                    }
+                    // Re-sync and check OOB for resizable
+                    self.maybe_sync_resizable_ta(ctx, src_arr);
+                    if self.is_typed_array_oob(src_arr) {
+                        self.throw_type_error(ctx, "Cannot perform operation on an out-of-bounds TypedArray");
+                        return Value::Undefined;
+                    }
                 }
 
                 if let Value::VmArray(res_arr) = &result {
+                    // Step 15.c: srcLength = TypedArrayLength(O) after potential resize
+                    let src_len = if let Value::VmArray(src_arr) = &this_val {
+                        src_arr.borrow().elements.len() as i64
+                    } else {
+                        0
+                    };
+                    // Step 15.d: endIndex = min(k + count, srcLength)
+                    let end_index = (k + count as i64).min(src_len);
+                    let actual_count = (end_index - k).max(0) as usize;
+
                     let res_ta_name = res_arr
                         .borrow()
                         .props
@@ -1579,7 +1629,7 @@ impl<'gc> VM<'gc> {
                             let target_start_byte = res_byte_offset;
                             if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
                                 let mut bb = buf_bytes.borrow_mut(ctx);
-                                for i in 0..(count * bpe) {
+                                for i in 0..(actual_count * bpe) {
                                     let src_idx = src_start_byte + i;
                                     let tgt_idx = target_start_byte + i;
                                     if src_idx < bb.elements.len() && tgt_idx < bb.elements.len() {
@@ -1589,7 +1639,7 @@ impl<'gc> VM<'gc> {
                                 }
                                 drop(bb);
                                 // Sync elements from buffer
-                                self.sync_ta_elements_from_buffer(ctx, res_arr, &res_ta_name, bpe, count);
+                                self.sync_ta_elements_from_buffer(ctx, res_arr, &res_ta_name, bpe, res_arr.borrow().elements.len());
                             }
                         }
                     } else {
@@ -1597,7 +1647,7 @@ impl<'gc> VM<'gc> {
                         let src_elements: Vec<Value<'gc>> = if let Value::VmArray(src_arr) = &this_val {
                             let a = src_arr.borrow();
                             let start = k as usize;
-                            let end = (k as usize + count).min(a.elements.len());
+                            let end = (k as usize + actual_count).min(a.elements.len());
                             a.elements[start..end].to_vec()
                         } else {
                             vec![]
@@ -1684,7 +1734,7 @@ impl<'gc> VM<'gc> {
                     }
                 };
 
-                // Check for detached buffer AFTER argument coercion
+                // Re-check after argument coercion (buffer may have been resized)
                 {
                     let a = arr.borrow();
                     if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
@@ -1694,8 +1744,15 @@ impl<'gc> VM<'gc> {
                         self.throw_type_error(ctx, "Cannot perform %TypedArray%.prototype.copyWithin on a detached ArrayBuffer");
                         return Value::Undefined;
                     }
+                    drop(a);
+                }
+                self.maybe_sync_resizable_ta(ctx, arr);
+                if self.is_typed_array_oob(arr) {
+                    self.throw_type_error(ctx, "Cannot perform operation on an out-of-bounds TypedArray");
+                    return Value::Undefined;
                 }
 
+                // Clamp to/from/final using ORIGINAL len per spec steps 5-17
                 let to = if relative_target < 0 {
                     (len + relative_target).max(0)
                 } else {
@@ -2394,6 +2451,44 @@ impl<'gc> VM<'gc> {
             )
     }
 
+    /// Returns true if a resizable-backed TypedArray is out of bounds
+    /// (buffer shrank below the TA's view). Non-resizable TAs always return false.
+    pub(super) fn is_typed_array_oob(&self, arr: &VmArrayHandle<'gc>) -> bool {
+        let b = arr.borrow();
+        if !b.props.contains_key("__typedarray_name__") {
+            return false;
+        }
+        let buf = match b.props.get("__typedarray_buffer__") {
+            Some(Value::VmObject(o)) => o.clone(),
+            _ => return false,
+        };
+        if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {
+            return false;
+        }
+        let bpe = match b.props.get("__bytes_per_element__") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 1,
+        };
+        let byte_offset = match b.props.get("__byte_offset__") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 0,
+        };
+        let buf_byte_len = match buf.borrow().get("byteLength") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 0,
+        };
+        let is_auto = matches!(b.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+        if is_auto {
+            byte_offset > buf_byte_len
+        } else {
+            let fixed_len = match b.props.get("__fixed_length__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            byte_offset + fixed_len * bpe > buf_byte_len
+        }
+    }
+
     /// Read element `index` from a TypedArray, syncing from buffer first if resizable.
     /// Returns Undefined when out of bounds (e.g. buffer was shrunk).
     pub(super) fn ta_get_element(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>, index: usize) -> Value<'gc> {
@@ -2950,8 +3045,12 @@ impl<'gc> VM<'gc> {
                 data.props.insert("__byte_offset__".to_string(), Value::Number(byte_offset as f64));
                 data.props
                     .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
-                data.props
-                    .insert("__length_tracking__".to_string(), Value::Boolean(explicit_len.is_none()));
+                let buf_is_resizable = matches!(buf_obj.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                    || matches!(buf_obj.borrow().get("__growable__"), Some(Value::Boolean(true)));
+                data.props.insert(
+                    "__length_tracking__".to_string(),
+                    Value::Boolean(explicit_len.is_none() && buf_is_resizable),
+                );
                 if let Some(len) = explicit_len {
                     data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
                 }

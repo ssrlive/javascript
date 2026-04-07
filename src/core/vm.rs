@@ -3842,6 +3842,7 @@ impl<'gc> VM<'gc> {
         let target_arity = arity as usize;
         let mut saved_args: Option<Vec<Value<'gc>>> = None;
         if stack_args.len() < target_arity {
+            saved_args = Some(stack_args.clone());
             stack_args.resize(target_arity, Value::Undefined);
         } else if stack_args.len() > target_arity {
             saved_args = Some(stack_args.clone());
@@ -16604,6 +16605,7 @@ impl<'gc> VM<'gc> {
                 let target_arity = *arity as usize;
                 let mut saved_args: Option<Vec<Value<'gc>>> = None;
                 if stack_args.len() < target_arity {
+                    saved_args = Some(stack_args.clone());
                     stack_args.resize(target_arity, Value::Undefined);
                 } else if stack_args.len() > target_arity {
                     saved_args = Some(stack_args.clone());
@@ -16664,6 +16666,7 @@ impl<'gc> VM<'gc> {
                 let target_arity = *arity as usize;
                 let mut saved_args: Option<Vec<Value<'gc>>> = None;
                 if stack_args.len() < target_arity {
+                    saved_args = Some(stack_args.clone());
                     stack_args.resize(target_arity, Value::Undefined);
                 } else if stack_args.len() > target_arity {
                     saved_args = Some(stack_args.clone());
@@ -23271,6 +23274,8 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
+
             let len = match self.array_like_length_u64(ctx, &target) {
                 Some(v) => v.min(usize::MAX as u64) as usize,
                 None => return Value::Undefined,
@@ -23288,6 +23293,14 @@ impl<'gc> VM<'gc> {
             } else {
                 0.0
             };
+
+            // Sync elements after coercion (valueOf may have resized the buffer)
+            if is_typed_array {
+                if let Value::VmArray(arr) = &target {
+                    self.maybe_sync_resizable_ta(ctx, arr);
+                }
+            }
+
             if n.is_infinite() && n.is_sign_positive() {
                 return Value::Number(-1.0);
             }
@@ -23362,6 +23375,8 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
+
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
                 return Value::Undefined;
             };
@@ -23379,6 +23394,13 @@ impl<'gc> VM<'gc> {
             } else {
                 f64::INFINITY
             };
+
+            // Sync elements after coercion (valueOf may have resized the buffer)
+            if is_typed_array {
+                if let Value::VmArray(arr) = &target {
+                    self.maybe_sync_resizable_ta(ctx, arr);
+                }
+            }
 
             let mut k: i128 = if n.is_infinite() {
                 if n.is_sign_negative() {
@@ -23820,6 +23842,8 @@ impl<'gc> VM<'gc> {
                 _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
             };
 
+            let is_typed_array = matches!(&target, Value::VmArray(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
+
             let max_safe_len: u64 = 9_007_199_254_740_991;
             let len = match &target {
                 Value::VmArray(arr) => {
@@ -23869,6 +23893,13 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 },
             };
+
+            // Sync elements after coercion (valueOf may have resized the buffer)
+            if is_typed_array {
+                if let Value::VmArray(arr) = &target {
+                    self.maybe_sync_resizable_ta(ctx, arr);
+                }
+            }
 
             let n = if from_index.is_nan() {
                 0i128
@@ -30498,6 +30529,7 @@ impl<'gc> VM<'gc> {
                 let this_val = Value::VmObject(new_obj);
                 self.this_stack.push(this_val);
                 let target_arity = _arity as usize;
+                let original_arg_count = args.len();
                 let mut stack_args = args.to_vec();
                 let mut saved_args: Option<Vec<Value<'gc>>> = None;
                 if stack_args.len() < target_arity {
@@ -30515,7 +30547,7 @@ impl<'gc> VM<'gc> {
                 let ctor_new_target = new_target.cloned().unwrap_or_else(|| target.clone());
                 let target_depth = self.frames.len();
                 let saved_ip = self.ip;
-                let arg_count = saved_args.as_ref().map_or(stack_args.len(), Vec::len);
+                let arg_count = original_arg_count;
                 self.stack.push(Value::Undefined);
                 let bp = self.stack.len();
                 let saved_stack_depth = bp - 1;

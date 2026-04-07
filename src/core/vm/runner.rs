@@ -4456,7 +4456,20 @@ impl<'gc> VM<'gc> {
                                 self.handle_throw(ctx, &err)?;
                                 Value::Undefined
                             }
-                            _ => self.lookup_proto_chain(proto.as_ref(), &key).unwrap_or(Value::Undefined),
+                            _ => {
+                                // Check for getter on the prototype chain first
+                                if let Some(getter_fn) = self.lookup_proto_chain(proto.as_ref(), &getter_key) {
+                                    self.invoke_getter_with_receiver(ctx, &getter_fn, &obj)
+                                } else {
+                                    match self.lookup_proto_chain(proto.as_ref(), &key) {
+                                        Some(Value::Property { getter: Some(g), .. }) => self.invoke_getter_with_receiver(ctx, &g, &obj),
+                                        Some(Value::Property { value: Some(inner), .. }) => inner.borrow().clone(),
+                                        Some(Value::Property { value: None, .. }) => Value::Undefined,
+                                        Some(v) => v,
+                                        None => Value::Undefined,
+                                    }
+                                }
+                            }
                         }
                     }
                 };

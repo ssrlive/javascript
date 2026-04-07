@@ -1624,10 +1624,15 @@ impl<'gc> VM<'gc> {
                             _ => 0,
                         };
 
-                        if let Some(Value::VmObject(buf_obj)) = &src_buf {
+                        let buf_bytes_gc = if let Some(Value::VmObject(buf_obj)) = &src_buf {
+                            buf_obj.borrow().get("__buffer_bytes__").cloned()
+                        } else {
+                            None
+                        };
+                        if let Some(Value::VmArray(buf_bytes)) = buf_bytes_gc {
                             let src_start_byte = src_byte_offset + k as usize * bpe;
                             let target_start_byte = res_byte_offset;
-                            if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
+                            {
                                 let mut bb = buf_bytes.borrow_mut(ctx);
                                 for i in 0..(actual_count * bpe) {
                                     let src_idx = src_start_byte + i;
@@ -1637,16 +1642,16 @@ impl<'gc> VM<'gc> {
                                         bb.elements[tgt_idx] = byte_val;
                                     }
                                 }
-                                drop(bb);
-                                // Sync elements from buffer
-                                self.sync_ta_elements_from_buffer(ctx, res_arr, &res_ta_name, bpe, res_arr.borrow().elements.len());
                             }
+                            // Sync result elements from buffer (all borrows released)
+                            let res_elem_len = res_arr.borrow().elements.len();
+                            self.sync_ta_elements_from_buffer(ctx, res_arr, &res_ta_name, bpe, res_elem_len);
                         }
                     } else {
                         // Different buffer or different type: element-by-element set
                         let src_elements: Vec<Value<'gc>> = if let Value::VmArray(src_arr) = &this_val {
                             let a = src_arr.borrow();
-                            let start = k as usize;
+                            let start = (k as usize).min(a.elements.len());
                             let end = (k as usize + actual_count).min(a.elements.len());
                             a.elements[start..end].to_vec()
                         } else {
@@ -1989,8 +1994,40 @@ impl<'gc> VM<'gc> {
             && requested_len.is_finite()
             && *requested_len >= 0.0
         {
+            // Sync elements for resizable buffer TAs to get current length
+            if let Value::VmArray(arr) = &result {
+                self.maybe_sync_resizable_ta(ctx, arr);
+            }
             let actual_len = match &result {
-                Value::VmArray(arr) => arr.borrow().elements.len(),
+                Value::VmArray(arr) => {
+                    let a = arr.borrow();
+                    // Use dynamic TypedArrayLength for resizable buffers
+                    if matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true))) {
+                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__") {
+                            let buf_byte_len = match buf.borrow().get("byteLength") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let byte_offset = match a.props.get("__byte_offset__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 0,
+                            };
+                            let bpe = match a.props.get("__bytes_per_element__") {
+                                Some(Value::Number(n)) => *n as usize,
+                                _ => 1,
+                            };
+                            if buf_byte_len >= byte_offset {
+                                (buf_byte_len - byte_offset) / bpe
+                            } else {
+                                0
+                            }
+                        } else {
+                            a.elements.len()
+                        }
+                    } else {
+                        a.elements.len()
+                    }
+                }
                 _ => 0,
             };
             if actual_len < requested_len.trunc() as usize {
@@ -2409,9 +2446,13 @@ impl<'gc> VM<'gc> {
                 .unwrap_or(0);
             (buffer, byte_offset)
         };
-        if let Some(Value::VmObject(buf_obj)) = buffer
-            && let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
-        {
+        // Extract buf_bytes in its own scope so buf_obj borrow is dropped
+        let buf_bytes = if let Some(Value::VmObject(buf_obj)) = &buffer {
+            buf_obj.borrow().get("__buffer_bytes__").cloned()
+        } else {
+            None
+        };
+        if let Some(Value::VmArray(buf_bytes)) = buf_bytes {
             let bb = buf_bytes.borrow();
             let mut a = arr.borrow_mut(ctx);
             for i in 0..len {
@@ -2998,6 +3039,9 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
+                let buf_is_resizable = matches!(buf_obj.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                    || matches!(buf_obj.borrow().get("__growable__"), Some(Value::Boolean(true)));
+
                 let initial_len;
                 if let Some(len) = explicit_len {
                     // Explicit length: check it doesn't exceed buffer
@@ -3007,8 +3051,16 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     initial_len = len;
+                } else if buf_is_resizable {
+                    // Resizable buffer + no explicit length: length-tracking TA
+                    // No alignment check per spec step 13
+                    if byte_offset > byte_len {
+                        self.throw_range_error_object(ctx, "Start offset is outside the bounds of the buffer");
+                        return Value::Undefined;
+                    }
+                    initial_len = (byte_len.saturating_sub(byte_offset)) / bytes_per_element;
                 } else {
-                    // No explicit length: buffer must be aligned
+                    // Non-resizable buffer + no explicit length: must be aligned
                     if byte_len % bytes_per_element != 0 {
                         self.throw_range_error_object(
                             ctx,
@@ -3045,8 +3097,6 @@ impl<'gc> VM<'gc> {
                 data.props.insert("__byte_offset__".to_string(), Value::Number(byte_offset as f64));
                 data.props
                     .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
-                let buf_is_resizable = matches!(buf_obj.borrow().get("__resizable__"), Some(Value::Boolean(true)))
-                    || matches!(buf_obj.borrow().get("__growable__"), Some(Value::Boolean(true)));
                 data.props.insert(
                     "__length_tracking__".to_string(),
                     Value::Boolean(explicit_len.is_none() && buf_is_resizable),

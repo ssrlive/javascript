@@ -894,6 +894,38 @@ impl<'gc> Compiler<'gc> {
                             // Namespace imports are immutable bindings
                             self.chunk.const_import_bindings.insert(local.clone());
                         }
+                        ImportSpecifier::DeferredNamespace(local) => {
+                            let mut entries: Vec<(String, String)> = self
+                                .module_export_names
+                                .iter()
+                                .filter(|exp_name| !reexport_map.contains_key(*exp_name))
+                                .map(|exp_name| {
+                                    let local_name = self.export_name_to_local.get(exp_name).cloned().unwrap_or_else(|| {
+                                        if exp_name == "default" {
+                                            "*default*".to_string()
+                                        } else {
+                                            exp_name.clone()
+                                        }
+                                    });
+                                    (exp_name.clone(), local_name)
+                                })
+                                .collect();
+
+                            for (export_name, (re_src, orig_name)) in &reexport_map {
+                                if let Some(resolved) = self.resolve_import_path(re_src) {
+                                    let ns_reexport_key = format!("__ns_reexport_{}_{}", local, export_name);
+                                    self.chunk
+                                        .loaded_module_vars
+                                        .insert(ns_reexport_key.clone(), (resolved, orig_name.clone()));
+                                    entries.push((export_name.clone(), ns_reexport_key));
+                                }
+                            }
+
+                            self.chunk
+                                .self_deferred_namespace_imports
+                                .push((local.clone(), entries));
+                            self.chunk.const_import_bindings.insert(local.clone());
+                        }
                     }
                 }
             }
@@ -3092,6 +3124,36 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.const_import_bindings.insert(local.clone());
                                 continue;
                             }
+                            ImportSpecifier::DeferredNamespace(local) => {
+                                if self
+                                    .chunk
+                                    .self_deferred_namespace_imports
+                                    .iter()
+                                    .any(|(existing, _)| existing == local)
+                                {
+                                    self.chunk.const_import_bindings.insert(local.clone());
+                                    continue;
+                                }
+                                let entries: Vec<(String, String)> = self
+                                    .module_export_names
+                                    .iter()
+                                    .map(|exp_name| {
+                                        let local_name = self.export_name_to_local.get(exp_name).cloned().unwrap_or_else(|| {
+                                            if exp_name == "default" {
+                                                "*default*".to_string()
+                                            } else {
+                                                exp_name.clone()
+                                            }
+                                        });
+                                        (exp_name.clone(), local_name)
+                                    })
+                                    .collect();
+                                self.chunk
+                                    .self_deferred_namespace_imports
+                                    .push((local.clone(), entries));
+                                self.chunk.const_import_bindings.insert(local.clone());
+                                continue;
+                            }
                         }
                     }
                     match (source.as_str(), spec) {
@@ -3136,7 +3198,19 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_u16(os_name);
                             define_binding(self, local);
                         }
+                        ("os", ImportSpecifier::DeferredNamespace(local)) => {
+                            let os_name = self.chunk.add_constant(Value::from("os"));
+                            self.chunk.write_opcode(Opcode::GetGlobal);
+                            self.chunk.write_u16(os_name);
+                            define_binding(self, local);
+                        }
                         ("std", ImportSpecifier::Namespace(local)) => {
+                            let std_name = self.chunk.add_constant(Value::from("std"));
+                            self.chunk.write_opcode(Opcode::GetGlobal);
+                            self.chunk.write_u16(std_name);
+                            define_binding(self, local);
+                        }
+                        ("std", ImportSpecifier::DeferredNamespace(local)) => {
                             let std_name = self.chunk.add_constant(Value::from("std"));
                             self.chunk.write_opcode(Opcode::GetGlobal);
                             self.chunk.write_u16(std_name);
@@ -3178,6 +3252,21 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.const_import_bindings.insert(local.clone());
                             } else {
                                 // Fallback empty namespace
+                                self.chunk.write_opcode(Opcode::NewObject);
+                                self.chunk.write_byte(0);
+                            }
+                            define_binding(self, local);
+                        }
+                        (_, ImportSpecifier::DeferredNamespace(local)) => {
+                            if let Some(resolved_str) = self.resolve_import_path(source) {
+                                self.chunk.write_opcode(Opcode::NewObject);
+                                self.chunk.write_byte(0);
+                                self.chunk.loaded_module_vars.insert(
+                                    local.clone(),
+                                    (resolved_str, "\x00defer:*".to_string()),
+                                );
+                                self.chunk.const_import_bindings.insert(local.clone());
+                            } else {
                                 self.chunk.write_opcode(Opcode::NewObject);
                                 self.chunk.write_byte(0);
                             }
@@ -9965,9 +10054,9 @@ impl<'gc> Compiler<'gc> {
                     self.locals.pop();
                 }
                 // stack: [this, key, value]
-                self.chunk.write_opcode(Opcode::SetIndex);
+                self.chunk.write_opcode(Opcode::InitIndex);
                 self.chunk.write_opcode(Opcode::Pop);
-                // Remove temporary locals (consumed by SetIndex)
+                // Remove temporary locals (consumed by InitIndex)
                 if let Some(pos) = self.locals.iter().rposition(|l| l == "__field_key__") {
                     self.locals.remove(pos);
                 }

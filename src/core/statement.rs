@@ -325,6 +325,7 @@ pub enum ImportSpecifier {
     Default(String),               // import name from "module"
     Named(String, Option<String>), // import { name as alias } from "module"
     Namespace(String),             // import * as name from "module"
+    DeferredNamespace(String),     // import defer * as name from "module"
 }
 
 #[derive(Clone, Debug)]

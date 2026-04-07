@@ -1641,7 +1641,31 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         source = utf16_to_utf8(s);
         *index += 1;
     } else {
-        if let Some(name) = t[*index].token.as_identifier_string() {
+        let is_deferred_namespace = matches!(&t[*index].token, Token::Identifier(s) if s == "defer")
+            && *index + 1 < t.len()
+            && matches!(t[*index + 1].token, Token::Multiply);
+        if is_deferred_namespace {
+            *index += 1; // defer
+            *index += 1; // *
+            if *index < t.len() {
+                let is_as = match &t[*index].token {
+                    Token::Identifier(s) if s == "as" => true,
+                    Token::As => true,
+                    _ => false,
+                };
+                if is_as {
+                    *index += 1;
+                    if let Some(name) = t[*index].token.as_identifier_string() {
+                        specifiers.push(ImportSpecifier::DeferredNamespace(name));
+                        *index += 1;
+                    } else {
+                        return Err(raise_parse_error!("Expected identifier after 'import defer * as'"));
+                    }
+                } else {
+                    return Err(raise_parse_error!("Expected 'as' after 'import defer *'"));
+                }
+            }
+        } else if let Some(name) = t[*index].token.as_identifier_string() {
             specifiers.push(ImportSpecifier::Default(name));
             *index += 1;
             if *index < t.len() && matches!(t[*index].token, Token::Comma) {

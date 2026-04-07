@@ -306,6 +306,8 @@ pub struct Chunk<'gc> {
     pub const_import_bindings: std::collections::HashSet<String>,
     /// Self-import namespace imports: (local_name, Vec<(export_name, local_binding_name)>).
     pub self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    /// Self-import deferred namespace imports: (local_name, Vec<(export_name, local_binding_name)>).
+    pub self_deferred_namespace_imports: Vec<(String, Vec<(String, String)>)>,
     /// Self-import alias map: local_name -> exported_name (for live binding resolution at runtime).
     pub self_import_aliases: std::collections::HashMap<String, String>,
     /// External module variable bindings: local_name -> (module_path, export_name).
@@ -465,10 +467,12 @@ impl<'gc> Chunk<'gc> {
         self.lexical_declared_globals.extend(dep.lexical_declared_globals);
         self.fn_declared_globals.extend(dep.fn_declared_globals);
         self.block_alias_to_original.extend(dep.block_alias_to_original);
-        // Note: const_import_bindings, self_namespace_imports, self_import_aliases,
+        // Note: const_import_bindings, self_namespace_imports,
+        // self_deferred_namespace_imports, self_import_aliases,
         // loaded_module_vars are module-specific and not merged — they are set
         // separately from the main module's chunk after all merges.
-        // Note: self_namespace_imports, self_import_aliases, loaded_module_vars
+        // Note: self_namespace_imports, self_deferred_namespace_imports,
+        // self_import_aliases, loaded_module_vars
         // are module-specific and not merged — they belong to the main module.
 
         ip_offset
@@ -485,6 +489,7 @@ impl<'gc> Chunk<'gc> {
     /// - SetupTry: u32 jump + u16 const
     /// - MakeClosure: u16 const + u8 count + count×2 bytes
     /// - Call: u8 flags, conditionally +u16 (arg count, no adjustment)
+    /// - ThrowIfNotConstructor: u8 stack depth, no adjustment
     fn adjust_bytecode_offsets(code: &mut [u8], ip_offset: usize, const_offset: usize) {
         let len = code.len();
         let mut i = 0;
@@ -509,10 +514,10 @@ impl<'gc> Chunk<'gc> {
                 | 79..=95
                 | 97..=100
                 | 102..=103
-                | 105..=108 => {}
+                | 105..=107 => {}
 
                 // u8 operand, no adjustment needed
-                16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 => {
+                16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 | 108 => {
                     i += 1;
                 }
 

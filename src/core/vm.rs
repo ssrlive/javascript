@@ -652,6 +652,7 @@ struct ModuleExecutionState<'gc> {
     loaded_module_vars: std::collections::HashMap<String, (String, String)>,
     const_import_bindings: std::collections::HashSet<String>,
     self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    self_deferred_namespace_imports: Vec<(String, Vec<(String, String)>)>,
     self_import_aliases: std::collections::HashMap<String, String>,
     live_import_bindings: std::collections::HashMap<String, String>,
 }
@@ -750,11 +751,39 @@ struct SuspendedModuleState<'gc> {
     loaded_module_vars: std::collections::HashMap<String, (String, String)>,
     const_import_bindings: std::collections::HashSet<String>,
     self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    self_deferred_namespace_imports: Vec<(String, Vec<(String, String)>)>,
     self_import_aliases: std::collections::HashMap<String, String>,
     live_import_bindings: std::collections::HashMap<String, String>,
     dep_source: String,
     resolved_path: std::path::PathBuf,
     key: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModuleStatus {
+    Linked,
+    Evaluating,
+    EvaluatingAsync,
+    Evaluated,
+}
+
+#[derive(Clone)]
+struct StoredModuleRecord {
+    source: String,
+    resolved_path: std::path::PathBuf,
+    statements: Vec<crate::core::Statement>,
+    export_names: Vec<String>,
+    export_name_to_local: std::collections::HashMap<String, String>,
+    reexport_sources: Vec<(String, Vec<crate::core::ReexportSpec>)>,
+    requests: Vec<crate::core::ModuleRequest>,
+    loaded_module_vars: std::collections::HashMap<String, (String, String)>,
+    const_import_bindings: std::collections::HashSet<String>,
+    self_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    self_deferred_namespace_imports: Vec<(String, Vec<(String, String)>)>,
+    self_import_aliases: std::collections::HashMap<String, String>,
+    ip: usize,
+    has_tla: bool,
+    status: ModuleStatus,
 }
 
 unsafe impl<'gc> Collect<'gc> for SuspendedModuleState<'gc> {
@@ -811,6 +840,9 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         // Trace loaded module exports
         for exports in self.loaded_modules.values() {
             exports.trace(cc);
+        }
+        for namespace in self.deferred_module_ns_objects.values() {
+            namespace.trace(cc);
         }
         // Trace suspended module states (TLA)
         for state in &self.suspended_module_states {
@@ -948,6 +980,10 @@ pub struct VM<'gc> {
     /// Cross-module namespace identity cache: absolute module path → namespace Value.
     /// Ensures `GetModuleNamespace(module)` always returns the same object (spec §16.2.1.10).
     pub(crate) module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
+    /// Deferred namespace identity cache: absolute module path → deferred namespace Value.
+    deferred_module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
+    /// Parsed/compiled module records, including modules that are linked but not yet evaluated.
+    module_records: std::collections::HashMap<String, StoredModuleRecord>,
     /// Cached intrinsic %Promise% constructor used by dynamic import.
     intrinsic_promise_ctor: Value<'gc>,
     /// When true, `run_opcode_await` at module top level exits early to support
@@ -1141,6 +1177,8 @@ impl<'gc> VM<'gc> {
             loaded_module_states: std::collections::HashMap::new(),
             main_module_ip_start: None,
             module_ns_objects: std::collections::HashMap::new(),
+            deferred_module_ns_objects: std::collections::HashMap::new(),
+            module_records: std::collections::HashMap::new(),
             intrinsic_promise_ctor: Value::Undefined,
             suspend_on_module_await: false,
             module_await_suspended: false,
@@ -1169,22 +1207,46 @@ impl<'gc> VM<'gc> {
         self.is_module_mode = true;
     }
 
+    fn pre_create_module_namespace_with_phase(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        module_key: &str,
+        deferred: bool,
+    ) {
+        let mut ns_map = IndexMap::new();
+        ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+        if deferred {
+            ns_map.insert("__deferred_module_namespace__".to_string(), Value::Boolean(true));
+        }
+        ns_map.insert("__ns_module_key__".to_string(), Value::from(module_key));
+        ns_map.insert("__proto__".to_string(), Value::Null);
+        ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+        ns_map.insert(
+            "@@sym:4".to_string(),
+            Value::from(if deferred { "Deferred Module" } else { "Module" }),
+        );
+        ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
+        let main_ns = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
+        if deferred {
+            self.deferred_module_ns_objects
+                .insert(module_key.to_string(), main_ns);
+        } else {
+            self.module_ns_objects.insert(module_key.to_string(), main_ns);
+        }
+    }
+
     /// Pre-create a module namespace shell in `module_ns_objects` so that
     /// circular imports from dependency modules get the same identity object
     /// (spec GetModuleNamespace §16.2.1.10).  The shell has no `__ns_bindings__`
     /// yet; those are populated later when the full export info is known.
     pub fn pre_create_module_namespace(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
-        let mut ns_map = IndexMap::new();
-        ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
-        ns_map.insert("__ns_module_key__".to_string(), Value::from(module_key));
-        ns_map.insert("__proto__".to_string(), Value::Null);
-        ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
-        ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
-        ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
-        ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-        ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
-        let main_ns = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
-        self.module_ns_objects.insert(module_key.to_string(), main_ns);
+        self.pre_create_module_namespace_with_phase(ctx, module_key, false);
+    }
+
+    fn pre_create_deferred_module_namespace(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
+        self.pre_create_module_namespace_with_phase(ctx, module_key, true);
     }
 
     fn current_source_path(&self) -> Option<&str> {
@@ -1201,6 +1263,7 @@ impl<'gc> VM<'gc> {
             loaded_module_vars: self.chunk.loaded_module_vars.clone(),
             const_import_bindings: self.chunk.const_import_bindings.clone(),
             self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+            self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
             self_import_aliases: self.chunk.self_import_aliases.clone(),
             live_import_bindings: self.chunk.live_import_bindings.clone(),
         }
@@ -1221,6 +1284,7 @@ impl<'gc> VM<'gc> {
         self.chunk.loaded_module_vars = state.loaded_module_vars;
         self.chunk.const_import_bindings = state.const_import_bindings;
         self.chunk.self_namespace_imports = state.self_namespace_imports;
+        self.chunk.self_deferred_namespace_imports = state.self_deferred_namespace_imports;
         self.chunk.self_import_aliases = state.self_import_aliases;
         self.chunk.live_import_bindings = state.live_import_bindings;
         self.script_path = Some(module_key.to_string());
@@ -1238,6 +1302,7 @@ impl<'gc> VM<'gc> {
         self.chunk.loaded_module_vars = saved.state.loaded_module_vars;
         self.chunk.const_import_bindings = saved.state.const_import_bindings;
         self.chunk.self_namespace_imports = saved.state.self_namespace_imports;
+        self.chunk.self_deferred_namespace_imports = saved.state.self_deferred_namespace_imports;
         self.chunk.self_import_aliases = saved.state.self_import_aliases;
         self.chunk.live_import_bindings = saved.state.live_import_bindings;
         self.script_path = saved.script_path;
@@ -1376,6 +1441,91 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    pub(crate) fn register_current_module_record(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        module_key: &str,
+        source: &str,
+        resolved_path: &std::path::Path,
+        statements: &[crate::core::Statement],
+        export_names: &[String],
+        export_name_to_local: &std::collections::HashMap<String, String>,
+        reexport_sources: &[(String, Vec<crate::core::ReexportSpec>)],
+        requests: &[crate::core::ModuleRequest],
+        has_tla: bool,
+    ) {
+        self.pre_create_deferred_module_namespace(ctx, module_key);
+        self.module_records.insert(
+            module_key.to_string(),
+            StoredModuleRecord {
+                source: source.to_string(),
+                resolved_path: resolved_path.to_path_buf(),
+                statements: statements.to_vec(),
+                export_names: export_names.to_vec(),
+                export_name_to_local: export_name_to_local.clone(),
+                reexport_sources: reexport_sources.to_vec(),
+                requests: requests.to_vec(),
+                loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+                const_import_bindings: self.chunk.const_import_bindings.clone(),
+                self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+                self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
+                self_import_aliases: self.chunk.self_import_aliases.clone(),
+                ip: self.ip,
+                has_tla,
+                status: ModuleStatus::Linked,
+            },
+        );
+        self.refresh_module_namespace_object(ctx, module_key);
+        self.refresh_deferred_module_namespace_object(ctx, module_key);
+    }
+
+    pub(crate) fn seed_pending_module_record(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        module_key: &str,
+        source: &str,
+        resolved_path: &std::path::Path,
+        statements: &[crate::core::Statement],
+        export_names: &[String],
+        export_name_to_local: &std::collections::HashMap<String, String>,
+        reexport_sources: &[(String, Vec<crate::core::ReexportSpec>)],
+        requests: &[crate::core::ModuleRequest],
+        has_tla: bool,
+    ) {
+        self.pre_create_deferred_module_namespace(ctx, module_key);
+        let status = self
+            .module_records
+            .get(module_key)
+            .map(|record| record.status)
+            .unwrap_or(ModuleStatus::Linked);
+        self.module_records.insert(
+            module_key.to_string(),
+            StoredModuleRecord {
+                source: source.to_string(),
+                resolved_path: resolved_path.to_path_buf(),
+                statements: statements.to_vec(),
+                export_names: export_names.to_vec(),
+                export_name_to_local: export_name_to_local.clone(),
+                reexport_sources: reexport_sources.to_vec(),
+                requests: requests.to_vec(),
+                loaded_module_vars: std::collections::HashMap::new(),
+                const_import_bindings: std::collections::HashSet::new(),
+                self_namespace_imports: Vec::new(),
+                self_deferred_namespace_imports: Vec::new(),
+                self_import_aliases: std::collections::HashMap::new(),
+                ip: 0,
+                has_tla,
+                status,
+            },
+        );
+        self.refresh_module_namespace_object(ctx, module_key);
+        self.refresh_deferred_module_namespace_object(ctx, module_key);
+    }
+
+    pub(crate) fn mark_module_record_evaluating(&mut self, module_key: &str) {
+        self.set_module_record_status(module_key, ModuleStatus::Evaluating);
+    }
+
     pub(crate) fn finalize_active_module_record(&mut self, ctx: &GcContext<'gc>, module_key: &str, export_names: &[String]) {
         let mut exports = IndexMap::new();
         let export_name_to_local = self.loaded_module_local_names.get(module_key).cloned().unwrap_or_default();
@@ -1402,10 +1552,13 @@ impl<'gc> VM<'gc> {
             .insert(module_key.to_string(), self.snapshot_module_execution_state());
         self.module_load_errors.remove(module_key);
         self.refresh_module_namespace_object(ctx, module_key);
+        self.refresh_deferred_module_namespace_object(ctx, module_key);
+        self.set_module_record_status(module_key, ModuleStatus::Evaluated);
     }
 
     fn record_module_load_error(&mut self, module_key: &str, error: Value<'gc>) {
         self.loaded_module_states.remove(module_key);
+        self.set_module_record_status(module_key, ModuleStatus::Linked);
         self.module_load_errors.insert(module_key.to_string(), error);
     }
 
@@ -1453,12 +1606,26 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn refresh_module_namespace_object(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
+    fn refresh_module_namespace_object_with_phase(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        module_key: &str,
+        deferred: bool,
+    ) {
         self.ensure_module_export_bindings(module_key);
-        if !self.module_ns_objects.contains_key(module_key) {
+        if deferred {
+            if !self.deferred_module_ns_objects.contains_key(module_key) {
+                self.pre_create_deferred_module_namespace(ctx, module_key);
+            }
+        } else if !self.module_ns_objects.contains_key(module_key) {
             self.pre_create_module_namespace(ctx, module_key);
         }
-        let Some(Value::VmObject(ns_obj)) = self.module_ns_objects.get(module_key).cloned() else {
+        let ns_value = if deferred {
+            self.deferred_module_ns_objects.get(module_key).cloned()
+        } else {
+            self.module_ns_objects.get(module_key).cloned()
+        };
+        let Some(Value::VmObject(ns_obj)) = ns_value else {
             return;
         };
         let exports = self.loaded_modules.get(module_key).cloned().unwrap_or_default();
@@ -1471,10 +1638,16 @@ impl<'gc> VM<'gc> {
 
         let mut ns_map = ns_obj.borrow_mut(ctx);
         ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+        if deferred {
+            ns_map.insert("__deferred_module_namespace__".to_string(), Value::Boolean(true));
+        }
         ns_map.insert("__ns_module_key__".to_string(), Value::from(module_key));
         ns_map.insert("__proto__".to_string(), Value::Null);
         ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
-        ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
+        ns_map.insert(
+            "@@sym:4".to_string(),
+            Value::from(if deferred { "Deferred Module" } else { "Module" }),
+        );
         ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
         ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
@@ -1489,12 +1662,106 @@ impl<'gc> VM<'gc> {
         );
     }
 
+    fn refresh_module_namespace_object(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
+        self.refresh_module_namespace_object_with_phase(ctx, module_key, false);
+    }
+
+    fn refresh_deferred_module_namespace_object(&mut self, ctx: &GcContext<'gc>, module_key: &str) {
+        self.refresh_module_namespace_object_with_phase(ctx, module_key, true);
+    }
+
+    fn get_module_namespace_object(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        module_key: &str,
+        deferred: bool,
+    ) -> Option<Value<'gc>> {
+        if deferred {
+            self.refresh_deferred_module_namespace_object(ctx, module_key);
+            self.deferred_module_ns_objects.get(module_key).cloned()
+        } else {
+            self.refresh_module_namespace_object(ctx, module_key);
+            self.module_ns_objects.get(module_key).cloned()
+        }
+    }
+
     fn namespace_module_key(map: &VmObjectHandle<'gc>) -> Option<String> {
         let borrow = map.borrow();
         if let Some(Value::String(u16s)) = borrow.get("__ns_module_key__") {
             Some(crate::unicode::utf16_to_utf8(u16s))
         } else {
             None
+        }
+    }
+
+    fn namespace_is_deferred(map: &VmObjectHandle<'gc>) -> bool {
+        matches!(
+            map.borrow().get("__deferred_module_namespace__"),
+            Some(Value::Boolean(true))
+        )
+    }
+
+    fn namespace_is_symbol_like_key(map: &VmObjectHandle<'gc>, key: &str) -> bool {
+        key.starts_with("@@sym:") || (Self::namespace_is_deferred(map) && key == "then")
+    }
+
+    fn ready_for_sync_execution(
+        &self,
+        module_key: &str,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !seen.insert(module_key.to_string()) {
+            return true;
+        }
+        let Some(record) = self.module_records.get(module_key) else {
+            return true;
+        };
+        match record.status {
+            ModuleStatus::Evaluated => return true,
+            ModuleStatus::Evaluating | ModuleStatus::EvaluatingAsync => return false,
+            ModuleStatus::Linked => {}
+        }
+        if record.has_tla {
+            return false;
+        }
+        for request in &record.requests {
+            let required_module = crate::core::resolve_module_path(&request.specifier, &record.resolved_path)
+                .to_string_lossy()
+                .to_string();
+            if !self.ready_for_sync_execution(&required_module, seen) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn ensure_deferred_namespace_evaluation(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        map: &VmObjectHandle<'gc>,
+    ) -> Result<(), Value<'gc>> {
+        if !Self::namespace_is_deferred(map) {
+            return Ok(());
+        }
+        let Some(module_key) = Self::namespace_module_key(map) else {
+            return Ok(());
+        };
+        if let Some(error) = self.module_load_errors.get(&module_key).cloned() {
+            return Err(error);
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !self.ready_for_sync_execution(&module_key, &mut seen) {
+            return Err(self.make_type_error_object(
+                ctx,
+                "Deferred module namespace is not ready for synchronous evaluation",
+            ));
+        }
+        if self.ensure_module_evaluated(ctx, &module_key) {
+            Ok(())
+        } else {
+            Err(self.pending_throw.take().unwrap_or_else(|| {
+                self.make_type_error_object(ctx, "Deferred module namespace evaluation failed")
+            }))
         }
     }
 
@@ -1573,6 +1840,7 @@ impl<'gc> VM<'gc> {
                 .and_then(|origins| origins.get(export_name))
                 .cloned()
                 && origin_binding != "namespace"
+                && origin_binding != "deferred-namespace"
             {
                 let origin_local = self
                     .loaded_module_local_names
@@ -1597,6 +1865,7 @@ impl<'gc> VM<'gc> {
             .and_then(|origins| origins.get(binding_name))
             .cloned()
             && origin_binding != "namespace"
+            && origin_binding != "deferred-namespace"
         {
             let origin_local = self
                 .loaded_module_local_names
@@ -1674,9 +1943,10 @@ impl<'gc> VM<'gc> {
         map: &VmObjectHandle<'gc>,
         key: &str,
     ) -> Result<Option<Value<'gc>>, Value<'gc>> {
-        if key.starts_with("@@sym:") {
+        if Self::namespace_is_symbol_like_key(map, key) {
             return Ok(map.borrow().get(key).cloned());
         }
+        self.ensure_deferred_namespace_evaluation(ctx, map)?;
 
         let module_key = Self::namespace_module_key(map);
         if let Some(local_name) = Self::namespace_binding_local_name(map, key) {
@@ -1694,309 +1964,293 @@ impl<'gc> VM<'gc> {
         Ok(map.borrow().get(key).cloned())
     }
 
-    /// Load and execute dependency modules, storing their exports in `loaded_modules`.
-    /// `sources` is a list of raw import specifiers (e.g. `"./dep.js"`).
-    pub fn load_module_dependencies(&mut self, ctx: &GcContext<'gc>, entry_path: &std::path::Path, sources: &[String]) {
-        use crate::core::{collect_exports_from_ast, collect_module_sources, resolve_module_path};
+    fn set_module_record_status(&mut self, module_key: &str, status: ModuleStatus) {
+        if let Some(record) = self.module_records.get_mut(module_key) {
+            record.status = status;
+        }
+    }
 
-        // Topologically load modules: iterate sources, load each one.
-        // For simplicity we do a single-pass; circular deps get empty exports.
-        let mut load_queue: Vec<(String, std::path::PathBuf)> = Vec::new();
-        for src in sources {
-            let resolved = resolve_module_path(src, entry_path);
-            let key = resolved.to_string_lossy().to_string();
-            if !self.loaded_modules.contains_key(&key) {
-                load_queue.push((src.clone(), resolved));
-            }
+    fn collect_async_transitive_dependencies(
+        &self,
+        module_key: &str,
+        seen: &mut std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !seen.insert(module_key.to_string()) {
+            return;
+        }
+        let Some(record) = self.module_records.get(module_key) else {
+            return;
+        };
+        if record.status != ModuleStatus::Linked {
+            return;
+        }
+        if record.has_tla {
+            out.push(module_key.to_string());
+            return;
+        }
+        for request in &record.requests {
+            let dep_key = crate::core::resolve_module_path(&request.specifier, &record.resolved_path)
+                .to_string_lossy()
+                .to_string();
+            self.collect_async_transitive_dependencies(&dep_key, seen, out);
+        }
+    }
+
+    fn load_module_graph(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        entry_path: &std::path::Path,
+        requests: &[crate::core::ModuleRequest],
+    ) {
+        for request in requests {
+            let resolved = crate::core::resolve_module_path(&request.specifier, entry_path);
+            self.load_single_module(ctx, &resolved);
+        }
+    }
+
+    fn load_single_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path) {
+        use crate::core::{collect_exports_from_ast, collect_module_requests, module_has_top_level_await};
+
+        let key = resolved_path.to_string_lossy().to_string();
+        if self.module_records.contains_key(&key) || self.module_load_errors.contains_key(&key) {
+            return;
         }
 
-        for (_src, resolved_path) in &load_queue {
-            let key = resolved_path.to_string_lossy().to_string();
-            if self.loaded_modules.contains_key(&key) {
-                continue;
-            }
-
-            // Read and parse the dependency module
-            let dep_source = match crate::core::read_script_file(resolved_path) {
-                Ok(s) => s,
-                Err(err) => {
-                    let error_value = self.vm_value_from_error(ctx, &err);
-                    self.record_module_load_error(&key, error_value);
-                    continue;
-                }
-            };
-            let dep_stmts = match crate::core::parse_program_statements(&dep_source, true) {
-                Ok(s) => s,
-                Err(err) => {
-                    let error_value = self.vm_value_from_error(ctx, &err);
-                    self.record_module_load_error(&key, error_value);
-                    continue;
-                }
-            };
-            let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
-
-            // Insert sentinel to prevent circular recursion
-            self.pre_create_module_namespace(ctx, &key);
-            self.seed_module_record(&key, &export_names, &export_name_to_local);
-
-            // Recursively load any sub-dependencies first
-            let dep_basename = resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let sub_sources = collect_module_sources(&dep_stmts, dep_basename);
-            if !sub_sources.is_empty() {
-                self.load_module_dependencies(ctx, resolved_path, &sub_sources);
-            }
-
-            // Compile the dependency
-            let mut dep_compiler = crate::core::Compiler::new();
-            dep_compiler.set_script_filename(key.clone());
-            // Pass already-loaded module info to the dependency compiler
-            for (path, exports) in &self.loaded_modules {
-                let mut info = std::collections::HashMap::new();
-                for k in exports.keys() {
-                    info.insert(k.clone(), path.clone());
-                }
-                dep_compiler.set_loaded_module_exports(path.clone(), info);
-            }
-            let dep_chunk = match dep_compiler.compile(&dep_stmts) {
-                Ok(c) => c,
-                Err(err) => {
-                    let error_value = self.vm_value_from_error(ctx, &err);
-                    self.record_module_load_error(&key, error_value);
-                    continue;
-                }
-            };
-
-            // Extract module-specific metadata before merge consumes the chunk
-            let dep_loaded_module_vars = dep_chunk.loaded_module_vars.clone();
-            let dep_const_import_bindings = dep_chunk.const_import_bindings.clone();
-            let dep_self_namespace_imports = dep_chunk.self_namespace_imports.clone();
-            let dep_self_import_aliases = dep_chunk.self_import_aliases.clone();
-
-            // Merge dependency chunk into VM's persistent chunk so that
-            // functions created during dependency execution have IPs valid
-            // in the merged chunk (enabling cross-module function calls).
-            let dep_ip_offset = self.chunk.merge_dependency_chunk(dep_chunk);
-
-            // Save current state and temporarily activate dependency's module metadata
-            let saved_ip = self.ip;
-            let saved_module_locals = std::mem::take(&mut self.module_locals);
-            let saved_script_path = self.script_path.take();
-            let saved_stack = std::mem::take(&mut self.stack);
-            let saved_top_level_cells = std::mem::take(&mut self.top_level_cells);
-            let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, dep_loaded_module_vars);
-            let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, dep_const_import_bindings);
-            let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, dep_self_namespace_imports);
-            let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, dep_self_import_aliases);
-            let saved_live_import_bindings = std::mem::take(&mut self.chunk.live_import_bindings);
-            let saved_main_module_ip_start = self.main_module_ip_start.take();
-            let saved_const_globals = std::mem::take(&mut self.const_globals);
-            let saved_runtime_state = self.take_runtime_execution_state();
-
-            self.ip = dep_ip_offset;
-            self.set_module_this();
-            self.set_source_context(&dep_source, Some(resolved_path.as_path()));
-
-            // Inject sub-dependency bindings before running
-            self.inject_loaded_module_bindings(ctx);
-
-            // Execute (with TLA suspension support for async module interleaving)
-            self.suspend_on_module_await = true;
-            let dep_result = self.run(ctx);
-            let was_suspended = self.module_await_suspended;
-            self.module_await_suspended = false;
-
-            if was_suspended {
-                // Save dep execution state for later resumption (stored in VM for GC safety)
-                self.suspended_module_states.push(SuspendedModuleState {
-                    ip: self.ip,
-                    module_locals: self.module_locals.clone(),
-                    stack: self.stack.clone(),
-                    top_level_cells: self.top_level_cells.clone(),
-                    const_globals: self.const_globals.clone(),
-                    loaded_module_vars: self.chunk.loaded_module_vars.clone(),
-                    const_import_bindings: self.chunk.const_import_bindings.clone(),
-                    self_namespace_imports: self.chunk.self_namespace_imports.clone(),
-                    self_import_aliases: self.chunk.self_import_aliases.clone(),
-                    live_import_bindings: self.chunk.live_import_bindings.clone(),
-                    dep_source: dep_source.clone(),
-                    resolved_path: resolved_path.clone(),
-                    key: key.clone(),
-                });
-            }
-
-            let dep_failed = if let Err(err) = dep_result {
+        let dep_source = match crate::core::read_script_file(resolved_path) {
+            Ok(s) => s,
+            Err(err) => {
                 let error_value = self.vm_value_from_error(ctx, &err);
                 self.record_module_load_error(&key, error_value);
-                true
-            } else {
-                false
-            };
-
-            if !dep_failed {
-                // Collect the dependency's exports
-                let mut exports = IndexMap::new();
-
-                for (export_name, local_name) in &export_name_to_local {
-                    if let Some(val) = self.module_locals.get(local_name).cloned() {
-                        exports.insert(export_name.clone(), val);
-                    } else if let Some(val) = self.globals.get(local_name).cloned() {
-                        exports.insert(export_name.clone(), val);
-                    }
-                }
-                for export_name in &export_names {
-                    if !exports.contains_key(export_name) {
-                        if let Some(val) = self.module_locals.get(export_name).cloned() {
-                            exports.insert(export_name.clone(), val);
-                        } else if let Some(val) = self.globals.get(export_name).cloned() {
-                            exports.insert(export_name.clone(), val);
-                        }
-                    }
-                }
-
-                // Build export origins for local exports
-                let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-
-                // Detect namespace imports: `import * as foo from "mod"` + `export { foo }`
-                // Per spec ParseModule §16.2.1.7.1 step 10.1.ii.2, these are indirect exports
-                // with ImportName = "all", so their origin is (mod_path, "namespace").
-                let mut ns_import_origins: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-                for stmt in &dep_stmts {
-                    if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
-                        for spec in specs {
-                            if let crate::core::statement::ImportSpecifier::Namespace(local_name) = spec {
-                                let imp_resolved = resolve_module_path(source, resolved_path);
-                                ns_import_origins.insert(local_name.clone(), imp_resolved.to_string_lossy().to_string());
-                            }
-                        }
-                    }
-                }
-
-                for export_name in exports.keys() {
-                    // Check if this export is a re-export of a namespace import
-                    let local_name = export_name_to_local
-                        .get(export_name)
-                        .cloned()
-                        .unwrap_or_else(|| export_name.clone());
-                    if let Some(ns_mod_path) = ns_import_origins.get(&local_name) {
-                        origins.insert(export_name.clone(), (ns_mod_path.clone(), "namespace".to_string()));
-                    } else {
-                        origins.insert(export_name.clone(), (key.clone(), export_name.clone()));
-                    }
-                }
-
-                // Handle re-exports — track star-exported keys for ambiguity detection
-                // Per spec §15.2.1.16.3 ResolveExport: compare (Module, BindingName) not immediate source
-                let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-                let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let mut all_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
-                for (reexport_src, reexport_specs) in &reexport_sources {
-                    let reexport_resolved = resolve_module_path(reexport_src, resolved_path);
-                    let reexport_key = reexport_resolved.to_string_lossy().to_string();
-                    // Record all re-export deps for circular fixup
-                    all_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
-                    if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
-                        for spec in reexport_specs {
-                            match spec {
-                                crate::core::ReexportSpec::Named(name, alias) => {
-                                    let ename = alias.as_deref().unwrap_or(name).to_string();
-                                    if let Some(val) = source_exports.get(name).cloned() {
-                                        exports.insert(ename.clone(), val);
-                                        // Trace origin through source module
-                                        let origin = self
-                                            .export_origins
-                                            .get(&reexport_key)
-                                            .and_then(|o| o.get(name))
-                                            .cloned()
-                                            .unwrap_or_else(|| (reexport_key.clone(), name.clone()));
-                                        origins.insert(ename, origin);
-                                    }
-                                }
-                                crate::core::ReexportSpec::Star => {
-                                    for (k, v) in &source_exports {
-                                        if k == "default" {
-                                            continue;
-                                        }
-                                        // Local exports take precedence over star re-exports
-                                        if exports.contains_key(k) && !star_export_origins.contains_key(k) {
-                                            continue;
-                                        }
-                                        // Get the origin of this key from the source module
-                                        let cur_origin = self
-                                            .export_origins
-                                            .get(&reexport_key)
-                                            .and_then(|o| o.get(k))
-                                            .cloned()
-                                            .unwrap_or_else(|| (reexport_key.clone(), k.clone()));
-
-                                        if let Some(prev_origin) = star_export_origins.get(k) {
-                                            if prev_origin != &cur_origin {
-                                                ambiguous_keys.insert(k.clone());
-                                            }
-                                        } else {
-                                            star_export_origins.insert(k.clone(), cur_origin.clone());
-                                            if !exports.contains_key(k) {
-                                                exports.insert(k.clone(), v.clone());
-                                            }
-                                        }
-                                        origins.insert(k.clone(), cur_origin);
-                                    }
-                                }
-                                crate::core::ReexportSpec::Namespace(name) => {
-                                    self.refresh_module_namespace_object(ctx, &reexport_key);
-                                    if let Some(ns_obj) = self.module_ns_objects.get(&reexport_key).cloned() {
-                                        exports.insert(name.clone(), ns_obj);
-                                    }
-                                    // Namespace origin: the referenced module with "namespace" binding
-                                    origins.insert(name.clone(), (reexport_key.clone(), "namespace".to_string()));
-                                }
-                            }
-                        }
-                    }
-                }
-                // Remove ambiguous star-exported keys
-                for k in &ambiguous_keys {
-                    exports.shift_remove(k);
-                    origins.remove(k);
-                }
-                if !ambiguous_keys.is_empty() {
-                    self.ambiguous_export_keys.insert(key.clone(), ambiguous_keys);
-                }
-
-                self.loaded_modules.insert(key.clone(), exports);
-                self.export_origins.insert(key.clone(), origins);
-                self.loaded_module_local_names.insert(key.clone(), export_name_to_local.clone());
-                self.ensure_module_export_bindings(&key);
-                self.loaded_module_states
-                    .insert(key.clone(), self.snapshot_module_execution_state());
-                self.module_load_errors.remove(&key);
-                self.refresh_module_namespace_object(ctx, &key);
-                if !all_reexport_deps.is_empty() {
-                    self.reexport_deps.insert(key.clone(), all_reexport_deps);
-                }
+                return;
             }
+        };
+        let dep_stmts = match crate::core::parse_program_statements(&dep_source, true) {
+            Ok(s) => s,
+            Err(err) => {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(&key, error_value);
+                return;
+            }
+        };
+        let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
+        let dep_basename = resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let requests = collect_module_requests(&dep_stmts, dep_basename);
+        let dep_has_tla = module_has_top_level_await(&dep_stmts);
 
-            // Restore execution state and module-specific chunk metadata
-            self.ip = saved_ip;
-            self.module_locals = saved_module_locals;
-            self.script_path = saved_script_path;
-            self.stack = saved_stack;
-            self.top_level_cells = saved_top_level_cells;
-            self.chunk.loaded_module_vars = saved_loaded_module_vars;
-            self.chunk.const_import_bindings = saved_const_import_bindings;
-            self.chunk.self_namespace_imports = saved_self_namespace_imports;
-            self.chunk.self_import_aliases = saved_self_import_aliases;
-            self.chunk.live_import_bindings = saved_live_import_bindings;
-            self.main_module_ip_start = saved_main_module_ip_start;
-            self.const_globals = saved_const_globals;
-            self.restore_runtime_execution_state(saved_runtime_state);
-            if dep_failed {
+        self.pre_create_module_namespace(ctx, &key);
+        self.pre_create_deferred_module_namespace(ctx, &key);
+        self.seed_module_record(&key, &export_names, &export_name_to_local);
+        self.seed_module_export_metadata(&key, &export_name_to_local, &reexport_sources, resolved_path);
+        self.seed_pending_module_record(
+            ctx,
+            &key,
+            &dep_source,
+            resolved_path,
+            &dep_stmts,
+            &export_names,
+            &export_name_to_local,
+            &reexport_sources,
+            &requests,
+            dep_has_tla,
+        );
+
+        if !requests.is_empty() {
+            self.load_module_graph(ctx, resolved_path, &requests);
+        }
+
+        let mut dep_compiler = crate::core::Compiler::new();
+        dep_compiler.set_script_filename(key.clone());
+        for (path, exports) in &self.loaded_modules {
+            let mut info = std::collections::HashMap::new();
+            for k in exports.keys() {
+                info.insert(k.clone(), path.clone());
+            }
+            dep_compiler.set_loaded_module_exports(path.clone(), info);
+        }
+        let dep_chunk = match dep_compiler.compile(&dep_stmts) {
+            Ok(c) => c,
+            Err(err) => {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(&key, error_value);
+                return;
+            }
+        };
+
+        let record = StoredModuleRecord {
+            source: dep_source,
+            resolved_path: resolved_path.to_path_buf(),
+            statements: dep_stmts,
+            export_names,
+            export_name_to_local,
+            reexport_sources,
+            requests,
+            loaded_module_vars: dep_chunk.loaded_module_vars.clone(),
+            const_import_bindings: dep_chunk.const_import_bindings.clone(),
+            self_namespace_imports: dep_chunk.self_namespace_imports.clone(),
+            self_deferred_namespace_imports: dep_chunk.self_deferred_namespace_imports.clone(),
+            self_import_aliases: dep_chunk.self_import_aliases.clone(),
+            ip: self.chunk.merge_dependency_chunk(dep_chunk),
+            has_tla: dep_has_tla,
+            status: ModuleStatus::Linked,
+        };
+        self.module_records.insert(key.clone(), record);
+        self.refresh_module_namespace_object(ctx, &key);
+        self.refresh_deferred_module_namespace_object(ctx, &key);
+    }
+
+    fn finalize_dependency_module_record(&mut self, ctx: &GcContext<'gc>, record: &StoredModuleRecord) {
+        use crate::core::resolve_module_path;
+
+        let key = record.resolved_path.to_string_lossy().to_string();
+        let mut exports = IndexMap::new();
+
+        for (export_name, local_name) in &record.export_name_to_local {
+            if let Some(val) = self.module_locals.get(local_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            } else if let Some(val) = self.globals.get(local_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            }
+        }
+        for export_name in &record.export_names {
+            if exports.contains_key(export_name) {
                 continue;
+            }
+            if let Some(val) = self.module_locals.get(export_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            } else if let Some(val) = self.globals.get(export_name).cloned() {
+                exports.insert(export_name.clone(), val);
             }
         }
 
-        // Resume any TLA-suspended module deps now that all siblings have evaluated.
-        // Per spec §16.2.1.5.2.1 step 14, async modules suspend and resume after
-        // sibling modules in the graph have been evaluated.
+        let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        let mut ns_import_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        for stmt in &record.statements {
+            if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
+                let imp_resolved = resolve_module_path(source, &record.resolved_path)
+                    .to_string_lossy()
+                    .to_string();
+                for spec in specs {
+                    match spec {
+                        crate::core::statement::ImportSpecifier::Namespace(local_name) => {
+                            ns_import_origins.insert(
+                                local_name.clone(),
+                                (imp_resolved.clone(), "namespace".to_string()),
+                            );
+                        }
+                        crate::core::statement::ImportSpecifier::DeferredNamespace(local_name) => {
+                            ns_import_origins.insert(
+                                local_name.clone(),
+                                (imp_resolved.clone(), "deferred-namespace".to_string()),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        for export_name in exports.keys() {
+            let local_name = record
+                .export_name_to_local
+                .get(export_name)
+                .cloned()
+                .unwrap_or_else(|| export_name.clone());
+            if let Some((origin_module, origin_binding)) = ns_import_origins.get(&local_name) {
+                origins.insert(export_name.clone(), (origin_module.clone(), origin_binding.clone()));
+            } else {
+                origins.insert(export_name.clone(), (key.clone(), export_name.clone()));
+            }
+        }
+
+        let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut all_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
+        for (reexport_src, reexport_specs) in &record.reexport_sources {
+            let reexport_resolved = resolve_module_path(reexport_src, &record.resolved_path);
+            let reexport_key = reexport_resolved.to_string_lossy().to_string();
+            all_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
+            if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
+                for spec in reexport_specs {
+                    match spec {
+                        crate::core::ReexportSpec::Named(name, alias) => {
+                            let ename = alias.as_deref().unwrap_or(name).to_string();
+                            if let Some(val) = source_exports.get(name).cloned() {
+                                exports.insert(ename.clone(), val);
+                                let origin = self
+                                    .export_origins
+                                    .get(&reexport_key)
+                                    .and_then(|o| o.get(name))
+                                    .cloned()
+                                    .unwrap_or_else(|| (reexport_key.clone(), name.clone()));
+                                origins.insert(ename, origin);
+                            }
+                        }
+                        crate::core::ReexportSpec::Star => {
+                            for (k, v) in &source_exports {
+                                if k == "default" {
+                                    continue;
+                                }
+                                if exports.contains_key(k) && !star_export_origins.contains_key(k) {
+                                    continue;
+                                }
+                                let cur_origin = self
+                                    .export_origins
+                                    .get(&reexport_key)
+                                    .and_then(|o| o.get(k))
+                                    .cloned()
+                                    .unwrap_or_else(|| (reexport_key.clone(), k.clone()));
+                                if let Some(prev_origin) = star_export_origins.get(k) {
+                                    if prev_origin != &cur_origin {
+                                        ambiguous_keys.insert(k.clone());
+                                    }
+                                } else {
+                                    star_export_origins.insert(k.clone(), cur_origin.clone());
+                                    if !exports.contains_key(k) {
+                                        exports.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                origins.insert(k.clone(), cur_origin);
+                            }
+                        }
+                        crate::core::ReexportSpec::Namespace(name) => {
+                            self.refresh_module_namespace_object(ctx, &reexport_key);
+                            if let Some(ns_obj) = self.module_ns_objects.get(&reexport_key).cloned() {
+                                exports.insert(name.clone(), ns_obj);
+                            }
+                            origins.insert(name.clone(), (reexport_key.clone(), "namespace".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        for k in &ambiguous_keys {
+            exports.shift_remove(k);
+            origins.remove(k);
+        }
+        if !ambiguous_keys.is_empty() {
+            self.ambiguous_export_keys
+                .insert(key.clone(), ambiguous_keys);
+        }
+
+        self.loaded_modules.insert(key.clone(), exports);
+        self.export_origins.insert(key.clone(), origins);
+        self.loaded_module_local_names
+            .insert(key.clone(), record.export_name_to_local.clone());
+        self.ensure_module_export_bindings(&key);
+        self.loaded_module_states
+            .insert(key.clone(), self.snapshot_module_execution_state());
+        self.module_load_errors.remove(&key);
+        self.refresh_module_namespace_object(ctx, &key);
+        self.refresh_deferred_module_namespace_object(ctx, &key);
+        if !all_reexport_deps.is_empty() {
+            self.reexport_deps.insert(key.clone(), all_reexport_deps);
+        }
+        self.set_module_record_status(&key, ModuleStatus::Evaluated);
+    }
+
+    fn resume_suspended_module_states(&mut self, ctx: &GcContext<'gc>) {
         let suspended = std::mem::take(&mut self.suspended_module_states);
         for state in suspended {
             let saved_ip = self.ip;
@@ -2007,6 +2261,10 @@ impl<'gc> VM<'gc> {
             let saved_loaded_module_vars = std::mem::replace(&mut self.chunk.loaded_module_vars, state.loaded_module_vars);
             let saved_const_import_bindings = std::mem::replace(&mut self.chunk.const_import_bindings, state.const_import_bindings);
             let saved_self_namespace_imports = std::mem::replace(&mut self.chunk.self_namespace_imports, state.self_namespace_imports);
+            let saved_self_deferred_namespace_imports = std::mem::replace(
+                &mut self.chunk.self_deferred_namespace_imports,
+                state.self_deferred_namespace_imports,
+            );
             let saved_self_import_aliases = std::mem::replace(&mut self.chunk.self_import_aliases, state.self_import_aliases);
             let saved_live_import_bindings = std::mem::replace(&mut self.chunk.live_import_bindings, state.live_import_bindings);
             let saved_main_module_ip_start = self.main_module_ip_start.take();
@@ -2016,42 +2274,15 @@ impl<'gc> VM<'gc> {
             self.ip = state.ip;
             self.set_source_context(&state.dep_source, Some(state.resolved_path.as_path()));
 
-            // Resume execution from where the await suspended
             let resume_result = self.run(ctx);
 
             if let Err(err) = resume_result {
                 let error_value = self.vm_value_from_error(ctx, &err);
                 self.record_module_load_error(&state.key, error_value);
-            } else {
-                // Update exports with any bindings defined after the await
-                if let Some(existing_exports) = self.loaded_modules.get_mut(&state.key) {
-                    let (export_names, export_name_to_local, _) =
-                        collect_exports_from_ast(&crate::core::parse_program_statements(&state.dep_source, true).unwrap_or_default());
-                    for (export_name, local_name) in &export_name_to_local {
-                        if let Some(val) = self.module_locals.get(local_name).cloned() {
-                            existing_exports.insert(export_name.clone(), val);
-                        } else if let Some(val) = self.globals.get(local_name).cloned() {
-                            existing_exports.insert(export_name.clone(), val);
-                        }
-                    }
-                    for export_name in &export_names {
-                        if !existing_exports.contains_key(export_name) {
-                            if let Some(val) = self.module_locals.get(export_name).cloned() {
-                                existing_exports.insert(export_name.clone(), val);
-                            } else if let Some(val) = self.globals.get(export_name).cloned() {
-                                existing_exports.insert(export_name.clone(), val);
-                            }
-                        }
-                    }
-                }
-                self.ensure_module_export_bindings(&state.key);
-                self.loaded_module_states
-                    .insert(state.key.clone(), self.snapshot_module_execution_state());
-                self.module_load_errors.remove(&state.key);
-                self.refresh_module_namespace_object(ctx, &state.key);
+            } else if let Some(record) = self.module_records.get(&state.key).cloned() {
+                self.finalize_dependency_module_record(ctx, &record);
             }
 
-            // Restore parent state
             self.ip = saved_ip;
             self.module_locals = saved_module_locals;
             self.script_path = saved_script_path;
@@ -2060,12 +2291,166 @@ impl<'gc> VM<'gc> {
             self.chunk.loaded_module_vars = saved_loaded_module_vars;
             self.chunk.const_import_bindings = saved_const_import_bindings;
             self.chunk.self_namespace_imports = saved_self_namespace_imports;
+            self.chunk.self_deferred_namespace_imports = saved_self_deferred_namespace_imports;
             self.chunk.self_import_aliases = saved_self_import_aliases;
             self.chunk.live_import_bindings = saved_live_import_bindings;
             self.main_module_ip_start = saved_main_module_ip_start;
             self.const_globals = saved_const_globals;
             self.restore_runtime_execution_state(saved_runtime_state);
         }
+    }
+
+    fn ensure_module_evaluated(&mut self, ctx: &GcContext<'gc>, module_key: &str) -> bool {
+        if let Some(error) = self.module_load_errors.get(module_key).cloned() {
+            self.pending_throw = Some(error);
+            return false;
+        }
+        let Some(record) = self.module_records.get(module_key).cloned() else {
+            return true;
+        };
+        match record.status {
+            ModuleStatus::Evaluated | ModuleStatus::Evaluating | ModuleStatus::EvaluatingAsync => {
+                return true;
+            }
+            ModuleStatus::Linked => {}
+        }
+
+        self.set_module_record_status(module_key, ModuleStatus::Evaluating);
+        self.evaluate_module_requests(ctx, &record.resolved_path, &record.requests);
+        if self.pending_throw.is_some() {
+            self.set_module_record_status(module_key, ModuleStatus::Linked);
+            return false;
+        }
+
+        let saved_ip = self.ip;
+        let saved_module_locals = std::mem::take(&mut self.module_locals);
+        let saved_script_path = self.script_path.take();
+        let saved_stack = std::mem::take(&mut self.stack);
+        let saved_top_level_cells = std::mem::take(&mut self.top_level_cells);
+        let saved_loaded_module_vars =
+            std::mem::replace(&mut self.chunk.loaded_module_vars, record.loaded_module_vars.clone());
+        let saved_const_import_bindings =
+            std::mem::replace(&mut self.chunk.const_import_bindings, record.const_import_bindings.clone());
+        let saved_self_namespace_imports =
+            std::mem::replace(&mut self.chunk.self_namespace_imports, record.self_namespace_imports.clone());
+        let saved_self_deferred_namespace_imports = std::mem::replace(
+            &mut self.chunk.self_deferred_namespace_imports,
+            record.self_deferred_namespace_imports.clone(),
+        );
+        let saved_self_import_aliases =
+            std::mem::replace(&mut self.chunk.self_import_aliases, record.self_import_aliases.clone());
+        let saved_live_import_bindings = std::mem::take(&mut self.chunk.live_import_bindings);
+        let saved_main_module_ip_start = self.main_module_ip_start.take();
+        let saved_const_globals = std::mem::take(&mut self.const_globals);
+        let saved_runtime_state = self.take_runtime_execution_state();
+
+        self.ip = record.ip;
+        self.set_module_this();
+        self.set_source_context(&record.source, Some(record.resolved_path.as_path()));
+        self.inject_loaded_module_bindings(ctx);
+
+        self.suspend_on_module_await = true;
+        let dep_result = self.run(ctx);
+        let was_suspended = self.module_await_suspended;
+        self.module_await_suspended = false;
+
+        if was_suspended {
+            self.suspended_module_states.push(SuspendedModuleState {
+                ip: self.ip,
+                module_locals: self.module_locals.clone(),
+                stack: self.stack.clone(),
+                top_level_cells: self.top_level_cells.clone(),
+                const_globals: self.const_globals.clone(),
+                loaded_module_vars: self.chunk.loaded_module_vars.clone(),
+                const_import_bindings: self.chunk.const_import_bindings.clone(),
+                self_namespace_imports: self.chunk.self_namespace_imports.clone(),
+                self_deferred_namespace_imports: self.chunk.self_deferred_namespace_imports.clone(),
+                self_import_aliases: self.chunk.self_import_aliases.clone(),
+                live_import_bindings: self.chunk.live_import_bindings.clone(),
+                dep_source: record.source.clone(),
+                resolved_path: record.resolved_path.clone(),
+                key: module_key.to_string(),
+            });
+            self.set_module_record_status(module_key, ModuleStatus::EvaluatingAsync);
+        } else if let Err(err) = dep_result {
+            let error_value = self.vm_value_from_error(ctx, &err);
+            self.record_module_load_error(module_key, error_value);
+        } else {
+            self.finalize_dependency_module_record(ctx, &record);
+        }
+
+        self.ip = saved_ip;
+        self.module_locals = saved_module_locals;
+        self.script_path = saved_script_path;
+        self.stack = saved_stack;
+        self.top_level_cells = saved_top_level_cells;
+        self.chunk.loaded_module_vars = saved_loaded_module_vars;
+        self.chunk.const_import_bindings = saved_const_import_bindings;
+        self.chunk.self_namespace_imports = saved_self_namespace_imports;
+        self.chunk.self_deferred_namespace_imports = saved_self_deferred_namespace_imports;
+        self.chunk.self_import_aliases = saved_self_import_aliases;
+        self.chunk.live_import_bindings = saved_live_import_bindings;
+        self.main_module_ip_start = saved_main_module_ip_start;
+        self.const_globals = saved_const_globals;
+        self.restore_runtime_execution_state(saved_runtime_state);
+
+        self.resume_suspended_module_states(ctx);
+        if let Some(error) = self.module_load_errors.get(module_key).cloned() {
+            self.pending_throw = Some(error);
+            return false;
+        }
+        true
+    }
+
+    fn evaluate_module_requests(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        entry_path: &std::path::Path,
+        requests: &[crate::core::ModuleRequest],
+    ) {
+        for request in requests {
+            if request.phase != crate::core::ModuleRequestPhase::Evaluation {
+                continue;
+            }
+            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
+                .to_string_lossy()
+                .to_string();
+            if !self.ensure_module_evaluated(ctx, &key) {
+                return;
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut async_deps = Vec::new();
+        for request in requests {
+            if request.phase != crate::core::ModuleRequestPhase::Defer {
+                continue;
+            }
+            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
+                .to_string_lossy()
+                .to_string();
+            self.collect_async_transitive_dependencies(&key, &mut seen, &mut async_deps);
+        }
+        for module_key in async_deps {
+            if !self.ensure_module_evaluated(ctx, &module_key) {
+                return;
+            }
+        }
+    }
+
+    /// Load dependency modules, storing their exports in `loaded_modules`, and
+    /// eagerly evaluate only the evaluation-phase requests.
+    pub fn load_module_dependencies(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        entry_path: &std::path::Path,
+        requests: &[crate::core::ModuleRequest],
+    ) {
+        self.load_module_graph(ctx, entry_path, requests);
+        if self.pending_throw.is_some() {
+            return;
+        }
+        self.evaluate_module_requests(ctx, entry_path, requests);
     }
 
     /// Fixup pass for circular re-exports.
@@ -2163,15 +2548,15 @@ impl<'gc> VM<'gc> {
                 self.pending_throw = Some(error);
                 return;
             }
-            if export_name == "*" {
-                // Namespace import — reuse cached ns for same module path
-                if let Some(cached) = ns_cache.get(mod_path) {
+            if export_name == "*" || export_name == "\x00defer:*" {
+                let deferred = export_name == "\x00defer:*";
+                let cache_key = format!("{}:{mod_path}", if deferred { "defer" } else { "eval" });
+                if let Some(cached) = ns_cache.get(&cache_key) {
                     self.module_locals.insert(local.clone(), cached.clone());
                     continue;
                 }
-                self.refresh_module_namespace_object(ctx, mod_path);
-                if let Some(cached) = self.module_ns_objects.get(mod_path).cloned() {
-                    ns_cache.insert(mod_path.clone(), cached.clone());
+                if let Some(cached) = self.get_module_namespace_object(ctx, mod_path, deferred) {
+                    ns_cache.insert(cache_key, cached.clone());
                     self.module_locals.insert(local.clone(), cached);
                     continue;
                 }
@@ -3357,6 +3742,153 @@ impl<'gc> VM<'gc> {
         });
     }
 
+    fn host_dynamic_import_promise(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        let promise_ctor = if matches!(self.intrinsic_promise_ctor, Value::Undefined) {
+            self.globals.get("Promise").cloned().unwrap_or(Value::Undefined)
+        } else {
+            self.intrinsic_promise_ctor.clone()
+        };
+        let (promise, resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
+            Ok(capability) => capability,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return Value::Undefined;
+            }
+        };
+
+        let reject_with = |vm: &mut Self, value: Value<'gc>| {
+            vm.pending_throw = None;
+            if let Err(err) = vm.vm_call_function_value(ctx, &reject, &Value::Undefined, std::slice::from_ref(&value)) {
+                vm.set_pending_throw_from_error(&err);
+            } else {
+                vm.pending_throw = None;
+            }
+        };
+
+        let specifier = args.first().cloned().unwrap_or(Value::Undefined);
+        let specifier_string = match self.vm_to_string_like_spec(ctx, &specifier) {
+            Ok(specifier_string) => specifier_string,
+            Err(err) => {
+                let reject_value = self.vm_value_from_error(ctx, &err);
+                reject_with(self, reject_value);
+                return promise;
+            }
+        };
+
+        let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
+            let reject_value = self.make_type_error_object(ctx, "Dynamic import requires an active script or module");
+            reject_with(self, reject_value);
+            return promise;
+        };
+
+        let base_path = std::path::Path::new(&base_source);
+        let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
+        let module_key = resolved_path.to_string_lossy().to_string();
+
+        if !self.loaded_modules.contains_key(&module_key)
+            || self.module_records.get(&module_key).is_some_and(|record| record.status != ModuleStatus::Evaluated)
+        {
+            let request = crate::core::ModuleRequest {
+                specifier: specifier_string.clone(),
+                        phase: crate::core::ModuleRequestPhase::Evaluation,
+                    };
+            self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
+            self.fixup_circular_reexports();
+        }
+
+        if let Some(thrown) = self.pending_throw.take() {
+            reject_with(self, thrown);
+            return promise;
+        }
+
+        if let Some(reject_value) = self.module_load_errors.get(&module_key).cloned() {
+            reject_with(self, reject_value);
+            return promise;
+        }
+
+        let module_ready = self.loaded_module_states.contains_key(&module_key)
+            || (self.is_module_mode && self.current_source_path() == Some(module_key.as_str()));
+        if !module_ready {
+            let reject_value = self.make_type_error_object(ctx, &format!("Failed to dynamically import '{}'", specifier_string));
+            reject_with(self, reject_value);
+            return promise;
+        }
+
+        self.refresh_module_namespace_object(ctx, &module_key);
+        let namespace = self.module_ns_objects.get(&module_key).cloned().unwrap_or(Value::Undefined);
+        if let Err(err) = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, std::slice::from_ref(&namespace)) {
+            self.set_pending_throw_from_error(&err);
+        }
+        promise
+    }
+
+    fn host_deferred_import_namespace(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        let promise_ctor = if matches!(self.intrinsic_promise_ctor, Value::Undefined) {
+            self.globals.get("Promise").cloned().unwrap_or(Value::Undefined)
+        } else {
+            self.intrinsic_promise_ctor.clone()
+        };
+        let (promise, resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
+            Ok(capability) => capability,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return Value::Undefined;
+            }
+        };
+
+        let reject_with = |vm: &mut Self, value: Value<'gc>| {
+            vm.pending_throw = None;
+            if let Err(err) = vm.vm_call_function_value(ctx, &reject, &Value::Undefined, std::slice::from_ref(&value)) {
+                vm.set_pending_throw_from_error(&err);
+            } else {
+                vm.pending_throw = None;
+            }
+        };
+
+        let specifier = args.first().cloned().unwrap_or(Value::Undefined);
+        let specifier_string = match self.vm_to_string_like_spec(ctx, &specifier) {
+            Ok(specifier_string) => specifier_string,
+            Err(err) => {
+                let reject_value = self.vm_value_from_error(ctx, &err);
+                reject_with(self, reject_value);
+                return promise;
+            }
+        };
+
+        let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
+            let reject_value = self.make_type_error_object(ctx, "Deferred import requires an active script or module");
+            reject_with(self, reject_value);
+            return promise;
+        };
+
+        let base_path = std::path::Path::new(&base_source);
+        let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
+        let module_key = resolved_path.to_string_lossy().to_string();
+        let request = crate::core::ModuleRequest {
+            specifier: specifier_string,
+            phase: crate::core::ModuleRequestPhase::Defer,
+        };
+        self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
+        self.fixup_circular_reexports();
+        if let Some(thrown) = self.pending_throw.take() {
+            reject_with(self, thrown);
+            return promise;
+        }
+        if let Some(error) = self.module_load_errors.get(&module_key).cloned() {
+            reject_with(self, error);
+            return promise;
+        }
+        let Some(namespace) = self.get_module_namespace_object(ctx, &module_key, true) else {
+            let reject_value = self.make_type_error_object(ctx, &format!("Failed to deferred-import '{}'", module_key));
+            reject_with(self, reject_value);
+            return promise;
+        };
+        if let Err(err) = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, std::slice::from_ref(&namespace)) {
+            self.set_pending_throw_from_error(&err);
+        }
+        promise
+    }
+
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         match name {
             "__evalScript__" => {
@@ -3385,71 +3917,8 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            "module.dynamicImport" => {
-                let promise_ctor = if matches!(self.intrinsic_promise_ctor, Value::Undefined) {
-                    self.globals.get("Promise").cloned().unwrap_or(Value::Undefined)
-                } else {
-                    self.intrinsic_promise_ctor.clone()
-                };
-                let (promise, resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
-                    Ok(capability) => capability,
-                    Err(err) => {
-                        self.set_pending_throw_from_error(&err);
-                        return Value::Undefined;
-                    }
-                };
-
-                let reject_with = |vm: &mut Self, value: Value<'gc>| {
-                    if let Err(err) = vm.vm_call_function_value(ctx, &reject, &Value::Undefined, std::slice::from_ref(&value)) {
-                        vm.set_pending_throw_from_error(&err);
-                    }
-                };
-
-                let specifier = args.first().cloned().unwrap_or(Value::Undefined);
-                let specifier_string = match self.vm_to_string_like_spec(ctx, &specifier) {
-                    Ok(specifier_string) => specifier_string,
-                    Err(err) => {
-                        let reject_value = self.vm_value_from_error(ctx, &err);
-                        reject_with(self, reject_value);
-                        return promise;
-                    }
-                };
-
-                let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
-                    let reject_value = self.make_type_error_object(ctx, "Dynamic import requires an active script or module");
-                    reject_with(self, reject_value);
-                    return promise;
-                };
-
-                let base_path = std::path::Path::new(&base_source);
-                let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
-                let module_key = resolved_path.to_string_lossy().to_string();
-
-                if !self.loaded_modules.contains_key(&module_key) {
-                    self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&specifier_string));
-                    self.fixup_circular_reexports();
-                }
-
-                if let Some(reject_value) = self.module_load_errors.get(&module_key).cloned() {
-                    reject_with(self, reject_value);
-                    return promise;
-                }
-
-                let module_ready = self.loaded_module_states.contains_key(&module_key)
-                    || (self.is_module_mode && self.current_source_path() == Some(module_key.as_str()));
-                if !module_ready {
-                    let reject_value = self.make_type_error_object(ctx, &format!("Failed to dynamically import '{}'", specifier_string));
-                    reject_with(self, reject_value);
-                    return promise;
-                }
-
-                self.refresh_module_namespace_object(ctx, &module_key);
-                let namespace = self.module_ns_objects.get(&module_key).cloned().unwrap_or(Value::Undefined);
-                if let Err(err) = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, std::slice::from_ref(&namespace)) {
-                    self.set_pending_throw_from_error(&err);
-                }
-                promise
-            }
+            "module.dynamicImport" => self.host_dynamic_import_promise(ctx, args),
+            "import.defer" => self.host_deferred_import_namespace(ctx, args),
             "__createRealm__" => {
                 let realm_id = self.child_realms.len();
                 let child = Box::new(VM::new(Chunk::default(), ctx));
@@ -7444,8 +7913,14 @@ impl<'gc> VM<'gc> {
                 if let Value::VmObject(ref obj) = target
                     && obj.borrow().contains_key("__module_namespace__")
                 {
+                    if !Self::namespace_is_symbol_like_key(obj, &key)
+                        && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, obj)
+                    {
+                        self.pending_throw = Some(err);
+                        return Value::Undefined;
+                    }
                     let b = obj.borrow();
-                    if key.starts_with("@@sym:") {
+                    if Self::namespace_is_symbol_like_key(obj, &key) {
                         return Value::Boolean(b.contains_key(&key));
                     } else {
                         // Check if key is in exported bindings
@@ -7761,8 +8236,14 @@ impl<'gc> VM<'gc> {
                         Value::VmObject(map) => {
                             // Module namespace exotic object [[Delete]] (§10.4.6.10)
                             if map.borrow().contains_key("__module_namespace__") {
+                                if !Self::namespace_is_symbol_like_key(map, &key)
+                                    && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, map)
+                                {
+                                    self.pending_throw = Some(err);
+                                    return Value::Undefined;
+                                }
                                 // Symbol keys: allow deletion (but non-configurable symbols like toStringTag return false)
-                                if key.starts_with("@@sym:") {
+                                if Self::namespace_is_symbol_like_key(map, &key) {
                                     let nc_key = format!("__nonconfigurable_{}__", key);
                                     if map.borrow().contains_key(&nc_key) {
                                         return Value::Boolean(false);
@@ -8521,6 +9002,28 @@ impl<'gc> VM<'gc> {
 
                 let mut symbols = Vec::new();
                 if let Value::VmObject(obj) = &target {
+                    if obj.borrow().contains_key("__module_namespace__") {
+                        if let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, obj) {
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        let borrow = obj.borrow();
+                        for key in borrow.keys() {
+                            if let Some(id_str) = key.strip_prefix("@@sym:")
+                                && let Ok(id) = id_str.parse::<u64>()
+                                && let Some(sym_val) = self.get_symbol_value(ctx, id)
+                            {
+                                symbols.push(sym_val);
+                            }
+                        }
+                        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(symbols));
+                        if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
+                            && let Some(proto) = array_ctor.borrow().get("prototype").cloned()
+                        {
+                            arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
+                        }
+                        return Value::VmArray(arr);
+                    }
                     if obj.borrow().contains_key("__proxy_target__") {
                         let (proxy_target, handler, revoked) = {
                             let borrow = obj.borrow();
@@ -11038,27 +11541,6 @@ impl<'gc> VM<'gc> {
         if !recv_map.borrow().contains_key("__module_namespace__") {
             return Ok(false);
         }
-        let borrow = recv_map.borrow();
-        if let Some(Value::VmObject(bindings)) = borrow.get("__ns_bindings__") {
-            let bindings_b = bindings.borrow();
-            if let Some(Value::String(local_u16)) = bindings_b.get(key) {
-                let local_name = crate::unicode::utf16_to_utf8(local_u16);
-                let module_key = Self::namespace_module_key(recv_map);
-                drop(bindings_b);
-                drop(borrow);
-                let binding_val = self.lookup_module_binding_value(module_key.as_deref(), &local_name);
-                if matches!(binding_val, Value::Uninitialized) {
-                    let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", key));
-                    self.handle_throw(ctx, &err)?;
-                    return Ok(true);
-                }
-            } else {
-                drop(bindings_b);
-                drop(borrow);
-            }
-        } else {
-            drop(borrow);
-        }
         // Namespace [[Set]] always returns false → TypeError in strict mode
         let err = self.make_type_error_object(
             ctx,
@@ -11086,6 +11568,14 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(map) = obj
             && map.borrow().contains_key("__module_namespace__")
         {
+            if self.in_field_init
+                && !key.contains(super::PRIVATE_KEY_PREFIX)
+                && !key.starts_with("__brand_")
+                && !Self::namespace_is_symbol_like_key(map, key)
+            {
+                self.ensure_deferred_namespace_evaluation(ctx, map)
+                    .map_err(|err| self.vm_error_to_js_error(ctx, &err))?;
+            }
             let err = self.make_type_error_object(
                 ctx,
                 &format!("Cannot assign to read only property '{}' of object '[object Module]'", key),
@@ -12355,6 +12845,16 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
+                    if depth > 1 && map.borrow().contains_key("__module_namespace__") {
+                        match self.namespace_export_value(ctx, &map, key) {
+                            Ok(Some(val)) => return val,
+                            Ok(None) => return Value::Undefined,
+                            Err(err) => {
+                                self.pending_throw = Some(err);
+                                return Value::Undefined;
+                            }
+                        }
+                    }
                     let borrow = map.borrow();
                     let realm_id = match borrow.get("__realm_id__") {
                         Some(Value::Number(n)) => Some(*n as usize),
@@ -13593,6 +14093,9 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn(ctx, "global.__getIterator"),
         );
         let mut import_map = IndexMap::new();
+        // Probe compatibility hook for the `import-defer` feature check. Static
+        // `import defer` syntax remains gated separately in the Test262 runner.
+        import_map.insert("defer".to_string(), Self::make_host_fn(ctx, "import.defer"));
         import_map.insert("source".to_string(), Self::make_host_fn(ctx, "import.source"));
         self.globals
             .insert("import".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, import_map)));
@@ -20305,7 +20808,7 @@ impl<'gc> VM<'gc> {
                         }
                         // Module namespace exotic object [[GetOwnProperty]] (§10.4.6.4)
                         if borrow.contains_key("__module_namespace__") {
-                            if key.starts_with("@@sym:") {
+                            if Self::namespace_is_symbol_like_key(obj, &key) {
                                 // Symbol properties use ordinary [[GetOwnProperty]]
                                 if let Some(val) = borrow.get(&key) {
                                     let writable = !matches!(borrow.get(&format!("__readonly_{}__", key)), Some(Value::Boolean(true)));
@@ -20922,6 +21425,10 @@ impl<'gc> VM<'gc> {
                     }
                     // Module namespace exotic object [[OwnPropertyKeys]] (§10.4.6.11)
                     if obj.borrow().contains_key("__module_namespace__") {
+                        if let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, obj) {
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
                         let borrow = obj.borrow();
                         let mut keys: Vec<Value<'gc>> = Vec::new();
                         // Get sorted export names from __ns_bindings__
@@ -27350,6 +27857,23 @@ impl<'gc> VM<'gc> {
                     depth += 1;
                     match cur {
                         Value::VmObject(m) => {
+                            if m.borrow().contains_key("__module_namespace__") {
+                                if !Self::namespace_is_symbol_like_key(&m, key)
+                                    && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, &m)
+                                {
+                                    self.pending_throw = Some(err);
+                                    return false;
+                                }
+                                let b = m.borrow();
+                                if Self::namespace_is_symbol_like_key(&m, key) {
+                                    return b.contains_key(key);
+                                }
+                                return if let Some(Value::VmObject(bindings)) = b.get("__ns_bindings__") {
+                                    bindings.borrow().contains_key(key)
+                                } else {
+                                    !key.starts_with("__") && b.contains_key(key)
+                                };
+                            }
                             let b = m.borrow();
                             if let Some(Value::String(type_name_u16)) = b.get("__type__")
                                 && crate::unicode::utf16_to_utf8(type_name_u16) == "String"
@@ -27535,6 +28059,13 @@ impl<'gc> VM<'gc> {
         key: &str,
         desc: &IndexMap<String, Value<'gc>>,
     ) -> bool {
+        if obj.borrow().contains_key("__module_namespace__")
+            && !Self::namespace_is_symbol_like_key(obj, key)
+            && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, obj)
+        {
+            self.pending_throw = Some(err);
+            return false;
+        }
         let is_accessor = desc.contains_key("get") || desc.contains_key("set");
         let desc_is_data = desc.contains_key("value") || desc.contains_key("writable");
         // Use a separate storage key for "__proto__" to avoid clashing with the
@@ -30822,6 +31353,18 @@ impl<'gc> VM<'gc> {
 
         match target {
             Value::VmObject(map) => {
+                if map.borrow().contains_key("__module_namespace__") {
+                    if !Self::namespace_is_symbol_like_key(map, key) {
+                        self.ensure_deferred_namespace_evaluation(ctx, map)?;
+                        if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__")
+                            && bindings.borrow().contains_key(key)
+                        {
+                            self.throw_type_error(ctx, "Cannot delete property");
+                            return Err(Value::Undefined);
+                        }
+                    }
+                    return Ok(());
+                }
                 let nc_key = format!("__nonconfigurable_{}__", key);
                 if map.borrow().contains_key(&nc_key) {
                     self.throw_type_error(ctx, &format!("Cannot delete property '{}' of #<Object>", key));

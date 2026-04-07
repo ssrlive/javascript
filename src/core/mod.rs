@@ -141,6 +141,18 @@ pub(crate) enum ReexportSpec {
     Namespace(String),             // export * as name from ...
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ModuleRequestPhase {
+    Evaluation,
+    Defer,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ModuleRequest {
+    pub specifier: String,
+    pub phase: ModuleRequestPhase,
+}
+
 /// Resolve a module specifier relative to a base path.
 pub(crate) fn resolve_module_path(specifier: &str, base_path: &std::path::Path) -> std::path::PathBuf {
     let spec_path = std::path::Path::new(specifier);
@@ -415,6 +427,285 @@ pub(crate) fn collect_module_sources(statements: &[Statement], self_basename: &s
     sources
 }
 
+pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &str) -> Vec<ModuleRequest> {
+    let mut requests = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let known_builtins = ["math", "console", "os", "std", "./es6_module_export.js"];
+
+    for stmt in statements {
+        let maybe_request = match &*stmt.kind {
+            StatementKind::Import(specifiers, source) => {
+                let phase = if specifiers
+                    .iter()
+                    .any(|spec| matches!(spec, ImportSpecifier::DeferredNamespace(_)))
+                {
+                    ModuleRequestPhase::Defer
+                } else {
+                    ModuleRequestPhase::Evaluation
+                };
+                Some((source, phase))
+            }
+            StatementKind::Export(_specs, _, Some(source)) => Some((source, ModuleRequestPhase::Evaluation)),
+            _ => None,
+        };
+
+        let Some((source, phase)) = maybe_request else {
+            continue;
+        };
+        let import_base = source.strip_prefix("./").unwrap_or(source);
+        if import_base == self_basename || known_builtins.contains(&source.as_str()) {
+            continue;
+        }
+        if seen.insert((source.clone(), phase)) {
+            requests.push(ModuleRequest {
+                specifier: source.clone(),
+                phase,
+            });
+        }
+    }
+
+    requests
+}
+
+pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
+    fn expr_has_top_level_await(expr: &Expr) -> bool {
+        match expr {
+            Expr::Await(_) => true,
+            Expr::Assign(lhs, rhs)
+            | Expr::LogicalAnd(lhs, rhs)
+            | Expr::LogicalOr(lhs, rhs)
+            | Expr::NullishCoalescing(lhs, rhs)
+            | Expr::Mod(lhs, rhs)
+            | Expr::Pow(lhs, rhs)
+            | Expr::LogicalAndAssign(lhs, rhs)
+            | Expr::LogicalOrAssign(lhs, rhs)
+            | Expr::NullishAssign(lhs, rhs)
+            | Expr::AddAssign(lhs, rhs)
+            | Expr::SubAssign(lhs, rhs)
+            | Expr::PowAssign(lhs, rhs)
+            | Expr::MulAssign(lhs, rhs)
+            | Expr::DivAssign(lhs, rhs)
+            | Expr::ModAssign(lhs, rhs)
+            | Expr::BitXorAssign(lhs, rhs)
+            | Expr::BitAndAssign(lhs, rhs)
+            | Expr::BitOrAssign(lhs, rhs)
+            | Expr::LeftShiftAssign(lhs, rhs)
+            | Expr::RightShiftAssign(lhs, rhs)
+            | Expr::UnsignedRightShiftAssign(lhs, rhs)
+            | Expr::Binary(lhs, _, rhs)
+            | Expr::Comma(lhs, rhs) => expr_has_top_level_await(lhs) || expr_has_top_level_await(rhs),
+            Expr::Conditional(test, cons, alt) => {
+                expr_has_top_level_await(test)
+                    || expr_has_top_level_await(cons)
+                    || expr_has_top_level_await(alt)
+            }
+            Expr::TypeOf(inner)
+            | Expr::Delete(inner)
+            | Expr::Void(inner)
+            | Expr::Yield(Some(inner))
+            | Expr::LogicalNot(inner)
+            | Expr::UnaryNeg(inner)
+            | Expr::UnaryPlus(inner)
+            | Expr::BitNot(inner)
+            | Expr::Increment(inner)
+            | Expr::Decrement(inner)
+            | Expr::PostIncrement(inner)
+            | Expr::PostDecrement(inner)
+            | Expr::Spread(inner)
+            | Expr::Getter(inner)
+            | Expr::Setter(inner)
+            | Expr::YieldStar(inner)
+            | Expr::OptionalProperty(inner, _)
+            | Expr::OptionalPrivateMember(inner, _)
+            | Expr::Property(inner, _)
+            | Expr::PrivateMember(inner, _)
+            | Expr::SuperComputedProperty(inner) => expr_has_top_level_await(inner),
+            Expr::OptionalIndex(obj, idx) | Expr::Index(obj, idx) => {
+                expr_has_top_level_await(obj) || expr_has_top_level_await(idx)
+            }
+            Expr::OptionalCall(callee, args)
+            | Expr::Call(callee, args)
+            | Expr::New(callee, args)
+            | Expr::SuperComputedMethod(callee, args) => {
+                expr_has_top_level_await(callee) || args.iter().any(expr_has_top_level_await)
+            }
+            Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(expr_has_top_level_await),
+            Expr::Array(items) => items.iter().flatten().any(expr_has_top_level_await),
+            Expr::Object(props) => props
+                .iter()
+                .any(|(k, v, _, _)| expr_has_top_level_await(k) || expr_has_top_level_await(v)),
+            Expr::TaggedTemplate(tag, _, _, _, exprs) => {
+                expr_has_top_level_await(tag) || exprs.iter().any(expr_has_top_level_await)
+            }
+            Expr::TemplateString(_parts) => false,
+            Expr::DynamicImport(spec, attrs) => {
+                expr_has_top_level_await(spec)
+                    || attrs.as_ref().is_some_and(|attrs| expr_has_top_level_await(attrs))
+            }
+            Expr::Class(class_def) => {
+                class_def
+                    .extends
+                    .as_ref()
+                    .is_some_and(expr_has_top_level_await)
+                    || class_def.members.iter().any(|member| match member {
+                        ClassMember::Property(_, value)
+                        | ClassMember::StaticProperty(_, value)
+                        | ClassMember::PrivateProperty(_, value)
+                        | ClassMember::PrivateStaticProperty(_, value) => expr_has_top_level_await(value),
+                        ClassMember::PropertyComputed(key, value)
+                        | ClassMember::StaticPropertyComputed(key, value) => {
+                            expr_has_top_level_await(key) || expr_has_top_level_await(value)
+                        }
+                        ClassMember::StaticBlock(body) => module_has_top_level_await(body),
+                        ClassMember::MethodComputed(key, _, _)
+                        | ClassMember::MethodComputedGenerator(key, _, _)
+                        | ClassMember::MethodComputedAsync(key, _, _)
+                        | ClassMember::MethodComputedAsyncGenerator(key, _, _)
+                        | ClassMember::StaticMethodComputed(key, _, _)
+                        | ClassMember::StaticMethodComputedGenerator(key, _, _)
+                        | ClassMember::StaticMethodComputedAsync(key, _, _)
+                        | ClassMember::StaticMethodComputedAsyncGenerator(key, _, _)
+                        | ClassMember::SetterComputed(key, _, _)
+                        | ClassMember::StaticSetterComputed(key, _, _) => expr_has_top_level_await(key),
+                        ClassMember::GetterComputed(key, _)
+                        | ClassMember::StaticGetterComputed(key, _) => expr_has_top_level_await(key),
+                        _ => false,
+                    })
+            }
+            Expr::Function(..)
+            | Expr::GeneratorFunction(..)
+            | Expr::AsyncFunction(..)
+            | Expr::AsyncGeneratorFunction(..)
+            | Expr::ArrowFunction(..)
+            | Expr::AsyncArrowFunction(..)
+            | Expr::Yield(None)
+            | Expr::Var(..)
+            | Expr::Number(_)
+            | Expr::StringLit(_)
+            | Expr::Boolean(_)
+            | Expr::Null
+            | Expr::Undefined
+            | Expr::BigInt(_)
+            | Expr::This
+            | Expr::NewTarget
+            | Expr::PrivateName(_)
+            | Expr::Super
+            | Expr::SuperProperty(_)
+            | Expr::Regex(_, _)
+            | Expr::ValuePlaceholder => false,
+        }
+    }
+
+    fn stmt_has_top_level_await(stmt: &Statement) -> bool {
+        match &*stmt.kind {
+            StatementKind::Expr(expr) => expr_has_top_level_await(expr),
+            StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+                .iter()
+                .any(|(_, init)| init.as_ref().is_some_and(expr_has_top_level_await)),
+            StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+                decls.iter().any(|(_, init)| expr_has_top_level_await(init))
+            }
+            StatementKind::Return(expr) => expr.as_ref().is_some_and(expr_has_top_level_await),
+            StatementKind::Throw(expr)
+            | StatementKind::Assign(_, expr)
+            | StatementKind::LetDestructuringArray(_, expr)
+            | StatementKind::VarDestructuringArray(_, expr)
+            | StatementKind::ConstDestructuringArray(_, expr)
+            | StatementKind::LetDestructuringObject(_, expr)
+            | StatementKind::VarDestructuringObject(_, expr)
+            | StatementKind::ConstDestructuringObject(_, expr) => expr_has_top_level_await(expr),
+            StatementKind::While(expr, body) | StatementKind::DoWhile(body, expr) => {
+                expr_has_top_level_await(expr) || module_has_top_level_await(body)
+            }
+            StatementKind::Block(stmts) => module_has_top_level_await(stmts),
+            StatementKind::If(if_stmt) => {
+                expr_has_top_level_await(&if_stmt.condition)
+                    || module_has_top_level_await(&if_stmt.then_body)
+                    || if_stmt
+                        .else_body
+                        .as_ref()
+                        .is_some_and(|else_body| module_has_top_level_await(else_body))
+            }
+            StatementKind::TryCatch(try_stmt) => {
+                module_has_top_level_await(&try_stmt.try_body)
+                    || try_stmt
+                        .catch_body
+                        .as_ref()
+                        .is_some_and(|catch_body| module_has_top_level_await(catch_body))
+                    || try_stmt
+                        .finally_body
+                        .as_ref()
+                        .is_some_and(|finally_body| module_has_top_level_await(finally_body))
+            }
+            StatementKind::Class(class_def) => expr_has_top_level_await(&Expr::Class(class_def.clone())),
+            StatementKind::For(for_stmt) => {
+                for_stmt
+                    .init
+                    .as_ref()
+                    .is_some_and(|init| stmt_has_top_level_await(init))
+                    || for_stmt
+                        .test
+                        .as_ref()
+                        .is_some_and(expr_has_top_level_await)
+                    || for_stmt
+                        .update
+                        .as_ref()
+                        .is_some_and(|update| stmt_has_top_level_await(update))
+                    || module_has_top_level_await(&for_stmt.body)
+            }
+            StatementKind::ForOf(_, _, expr, body)
+            | StatementKind::ForIn(_, _, expr, body)
+            | StatementKind::ForAwaitOf(_, _, expr, body) => {
+                matches!(&*stmt.kind, StatementKind::ForAwaitOf(..))
+                    || expr_has_top_level_await(expr)
+                    || module_has_top_level_await(body)
+            }
+            StatementKind::ForOfExpr(lhs, rhs, body)
+            | StatementKind::ForInExpr(lhs, rhs, body)
+            | StatementKind::ForAwaitOfExpr(lhs, rhs, body) => {
+                matches!(&*stmt.kind, StatementKind::ForAwaitOfExpr(..))
+                    || expr_has_top_level_await(lhs)
+                    || expr_has_top_level_await(rhs)
+                    || module_has_top_level_await(body)
+            }
+            StatementKind::ForInDestructuringObject(_, _, expr, body)
+            | StatementKind::ForInDestructuringArray(_, _, expr, body)
+            | StatementKind::ForOfDestructuringObject(_, _, expr, body)
+            | StatementKind::ForOfDestructuringArray(_, _, expr, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_, _, expr, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_, _, expr, body) => {
+                matches!(
+                    &*stmt.kind,
+                    StatementKind::ForAwaitOfDestructuringObject(..)
+                        | StatementKind::ForAwaitOfDestructuringArray(..)
+                ) || expr_has_top_level_await(expr)
+                    || module_has_top_level_await(body)
+            }
+            StatementKind::Switch(switch_stmt) => {
+                expr_has_top_level_await(&switch_stmt.expr)
+                    || switch_stmt.cases.iter().any(|case| match case {
+                        SwitchCase::Case(expr, body) => {
+                            expr_has_top_level_await(expr) || module_has_top_level_await(body)
+                        }
+                        SwitchCase::Default(body) => module_has_top_level_await(body),
+                    })
+            }
+            StatementKind::With(expr, body) => {
+                expr_has_top_level_await(expr) || module_has_top_level_await(body)
+            }
+            StatementKind::Label(_, inner) => stmt_has_top_level_await(inner),
+            StatementKind::FunctionDeclaration(..)
+            | StatementKind::Import(..)
+            | StatementKind::Export(..)
+            | StatementKind::Break(_)
+            | StatementKind::Continue(_)
+            | StatementKind::Debugger => false,
+        }
+    }
+
+    statements.iter().any(stmt_has_top_level_await)
+}
+
 pub fn evaluate_script<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script: T,
     run_as_module: bool,
@@ -458,19 +749,60 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         }
 
         // Multi-file module loading: load and execute dependencies before the main module.
-        let mut main_module_record: Option<(String, Vec<String>)> = None;
+        let mut main_module_record: Option<(
+            String,
+            Vec<String>,
+            HashMap<String, String>,
+            Vec<(String, Vec<ReexportSpec>)>,
+            Vec<ModuleRequest>,
+            bool,
+            std::path::PathBuf,
+        )> = None;
         if run_as_module && let Some(ref entry_path) = script_path_buf {
             let main_key = entry_path.to_string_lossy().to_string();
             let (main_export_names, main_export_name_to_local, main_reexport_sources) = collect_exports_from_ast(&statements);
             vm.pre_create_module_namespace(ctx, &main_key);
             vm.seed_module_record(&main_key, &main_export_names, &main_export_name_to_local);
             vm.seed_module_export_metadata(&main_key, &main_export_name_to_local, &main_reexport_sources, entry_path);
-            main_module_record = Some((main_key, main_export_names));
+            let main_has_tla = module_has_top_level_await(&statements);
 
             let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let sources = collect_module_sources(&statements, self_basename);
-            if !sources.is_empty() {
-                vm.load_module_dependencies(ctx, entry_path, &sources);
+            let requests = collect_module_requests(&statements, self_basename);
+            main_module_record = Some((
+                main_key,
+                main_export_names,
+                main_export_name_to_local,
+                main_reexport_sources,
+                requests.clone(),
+                main_has_tla,
+                entry_path.clone(),
+            ));
+            if let Some((
+                main_key,
+                main_export_names,
+                main_export_name_to_local,
+                main_reexport_sources,
+                main_requests,
+                main_has_tla,
+                entry_path,
+            )) = &main_module_record
+            {
+                vm.seed_pending_module_record(
+                    ctx,
+                    main_key,
+                    script_str,
+                    entry_path,
+                    &statements,
+                    main_export_names,
+                    main_export_name_to_local,
+                    main_reexport_sources,
+                    main_requests,
+                    *main_has_tla,
+                );
+                vm.mark_module_record_evaluating(main_key);
+            }
+            if !requests.is_empty() {
+                vm.load_module_dependencies(ctx, entry_path, &requests);
                 // Fixup circular re-exports
                 vm.fixup_circular_reexports();
                 // Pass loaded module info to the main compiler
@@ -494,6 +826,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
             // Save module-specific metadata before merge consumes the chunk
             let main_loaded_module_vars = chunk.loaded_module_vars.clone();
             let main_self_namespace_imports = chunk.self_namespace_imports.clone();
+            let main_self_deferred_namespace_imports = chunk.self_deferred_namespace_imports.clone();
             let main_self_import_aliases = chunk.self_import_aliases.clone();
             let main_const_import_bindings = chunk.const_import_bindings.clone();
 
@@ -504,6 +837,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
             // Restore main module's module-specific metadata on the merged chunk
             vm.chunk.loaded_module_vars = main_loaded_module_vars;
             vm.chunk.self_namespace_imports = main_self_namespace_imports;
+            vm.chunk.self_deferred_namespace_imports = main_self_deferred_namespace_imports;
             vm.chunk.self_import_aliases = main_self_import_aliases;
             vm.chunk.const_import_bindings = main_const_import_bindings;
         } else {
@@ -515,6 +849,31 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
             vm.set_module_this();
         }
 
+        if let Some((
+            main_key,
+            main_export_names,
+            main_export_name_to_local,
+            main_reexport_sources,
+            main_requests,
+            main_has_tla,
+            entry_path,
+        )) = &main_module_record
+        {
+            vm.register_current_module_record(
+                ctx,
+                main_key,
+                script_str,
+                entry_path,
+                &statements,
+                main_export_names,
+                main_export_name_to_local,
+                main_reexport_sources,
+                main_requests,
+                *main_has_tla,
+            );
+            vm.mark_module_record_evaluating(main_key);
+        }
+
         // Inject loaded module bindings into module_locals before execution.
         if run_as_module {
             vm.inject_loaded_module_bindings(ctx);
@@ -523,7 +882,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         // let mut vm = VM::new(chunk, ctx);
         vm.set_source_context(script_str, script_path_buf.as_deref());
         let mut v = vm.run(ctx)?;
-        if let Some((main_key, main_export_names)) = &main_module_record {
+        if let Some((main_key, main_export_names, ..)) = &main_module_record {
             vm.finalize_active_module_record(ctx, main_key, main_export_names);
         }
 

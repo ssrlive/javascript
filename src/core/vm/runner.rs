@@ -1789,6 +1789,81 @@ impl<'gc> VM<'gc> {
                 self.stack.push(ns_obj);
                 return Ok(OpcodeAction::Continue);
             }
+            if self.is_module_mode
+                && let Some(entries) = self
+                    .chunk
+                    .self_deferred_namespace_imports
+                    .iter()
+                    .find(|(local, _)| local == &name_str)
+                    .map(|(_, entries)| entries.clone())
+            {
+                if let Some(cached_ns) = self.module_locals.get("__self_deferred_ns_cached__").cloned() {
+                    self.module_locals.insert(name_str.clone(), cached_ns.clone());
+                    self.stack.push(cached_ns);
+                    return Ok(OpcodeAction::Continue);
+                }
+
+                let mut sorted_entries = entries.clone();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+                if let Some(ref sp) = self.script_path.clone()
+                    && let Some(cached_ns) = self.deferred_module_ns_objects.get(sp).cloned()
+                {
+                    if let Value::VmObject(obj) = &cached_ns {
+                        let mut obj_map = obj.borrow_mut(ctx);
+                        for (export_name, _) in &sorted_entries {
+                            if !obj_map.contains_key(export_name) {
+                                obj_map.insert(export_name.clone(), Value::Null);
+                            }
+                        }
+                        if let Some(sp) = self.script_path.as_deref() {
+                            obj_map.insert("__ns_module_key__".to_string(), Value::from(sp));
+                        }
+                        obj_map.insert("__deferred_module_namespace__".to_string(), Value::Boolean(true));
+                        let mut bindings_map = IndexMap::new();
+                        for (export_name, local_name) in &sorted_entries {
+                            bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
+                        }
+                        obj_map.insert("__ns_bindings__".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bindings_map)));
+                    }
+                    self.module_locals
+                        .insert("__self_deferred_ns_cached__".to_string(), cached_ns.clone());
+                    self.module_locals.insert(name_str.clone(), cached_ns.clone());
+                    self.stack.push(cached_ns);
+                    return Ok(OpcodeAction::Continue);
+                }
+
+                let mut ns_map = IndexMap::new();
+                for (export_name, _) in &sorted_entries {
+                    ns_map.insert(export_name.clone(), Value::Null);
+                }
+                let mut bindings_map = IndexMap::new();
+                for (export_name, local_name) in &sorted_entries {
+                    bindings_map.insert(export_name.clone(), Value::from(local_name.as_str()));
+                }
+                ns_map.insert("__ns_bindings__".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, bindings_map)));
+                if let Some(sp) = self.script_path.as_deref() {
+                    ns_map.insert("__ns_module_key__".to_string(), Value::from(sp));
+                }
+                ns_map.insert("__module_namespace__".to_string(), Value::Boolean(true));
+                ns_map.insert("__deferred_module_namespace__".to_string(), Value::Boolean(true));
+                ns_map.insert("__proto__".to_string(), Value::Null);
+                ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
+                ns_map.insert("@@sym:4".to_string(), Value::from("Deferred Module"));
+                ns_map.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+                ns_map.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+                ns_map.insert("__nonconfigurable_@@sym:4__".to_string(), Value::Boolean(true));
+                let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
+                self.module_locals
+                    .insert("__self_deferred_ns_cached__".to_string(), ns_obj.clone());
+                self.module_locals.insert(name_str.clone(), ns_obj.clone());
+                if let Some(ref sp) = self.script_path {
+                    self.deferred_module_ns_objects
+                        .insert(sp.clone(), ns_obj.clone());
+                }
+                self.stack.push(ns_obj);
+                return Ok(OpcodeAction::Continue);
+            }
             if let Some(val) = self.globals.get(&name_str).cloned() {
                 if matches!(val, Value::Uninitialized) {
                     let err = self.make_reference_error(ctx, &format!("Cannot access '{}' before initialization", name_str));
@@ -3574,7 +3649,14 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         // Check self-import namespace bindings (they return "object")
-        if self.is_module_mode && self.chunk.self_namespace_imports.iter().any(|(local, _)| local == &name) {
+        if self.is_module_mode
+            && (self.chunk.self_namespace_imports.iter().any(|(local, _)| local == &name)
+                || self
+                    .chunk
+                    .self_deferred_namespace_imports
+                    .iter()
+                    .any(|(local, _)| local == &name))
+        {
             self.stack.push(Value::from("object"));
             return Ok(OpcodeAction::Continue);
         }
@@ -4523,12 +4605,26 @@ impl<'gc> VM<'gc> {
         } else {
             value_to_string(name_val)
         };
+        let is_private_like = key.contains(PRIVATE_KEY_PREFIX) || key.starts_with("__brand_");
         let val = self.stack.pop().expect("VM Stack underflow on InitProperty (val)");
         let obj = self.stack.pop().expect("VM Stack underflow on InitProperty (obj)");
         // Private fields live on the exact object (including proxies) — no unwrapping.
         // Proxy traps are not triggered for private field init.
         match &obj {
             Value::VmObject(map) => {
+                if map.borrow().contains_key("__module_namespace__") && !is_private_like {
+                    if let Err(err) = self.create_data_property_or_throw(ctx, &obj, &key, &val) {
+                        self.set_pending_throw_from_error(&err);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            self.stack.push(val);
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        return Err(err);
+                    }
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
                 // Check for proxy: delegate to defineProperty trap (non-private and non-brand only)
                 if !key.contains(PRIVATE_KEY_PREFIX) && !key.starts_with("__brand_") && map.borrow().contains_key("__proxy_target__") {
                     // Use assign_named_property for proxy to trigger set/defineProperty traps
@@ -4550,7 +4646,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                if (is_frozen || (is_non_ext && !key_exists)) && !is_private {
+                if (is_frozen || (is_non_ext && !key_exists)) && !is_private_like {
                     let msg = if is_frozen {
                         format!("Cannot add property {}, object is frozen", key)
                     } else {
@@ -4561,7 +4657,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                if is_non_ext && !key_exists && is_private {
+                if is_non_ext && !key_exists && is_private_like {
                     let err = self.make_type_error_object(ctx, "Cannot add private member, object is not extensible");
                     self.handle_throw(ctx, &err)?;
                     self.stack.push(val);
@@ -5323,7 +5419,16 @@ impl<'gc> VM<'gc> {
             },
             Value::VmObject(map) => {
                 self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
-                let _ = map;
+                if map.borrow().contains_key("__module_namespace__")
+                    && !Self::namespace_is_symbol_like_key(map, &coerced_key)
+                    && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, map)
+                {
+                    self.pending_throw = Some(err);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                        return Ok(OpcodeAction::Continue);
+                    }
+                }
                 match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
                     Ok(_) => {}
                     Err(err) => {
@@ -5457,6 +5562,19 @@ impl<'gc> VM<'gc> {
         self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
         match &obj {
             Value::VmObject(map) => {
+                if map.borrow().contains_key("__module_namespace__") {
+                    if let Err(err) = self.create_data_property_or_throw(ctx, &obj, &coerced_key, &val) {
+                        self.set_pending_throw_from_error(&err);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            self.stack.push(val);
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        return Err(err);
+                    }
+                    self.stack.push(val);
+                    return Ok(OpcodeAction::Continue);
+                }
                 let getter_key = format!("__get_{}", coerced_key);
                 let setter_key = format!("__set_{}", coerced_key);
                 let readonly_key = format!("__readonly_{}__", coerced_key);
@@ -6716,8 +6834,15 @@ impl<'gc> VM<'gc> {
             Value::VmObject(map) => {
                 // Module namespace exotic object [[HasProperty]] (§10.4.6.7)
                 if map.borrow().contains_key("__module_namespace__") {
+                    if !Self::namespace_is_symbol_like_key(map, &key)
+                        && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, map)
+                    {
+                        self.pending_throw = Some(err);
+                        self.stack.push(Value::Boolean(false));
+                        return Ok(OpcodeAction::Continue);
+                    }
                     let b = map.borrow();
-                    if key.starts_with("@@sym:") {
+                    if Self::namespace_is_symbol_like_key(map, &key) {
                         // Symbol keys: check via ordinary hasProperty (e.g., Symbol.toStringTag)
                         b.contains_key(&key)
                     } else {
@@ -7257,7 +7382,17 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(map) = &obj {
             // Module namespace exotic object [[Delete]] (§10.4.6.10)
             if map.borrow().contains_key("__module_namespace__") {
-                let is_export = if !key.starts_with("@@sym:") {
+                if !Self::namespace_is_symbol_like_key(map, &key)
+                    && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, map)
+                {
+                    self.pending_throw = Some(err);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                        self.stack.push(Value::Boolean(false));
+                        return Ok(OpcodeAction::Continue);
+                    }
+                }
+                let is_export = if !Self::namespace_is_symbol_like_key(map, &key) {
                     if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
                         bindings.borrow().contains_key(&key)
                     } else {
@@ -8274,7 +8409,17 @@ impl<'gc> VM<'gc> {
                 };
                 // Module namespace exotic object [[Delete]]
                 if map.borrow().contains_key("__module_namespace__") {
-                    let is_export = if !key.starts_with("@@sym:") {
+                    if !Self::namespace_is_symbol_like_key(map, &key)
+                        && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, map)
+                    {
+                        self.pending_throw = Some(err);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            self.stack.push(Value::Boolean(false));
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    }
+                    let is_export = if !Self::namespace_is_symbol_like_key(map, &key) {
                         if let Some(Value::VmObject(bindings)) = map.borrow().get("__ns_bindings__") {
                             bindings.borrow().contains_key(&key)
                         } else {

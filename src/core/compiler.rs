@@ -3,7 +3,7 @@ use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
     StatementKind,
 };
-use crate::core::{JSError, Value};
+use crate::core::{BUILTIN_NEW_FUNCTION, JSError, Value};
 use crate::raise_syntax_error;
 
 pub(crate) const INTERNAL_FOROF_HELPER: &str = "__forOfValues internal";
@@ -5037,7 +5037,7 @@ impl<'gc> Compiler<'gc> {
                         }
                         "Function" => {
                             // new Function(p1, p2, ..., body) → push native_fn + all args, Call(N)
-                            let fn_idx = self.chunk.add_constant(Value::VmNativeFunction(72));
+                            let fn_idx = self.chunk.add_constant(Value::VmNativeFunction(BUILTIN_NEW_FUNCTION));
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(fn_idx);
                             if args.is_empty() {

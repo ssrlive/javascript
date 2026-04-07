@@ -2615,9 +2615,8 @@ impl<'gc> Compiler<'gc> {
                     for bp in ctx.break_patches {
                         self.patch_jump(bp);
                     }
-                    if self.scope_depth > 0 && !forced_local && !is_tdz {
-                        self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
-                    }
+                    // Keep synthetic loop locals in the table so local indices stay
+                    // aligned with the stack slots that still hold them.
                 } else {
                     // Regular for-of: lazy iteration with IteratorClose on early exit
                     let iter_var = format!("__forofIter_{}__", self.forin_counter);
@@ -2768,24 +2767,36 @@ impl<'gc> Compiler<'gc> {
                     self.completion_var = saved_cv;
                 }
             }
-            StatementKind::ForOfDestructuringArray(_decl_kind, elements, iterable_expr, body) => {
+            StatementKind::ForOfDestructuringArray(_decl_kind, elements, iterable_expr, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_decl_kind, elements, iterable_expr, body) => {
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
                 }
-                self.compile_for_of_destructuring_array(elements, iterable_expr, body)?;
+                self.compile_for_of_destructuring_array(
+                    elements,
+                    iterable_expr,
+                    body,
+                    matches!(*stmt.kind, StatementKind::ForAwaitOfDestructuringArray(..)),
+                )?;
                 if is_last {
                     self.emit_load_completion();
                 } else {
                     self.completion_var = saved_cv;
                 }
             }
-            StatementKind::ForOfDestructuringObject(_decl_kind, elements, iterable_expr, body) => {
+            StatementKind::ForOfDestructuringObject(_decl_kind, elements, iterable_expr, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_decl_kind, elements, iterable_expr, body) => {
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
                 }
-                self.compile_for_of_destructuring_object(elements, iterable_expr, body)?;
+                self.compile_for_of_destructuring_object(
+                    elements,
+                    iterable_expr,
+                    body,
+                    matches!(*stmt.kind, StatementKind::ForAwaitOfDestructuringObject(..)),
+                )?;
                 if is_last {
                     self.emit_load_completion();
                 } else {
@@ -2816,12 +2827,14 @@ impl<'gc> Compiler<'gc> {
                     self.completion_var = saved_cv;
                 }
             }
-            StatementKind::ForOfExpr(lhs_expr, iterable_expr, body) => {
-                // Same as ForOf but assigns to an expression LHS instead of a declared variable
+            StatementKind::ForOfExpr(lhs_expr, iterable_expr, body) | StatementKind::ForAwaitOfExpr(lhs_expr, iterable_expr, body) => {
+                // Same as ForOf/ForAwaitOf but assigns to an expression LHS instead
+                // of a declared variable.
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
                 }
+                let is_for_await = matches!(*stmt.kind, StatementKind::ForAwaitOfExpr(..));
                 self.compile_expr(&Expr::Call(
                     Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
                     vec![iterable_expr.clone()],
@@ -2857,13 +2870,22 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::LessThan);
                 let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
 
+                if is_for_await {
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.chunk.write_opcode(Opcode::Await);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+
                 // lhs_expr = arr[idx]
                 self.emit_helper_get("__forofArr__");
                 self.emit_helper_get("__forofIdx__");
                 self.chunk.write_opcode(Opcode::GetIndex);
-                // Assign to expression LHS
-                self.compile_assign_to_expr(lhs_expr)?;
-                self.chunk.write_opcode(Opcode::Pop);
+                if is_for_await {
+                    self.chunk.write_opcode(Opcode::Await);
+                }
+                self.compile_expr_assign_to_target(lhs_expr)?;
 
                 for s in body {
                     self.compile_statement(s, false)?;
@@ -2883,9 +2905,8 @@ impl<'gc> Compiler<'gc> {
                 for bp in ctx.break_patches {
                     self.patch_jump(bp);
                 }
-                if self.scope_depth > 0 {
-                    self.locals.retain(|l| l != "__forofArr__" && l != "__forofIdx__");
-                }
+                // Keep synthetic loop locals in the table so local indices stay
+                // aligned with the stack slots that still hold them.
                 if is_last {
                     self.emit_load_completion();
                 } else {
@@ -7089,6 +7110,7 @@ impl<'gc> Compiler<'gc> {
         elements: &[DestructuringElement],
         iterable_expr: &Expr,
         body: &[Statement],
+        is_for_await: bool,
     ) -> Result<(), JSError> {
         let arr_name = format!("__forofda_{}__", self.forin_counter);
         self.forin_counter += 1;
@@ -7132,10 +7154,21 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::LessThan);
         let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
 
+        if is_for_await {
+            let undef_idx = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef_idx);
+            self.chunk.write_opcode(Opcode::Await);
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
         // item = arr[idx], then destructure
         self.emit_helper_get(&arr_name);
         self.emit_helper_get(&idx_name);
         self.chunk.write_opcode(Opcode::GetIndex);
+        if is_for_await {
+            self.chunk.write_opcode(Opcode::Await);
+        }
         // Item is on stack — array destructure it
         self.compile_array_destructuring(elements)?;
 
@@ -7171,6 +7204,7 @@ impl<'gc> Compiler<'gc> {
         elements: &[ObjectDestructuringElement],
         iterable_expr: &Expr,
         body: &[Statement],
+        is_for_await: bool,
     ) -> Result<(), JSError> {
         let arr_name = format!("__forofdo_{}__", self.forin_counter);
         self.forin_counter += 1;
@@ -7200,10 +7234,21 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::LessThan);
         let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
 
+        if is_for_await {
+            let undef_idx = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef_idx);
+            self.chunk.write_opcode(Opcode::Await);
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
         // item = arr[idx], then object-destructure
         self.emit_helper_get(&arr_name);
         self.emit_helper_get(&idx_name);
         self.chunk.write_opcode(Opcode::GetIndex);
+        if is_for_await {
+            self.chunk.write_opcode(Opcode::Await);
+        }
         self.compile_object_destructuring(elements)?;
 
         for s in body {
@@ -8232,7 +8277,10 @@ impl<'gc> Compiler<'gc> {
     fn compile_object_destructuring(&mut self, elements: &[ObjectDestructuringElement]) -> Result<(), JSError> {
         let temp = format!("__destr_obj_{}__", self.forin_counter);
         self.forin_counter += 1;
-        self.emit_define_var(&temp);
+        let temp_name = crate::unicode::utf8_to_utf16(&temp);
+        let temp_name_idx = self.chunk.add_constant(Value::String(temp_name));
+        self.chunk.write_opcode(Opcode::DefineGlobal);
+        self.chunk.write_u16(temp_name_idx);
 
         // Runtime guard: object destructuring from undefined/null must throw.
         let first_prop = elements.iter().find_map(|e| match e {
@@ -8366,10 +8414,6 @@ impl<'gc> Compiler<'gc> {
                     self.emit_define_var(name);
                 }
             }
-        }
-
-        if self.scope_depth > 0 {
-            self.locals.retain(|l| l != &temp);
         }
         Ok(())
     }

@@ -252,6 +252,32 @@ mod symbol_additional_tests {
     }
 
     #[test]
+    fn test_symbol_async_iterator_exists_and_async_generators_use_it() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let script = r#"
+            async function* generator() { yield 1; }
+            let iter = generator();
+            let AsyncIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf(generator.prototype));
+            let method = AsyncIteratorPrototype[Symbol.asyncIterator];
+            [typeof Symbol.asyncIterator, typeof method, method.call(iter) === iter]
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"symbol\",\"function\",true]");
+    }
+
+    #[test]
+    fn test_symbol_async_iterator_descriptor_and_cross_realm_identity() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let script = r#"
+            let desc = Object.getOwnPropertyDescriptor(Symbol, "asyncIterator");
+            let other = __createRealm__().global.Symbol;
+            [desc.writable, desc.enumerable, desc.configurable, Symbol.asyncIterator === other.asyncIterator]
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[false,false,false,true]");
+    }
+
+    #[test]
     fn test_symbol_to_string_tag() {
         let script = r#"
             let tag = Symbol.toStringTag;

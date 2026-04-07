@@ -4037,8 +4037,27 @@ impl<'gc> VM<'gc> {
             "import.defer" => self.host_deferred_import_namespace(ctx, args),
             "__createRealm__" => {
                 let realm_id = self.child_realms.len();
-                let child = Box::new(VM::new(Chunk::default(), ctx));
+                let mut child = Box::new(VM::new(Chunk::default(), ctx));
                 let child_global_this = child.global_this;
+
+                if let Some(Value::VmObject(parent_symbol_obj)) = self.globals.get("Symbol")
+                    && let Some(Value::VmObject(child_symbol_obj)) = child.globals.get("Symbol").cloned()
+                {
+                    let mut child_symbol_borrow = child_symbol_obj.borrow_mut(ctx);
+                    for (key, id) in [
+                        ("iterator", 1_u64),
+                        ("hasInstance", 2),
+                        ("toPrimitive", 3),
+                        ("toStringTag", 4),
+                        ("species", 5),
+                        ("asyncIterator", 6),
+                    ] {
+                        if let Some(shared_symbol) = parent_symbol_obj.borrow().get(key).cloned() {
+                            child_symbol_borrow.insert(key.to_string(), shared_symbol.clone());
+                            child.cache_symbol_value(id, &shared_symbol);
+                        }
+                    }
+                }
 
                 // Expose intrinsic constructors that are not globals (AsyncFunction,
                 // AsyncGeneratorFunction, GeneratorFunction) on child globalThis so
@@ -14222,7 +14241,8 @@ impl<'gc> VM<'gc> {
         self.globals
             .insert("import".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, import_map)));
         // Minimal Symbol object — callable via __native_id__, with well-known symbol properties
-        // Well-known symbols are proper VmObject symbols with fixed IDs: iterator=1, hasInstance=2, toPrimitive=3, toStringTag=4
+        // Well-known symbols are proper VmObject symbols with fixed IDs:
+        // iterator=1, hasInstance=2, toPrimitive=3, toStringTag=4, species=5, asyncIterator=6
         let make_well_known_symbol = |id: u64, name: &str| -> Value<'gc> {
             let mut m = IndexMap::new();
             m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
@@ -14235,12 +14255,14 @@ impl<'gc> VM<'gc> {
         let sym_to_primitive = make_well_known_symbol(3, "toPrimitive");
         let sym_to_string_tag = make_well_known_symbol(4, "toStringTag");
         let sym_species = make_well_known_symbol(5, "species");
+        let sym_async_iterator = make_well_known_symbol(6, "asyncIterator");
         self.cache_symbol_value(1, &sym_iterator);
         self.cache_symbol_value(2, &sym_has_instance);
         self.cache_symbol_value(3, &sym_to_primitive);
         self.cache_symbol_value(4, &sym_to_string_tag);
         self.cache_symbol_value(5, &sym_species);
-        self.symbol_counter = 5; // user symbols start from 6+
+        self.cache_symbol_value(6, &sym_async_iterator);
+        self.symbol_counter = 6; // user symbols start from 7+
 
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
@@ -14249,6 +14271,12 @@ impl<'gc> VM<'gc> {
         sym_obj.insert("toPrimitive".to_string(), sym_to_primitive);
         sym_obj.insert("toStringTag".to_string(), sym_to_string_tag);
         sym_obj.insert("species".to_string(), sym_species);
+        sym_obj.insert("asyncIterator".to_string(), sym_async_iterator);
+        for key in ["iterator", "hasInstance", "toPrimitive", "toStringTag", "species", "asyncIterator"] {
+            sym_obj.insert(format!("__readonly_{}__", key), Value::Boolean(true));
+            sym_obj.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+            sym_obj.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));
+        }
         sym_obj.insert("for".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_FOR));
         sym_obj.insert("keyFor".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_KEYFOR));
         self.globals
@@ -15552,6 +15580,7 @@ impl<'gc> VM<'gc> {
                 "Math",
                 "JSON",
                 "BigInt",
+                "Symbol",
                 "__createRealm__",
             ] {
                 if let Some(v) = self.globals.get(name).cloned() {
@@ -15748,9 +15777,8 @@ impl<'gc> VM<'gc> {
         self.globals.insert("__async_function_ctor".to_string(), async_fn_ctor_val);
         self.globals.insert("__async_function_prototype".to_string(), async_fn_proto_val);
 
-        // %AsyncGeneratorPrototype%, %AsyncGeneratorFunction% and
-        // %AsyncGeneratorFunction.prototype%
-        let mut async_gen_proto = IndexMap::new();
+        // %AsyncIteratorPrototype%, %AsyncGeneratorPrototype%, %AsyncGeneratorFunction%
+        // and %AsyncGeneratorFunction.prototype%
         let async_to_string_tag_key = self
             .globals
             .get("Symbol")
@@ -15767,6 +15795,31 @@ impl<'gc> VM<'gc> {
                 _ => None,
             })
             .unwrap_or_else(|| "@@sym:4".to_string());
+        let async_iterator_key = self
+            .globals
+            .get("Symbol")
+            .and_then(|v| match v {
+                Value::VmObject(sym_obj) => sym_obj.borrow().get("asyncIterator").cloned(),
+                _ => None,
+            })
+            .and_then(|v| match v {
+                Value::VmObject(sym) => sym.borrow().get("__symbol_id__").cloned(),
+                _ => None,
+            })
+            .and_then(|v| match v {
+                Value::Number(id) => Some(format!("@@sym:{}", id as u64)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "@@sym:6".to_string());
+        let async_iterator_method = Self::make_host_fn_with_name_len(ctx, "iterator.self", "[Symbol.asyncIterator]", 0.0, false);
+        let mut async_iterator_proto = IndexMap::new();
+        async_iterator_proto.insert(async_iterator_key.clone(), async_iterator_method);
+        async_iterator_proto.insert(format!("__nonenumerable_{}__", async_iterator_key), Value::Boolean(true));
+        let async_iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, async_iterator_proto));
+        self.globals
+            .insert("__AsyncIteratorPrototype__".to_string(), async_iterator_proto_val.clone());
+
+        let mut async_gen_proto = IndexMap::new();
         let make_async_gen_method = |id: FunctionID, name: &str, length: f64| {
             let mut m = IndexMap::new();
             m.insert("__native_id__".to_string(), Value::Number(id as f64));
@@ -15842,11 +15895,7 @@ impl<'gc> VM<'gc> {
             agb.insert("__readonly_constructor__".to_string(), Value::Boolean(true));
             agb.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
 
-            if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
-                && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
-            {
-                agb.insert("__proto__".to_string(), obj_proto);
-            }
+            agb.insert("__proto__".to_string(), async_iterator_proto_val.clone());
 
             if let Some(Value::VmObject(function_ctor_obj)) = self.globals.get("Function")
                 && let Some(fn_proto) = function_ctor_obj.borrow().get("prototype").cloned()
@@ -31125,14 +31174,8 @@ impl<'gc> VM<'gc> {
             self.set_function_realm_intrinsic(ctx, wrapped, async_proto, "__async_dynamic_function__", None);
         }
         if is_async_gen_ctor {
-            let (async_gen_fn_proto, async_gen_proto) = self.async_generator_constructor_protos(ctor_prototype);
-            self.set_function_realm_intrinsic(
-                ctx,
-                wrapped,
-                async_gen_fn_proto,
-                "__async_dynamic_generator_function__",
-                Some(async_gen_proto),
-            );
+            let (async_gen_fn_proto, _async_gen_proto) = self.async_generator_constructor_protos(ctor_prototype);
+            self.set_function_realm_intrinsic(ctx, wrapped, async_gen_fn_proto, "__async_dynamic_generator_function__", None);
         }
 
         let fallback_proto = self.resolve_async_constructor_fallback_proto(ctx, is_async_gen_ctor, origin_global.as_ref());

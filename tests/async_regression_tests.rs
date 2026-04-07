@@ -145,3 +145,47 @@ fn test_sync_throw_in_async_initial_step_reports_error_object() {
         Ok(v) => panic!("Expected Err for sync-throw in async initial step, got Ok: {:?}", v),
     }
 }
+
+#[test]
+fn test_for_await_of_assignment_and_declaration_destructuring_regression() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let script = r#"
+                (async function() {
+                    let arrow;
+                    let prop_target = {};
+                    let decl_array = 0;
+                    let decl_object = 0;
+
+                    for await ([arrow = () => {}] of [[]]) {}
+                    for await ({ value: prop_target.value } of [{ value: 7 }]) {}
+                    for await (let [x] of [[11]]) { decl_array = x; }
+                    for await (const { y } of [{ y: 13 }]) { decl_object = y; }
+
+                    return [arrow.name, prop_target.value, decl_array, decl_object];
+                })()
+            "#;
+
+            match evaluate_script_with_unwrap(script, false, None::<&std::path::Path>, true) {
+                Ok(result) => {
+                    let _ = tx.send(Ok(result));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(format!("evaluate_script failed: {:?}", e)));
+                }
+            }
+        })
+        .expect("failed to spawn thread");
+
+    let timeout = std::time::Duration::from_secs(10);
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(result)) => assert_eq!(result, "[\"arrow\",7,11,13]"),
+        Ok(Err(err_msg)) => panic!("{}", err_msg),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("test timed out after {:?}; possible event loop deadlock", timeout)
+        }
+        Err(e) => panic!("channel recv error: {:?}", e),
+    }
+}

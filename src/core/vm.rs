@@ -340,6 +340,7 @@ pub(super) const BUILTIN_CTOR_BIGINT64ARRAY: FunctionID = 469;
 pub(super) const BUILTIN_CTOR_BIGUINT64ARRAY: FunctionID = 470;
 // ── SharedArrayBuffer (480–489) ─────────────────────────────────────
 const BUILTIN_CTOR_SHAREDARRAYBUFFER: FunctionID = 480;
+const BUILTIN_SHAREDARRAYBUFFER_GROW: FunctionID = 481;
 // ── Atomics (490–509) ───────────────────────────────────────────────
 const BUILTIN_ATOMICS_ISLOCKFREE: FunctionID = 490;
 const BUILTIN_ATOMICS_LOAD: FunctionID = 491;
@@ -4522,6 +4523,229 @@ impl<'gc> VM<'gc> {
 
                 let len = buf_obj.borrow().get("byteLength").map(to_number).unwrap_or(0.0);
                 Value::Number(len)
+            }
+            "arrayBuffer.getMaxByteLength" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get ArrayBuffer.prototype.maxByteLength called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                };
+                let b = buf_obj.borrow();
+                let is_ab = matches!(b.get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
+                if !is_ab {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get ArrayBuffer.prototype.maxByteLength called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                }
+                if matches!(b.get("__resizable__"), Some(Value::Boolean(true))) {
+                    let max = b.get("__maxByteLength__").map(to_number).unwrap_or(0.0);
+                    Value::Number(max)
+                } else {
+                    let len = b.get("byteLength").map(to_number).unwrap_or(0.0);
+                    Value::Number(len)
+                }
+            }
+            "arrayBuffer.getResizable" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw = Some(
+                        self.make_type_error_object(ctx, "Method get ArrayBuffer.prototype.resizable called on incompatible receiver"),
+                    );
+                    return Value::Undefined;
+                };
+                let b = buf_obj.borrow();
+                let is_ab = matches!(b.get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
+                if !is_ab {
+                    drop(b);
+                    self.pending_throw = Some(
+                        self.make_type_error_object(ctx, "Method get ArrayBuffer.prototype.resizable called on incompatible receiver"),
+                    );
+                    return Value::Undefined;
+                }
+                Value::Boolean(matches!(b.get("__resizable__"), Some(Value::Boolean(true))))
+            }
+            "arrayBuffer.resize" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.resize called on incompatible receiver"));
+                    return Value::Undefined;
+                };
+                let is_ab = matches!(buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
+                if !is_ab {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.resize called on incompatible receiver"));
+                    return Value::Undefined;
+                }
+
+                let new_len_f = match args.first() {
+                    Some(v) => to_number(v),
+                    _ => 0.0,
+                };
+
+                let mut b = buf_obj.borrow_mut(ctx);
+                let is_detached = matches!(b.get("__detached__"), Some(Value::Boolean(true)));
+                if is_detached {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot resize a detached ArrayBuffer"));
+                    return Value::Undefined;
+                }
+                let is_resizable = matches!(b.get("__resizable__"), Some(Value::Boolean(true)));
+                if !is_resizable {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "ArrayBuffer is not resizable"));
+                    return Value::Undefined;
+                }
+                let max_byte_len = b
+                    .get("__maxByteLength__")
+                    .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                    .unwrap_or(0);
+
+                if new_len_f.is_nan() || new_len_f < 0.0 || !new_len_f.is_finite() || (new_len_f as usize) > max_byte_len {
+                    drop(b);
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                    err_map.insert("message".to_string(), Value::from("Invalid length for ArrayBuffer.resize"));
+                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                }
+                let new_len = new_len_f as usize;
+                b.insert("byteLength".to_string(), Value::Number(new_len as f64));
+                if let Some(Value::VmArray(bytes)) = b.get("__buffer_bytes__") {
+                    let mut bytes_mut = bytes.borrow_mut(ctx);
+                    bytes_mut.elements.resize(new_len, Value::Number(0.0));
+                }
+                Value::Undefined
+            }
+            "sharedArrayBuffer.getByteLength" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get SharedArrayBuffer.prototype.byteLength called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                };
+                let b = buf_obj.borrow();
+                let is_sab = matches!(b.get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                if !is_sab {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get SharedArrayBuffer.prototype.byteLength called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                }
+                let len = b.get("byteLength").map(to_number).unwrap_or(0.0);
+                Value::Number(len)
+            }
+            "sharedArrayBuffer.getMaxByteLength" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get SharedArrayBuffer.prototype.maxByteLength called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                };
+                let b = buf_obj.borrow();
+                let is_sab = matches!(b.get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                if !is_sab {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get SharedArrayBuffer.prototype.maxByteLength called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                }
+                if matches!(b.get("__growable__"), Some(Value::Boolean(true))) {
+                    let max = b.get("__maxByteLength__").map(to_number).unwrap_or(0.0);
+                    Value::Number(max)
+                } else {
+                    let len = b.get("byteLength").map(to_number).unwrap_or(0.0);
+                    Value::Number(len)
+                }
+            }
+            "sharedArrayBuffer.getGrowable" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get SharedArrayBuffer.prototype.growable called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                };
+                let b = buf_obj.borrow();
+                let is_sab = matches!(b.get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                if !is_sab {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get SharedArrayBuffer.prototype.growable called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                }
+                Value::Boolean(matches!(b.get("__growable__"), Some(Value::Boolean(true))))
+            }
+            "sharedArrayBuffer.grow" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method SharedArrayBuffer.prototype.grow called on incompatible receiver"));
+                    return Value::Undefined;
+                };
+                let is_sab = matches!(buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                if !is_sab {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method SharedArrayBuffer.prototype.grow called on incompatible receiver"));
+                    return Value::Undefined;
+                }
+
+                let new_len_f = match args.first() {
+                    Some(v) => to_number(v),
+                    _ => 0.0,
+                };
+
+                let mut b = buf_obj.borrow_mut(ctx);
+                let is_growable = matches!(b.get("__growable__"), Some(Value::Boolean(true)));
+                if !is_growable {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "SharedArrayBuffer is not growable"));
+                    return Value::Undefined;
+                }
+                let max_byte_len = b
+                    .get("__maxByteLength__")
+                    .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                    .unwrap_or(0);
+
+                if new_len_f.is_nan() || new_len_f < 0.0 || !new_len_f.is_finite() || (new_len_f as usize) > max_byte_len {
+                    drop(b);
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                    err_map.insert("message".to_string(), Value::from("Invalid length for SharedArrayBuffer.grow"));
+                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                }
+                let new_len = new_len_f as usize;
+                b.insert("byteLength".to_string(), Value::Number(new_len as f64));
+                if let Some(Value::VmArray(bytes)) = b.get("__buffer_bytes__") {
+                    let mut bytes_mut = bytes.borrow_mut(ctx);
+                    bytes_mut.elements.resize(new_len, Value::Number(0.0));
+                }
+                Value::Undefined
             }
             "arrayBuffer.slice" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
@@ -14738,6 +14962,22 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getByteLength", "get byteLength", 0.0, false),
         );
         array_buffer_proto.insert("__nonenumerable_byteLength__".to_string(), Value::Boolean(true));
+        array_buffer_proto.insert("__nonconfigurable_byteLength__".to_string(), Value::Boolean(false));
+        array_buffer_proto.insert(
+            "__get_maxByteLength".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getMaxByteLength", "get maxByteLength", 0.0, false),
+        );
+        array_buffer_proto.insert("__nonenumerable_maxByteLength__".to_string(), Value::Boolean(true));
+        array_buffer_proto.insert(
+            "__get_resizable".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getResizable", "get resizable", 0.0, false),
+        );
+        array_buffer_proto.insert("__nonenumerable_resizable__".to_string(), Value::Boolean(true));
+        array_buffer_proto.insert(
+            "resize".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "arrayBuffer.resize", "resize", 1.0, false),
+        );
+        array_buffer_proto.insert("__nonenumerable_resize__".to_string(), Value::Boolean(true));
         array_buffer_proto.insert(
             "slice".to_string(),
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.slice", "slice", 2.0, false),
@@ -14794,6 +15034,26 @@ impl<'gc> VM<'gc> {
         sab_proto.insert("@@sym:4".to_string(), Value::from("SharedArrayBuffer"));
         sab_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         sab_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        sab_proto.insert(
+            "__get_byteLength".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getByteLength", "get byteLength", 0.0, false),
+        );
+        sab_proto.insert("__nonenumerable_byteLength__".to_string(), Value::Boolean(true));
+        sab_proto.insert(
+            "__get_maxByteLength".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getMaxByteLength", "get maxByteLength", 0.0, false),
+        );
+        sab_proto.insert("__nonenumerable_maxByteLength__".to_string(), Value::Boolean(true));
+        sab_proto.insert(
+            "__get_growable".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getGrowable", "get growable", 0.0, false),
+        );
+        sab_proto.insert("__nonenumerable_growable__".to_string(), Value::Boolean(true));
+        sab_proto.insert(
+            "grow".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.grow", "grow", 1.0, false),
+        );
+        sab_proto.insert("__nonenumerable_grow__".to_string(), Value::Boolean(true));
         let sab_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, sab_proto));
         shared_array_buffer_map.insert("prototype".to_string(), sab_proto_val);
         shared_array_buffer_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
@@ -17455,13 +17715,29 @@ impl<'gc> VM<'gc> {
             },
             BUILTIN_CTOR_SHAREDARRAYBUFFER => {
                 let len = match args.first() {
-                    Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n as usize,
+                    Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as usize,
                     _ => 0,
+                };
+                let max_len = match args.get(1) {
+                    Some(Value::VmObject(opts)) => opts
+                        .borrow()
+                        .get("maxByteLength")
+                        .and_then(|v| {
+                            if let Value::Number(n) = v {
+                                Some((*n).max(len as f64) as usize)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(len),
+                    _ => len,
                 };
                 let bytes = vec![Value::Number(0.0); len];
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
                 map.insert("byteLength".to_string(), Value::Number(len as f64));
+                map.insert("maxByteLength".to_string(), Value::Number(max_len as f64));
+                map.insert("grow".to_string(), Value::VmNativeFunction(BUILTIN_SHAREDARRAYBUFFER_GROW));
                 map.insert(
                     "__buffer_bytes__".to_string(),
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
@@ -22500,6 +22776,36 @@ impl<'gc> VM<'gc> {
             };
             self.microtask_queue.push(task);
             return result_promise;
+        }
+
+        if id == BUILTIN_SHAREDARRAYBUFFER_GROW
+            && let Value::VmObject(obj) = &receiver
+        {
+            let mut b = obj.borrow_mut(ctx);
+            if let Some(Value::String(t)) = b.get("__type__")
+                && crate::unicode::utf16_to_utf8(t) == "SharedArrayBuffer"
+            {
+                let max_byte_len = b
+                    .get("maxByteLength")
+                    .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                    .unwrap_or(0);
+                let new_len_f = match args.first() {
+                    Some(v) => to_number(v),
+                    _ => 0.0,
+                };
+                if new_len_f.is_nan() || new_len_f < 0.0 || !new_len_f.is_finite() || (new_len_f as usize) > max_byte_len {
+                    drop(b);
+                    self.throw_type_error(ctx, "Invalid length for SharedArrayBuffer.grow");
+                    return Value::Undefined;
+                }
+                let new_len = new_len_f as usize;
+                b.insert("byteLength".to_string(), Value::Number(new_len as f64));
+                if let Some(Value::VmArray(bytes)) = b.get("__buffer_bytes__") {
+                    let mut bytes_mut = bytes.borrow_mut(ctx);
+                    bytes_mut.elements.resize(new_len, Value::Number(0.0));
+                }
+                return Value::Undefined;
+            }
         }
 
         if id == BUILTIN_ARRAYBUFFER_RESIZE

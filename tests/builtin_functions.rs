@@ -7,7 +7,7 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod builtin_functions_tests {
-    use javascript::evaluate_script;
+    use javascript::{evaluate_script, JSErrorKind};
 
     #[test]
     fn test_array_methods_exist() {
@@ -213,6 +213,44 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_is_nan_uses_tonumber_coercion() {
+        let script = r#"
+            let calls = 0;
+            let value = {
+                [Symbol.toPrimitive]() {
+                    calls++;
+                    return "NaN";
+                }
+            };
+            isNaN(value) && calls === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_is_nan_throws_when_toprimitive_returns_object() {
+        let script = r#"
+            let value = {
+                [Symbol.toPrimitive]() {
+                    return {};
+                }
+            };
+            isNaN(value)
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>);
+        match result {
+            Err(err) => match err.kind() {
+                JSErrorKind::TypeError { message, .. } => {
+                    assert!(message.contains("primitive"));
+                }
+                _ => panic!("Expected TypeError, got {:?}", err),
+            },
+            Ok(value) => panic!("Expected TypeError, got {:?}", value),
+        }
+    }
+
+    #[test]
     fn test_is_finite() {
         let script = "isFinite(42)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
@@ -221,6 +259,26 @@ mod builtin_functions_tests {
         let script = "isFinite(Infinity)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "false");
+
+        let script = "isFinite.length";
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "1");
+    }
+
+    #[test]
+    fn test_is_finite_uses_tonumber_coercion() {
+        let script = r#"
+            let calls = 0;
+            let value = {
+                [Symbol.toPrimitive]() {
+                    calls++;
+                    return "42";
+                }
+            };
+            isFinite(value) && calls === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]

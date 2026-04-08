@@ -7514,7 +7514,13 @@ impl<'gc> VM<'gc> {
                 self.settle_promise(ctx, &promise, &namespace, false);
                 promise
             }
-            "global.isFinite" => Value::Boolean(to_number(args.first().unwrap_or(&Value::Undefined)).is_finite()),
+            "global.isFinite" => {
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                match self.extract_number_with_coercion(ctx, &arg) {
+                    Some(num) => Value::Boolean(num.is_finite()),
+                    None => Value::Undefined,
+                }
+            }
             "global.encodeURI" | "global.encodeURIComponent" | "global.decodeURI" | "global.decodeURIComponent" => {
                 self.uri_handle_host_fn(ctx, name, args)
             }
@@ -15031,8 +15037,10 @@ impl<'gc> VM<'gc> {
 
         // Global functions
         self.globals.insert("isNaN".to_string(), Value::VmNativeFunction(BUILTIN_ISNAN));
-        self.globals
-            .insert("isFinite".to_string(), Self::make_host_fn(ctx, "global.isFinite"));
+        self.globals.insert(
+            "isFinite".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "global.isFinite", "isFinite", 1.0, false),
+        );
         self.uri_init_globals(ctx);
         self.globals.insert(
             crate::core::INTERNAL_FOROF_HELPER.to_string(),
@@ -19291,11 +19299,13 @@ impl<'gc> VM<'gc> {
                 let b = args.get(1).map(|v| to_int32(to_number(v))).unwrap_or(0);
                 Value::Number((a.wrapping_mul(b)) as f64)
             }
-            BUILTIN_ISNAN => match args.first() {
-                Some(Value::Number(n)) => Value::Boolean(n.is_nan()),
-                Some(Value::Undefined) => Value::Boolean(true),
-                _ => Value::Boolean(false),
-            },
+            BUILTIN_ISNAN => {
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                match self.extract_number_with_coercion(ctx, &arg) {
+                    Some(num) => Value::Boolean(num.is_nan()),
+                    None => Value::Undefined,
+                }
+            }
             BUILTIN_PARSEINT => {
                 let raw_arg = args.first().cloned().unwrap_or(Value::Undefined);
                 let prim = self.try_to_primitive(ctx, &raw_arg, "string");

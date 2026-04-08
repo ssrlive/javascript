@@ -139,3 +139,38 @@ fn set_iterator_stays_done_after_mutation() {
     let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "true");
 }
+
+#[test]
+fn iterator_prototype_symbol_iterator_returns_this_value() {
+    let script = r#"
+        let iteratorPrototype = Object.getPrototypeOf(
+            Object.getPrototypeOf([][Symbol.iterator]())
+        );
+        let getIterator = iteratorPrototype[Symbol.iterator];
+        let values = [{}, Symbol(), 4, 4n, true, undefined, null];
+        values.every(function(value) {
+            return getIterator.call(value) === value;
+        })
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}
+
+#[test]
+fn iterator_prototype_symbol_iterator_has_standard_metadata() {
+    let script = r#"
+        let iteratorPrototype = Object.getPrototypeOf(
+            Object.getPrototypeOf([][Symbol.iterator]())
+        );
+        let descriptor = Object.getOwnPropertyDescriptor(iteratorPrototype, Symbol.iterator);
+        descriptor.value.name === "[Symbol.iterator]" &&
+        descriptor.value.length === 0 &&
+        descriptor.writable === true &&
+        descriptor.enumerable === false &&
+        descriptor.configurable === true
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}

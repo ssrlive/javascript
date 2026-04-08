@@ -1065,61 +1065,82 @@ impl<'gc> VM<'gc> {
         None
     }
 
-    /// Fast path for `eval("/pattern/flags")` — skips full tokenize/parse/compile/execute.
-    fn eval_regex_literal_fast_path(&mut self, ctx: &GcContext<'gc>, code: &str) -> Option<Value<'gc>> {
-        let trimmed = code.trim();
-        if !trimmed.starts_with('/') || trimmed.len() < 2 {
+    /// Fast path for `eval("/pattern/flags")` — operates on raw UTF-16 to preserve lone surrogates.
+    fn eval_regex_literal_fast_path_u16(&mut self, ctx: &GcContext<'gc>, code: &[u16]) -> Option<Value<'gc>> {
+        // Trim leading/trailing whitespace (ASCII whitespace in UTF-16)
+        let is_ws = |c: u16| {
+            matches!(c, 0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20 | 0xA0 | 0xFEFF)
+                || (0x2000..=0x200A).contains(&c)
+                || c == 0x2028
+                || c == 0x2029
+                || c == 0x202F
+                || c == 0x205F
+                || c == 0x3000
+                || c == 0x1680
+        };
+        let start = code.iter().position(|c| !is_ws(*c)).unwrap_or(code.len());
+        let end = code.iter().rposition(|c| !is_ws(*c)).map(|p| p + 1).unwrap_or(0);
+        if start >= end {
             return None;
         }
-        let chars: Vec<char> = trimmed.chars().collect();
+        let trimmed = &code[start..end];
+        if trimmed.is_empty() || trimmed[0] != b'/' as u16 || trimmed.len() < 2 {
+            return None;
+        }
+        let is_lt = |c: u16| matches!(c, 0x000A | 0x000D | 0x2028 | 0x2029);
         let mut i = 1; // skip opening /
         let mut in_class = false;
-        let is_line_terminator = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
         loop {
-            if i >= chars.len() {
-                return None; // no closing /
+            if i >= trimmed.len() {
+                return None;
             }
-            let c = chars[i];
-            if is_line_terminator(c) {
-                return None; // line terminator in regex → let full path handle (SyntaxError)
+            let c = trimmed[i];
+            if is_lt(c) {
+                return None; // line terminator → let full path handle (SyntaxError)
             }
             match c {
-                '\\' => {
+                0x005C => {
+                    // backslash
                     i += 1;
-                    if i >= chars.len() || is_line_terminator(chars[i]) {
-                        return None; // escaped line terminator → let full path handle
+                    if i >= trimmed.len() || is_lt(trimmed[i]) {
+                        return None;
                     }
                 }
-                '[' if !in_class => in_class = true,
-                ']' if in_class => in_class = false,
-                '/' if !in_class => break,
+                0x005B if !in_class => in_class = true, // [
+                0x005D if in_class => in_class = false, // ]
+                0x002F if !in_class => break,           // /
                 _ => {}
             }
             i += 1;
         }
-        // Collect pattern as String (chars 1..i)
-        let pattern: String = chars[1..i].iter().collect();
-        let after: String = chars[i + 1..].iter().collect();
-        // Flags: only ASCII letters immediately after closing /
-        let flag_end = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
-        let flags = &after[..flag_end];
-        let rest = after[flag_end..].trim();
-        if !rest.is_empty() && rest != ";" {
+        let pattern_u16 = &trimmed[1..i];
+        let after = &trimmed[i + 1..];
+        // Flags: ASCII letters immediately after closing /
+        let flag_end = after
+            .iter()
+            .position(|&c| !(c < 128 && (c as u8 as char).is_ascii_alphabetic()))
+            .unwrap_or(after.len());
+        let flags_u16 = &after[..flag_end];
+        let rest = &after[flag_end..];
+        // Check rest is empty or just ";"
+        let rest_trimmed: Vec<u16> = rest.iter().copied().filter(|c| !is_ws(*c)).collect();
+        if !rest_trimmed.is_empty() && rest_trimmed != [b';' as u16] {
             return None;
         }
-        if let Some(err_msg) = Self::validate_regexp_flags(flags) {
+        let flags: String = flags_u16.iter().map(|&c| c as u8 as char).collect();
+        if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
             self.throw_syntax_error(ctx, &err_msg);
             return Some(Value::Undefined);
         }
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
         let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
-        if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
-            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
+        if let Err(e) = get_or_compile_regex(pattern_u16, &regress_flags) {
+            let pat_str = crate::unicode::utf16_to_utf8(pattern_u16);
+            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pat_str, e));
             return Some(Value::Undefined);
         }
         let mut map = IndexMap::new();
-        map.insert("__regex_pattern__".to_string(), Value::from(pattern.as_str()));
-        map.insert("__regex_flags__".to_string(), Value::from(flags));
+        map.insert("__regex_pattern__".to_string(), Value::String(pattern_u16.to_vec()));
+        map.insert("__regex_flags__".to_string(), Value::from(flags.as_str()));
         map.insert("__type__".to_string(), Value::from("RegExp"));
         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
         map.insert("lastIndex".to_string(), Value::Number(0.0));
@@ -17356,9 +17377,13 @@ impl<'gc> VM<'gc> {
             }
             // RegExp display: /pattern/flags
             if borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string()) {
-                let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                let pattern_u16 = match borrow.get("__regex_pattern__") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+                    None => Vec::new(),
+                };
                 let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-                return format!("/{}/{}", pattern, flags);
+                return format!("/{}/{}", crate::unicode::utf16_to_utf8(&pattern_u16), flags);
             }
             drop(borrow);
             let ts = map.borrow().get("toString").cloned();
@@ -19499,7 +19524,10 @@ impl<'gc> VM<'gc> {
                     return v;
                 }
                 // Fast path: eval of a bare regex literal like /pattern/ or /pattern/flags
-                if let Some(v) = self.eval_regex_literal_fast_path(ctx, &code) {
+                // Use raw UTF-16 to preserve lone surrogates
+                if let Value::String(raw_u16) = first_arg
+                    && let Some(v) = self.eval_regex_literal_fast_path_u16(ctx, raw_u16)
+                {
                     return v;
                 }
                 if code.contains("?.") {

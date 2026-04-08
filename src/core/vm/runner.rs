@@ -2119,10 +2119,23 @@ impl<'gc> VM<'gc> {
                 || matches!(&a, Value::VmArray(_) | Value::VmObject(_))
                 || matches!(&b, Value::VmArray(_) | Value::VmObject(_)) =>
             {
-                let a_s = self.vm_to_string(ctx, &a);
-                let b_s = self.vm_to_string(ctx, &b);
-                let mut result = crate::unicode::utf8_to_utf16(&a_s);
-                result.extend_from_slice(&crate::unicode::utf8_to_utf16(&b_s));
+                // Concatenate preserving raw UTF-16 (lone surrogates included)
+                let a_u16 = match &a {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        let s = self.vm_to_string(ctx, &a);
+                        crate::unicode::utf8_to_utf16(&s)
+                    }
+                };
+                let b_u16 = match &b {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        let s = self.vm_to_string(ctx, &b);
+                        crate::unicode::utf8_to_utf16(&s)
+                    }
+                };
+                let mut result = a_u16;
+                result.extend_from_slice(&b_u16);
                 self.stack.push(Value::String(result));
             }
             (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
@@ -7839,11 +7852,11 @@ impl<'gc> VM<'gc> {
                     }
                     BUILTIN_CTOR_REGEXP => {
                         // new RegExp(pattern, flags)
-                        let (pattern, flags) = match args.first() {
+                        let (pattern_u16, flags) = match args.first() {
                             Some(Value::VmObject(pat_obj))
                                 if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") =>
                             {
-                                let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                                let p = Self::regexp_get_pattern_u16(pat_obj);
                                 let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
                                     pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
                                 } else {
@@ -7853,8 +7866,12 @@ impl<'gc> VM<'gc> {
                             }
                             _ => {
                                 let p = match args.first() {
-                                    None | Some(Value::Undefined) => String::new(),
-                                    Some(v) => self.vm_to_string(ctx, v),
+                                    None | Some(Value::Undefined) => Vec::new(),
+                                    Some(Value::String(s)) => s.clone(),
+                                    Some(v) => {
+                                        let s = self.vm_to_string(ctx, v);
+                                        crate::unicode::utf8_to_utf16(&s)
+                                    }
                                 };
                                 if self.pending_throw.is_some() {
                                     if let Some(thrown) = self.pending_throw.take() {
@@ -7889,17 +7906,17 @@ impl<'gc> VM<'gc> {
                             return Ok(OpcodeAction::Continue);
                         }
                         // Validate pattern by attempting compilation
-                        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
                         let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
                         if let Err(e) = super::get_or_compile_regex(&pattern_u16, &regress_flags) {
-                            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
+                            let pattern_str = crate::unicode::utf16_to_utf8(&pattern_u16);
+                            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern_str, e));
                             if let Some(thrown) = self.pending_throw.take() {
                                 self.handle_throw(ctx, &thrown)?;
                             }
                             return Ok(OpcodeAction::Continue);
                         }
                         let mut map = IndexMap::new();
-                        map.insert("__regex_pattern__".to_string(), Value::from(&pattern));
+                        map.insert("__regex_pattern__".to_string(), Value::String(pattern_u16));
                         map.insert("__regex_flags__".to_string(), Value::from(&flags));
                         map.insert("__type__".to_string(), Value::from("RegExp"));
                         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
@@ -8071,11 +8088,11 @@ impl<'gc> VM<'gc> {
                         }
 
                         if id == BUILTIN_CTOR_REGEXP {
-                            let (pattern, flags) = match args.first() {
+                            let (pattern_u16, flags) = match args.first() {
                                 Some(Value::VmObject(pat_obj))
                                     if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") =>
                                 {
-                                    let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                                    let p = Self::regexp_get_pattern_u16(pat_obj);
                                     let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
                                         pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
                                     } else {
@@ -8085,8 +8102,12 @@ impl<'gc> VM<'gc> {
                                 }
                                 _ => {
                                     let p = match args.first() {
-                                        None | Some(Value::Undefined) => String::new(),
-                                        Some(v) => self.vm_to_string(ctx, v),
+                                        None | Some(Value::Undefined) => Vec::new(),
+                                        Some(Value::String(s)) => s.clone(),
+                                        Some(v) => {
+                                            let s = self.vm_to_string(ctx, v);
+                                            crate::unicode::utf8_to_utf16(&s)
+                                        }
                                     };
                                     if self.pending_throw.is_some() {
                                         if let Some(thrown) = self.pending_throw.take() {
@@ -8121,17 +8142,17 @@ impl<'gc> VM<'gc> {
                                 return Ok(OpcodeAction::Continue);
                             }
                             // Validate pattern by attempting compilation
-                            let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
                             let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
                             if let Err(e) = super::get_or_compile_regex(&pattern_u16, &regress_flags) {
-                                self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
+                                let pattern_str = crate::unicode::utf16_to_utf8(&pattern_u16);
+                                self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern_str, e));
                                 if let Some(thrown) = self.pending_throw.take() {
                                     self.handle_throw(ctx, &thrown)?;
                                 }
                                 return Ok(OpcodeAction::Continue);
                             }
                             let mut m = IndexMap::new();
-                            m.insert("__regex_pattern__".to_string(), Value::from(&pattern));
+                            m.insert("__regex_pattern__".to_string(), Value::String(pattern_u16));
                             m.insert("__regex_flags__".to_string(), Value::from(&flags));
                             m.insert("__type__".to_string(), Value::from("RegExp"));
                             m.insert("__toStringTag__".to_string(), Value::from("RegExp"));

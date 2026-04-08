@@ -145,26 +145,47 @@ impl<'gc> VM<'gc> {
                     Some(Value::VmObject(re_obj)) => {
                         let borrow = re_obj.borrow();
                         if borrow.get("__type__").map(value_to_string).as_deref() == Some("RegExp") {
-                            let raw = match borrow.get("__regex_pattern__") {
-                                Some(v) => value_to_string(v),
-                                None => String::new(),
+                            let raw_u16 = match borrow.get("__regex_pattern__") {
+                                Some(Value::String(s)) => s.clone(),
+                                Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+                                None => Vec::new(),
                             };
-                            if raw.is_empty() {
+                            if raw_u16.is_empty() {
                                 Value::from("(?:)")
                             } else {
                                 // EscapeRegExpPattern: escape / and line terminators
-                                let mut escaped = String::with_capacity(raw.len());
-                                for ch in raw.chars() {
-                                    match ch {
-                                        '/' => escaped.push_str("\\/"),
-                                        '\n' => escaped.push_str("\\n"),
-                                        '\r' => escaped.push_str("\\r"),
-                                        '\u{2028}' => escaped.push_str("\\u2028"),
-                                        '\u{2029}' => escaped.push_str("\\u2029"),
-                                        _ => escaped.push(ch),
+                                // Work directly on UTF-16 to preserve lone surrogates
+                                let mut escaped: Vec<u16> = Vec::with_capacity(raw_u16.len());
+                                for &cu in &raw_u16 {
+                                    match cu {
+                                        0x002F => {
+                                            escaped.push(0x005C);
+                                            escaped.push(0x002F);
+                                        } // \/
+                                        0x000A => {
+                                            escaped.push(0x005C);
+                                            escaped.push(b'n' as u16);
+                                        } // \n
+                                        0x000D => {
+                                            escaped.push(0x005C);
+                                            escaped.push(b'r' as u16);
+                                        } // \r
+                                        0x2028 => {
+                                            // \u2028
+                                            for c in "\\u2028".encode_utf16() {
+                                                escaped.push(c);
+                                            }
+                                        }
+                                        0x2029 => {
+                                            // \u2029
+                                            for c in "\\u2029".encode_utf16() {
+                                                escaped.push(c);
+                                            }
+                                        }
+                                        _ => escaped.push(cu),
                                     }
                                 }
-                                Value::from(&escaped)
+                                Value::String(escaped)
                             }
                         } else if self.is_home_regexp_prototype(re_obj) {
                             Value::from("(?:)")
@@ -418,7 +439,7 @@ impl<'gc> VM<'gc> {
             }
         }
         // Otherwise create a new RegExp
-        let (pattern, flags) = self.regexp_extract_pattern_flags(ctx, args);
+        let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, args);
         if self.pending_throw.is_some() {
             return Value::Undefined;
         }
@@ -427,14 +448,14 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
         // Validate pattern by attempting compilation
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
         let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
         if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
+            let pattern = crate::unicode::utf16_to_utf8(&pattern_u16);
             self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
             return Value::Undefined;
         }
         let mut map = IndexMap::new();
-        map.insert("__regex_pattern__".to_string(), Value::from(pattern.as_str()));
+        map.insert("__regex_pattern__".to_string(), Value::String(pattern_u16));
         map.insert("__regex_flags__".to_string(), Value::from(flags.as_str()));
         map.insert("__type__".to_string(), Value::from("RegExp"));
         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
@@ -457,7 +478,7 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Option<Value<'gc>> {
         if let Value::VmObject(obj) = receiver {
-            let (pattern, flags) = self.regexp_extract_pattern_flags(ctx, args);
+            let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, args);
             if self.pending_throw.is_some() {
                 return Some(Value::Undefined);
             }
@@ -466,14 +487,14 @@ impl<'gc> VM<'gc> {
                 return Some(Value::Undefined);
             }
             // Validate pattern by attempting compilation
-            let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
             let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
             if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
+                let pattern = crate::unicode::utf16_to_utf8(&pattern_u16);
                 self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
                 return Some(Value::Undefined);
             }
             let mut borrow = obj.borrow_mut(ctx);
-            borrow.insert("__regex_pattern__".to_string(), Value::from(pattern.as_str()));
+            borrow.insert("__regex_pattern__".to_string(), Value::String(pattern_u16));
             borrow.insert("__regex_flags__".to_string(), Value::from(flags.as_str()));
             borrow.insert("__type__".to_string(), Value::from("RegExp"));
             borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
@@ -568,11 +589,8 @@ impl<'gc> VM<'gc> {
 
     /// String.prototype.search with RegExp.
     pub(super) fn regexp_string_search(&self, rust_str: &str, re_obj: &VmObjectHandle<'gc>) -> Value<'gc> {
-        let borrow = re_obj.borrow();
-        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
-        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        drop(borrow);
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
+        let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
         if let Ok(re) = get_or_compile_regex(&pattern_u16, &flags) {
             let input_u16: Vec<u16> = rust_str.encode_utf16().collect();
             let use_unicode = flags.contains('u') || flags.contains('v');
@@ -588,11 +606,24 @@ impl<'gc> VM<'gc> {
 
     // ── Internal helpers ──────────────────────────────────────────────
 
+    /// Extract stored regex pattern as UTF-16 directly, preserving lone surrogates.
+    pub(super) fn regexp_get_pattern_u16(re_obj: &VmObjectHandle<'gc>) -> Vec<u16> {
+        match re_obj.borrow().get("__regex_pattern__") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+            None => Vec::new(),
+        }
+    }
+
     /// Extract (pattern, flags) from constructor arguments, handling RegExp-as-source.
-    fn regexp_extract_pattern_flags(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> (String, String) {
+    fn regexp_extract_pattern_flags(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> (Vec<u16>, String) {
         match args.first() {
             Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
-                let p = pat_obj.borrow().get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                let p = match pat_obj.borrow().get("__regex_pattern__") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+                    None => Vec::new(),
+                };
                 let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
                     pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
                 } else {
@@ -602,8 +633,12 @@ impl<'gc> VM<'gc> {
             }
             _ => {
                 let p = match args.first() {
-                    None | Some(Value::Undefined) => String::new(),
-                    Some(v) => self.vm_to_string(ctx, v),
+                    None | Some(Value::Undefined) => Vec::new(),
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => {
+                        let s = self.vm_to_string(ctx, v);
+                        crate::unicode::utf8_to_utf16(&s)
+                    }
                 };
                 if self.pending_throw.is_some() {
                     return (p, String::new());
@@ -644,27 +679,39 @@ impl<'gc> VM<'gc> {
 
     fn regex_to_string(&self, re_obj: &VmObjectHandle<'gc>) -> String {
         let borrow = re_obj.borrow();
-        let raw_pattern = borrow
-            .get("__regex_pattern__")
-            .map(value_to_string)
-            .unwrap_or_else(|| borrow.get("source").map(value_to_string).unwrap_or_default());
+        let raw_u16 = match borrow.get("__regex_pattern__") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+            None => match borrow.get("source") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+                None => Vec::new(),
+            },
+        };
         let flags = borrow
             .get("__regex_flags__")
             .map(value_to_string)
             .unwrap_or_else(|| borrow.get("flags").map(value_to_string).unwrap_or_default());
         // EscapeRegExpPattern
-        let source = if raw_pattern.is_empty() {
+        let source = if raw_u16.is_empty() {
             "(?:)".to_string()
         } else {
-            let mut escaped = String::with_capacity(raw_pattern.len());
-            for ch in raw_pattern.chars() {
-                match ch {
-                    '/' => escaped.push_str("\\/"),
-                    '\n' => escaped.push_str("\\n"),
-                    '\r' => escaped.push_str("\\r"),
-                    '\u{2028}' => escaped.push_str("\\u2028"),
-                    '\u{2029}' => escaped.push_str("\\u2029"),
-                    _ => escaped.push(ch),
+            let mut escaped = String::with_capacity(raw_u16.len());
+            for &cu in &raw_u16 {
+                match cu {
+                    0x002F => escaped.push_str("\\/"), // /
+                    0x000A => escaped.push_str("\\n"), // \n
+                    0x000D => escaped.push_str("\\r"), // \r
+                    0x2028 => escaped.push_str("\\u2028"),
+                    0x2029 => escaped.push_str("\\u2029"),
+                    _ => {
+                        if let Some(ch) = char::from_u32(cu as u32) {
+                            escaped.push(ch);
+                        } else {
+                            // Lone surrogate — emit \uXXXX escape
+                            escaped.push_str(&format!("\\u{:04x}", cu));
+                        }
+                    }
                 }
             }
             escaped
@@ -710,7 +757,6 @@ impl<'gc> VM<'gc> {
     /// Execute a regex match, returning an array result or Null
     pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &VmObjectHandle<'gc>, input: &str) -> Value<'gc> {
         let borrow = re_obj.borrow();
-        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
         let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
         let is_global = flags.contains('g');
         let is_sticky = flags.contains('y');
@@ -737,7 +783,7 @@ impl<'gc> VM<'gc> {
         };
         let last_index = if is_global || is_sticky { last_index_len } else { 0 };
 
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
         let regress_flags: String = flags.chars().filter(|flag| "gimsuvy".contains(*flag)).collect();
         let re = match get_or_compile_regex(&pattern_u16, &regress_flags) {
             Ok(r) => r,
@@ -849,12 +895,9 @@ impl<'gc> VM<'gc> {
 
     /// Global match: return array of all full match strings
     fn regex_match_all(&self, ctx: &GcContext<'gc>, input: &str, re_obj: &VmObjectHandle<'gc>) -> Value<'gc> {
-        let borrow = re_obj.borrow();
-        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
-        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        drop(borrow);
+        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
+        let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
 
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
         let re = match get_or_compile_regex(&pattern_u16, &flags) {
             Ok(r) => r,
             Err(_) => return Value::Null,
@@ -895,13 +938,10 @@ impl<'gc> VM<'gc> {
 
     /// Replace string content using a regex pattern
     fn regex_replace_string(&self, input: &str, re_obj: &VmObjectHandle<'gc>, replacement: &str, replace_all: bool) -> String {
-        let borrow = re_obj.borrow();
-        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
-        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        drop(borrow);
+        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
+        let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
 
         let is_global = flags.contains('g');
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
         let re = match get_or_compile_regex(&pattern_u16, &flags) {
             Ok(r) => r,
             Err(_) => return input.to_string(),
@@ -1015,12 +1055,9 @@ impl<'gc> VM<'gc> {
 
     /// Split a string using a regex separator, with optional capturing groups
     fn regex_split_string(&self, input: &str, re_obj: &VmObjectHandle<'gc>, limit: Option<usize>) -> Vec<Value<'gc>> {
-        let borrow = re_obj.borrow();
-        let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
-        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        drop(borrow);
+        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
+        let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
 
-        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
         let re = match get_or_compile_regex(&pattern_u16, &flags) {
             Ok(r) => r,
             Err(_) => return vec![Value::from(input)],

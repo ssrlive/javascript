@@ -168,6 +168,7 @@ jobs:
               TITLE='"language/literals"'
               FOCUS='language/literals'
               TIMEOUT='200'
+              RUN_TESTS='true'
               ;;
             18)
               TITLE='"language/keywords" - "language/white-space"'

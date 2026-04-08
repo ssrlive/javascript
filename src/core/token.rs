@@ -1258,6 +1258,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     continue;
                 }
 
+                // Strict mode: reject legacy octal literals (e.g. 01, 077, 08, 09)
+                // A leading 0 followed by another decimal digit is always a SyntaxError
+                // in strict mode. Only 0 by itself, 0.x, 0eX, 0n are valid.
+                if chars[start] == '0' && start + 1 < chars.len() && chars[start + 1].is_ascii_digit() {
+                    return Err(raise_tokenize_error!("Octal literals are not allowed in strict mode", line, column));
+                }
+
                 // integer part (allow underscores as numeric separators)
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
                     i += 1;

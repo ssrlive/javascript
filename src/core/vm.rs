@@ -7527,7 +7527,7 @@ impl<'gc> VM<'gc> {
                 // For strings: create a code-point iterator (preserves lone surrogates)
                 if let Value::String(s) = &iterable {
                     let chars = Self::utf16_code_point_strings(s);
-                    let vals: Vec<Value<'gc>> = chars.into_iter().map(|v| Value::String(v)).collect();
+                    let vals: Vec<Value<'gc>> = chars.into_iter().map(Value::String).collect();
                     let arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vals)));
                     let arr_iter_fn = self.read_named_property(ctx, &arr, "@@sym:1");
                     if self.is_value_callable(&arr_iter_fn) {
@@ -7546,7 +7546,7 @@ impl<'gc> VM<'gc> {
                     && let Some(Value::String(s)) = map.borrow().get("__value__").cloned()
                 {
                     let chars = Self::utf16_code_point_strings(&s);
-                    let vals: Vec<Value<'gc>> = chars.into_iter().map(|v| Value::String(v)).collect();
+                    let vals: Vec<Value<'gc>> = chars.into_iter().map(Value::String).collect();
                     let arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vals)));
                     let arr_iter_fn = self.read_named_property(ctx, &arr, "@@sym:1");
                     if self.is_value_callable(&arr_iter_fn) {
@@ -19561,7 +19561,7 @@ impl<'gc> VM<'gc> {
                     let do_parse = |code: &str| -> Result<Vec<crate::core::statement::Statement>, JSError> {
                         let tokens = crate::core::tokenize(code)?;
                         let mut index = 0;
-                        Ok(crate::core::parse_statements(&tokens, &mut index)?)
+                        crate::core::parse_statements(&tokens, &mut index)
                     };
                     // For direct eval inside class bodies, push private names so parser accepts #field access
                     let privns_context = if is_direct {
@@ -29188,9 +29188,9 @@ impl<'gc> VM<'gc> {
         let mut i = 0;
         while i < s.len() {
             let cu = s[i];
-            if cu >= 0xD800 && cu <= 0xDBFF && i + 1 < s.len() {
+            if (0xD800..=0xDBFF).contains(&cu) && i + 1 < s.len() {
                 let cu2 = s[i + 1];
-                if cu2 >= 0xDC00 && cu2 <= 0xDFFF {
+                if (0xDC00..=0xDFFF).contains(&cu2) {
                     result.push(vec![cu, cu2]);
                     i += 2;
                     continue;

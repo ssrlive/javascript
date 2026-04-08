@@ -2940,15 +2940,14 @@ pub fn parse_assignment(tokens: &[TokenData], index: &mut usize) -> Result<Expr,
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
         // Strict mode: cannot assign to 'eval' or 'arguments'
-        if strict_binding_checks() {
-            if let Expr::Var(ref name, _, _) = left {
-                if name == "eval" || name == "arguments" {
-                    return Err(raise_parse_error_with_token!(
-                        tokens[*index - 1],
-                        format!("'{}' can't be defined or assigned to in strict mode code", name)
-                    ));
-                }
-            }
+        if strict_binding_checks()
+            && let Expr::Var(ref name, _, _) = left
+            && (name == "eval" || name == "arguments")
+        {
+            return Err(raise_parse_error_with_token!(
+                tokens[*index - 1],
+                format!("'{}' can't be defined or assigned to in strict mode code", name)
+            ));
         }
         *index += 1;
         let right = parse_assignment(tokens, index)?;

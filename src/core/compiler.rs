@@ -2350,19 +2350,16 @@ impl<'gc> Compiler<'gc> {
 
                 // Save try block's completion value before jumping over catch.
                 // Per spec, if finally completes normally, use try/catch's completion.
-                if has_finally {
-                    if let Some(tfc) = self.try_finally_stack.last() {
-                        if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
-                            let sv = sv.clone();
-                            let cv = cv.clone();
-                            self.emit_helper_get(&cv);
-                            self.emit_helper_set(&sv);
-                            self.chunk.write_opcode(Opcode::Pop);
-                        }
-                    }
+                if has_finally
+                    && let Some(tfc) = self.try_finally_stack.last()
+                    && let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var)
+                {
+                    let sv = sv.clone();
+                    let cv = cv.clone();
+                    self.emit_helper_get(&cv);
+                    self.emit_helper_set(&sv);
+                    self.chunk.write_opcode(Opcode::Pop);
                 }
-
-                // Jump over catch block
                 let jump_over_catch = self.emit_jump(Opcode::Jump);
 
                 // Patch catch address to here
@@ -2511,16 +2508,15 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     // Save catch block's completion value for finally restore.
-                    if has_finally {
-                        if let Some(tfc) = self.try_finally_stack.last() {
-                            if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
-                                let sv = sv.clone();
-                                let cv = cv.clone();
-                                self.emit_helper_get(&cv);
-                                self.emit_helper_set(&sv);
-                                self.chunk.write_opcode(Opcode::Pop);
-                            }
-                        }
+                    if has_finally
+                        && let Some(tfc) = self.try_finally_stack.last()
+                        && let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var)
+                    {
+                        let sv = sv.clone();
+                        let cv = cv.clone();
+                        self.emit_helper_get(&cv);
+                        self.emit_helper_set(&sv);
+                        self.chunk.write_opcode(Opcode::Pop);
                     }
 
                     self.block_stmt_depth = self.block_stmt_depth.saturating_sub(1);
@@ -2560,16 +2556,15 @@ impl<'gc> Compiler<'gc> {
                         }
                     }
                     // Save catch block's completion value for finally restore.
-                    if has_finally {
-                        if let Some(tfc) = self.try_finally_stack.last() {
-                            if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
-                                let sv = sv.clone();
-                                let cv = cv.clone();
-                                self.emit_helper_get(&cv);
-                                self.emit_helper_set(&sv);
-                                self.chunk.write_opcode(Opcode::Pop);
-                            }
-                        }
+                    if has_finally
+                        && let Some(tfc) = self.try_finally_stack.last()
+                        && let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var)
+                    {
+                        let sv = sv.clone();
+                        let cv = cv.clone();
+                        self.emit_helper_get(&cv);
+                        self.emit_helper_set(&sv);
+                        self.chunk.write_opcode(Opcode::Pop);
                     }
                 }
                 if catch_bumped_depth {
@@ -2645,14 +2640,14 @@ impl<'gc> Compiler<'gc> {
                 self.end_block_scope(saved_finally);
 
                 // Restore try/catch completion value from saved_cv_var
-                if let Some(ref tfc) = finally_context {
-                    if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
-                        let sv = sv.clone();
-                        let cv = cv.clone();
-                        self.emit_helper_get(&sv);
-                        self.emit_helper_set(&cv);
-                        self.chunk.write_opcode(Opcode::Pop);
-                    }
+                if let Some(ref tfc) = finally_context
+                    && let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var)
+                {
+                    let sv = sv.clone();
+                    let cv = cv.clone();
+                    self.emit_helper_get(&sv);
+                    self.emit_helper_set(&cv);
+                    self.chunk.write_opcode(Opcode::Pop);
                 }
 
                 // After finally: check break flag and restore cv, then jump to break target

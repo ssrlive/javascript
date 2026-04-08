@@ -3514,6 +3514,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_MATH_CLZ32 => "clz32",
             BUILTIN_MATH_IMUL => "imul",
             // Global functions
+            BUILTIN_EVAL => "eval",
             BUILTIN_ISNAN => "isNaN",
             BUILTIN_PARSEINT => "parseInt",
             BUILTIN_PARSEFLOAT => "parseFloat",

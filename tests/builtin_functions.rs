@@ -469,6 +469,19 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_eval_name_property() {
+        let script = r#"
+            let desc = Object.getOwnPropertyDescriptor(eval, "name");
+            desc.value === "eval" &&
+            desc.writable === false &&
+            desc.enumerable === false &&
+            desc.configurable === true
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_encode_uri() {
         let script = "encodeURI('hello world')";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

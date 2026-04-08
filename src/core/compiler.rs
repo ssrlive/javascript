@@ -3276,13 +3276,14 @@ impl<'gc> Compiler<'gc> {
                     self.completion_var = saved_cv;
                 }
             }
-            StatementKind::ForOfDestructuringArray(_decl_kind, elements, iterable_expr, body)
-            | StatementKind::ForAwaitOfDestructuringArray(_decl_kind, elements, iterable_expr, body) => {
+            StatementKind::ForOfDestructuringArray(decl_kind, elements, iterable_expr, body)
+            | StatementKind::ForAwaitOfDestructuringArray(decl_kind, elements, iterable_expr, body) => {
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
                 }
                 self.compile_for_of_destructuring_array(
+                    decl_kind.as_ref(),
                     elements,
                     iterable_expr,
                     body,
@@ -3294,13 +3295,14 @@ impl<'gc> Compiler<'gc> {
                     self.completion_var = saved_cv;
                 }
             }
-            StatementKind::ForOfDestructuringObject(_decl_kind, elements, iterable_expr, body)
-            | StatementKind::ForAwaitOfDestructuringObject(_decl_kind, elements, iterable_expr, body) => {
+            StatementKind::ForOfDestructuringObject(decl_kind, elements, iterable_expr, body)
+            | StatementKind::ForAwaitOfDestructuringObject(decl_kind, elements, iterable_expr, body) => {
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
                 }
                 self.compile_for_of_destructuring_object(
+                    decl_kind.as_ref(),
                     elements,
                     iterable_expr,
                     body,
@@ -7646,11 +7648,42 @@ impl<'gc> Compiler<'gc> {
 
     fn compile_for_of_destructuring_array(
         &mut self,
+        decl_kind: Option<&crate::core::VarDeclKind>,
         elements: &[DestructuringElement],
         iterable_expr: &Expr,
         body: &[Statement],
         is_for_await: bool,
     ) -> Result<(), JSError> {
+        let is_lexical = matches!(
+            decl_kind,
+            Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+        );
+        let forced_local = self.scope_depth == 0 && is_lexical;
+        let saved_locals = self.locals.len();
+        if forced_local {
+            self.force_local_let = true;
+        }
+
+        // Collect bound names for TDZ + per-iteration scoping
+        let mut bound_names = Vec::new();
+        if is_lexical {
+            for elem in elements {
+                Self::collect_destructuring_binding_names(elem, &mut bound_names);
+            }
+        }
+
+        // TDZ: push Uninitialized for all bound names before evaluating iterable
+        if is_lexical {
+            for name in &bound_names {
+                if !self.locals[saved_locals..].iter().any(|l| l == name) {
+                    let uninit = self.chunk.add_constant(Value::Uninitialized);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(uninit);
+                    self.locals.push(name.clone());
+                }
+            }
+        }
+
         let arr_name = format!("__forofda_{}__", self.forin_counter);
         self.forin_counter += 1;
         let idx_name = format!("__forofdi_{}__", self.forin_counter);
@@ -7666,20 +7699,6 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(zero);
         self.emit_define_var(&idx_name);
-
-        // Pre-allocate destructured variable slots
-        let mut destr_names = Vec::new();
-        for elem in elements {
-            if let DestructuringElement::Variable(name, _) = elem {
-                if self.scope_depth > 0 && !self.locals.iter().any(|l| l == name) {
-                    let undef = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(undef);
-                    self.locals.push(name.clone());
-                }
-                destr_names.push(name.clone());
-            }
-        }
 
         let loop_start = self.chunk.code.len();
         let ctx = self.make_loop_context(loop_start);
@@ -7701,6 +7720,16 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::Pop);
         }
 
+        // Per-iteration: ReboxLocal for all bound names to create fresh cells
+        if is_lexical {
+            for name in &bound_names {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::ReboxLocal);
+                    self.chunk.write_byte(pos as u8);
+                }
+            }
+        }
+
         // item = arr[idx], then destructure
         self.emit_helper_get(&arr_name);
         self.emit_helper_get(&idx_name);
@@ -7708,11 +7737,35 @@ impl<'gc> Compiler<'gc> {
         if is_for_await {
             self.chunk.write_opcode(Opcode::Await);
         }
-        // Item is on stack — array destructure it
         self.compile_array_destructuring(elements)?;
 
+        // After destructuring, write the new values into the fresh cells
+        if is_lexical {
+            for name in &bound_names {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(pos as u8);
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(pos as u8);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+            }
+        }
+
+        // Turn off force_local_let before body so `var` in the body hoists to global
+        if forced_local {
+            self.force_local_let = false;
+        }
+
+        let body_saved = self.locals.len();
+        if let Some(ctx) = self.loop_stack.last_mut() {
+            ctx.body_saved_locals = Some(body_saved);
+        }
         for s in body {
             self.compile_statement(s, false)?;
+        }
+        if is_lexical {
+            self.end_block_scope(body_saved);
         }
 
         let update_ip = self.chunk.code.len();
@@ -7732,19 +7785,52 @@ impl<'gc> Compiler<'gc> {
             self.patch_jump(bp);
         }
 
-        // Keep synthetic function-scope loop locals in the locals table so later
-        // local indices stay aligned with the runtime stack slots.
+        if forced_local {
+            self.end_block_scope(saved_locals);
+        }
+
         Ok(())
     }
 
     /// Helper: compile a for-of loop body where the iteration variable is object-destructured.
     fn compile_for_of_destructuring_object(
         &mut self,
+        decl_kind: Option<&crate::core::VarDeclKind>,
         elements: &[ObjectDestructuringElement],
         iterable_expr: &Expr,
         body: &[Statement],
         is_for_await: bool,
     ) -> Result<(), JSError> {
+        let is_lexical = matches!(
+            decl_kind,
+            Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+        );
+        let forced_local = self.scope_depth == 0 && is_lexical;
+        let saved_locals = self.locals.len();
+        if forced_local {
+            self.force_local_let = true;
+        }
+
+        // Collect bound names for TDZ + per-iteration scoping
+        let mut bound_names = Vec::new();
+        if is_lexical {
+            for elem in elements {
+                Self::collect_object_destructuring_binding_names(elem, &mut bound_names);
+            }
+        }
+
+        // TDZ: push Uninitialized for all bound names before evaluating iterable
+        if is_lexical {
+            for name in &bound_names {
+                if !self.locals[saved_locals..].iter().any(|l| l == name) {
+                    let uninit = self.chunk.add_constant(Value::Uninitialized);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(uninit);
+                    self.locals.push(name.clone());
+                }
+            }
+        }
+
         let arr_name = format!("__forofdo_{}__", self.forin_counter);
         self.forin_counter += 1;
         let idx_name = format!("__forofdi_{}__", self.forin_counter);
@@ -7781,6 +7867,16 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::Pop);
         }
 
+        // Per-iteration: ReboxLocal for fresh cells
+        if is_lexical {
+            for name in &bound_names {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::ReboxLocal);
+                    self.chunk.write_byte(pos as u8);
+                }
+            }
+        }
+
         // item = arr[idx], then object-destructure
         self.emit_helper_get(&arr_name);
         self.emit_helper_get(&idx_name);
@@ -7790,8 +7886,33 @@ impl<'gc> Compiler<'gc> {
         }
         self.compile_object_destructuring(elements)?;
 
+        // Write new values into fresh cells
+        if is_lexical {
+            for name in &bound_names {
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::GetLocal);
+                    self.chunk.write_byte(pos as u8);
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(pos as u8);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+            }
+        }
+
+        // Turn off force_local_let before body so `var` in the body hoists to global
+        if forced_local {
+            self.force_local_let = false;
+        }
+
+        let body_saved = self.locals.len();
+        if let Some(ctx) = self.loop_stack.last_mut() {
+            ctx.body_saved_locals = Some(body_saved);
+        }
         for s in body {
             self.compile_statement(s, false)?;
+        }
+        if is_lexical {
+            self.end_block_scope(body_saved);
         }
 
         let update_ip = self.chunk.code.len();
@@ -7811,8 +7932,10 @@ impl<'gc> Compiler<'gc> {
             self.patch_jump(bp);
         }
 
-        // Keep synthetic function-scope loop locals in the locals table so later
-        // local indices stay aligned with the runtime stack slots.
+        if forced_local {
+            self.end_block_scope(saved_locals);
+        }
+
         Ok(())
     }
 

@@ -173,22 +173,27 @@ jobs:
             18)
               TITLE='"language/keywords" - "language/white-space"'
               FOCUS='language/keywords,language/line-terminators,language/module-code,language/punctuators,language/reserved-words,language/rest-parameters,language/source-text,language/statementList,language/types,language/white-space'
+              RUN_TESTS='true'
               ;;
             19)
               TITLE='"language/statements/async-function" - "language/statements/for"'
               FOCUS='language/statements/async-function,language/statements/async-generator,language/statements/await-using,language/statements/block,language/statements/break,language/statements/const,language/statements/continue,language/statements/debugger,language/statements/do-while,language/statements/empty,language/statements/expression,language/statements/for'
+              RUN_TESTS='true'
               ;;
             20)
               TITLE='"language/statements/for-await-of"'
               FOCUS='language/statements/for-await-of'
+              RUN_TESTS='true'
               ;;
             21)
               TITLE='"language/statements/for-in" - "language/statements/function"'
               FOCUS='language/statements/for-in,language/statements/for-of,language/statements/function'
+              RUN_TESTS='true'
               ;;
             22)
               TITLE='"language/statements/generators" - "language/statements/with"'
               FOCUS='language/statements/generators,language/statements/if,language/statements/labeled,language/statements/let,language/statements/return,language/statements/switch,language/statements/throw,language/statements/try,language/statements/using,language/statements/variable,language/statements/while,language/statements/with'
+              RUN_TESTS='true'
               ;;
             23)
               TITLE='"language/statements/class/accessor-name-inst" - "language/statements/class/definition"'

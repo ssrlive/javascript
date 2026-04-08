@@ -2031,12 +2031,18 @@ impl<'gc> Compiler<'gc> {
                 // Use a unique internal name so handle_throw doesn't overwrite
                 // any outer global that happens to share the catch parameter name.
                 let catch_internal_name: Option<String> = if tc.catch_body.is_some() {
-                    if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
-                        let unique = format!("__catch_{}_{name}__", self.forin_counter);
-                        self.forin_counter = self.forin_counter.saturating_add(1);
-                        Some(unique)
-                    } else {
-                        None
+                    match &tc.catch_param {
+                        Some(CatchParamPattern::Identifier(name)) => {
+                            let unique = format!("__catch_{}_{name}__", self.forin_counter);
+                            self.forin_counter = self.forin_counter.saturating_add(1);
+                            Some(unique)
+                        }
+                        Some(CatchParamPattern::Array(_) | CatchParamPattern::Object(_)) => {
+                            let unique = format!("__catch_{}_dstr__", self.forin_counter);
+                            self.forin_counter = self.forin_counter.saturating_add(1);
+                            Some(unique)
+                        }
+                        None => None,
                     }
                 } else {
                     None
@@ -2161,6 +2167,22 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(load_idx);
                     self.locals.push(name.clone());
+                } else if let Some(CatchParamPattern::Array(ref elements)) = tc.catch_param {
+                    // Load caught value onto stack for array destructuring
+                    let load_name = catch_internal_name.as_deref().unwrap();
+                    let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                    let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(load_idx);
+                    self.compile_array_destructuring(elements)?;
+                } else if let Some(CatchParamPattern::Object(ref elements)) = tc.catch_param {
+                    // Load caught value onto stack for object destructuring
+                    let load_name = catch_internal_name.as_deref().unwrap();
+                    let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                    let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                    self.chunk.write_opcode(Opcode::GetGlobal);
+                    self.chunk.write_u16(load_idx);
+                    self.compile_object_destructuring_from_destr(elements)?;
                 }
                 if let Some(ref catch_body) = tc.catch_body {
                     for s in catch_body {

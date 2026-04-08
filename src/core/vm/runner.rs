@@ -6167,6 +6167,31 @@ impl<'gc> VM<'gc> {
                     };
                 }
                 Value::VmObject(map) => {
+                    // Module namespace: [[GetOwnProperty]] must resolve each binding,
+                    // throwing ReferenceError for uninitialized bindings (spec 10.4.6.4).
+                    if map.borrow().contains_key("__module_namespace__") {
+                        let binding_keys: Vec<String> = if let Some(Value::VmObject(bmap)) = map.borrow().get("__ns_bindings__") {
+                            bmap.borrow().keys().cloned().collect()
+                        } else {
+                            Vec::new()
+                        };
+                        for export_name in &binding_keys {
+                            match self.namespace_export_value(ctx, &map, export_name) {
+                                Ok(_) => {
+                                    if seen_any.insert(export_name.clone()) {
+                                        out_keys.push(Value::from(export_name));
+                                    }
+                                }
+                                Err(err) => {
+                                    self.pending_throw = Some(err);
+                                    break;
+                                }
+                            }
+                        }
+                        current = None;
+                        continue;
+                    }
+
                     // Collect ALL own keys (enumerable + non-enumerable) for shadowing,
                     // but only add enumerable keys to the output.
                     let borrow = map.borrow();

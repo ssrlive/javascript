@@ -16426,11 +16426,13 @@ impl<'gc> VM<'gc> {
                         proto.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_MAP_KEYS));
                         proto.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_MAP_VALUES));
                         proto.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_MAP_ENTRIES));
+                        proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_MAP_ENTRIES));
                         proto.insert("forEach".to_string(), Value::VmNativeFunction(BUILTIN_MAP_FOREACH));
                         proto.insert("clear".to_string(), Value::VmNativeFunction(BUILTIN_MAP_CLEAR));
                         proto.insert("__nonenumerable_keys__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_values__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_entries__".to_string(), Value::Boolean(true));
+                        proto.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_forEach__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_clear__".to_string(), Value::Boolean(true));
                     }

@@ -586,6 +586,19 @@ fn test_map_constructor_closes_iterator_when_set_throws() {
 }
 
 #[test]
+fn test_map_symbol_iterator_aliases_entries() {
+    let result = evaluate_script(
+        r#"
+        Map.prototype[Symbol.iterator] === Map.prototype.entries
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_set_constructor_uses_add_for_iterables() {
     let result = evaluate_script(
         r#"

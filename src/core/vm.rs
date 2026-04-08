@@ -29335,8 +29335,13 @@ impl<'gc> VM<'gc> {
                 if rest.starts_with("@@sym:") { None } else { Some(rest) }
             } else if let Some(rest) = raw_key.strip_prefix("__set_") {
                 if rest.starts_with("@@sym:") { None } else { Some(rest) }
-            } else if raw_key.starts_with("__") {
+            } else if raw_key.starts_with("__")
+                && (raw_key.ends_with("__") || raw_key.starts_with("__brand_") || raw_key.starts_with("__deleted_"))
+            {
                 None
+            } else if raw_key.starts_with("__") {
+                // User-visible property that happens to start with "__" (e.g. __declared__var)
+                Some(raw_key.as_str())
             } else {
                 Some(raw_key.as_str())
             };
@@ -29413,7 +29418,9 @@ impl<'gc> VM<'gc> {
                 if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
             } else if let Some(rest) = raw_key.strip_prefix("__set_") {
                 if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
-            } else if raw_key.starts_with("__") {
+            } else if raw_key.starts_with("__")
+                && (raw_key.ends_with("__") || raw_key.starts_with("__brand_") || raw_key.starts_with("__deleted_"))
+            {
                 None
             } else {
                 // TypedArrays: skip internal properties that are not user-defined

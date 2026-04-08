@@ -7,7 +7,7 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod builtin_functions_tests {
-    use javascript::{evaluate_script, JSErrorKind};
+    use javascript::{JSErrorKind, evaluate_script};
 
     #[test]
     fn test_array_methods_exist() {

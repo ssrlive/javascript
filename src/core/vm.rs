@@ -305,6 +305,9 @@ const BUILTIN_CTOR_WEAKMAP: FunctionID = 390;
 const BUILTIN_CTOR_WEAKSET: FunctionID = 391;
 const BUILTIN_CTOR_WEAKREF: FunctionID = 392;
 const BUILTIN_WEAKREF_DEREF: FunctionID = 393;
+const BUILTIN_WEAKSET_ADD: FunctionID = 394;
+const BUILTIN_WEAKSET_HAS: FunctionID = 395;
+const BUILTIN_WEAKSET_DELETE: FunctionID = 396;
 // ── Symbol (400–409) ────────────────────────────────────────────────
 const BUILTIN_SYMBOL: FunctionID = 400;
 const BUILTIN_SYMBOL_FOR: FunctionID = 401;
@@ -3525,6 +3528,15 @@ impl<'gc> VM<'gc> {
             BUILTIN_NUM_TOLOCALESTRING => "toLocaleString",
             BUILTIN_NUM_VALUEOF => "valueOf",
             BUILTIN_SET_ADD => "add",
+            BUILTIN_SET_HAS => "has",
+            BUILTIN_SET_DELETE => "delete",
+            BUILTIN_SET_VALUES => "values",
+            BUILTIN_SET_ENTRIES => "entries",
+            BUILTIN_SET_FOREACH => "forEach",
+            BUILTIN_SET_CLEAR => "clear",
+            BUILTIN_WEAKSET_ADD => "add",
+            BUILTIN_WEAKSET_HAS => "has",
+            BUILTIN_WEAKSET_DELETE => "delete",
             BUILTIN_BIGINT_ASINTN => "asIntN",
             BUILTIN_BIGINT_ASUINTN => "asUintN",
             BUILTIN_BIGINT_TOSTRING => "toString",
@@ -3631,6 +3643,7 @@ impl<'gc> VM<'gc> {
             // parseInt/parseFloat
             BUILTIN_PARSEINT | BUILTIN_BIGINT_ASINTN | BUILTIN_BIGINT_ASUINTN => 2.0,
             BUILTIN_PARSEFLOAT => 1.0,
+            BUILTIN_SET_VALUES | BUILTIN_SET_ENTRIES | BUILTIN_SET_CLEAR => 0.0,
             _ => 1.0,
         }
     }
@@ -13923,16 +13936,23 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         if let Some(Value::VmSet(set_data)) = borrow.get("__set_data__").cloned() {
+                            let is_weak = set_data.borrow().is_weak;
                             match key {
-                                "size" if !set_data.borrow().is_weak => return Value::Number(set_data.borrow().values.len() as f64),
-                                "add" => return Value::VmNativeFunction(BUILTIN_SET_ADD),
-                                "has" => return Value::VmNativeFunction(BUILTIN_SET_HAS),
-                                "delete" => return Value::VmNativeFunction(BUILTIN_SET_DELETE),
-                                "keys" if !set_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_SET_VALUES),
-                                "values" if !set_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_SET_VALUES),
-                                "entries" if !set_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
-                                "forEach" if !set_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_SET_FOREACH),
-                                "clear" if !set_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_SET_CLEAR),
+                                "size" if !is_weak => return Value::Number(set_data.borrow().values.len() as f64),
+                                "add" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKSET_ADD } else { BUILTIN_SET_ADD });
+                                }
+                                "has" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKSET_HAS } else { BUILTIN_SET_HAS });
+                                }
+                                "delete" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKSET_DELETE } else { BUILTIN_SET_DELETE });
+                                }
+                                "keys" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_VALUES),
+                                "values" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_VALUES),
+                                "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
+                                "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_FOREACH),
+                                "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_CLEAR),
                                 _ => {}
                             }
                         }
@@ -14542,14 +14562,26 @@ impl<'gc> VM<'gc> {
                 _ => Value::Undefined,
             },
             Value::VmSet(set) => match key {
-                "size" => Value::Number(set.borrow().values.len() as f64),
-                "add" => Value::VmNativeFunction(BUILTIN_SET_ADD),
-                "has" => Value::VmNativeFunction(BUILTIN_SET_HAS),
-                "delete" => Value::VmNativeFunction(BUILTIN_SET_DELETE),
-                "keys" | "values" | "@@sym:1" => Value::VmNativeFunction(BUILTIN_SET_VALUES),
-                "entries" => Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
-                "forEach" => Value::VmNativeFunction(BUILTIN_SET_FOREACH),
-                "clear" => Value::VmNativeFunction(BUILTIN_SET_CLEAR),
+                "size" if !set.borrow().is_weak => Value::Number(set.borrow().values.len() as f64),
+                "add" => Value::VmNativeFunction(if set.borrow().is_weak {
+                    BUILTIN_WEAKSET_ADD
+                } else {
+                    BUILTIN_SET_ADD
+                }),
+                "has" => Value::VmNativeFunction(if set.borrow().is_weak {
+                    BUILTIN_WEAKSET_HAS
+                } else {
+                    BUILTIN_SET_HAS
+                }),
+                "delete" => Value::VmNativeFunction(if set.borrow().is_weak {
+                    BUILTIN_WEAKSET_DELETE
+                } else {
+                    BUILTIN_SET_DELETE
+                }),
+                "keys" | "values" | "@@sym:1" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_VALUES),
+                "entries" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
+                "forEach" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_FOREACH),
+                "clear" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_CLEAR),
                 "toString" => Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING),
                 _ => Value::Undefined,
             },
@@ -15984,8 +16016,7 @@ impl<'gc> VM<'gc> {
         );
         iterator_proto.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
         let iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_proto));
-        self.globals
-            .insert("__IteratorPrototype__".to_string(), iterator_proto_val.clone());
+        self.globals.insert("__IteratorPrototype__".to_string(), iterator_proto_val.clone());
 
         let mut array_iter_proto = IndexMap::new();
         array_iter_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
@@ -16357,20 +16388,37 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 BUILTIN_CTOR_SET | BUILTIN_CTOR_WEAKSET => {
-                    proto.insert("add".to_string(), Value::VmNativeFunction(BUILTIN_SET_ADD));
-                    proto.insert("has".to_string(), Value::VmNativeFunction(BUILTIN_SET_HAS));
-                    proto.insert("delete".to_string(), Value::VmNativeFunction(BUILTIN_SET_DELETE));
+                    let add_id = if ctor_id == BUILTIN_CTOR_WEAKSET {
+                        BUILTIN_WEAKSET_ADD
+                    } else {
+                        BUILTIN_SET_ADD
+                    };
+                    let has_id = if ctor_id == BUILTIN_CTOR_WEAKSET {
+                        BUILTIN_WEAKSET_HAS
+                    } else {
+                        BUILTIN_SET_HAS
+                    };
+                    let delete_id = if ctor_id == BUILTIN_CTOR_WEAKSET {
+                        BUILTIN_WEAKSET_DELETE
+                    } else {
+                        BUILTIN_SET_DELETE
+                    };
+                    proto.insert("add".to_string(), Value::VmNativeFunction(add_id));
+                    proto.insert("has".to_string(), Value::VmNativeFunction(has_id));
+                    proto.insert("delete".to_string(), Value::VmNativeFunction(delete_id));
                     proto.insert("__nonenumerable_add__".to_string(), Value::Boolean(true));
                     proto.insert("__nonenumerable_has__".to_string(), Value::Boolean(true));
                     proto.insert("__nonenumerable_delete__".to_string(), Value::Boolean(true));
                     if ctor_id == BUILTIN_CTOR_SET {
                         proto.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_SET_VALUES));
                         proto.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_SET_VALUES));
+                        proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_SET_VALUES));
                         proto.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_SET_ENTRIES));
                         proto.insert("forEach".to_string(), Value::VmNativeFunction(BUILTIN_SET_FOREACH));
                         proto.insert("clear".to_string(), Value::VmNativeFunction(BUILTIN_SET_CLEAR));
                         proto.insert("__nonenumerable_keys__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_values__".to_string(), Value::Boolean(true));
+                        proto.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_entries__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_forEach__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_clear__".to_string(), Value::Boolean(true));
@@ -27724,13 +27772,35 @@ impl<'gc> VM<'gc> {
             },
             _ => None,
         };
-        if receiver_set.is_none() && id == BUILTIN_SET_ADD {
-            self.throw_type_error(ctx, "Set.prototype.add called on incompatible receiver");
+        let receiver_set_is_weak = receiver_set.map(|s| s.borrow().is_weak);
+        if (matches!(
+            id,
+            BUILTIN_SET_ADD
+                | BUILTIN_SET_HAS
+                | BUILTIN_SET_DELETE
+                | BUILTIN_SET_VALUES
+                | BUILTIN_SET_ENTRIES
+                | BUILTIN_SET_FOREACH
+                | BUILTIN_SET_CLEAR
+        ) && receiver_set_is_weak != Some(false))
+            || (matches!(id, BUILTIN_WEAKSET_ADD | BUILTIN_WEAKSET_HAS | BUILTIN_WEAKSET_DELETE) && receiver_set_is_weak != Some(true))
+        {
+            let method_name = match id {
+                BUILTIN_SET_ADD | BUILTIN_WEAKSET_ADD => "add",
+                BUILTIN_SET_HAS | BUILTIN_WEAKSET_HAS => "has",
+                BUILTIN_SET_DELETE | BUILTIN_WEAKSET_DELETE => "delete",
+                BUILTIN_SET_VALUES => "values",
+                BUILTIN_SET_ENTRIES => "entries",
+                BUILTIN_SET_FOREACH => "forEach",
+                BUILTIN_SET_CLEAR => "clear",
+                _ => unreachable!(),
+            };
+            self.throw_type_error(ctx, &format!("Set.prototype.{} called on incompatible receiver", method_name));
             return Value::Undefined;
         }
         if let Some(s) = receiver_set {
             match id {
-                BUILTIN_SET_ADD => {
+                BUILTIN_SET_ADD | BUILTIN_WEAKSET_ADD => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = s.borrow_mut(ctx);
                     // WeakSet requires object values
@@ -27742,22 +27812,22 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
                         return Value::Undefined;
                     }
-                    if !borrow.values.iter().any(|v| self.values_equal(v, &val)) {
+                    if !borrow.values.iter().any(|v| self.values_same_zero(v, &val)) {
                         borrow.values.push(val);
                     }
                     drop(borrow);
                     return receiver.clone(); // Set.add returns the Set itself
                 }
-                BUILTIN_SET_HAS => {
+                BUILTIN_SET_HAS | BUILTIN_WEAKSET_HAS => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let borrow = s.borrow();
-                    return Value::Boolean(borrow.values.iter().any(|v| self.values_equal(v, &val)));
+                    return Value::Boolean(borrow.values.iter().any(|v| self.values_same_zero(v, &val)));
                 }
-                BUILTIN_SET_DELETE => {
+                BUILTIN_SET_DELETE | BUILTIN_WEAKSET_DELETE => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = s.borrow_mut(ctx);
                     let len_before = borrow.values.len();
-                    borrow.values.retain(|v| !self.values_equal(v, &val));
+                    borrow.values.retain(|v| !self.values_same_zero(v, &val));
                     return Value::Boolean(borrow.values.len() < len_before);
                 }
                 BUILTIN_SET_CLEAR => {
@@ -27843,9 +27913,7 @@ impl<'gc> VM<'gc> {
             return Value::Boolean(removed);
         }
 
-        if id == BUILTIN_ITERATOR_NEXT
-            && !matches!(receiver, Value::VmObject(_) | Value::VmArray(_))
-        {
+        if id == BUILTIN_ITERATOR_NEXT && !matches!(receiver, Value::VmObject(_) | Value::VmArray(_)) {
             self.throw_type_error(ctx, "ArrayIterator.prototype.next called on incompatible receiver");
             return Value::Undefined;
         }
@@ -27854,7 +27922,17 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT
         {
-            let (idx, has_iter_target_slot, has_map_target_slot, has_set_target_slot, iter_target, items_snapshot, iter_kind, map_target, set_target) = {
+            let (
+                idx,
+                has_iter_target_slot,
+                has_map_target_slot,
+                has_set_target_slot,
+                iter_target,
+                items_snapshot,
+                iter_kind,
+                map_target,
+                set_target,
+            ) = {
                 let borrow = obj.borrow();
                 let idx = match borrow.get("__index__") {
                     Some(Value::Number(n)) => *n as usize,
@@ -29131,6 +29209,13 @@ impl<'gc> VM<'gc> {
             (Value::VmClosure(_, _, _), Value::VmFunction(_, _)) => false,
             (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             _ => false,
+        }
+    }
+
+    fn values_same_zero(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => (x.is_nan() && y.is_nan()) || x == y,
+            _ => self.values_same(a, b),
         }
     }
 

@@ -234,3 +234,113 @@ fn test_set_add_has_standard_name() {
     let result = evaluate_script("Set.prototype.add.name", false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"add\"");
 }
+
+#[test]
+fn test_set_other_builtin_methods_reject_invalid_receivers() {
+    let result = evaluate_script(
+        r#"
+        const cases = [
+          () => Set.prototype.clear.call({}),
+          () => Set.prototype.delete.call({}, 1),
+          () => Set.prototype.has.call({}, 1),
+          () => Set.prototype.values.call({}),
+          () => Set.prototype.entries.call({}),
+          () => Set.prototype.clear.call(null),
+          () => Set.prototype.delete.call(undefined, 1),
+          () => Set.prototype.has.call(true, 1),
+          () => Set.prototype.values.call("x"),
+          () => Set.prototype.entries.call(1),
+        ];
+        cases.every(fn => {
+          try {
+            fn();
+            return false;
+          } catch (err) {
+            return err instanceof TypeError;
+          }
+        })
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_builtin_method_metadata() {
+    let result = evaluate_script(
+        r#"
+        Set.prototype.has.name === "has" &&
+        Set.prototype.delete.name === "delete" &&
+        Set.prototype.values.name === "values" &&
+        Set.prototype.entries.name === "entries" &&
+        Set.prototype.clear.name === "clear" &&
+        Set.prototype.values.length === 0 &&
+        Set.prototype.entries.length === 0 &&
+        Set.prototype.clear.length === 0
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_has_uses_same_value_zero_for_nan() {
+    let result = evaluate_script(
+        r#"
+        const set = new Set();
+        set.add(NaN);
+        set.has(NaN)
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_symbol_iterator_is_values_alias() {
+    let result = evaluate_script(
+        r#"
+        Set.prototype[Symbol.iterator] === Set.prototype.values &&
+        typeof Set.prototype[Symbol.iterator] === "function"
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_prototype_methods_reject_weakset_receivers() {
+    let result = evaluate_script(
+        r#"
+        const weak = new WeakSet();
+        const cases = [
+          () => Set.prototype.add.call(weak, {}),
+          () => Set.prototype.has.call(weak, {}),
+          () => Set.prototype.delete.call(weak, {}),
+          () => Set.prototype.clear.call(weak),
+          () => Set.prototype.values.call(weak),
+          () => Set.prototype.entries.call(weak),
+        ];
+        cases.every(fn => {
+          try {
+            fn();
+            return false;
+          } catch (err) {
+            return err instanceof TypeError;
+          }
+        })
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}

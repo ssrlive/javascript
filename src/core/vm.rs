@@ -27798,6 +27798,13 @@ impl<'gc> VM<'gc> {
             return Value::Boolean(removed);
         }
 
+        if id == BUILTIN_ITERATOR_NEXT
+            && !matches!(receiver, Value::VmObject(_) | Value::VmArray(_))
+        {
+            self.throw_type_error(ctx, "ArrayIterator.prototype.next called on incompatible receiver");
+            return Value::Undefined;
+        }
+
         // Iterator next() on VmObject with __iter_target__ (live) or __items__ (snapshot)
         if let Value::VmObject(obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT

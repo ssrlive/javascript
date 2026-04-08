@@ -3468,7 +3468,6 @@ impl<'gc> VM<'gc> {
 
     // Opcode::GetUpvalue
     fn run_opcode_get_upvalue(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
-        let _ = ctx;
         let idx = self.read_byte() as usize;
         let val = if let Some(frame) = self.frames.last() {
             frame
@@ -3479,7 +3478,16 @@ impl<'gc> VM<'gc> {
         } else {
             Value::Undefined
         };
-        self.stack.push(val);
+        // TDZ check: Uninitialized upvalues throw ReferenceError
+        if matches!(val, Value::Uninitialized) {
+            let mut err_map = IndexMap::new();
+            err_map.insert("message".to_string(), Value::from("Cannot access variable before initialization"));
+            err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
+            let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
+            self.handle_throw(ctx, &err)?;
+        } else {
+            self.stack.push(val);
+        }
         Ok(OpcodeAction::Continue)
     }
 
@@ -3490,7 +3498,17 @@ impl<'gc> VM<'gc> {
         if let Some(frame) = self.frames.last_mut()
             && idx < frame.upvalues.len()
         {
-            *frame.upvalues[idx].borrow_mut(ctx) = val;
+            // TDZ check: writing to uninitialized upvalue throws ReferenceError
+            let current = frame.upvalues[idx].borrow().clone();
+            if matches!(current, Value::Uninitialized) {
+                let mut err_map = IndexMap::new();
+                err_map.insert("message".to_string(), Value::from("Cannot access variable before initialization"));
+                err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
+                let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
+                self.handle_throw(ctx, &err)?;
+            } else {
+                *frame.upvalues[idx].borrow_mut(ctx) = val;
+            }
         }
         Ok(OpcodeAction::Continue)
     }

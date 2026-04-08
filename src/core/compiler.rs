@@ -1068,10 +1068,10 @@ impl<'gc> Compiler<'gc> {
     /// create a new function-scoped local.
     /// Inside a block (not hoisting): create a block-scoped local.
     fn emit_fn_decl_binding(&mut self, name: &str) {
-        if self.scope_depth > 0 {
-            if self.hoisting_fn_decl {
-                // Hoisted to function scope: reuse existing slot if found
-                if let Some(pos) = self.locals.iter().position(|l| l == name) {
+        if self.scope_depth > 0 || self.force_local_let {
+            if self.hoisting_fn_decl || (self.scope_depth == 0 && self.force_local_let) {
+                // Reuse existing slot (pre-declared or hoisted)
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
                     self.chunk.write_opcode(Opcode::Pop);
@@ -1128,10 +1128,9 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     if self.scope_depth > 0 || self.force_local_let {
-                        if self.scope_depth == 1
-                            && self.block_stmt_depth == 0
+                        if ((self.scope_depth == 1 && self.block_stmt_depth == 0) || (self.scope_depth == 0 && self.force_local_let))
                             && self.hoisted_function_lexicals.contains(name)
-                            && let Some(pos) = self.locals.iter().position(|l| l == name)
+                            && let Some(pos) = self.locals.iter().rposition(|l| l == name)
                         {
                             self.chunk.write_opcode(Opcode::SetLocal);
                             self.chunk.write_byte(pos as u8);
@@ -1215,10 +1214,9 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
                     }
                     if self.scope_depth > 0 || self.force_local_let {
-                        if self.scope_depth == 1
-                            && self.block_stmt_depth == 0
+                        if ((self.scope_depth == 1 && self.block_stmt_depth == 0) || (self.scope_depth == 0 && self.force_local_let))
                             && self.hoisted_function_lexicals.contains(name)
-                            && let Some(pos) = self.locals.iter().position(|l| l == name)
+                            && let Some(pos) = self.locals.iter().rposition(|l| l == name)
                         {
                             self.chunk.write_opcode(Opcode::SetLocal);
                             self.chunk.write_byte(pos as u8);
@@ -1273,90 +1271,71 @@ impl<'gc> Compiler<'gc> {
             StatementKind::Block(statements) => {
                 let saved_locals = self.locals.len();
                 self.block_stmt_depth = self.block_stmt_depth.saturating_add(1);
-                // Collect block-scoped declarations for alias-based scoping at top level.
-                // let/const are always block-scoped (ES6+), function declarations only in strict mode.
-                let mut block_fn_names: Vec<String> = Vec::new();
-                let mut block_lexical_names: Vec<String> = Vec::new();
-                let mut block_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
-                if self.scope_depth == 0 {
+
+                // At scope_depth 0, use local variables (with TDZ via Uninitialized)
+                // for block-scoped declarations instead of global aliases.
+                let use_block_locals = self.scope_depth == 0;
+                let saved_force_local_let = self.force_local_let;
+                let mut block_local_names: Vec<String> = Vec::new();
+
+                if use_block_locals {
+                    // Collect block-scoped names (let/const/class/strict-mode function decls)
                     for s in statements.iter() {
                         match &*s.kind {
                             StatementKind::FunctionDeclaration(name, ..) if self.current_strict => {
-                                block_fn_names.push(name.clone());
-                                let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                self.forin_counter = self.forin_counter.saturating_add(1);
-                                block_aliases.insert(name.clone(), (alias, false));
+                                if !block_local_names.contains(name) {
+                                    block_local_names.push(name.clone());
+                                }
                             }
                             StatementKind::Let(decls) => {
                                 for (name, _) in decls {
-                                    block_lexical_names.push(name.clone());
-                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                    self.forin_counter = self.forin_counter.saturating_add(1);
-                                    block_aliases.insert(name.clone(), (alias, false));
+                                    if !block_local_names.contains(name) {
+                                        block_local_names.push(name.clone());
+                                    }
                                 }
                             }
                             StatementKind::Const(decls) => {
                                 for (name, _) in decls {
-                                    block_lexical_names.push(name.clone());
-                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                    self.forin_counter = self.forin_counter.saturating_add(1);
-                                    block_aliases.insert(name.clone(), (alias, true));
+                                    if !block_local_names.contains(name) {
+                                        block_local_names.push(name.clone());
+                                    }
                                 }
                             }
                             StatementKind::Class(class_def) => {
-                                if !class_def.name.is_empty() {
-                                    block_lexical_names.push(class_def.name.clone());
-                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                    self.forin_counter = self.forin_counter.saturating_add(1);
-                                    block_aliases.insert(class_def.name.clone(), (alias, false));
+                                if !class_def.name.is_empty() && !block_local_names.contains(&class_def.name) {
+                                    block_local_names.push(class_def.name.clone());
                                 }
                             }
                             _ => {}
                         }
                     }
-                }
-                let pushed_block_aliases = !block_aliases.is_empty();
-                if pushed_block_aliases {
-                    self.top_level_block_aliases.push(block_aliases);
-                }
-                // Keep a reference to the aliases map for cleanup code emission
-                let _cleanup_aliases: std::collections::HashMap<String, (String, bool)> = if pushed_block_aliases {
-                    self.top_level_block_aliases.last().cloned().unwrap_or_default()
-                } else {
-                    std::collections::HashMap::new()
-                };
 
-                // With alias-only block scoping, we no longer modify original
-                // global names, so no try-catch cleanup is needed.
-                let block_needs_try_cleanup = false;
-                let rethrow_var: Option<(String, usize)> = if block_needs_try_cleanup {
-                    let var_name = format!("__block_rethrow_{}__", self.forin_counter);
-                    self.forin_counter = self.forin_counter.saturating_add(1);
-                    let binding_u16 = crate::unicode::utf8_to_utf16(&var_name);
-                    let binding_idx = self.chunk.add_constant(Value::String(binding_u16));
-                    self.chunk.write_opcode(Opcode::SetupTry);
-                    let catch_placeholder = self.chunk.code.len();
-                    self.chunk.write_u32(0xffff_ffff); // placeholder
-                    self.chunk.write_u16(binding_idx as u16);
-                    Some((var_name, catch_placeholder))
-                } else {
-                    None
-                };
+                    if !block_local_names.is_empty() {
+                        self.force_local_let = true;
+                        // Pre-declare all block-scoped names as Uninitialized locals
+                        // with BoxLocal so nested functions can capture them as upvalues
+                        // with proper TDZ semantics.
+                        for name in &block_local_names {
+                            let uninit_idx = self.chunk.add_constant(Value::Uninitialized);
+                            self.chunk.write_opcode(Opcode::Constant);
+                            self.chunk.write_u16(uninit_idx);
+                            self.hoisted_function_lexicals.insert(name.clone());
+                            self.locals.push(name.clone());
+                            self.chunk.write_opcode(Opcode::BoxLocal);
+                            self.chunk.write_byte((self.locals.len() - 1) as u8);
+                        }
+                    }
 
-                // At scope_depth 0, hoist function declarations to the top
-                // of the block.  At scope_depth > 0 (inside a function),
-                // compile everything in source order so that closures in
-                // function declarations can capture block-scoped let/const
-                // variables that precede them.
-                if self.scope_depth == 0 {
+                    // Hoist function declarations to the top of the block
                     for s in statements.iter() {
                         if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
                             self.compile_statement(s, false)?;
                         }
                     }
                 }
+
                 for (i, s) in statements.iter().enumerate() {
-                    if self.scope_depth == 0 && matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
+                    if use_block_locals && matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
                         continue;
                     }
                     let s_is_last = is_last && i == statements.len() - 1;
@@ -1364,21 +1343,17 @@ impl<'gc> Compiler<'gc> {
                 }
                 // Clean up block-scoped locals
                 if is_last {
-                    // Frame is about to return; just fix compiler state
                     self.locals.truncate(saved_locals);
                 } else {
                     self.end_block_scope(saved_locals);
                 }
 
-                // With the alias-only approach, we no longer modify the original
-                // global names during the block, so there is nothing to clean up.
-                // The try handler for block cleanup is therefore unnecessary.
-                // Aliases persist in globals (unique names, invisible to user code).
-                if let Some((_, _)) = rethrow_var {
-                    self.chunk.write_opcode(Opcode::TeardownTry);
-                }
-                if pushed_block_aliases {
-                    self.top_level_block_aliases.pop();
+                if use_block_locals {
+                    self.force_local_let = saved_force_local_let;
+                    for name in &block_local_names {
+                        self.hoisted_function_lexicals.remove(name);
+                        self.const_locals.remove(name);
+                    }
                 }
                 self.block_stmt_depth = self.block_stmt_depth.saturating_sub(1);
             }
@@ -2437,7 +2412,7 @@ impl<'gc> Compiler<'gc> {
                 // let/const in the catch body are block-scoped while var stays
                 // function-scoped (global).  At scope_depth > 0, locals are
                 // naturally block-scoped via saved_catch.
-                let catch_use_aliases = self.scope_depth == 0;
+                let catch_use_aliases = self.scope_depth == 0 && !self.force_local_let;
                 let catch_bumped_depth = self.scope_depth == 0 && !catch_use_aliases && tc.catch_param.is_some();
                 if catch_bumped_depth {
                     self.scope_depth = 1;
@@ -9659,7 +9634,7 @@ impl<'gc> Compiler<'gc> {
         // BEFORE the heritage expression, so closures in the heritage capture the
         // inner binding (per spec §14.6 step 4 before step 6).
         let mut class_expr_temp: Option<String> = None;
-        if !is_expr && self.scope_depth == 0 && !name.is_empty() {
+        if !is_expr && self.scope_depth == 0 && !name.is_empty() && !self.force_local_let {
             let temp_name = format!("__cls_expr_{}__", self.forin_counter);
             self.forin_counter += 1;
             self.current_class_expr_refs.push(temp_name.clone());
@@ -9865,27 +9840,28 @@ impl<'gc> Compiler<'gc> {
         // so that the constructor and methods can capture it as a const upvalue.
         // Only for class statements (not expressions) — expression names are scoped
         // to the class body only and must not leak to the enclosing scope.
-        let class_name_pre_slot = if !name.is_empty() && self.scope_depth > 0 && !is_expr {
-            if let Some(existing) = self.locals.iter().rposition(|l| l == name) {
-                // Reuse existing hoisted slot (already BoxLocal'd for upvalue capture)
-                self.const_locals.insert(name.to_string());
-                Some(existing)
+        let class_name_pre_slot =
+            if !name.is_empty() && (self.scope_depth > 0 || (self.scope_depth == 0 && self.force_local_let)) && !is_expr {
+                if let Some(existing) = self.locals.iter().rposition(|l| l == name) {
+                    // Reuse existing hoisted slot (already BoxLocal'd for upvalue capture)
+                    self.const_locals.insert(name.to_string());
+                    Some(existing)
+                } else {
+                    // Push undefined onto stack as placeholder for the class name slot
+                    let undef_idx = self.chunk.add_constant(Value::Undefined);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(undef_idx);
+                    self.locals.push(name.to_string());
+                    self.const_locals.insert(name.to_string());
+                    let slot = self.locals.len() - 1;
+                    // BoxLocal so closures (e.g. constructor) capture the shared cell
+                    self.chunk.write_opcode(Opcode::BoxLocal);
+                    self.chunk.write_byte(slot as u8);
+                    Some(slot)
+                }
             } else {
-                // Push undefined onto stack as placeholder for the class name slot
-                let undef_idx = self.chunk.add_constant(Value::Undefined);
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(undef_idx);
-                self.locals.push(name.to_string());
-                self.const_locals.insert(name.to_string());
-                let slot = self.locals.len() - 1;
-                // BoxLocal so closures (e.g. constructor) capture the shared cell
-                self.chunk.write_opcode(Opcode::BoxLocal);
-                self.chunk.write_byte(slot as u8);
-                Some(slot)
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         // For class expressions, track the class name as const even without a pre-slot,
         // so nested functions (constructor/methods) see it via parent_const_locals.
@@ -10117,7 +10093,7 @@ impl<'gc> Compiler<'gc> {
 
         if !is_expr {
             // Define as global/local variable
-            if self.scope_depth == 0 {
+            if self.scope_depth == 0 && !self.force_local_let {
                 if !name.is_empty()
                     && let Some(temp_name) = class_expr_temp.as_ref()
                 {
@@ -10133,6 +10109,16 @@ impl<'gc> Compiler<'gc> {
                 } else {
                     self.emit_define_global_binding(name, false);
                 }
+            } else if self.scope_depth == 0 && self.force_local_let {
+                // Block-scoped class at top level: use pre-declared local slot
+                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    self.chunk.write_opcode(Opcode::SetLocal);
+                    self.chunk.write_byte(pos as u8);
+                    self.chunk.write_opcode(Opcode::Pop);
+                } else {
+                    self.emit_define_var(name);
+                }
+                self.const_locals.insert(name.to_string());
             } else if class_name_pre_slot.is_some() {
                 // Update existing pre-registered slot with actual constructor value
                 self.emit_define_var(name);
@@ -10762,7 +10748,7 @@ impl<'gc> Compiler<'gc> {
                 let alias_idx = self.chunk.add_constant(Value::String(alias_u16));
                 self.chunk.write_opcode(Opcode::GetGlobal);
                 self.chunk.write_u16(alias_idx);
-            } else if self.scope_depth == 0 {
+            } else if self.scope_depth == 0 && !self.force_local_let {
                 let name_u16 = crate::unicode::utf8_to_utf16(name);
                 let name_idx = self.chunk.add_constant(Value::String(name_u16));
                 self.chunk.write_opcode(Opcode::GetGlobal);

@@ -19924,6 +19924,32 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
+                        // Inject top-level block-scoped locals (force_local_let) into
+                        // the eval VM.  Find the latest snapshot recorded before the
+                        // current IP so eval inside a block sees the block's locals.
+                        if !self.chunk.top_level_locals_at_ip.is_empty() {
+                            let cur_ip = self.ip;
+                            let snap = self.chunk.top_level_locals_at_ip.iter().rev().find(|(ip, _, _)| *ip <= cur_ip);
+                            if let Some((_ip, local_names, const_names)) = snap {
+                                for (idx, name) in local_names.iter().enumerate() {
+                                    if name.starts_with("__") && name.ends_with("__") {
+                                        continue;
+                                    }
+                                    // Read from top_level_cells (boxed via BoxLocal) or stack
+                                    let val = if let Some(cell) = self.top_level_cells.get(&idx) {
+                                        cell.borrow().clone()
+                                    } else if idx < self.stack.len() {
+                                        self.stack[idx].clone()
+                                    } else {
+                                        continue;
+                                    };
+                                    eval_vm.globals.insert(name.clone(), val);
+                                    if const_names.contains(name) {
+                                        eval_vm.const_globals.insert(name.clone());
+                                    }
+                                }
+                            }
+                        }
                         // Direct eval: resolve active block aliases so that
                         // eval("x") inside a block sees the block-scoped value.
                         for (alias, original) in &self.chunk.block_alias_to_original {

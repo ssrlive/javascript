@@ -319,6 +319,10 @@ pub struct Chunk<'gc> {
     /// When reading an aliased import, redirect GetGlobal to the source binding
     /// so that mutations by the exporting module are visible (ES2024 §9.4.1.1).
     pub live_import_bindings: std::collections::HashMap<String, String>,
+    /// Snapshots of active top-level locals at various bytecode IPs, sorted by IP.
+    /// Used by direct eval to inject block-scoped locals into the eval VM.
+    /// Each entry: (ip, local_names, const_names).
+    pub top_level_locals_at_ip: Vec<(usize, Vec<String>, std::collections::HashSet<String>)>,
 }
 
 unsafe impl<'gc> Collect<'gc> for Chunk<'gc> {

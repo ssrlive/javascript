@@ -1324,6 +1324,8 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::BoxLocal);
                             self.chunk.write_byte((self.locals.len() - 1) as u8);
                         }
+                        // Record top-level locals snapshot for direct eval support
+                        self.record_top_level_locals_snapshot();
                     }
 
                     // Hoist function declarations to the top of the block
@@ -1368,6 +1370,11 @@ impl<'gc> Compiler<'gc> {
                     for name in &block_local_names {
                         self.hoisted_function_lexicals.remove(name);
                         self.const_locals.remove(name);
+                    }
+                    if !block_local_names.is_empty() {
+                        // Record locals snapshot after block exit so eval after this
+                        // block sees the reduced set of locals.
+                        self.record_top_level_locals_snapshot();
                     }
                 }
                 self.block_stmt_depth = self.block_stmt_depth.saturating_sub(1);
@@ -6981,6 +6988,18 @@ impl<'gc> Compiler<'gc> {
             self.chunk.write_opcode(Opcode::Pop);
         }
         self.locals.truncate(saved);
+    }
+
+    /// Record a snapshot of the current top-level locals for direct eval support.
+    /// Only effective when compiling at scope_depth 0 (top-level code).
+    fn record_top_level_locals_snapshot(&mut self) {
+        if self.scope_depth != 0 {
+            return;
+        }
+        let ip = self.chunk.code.len();
+        let locals = self.locals.clone();
+        let consts = self.const_locals.clone();
+        self.chunk.top_level_locals_at_ip.push((ip, locals, consts));
     }
 
     /// Emit get for a synthetic local/global variable

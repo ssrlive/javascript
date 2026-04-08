@@ -2058,6 +2058,17 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
+            let readonly_global = {
+                let gt = self.global_this.borrow();
+                gt.contains_key(&format!("__readonly_{}__", name_str))
+            };
+            if readonly_global {
+                if self.current_execution_is_strict() {
+                    let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of #<Object>", name_str));
+                    self.handle_throw(ctx, &err)?;
+                }
+                return Ok(OpcodeAction::Continue);
+            }
             self.globals.insert(name_str.clone(), val.clone());
             if !self.chunk.lexical_declared_globals.contains(&name_str) {
                 self.global_this.borrow_mut(ctx).insert(name_str, val);

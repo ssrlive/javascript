@@ -16539,6 +16539,7 @@ impl<'gc> VM<'gc> {
         {
             let mut gt = self.global_this.borrow_mut(ctx);
             for name in [
+                "globalThis",
                 "eval",
                 "parseInt",
                 "parseFloat",

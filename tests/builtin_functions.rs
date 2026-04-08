@@ -282,6 +282,43 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_global_this_is_the_global_object() {
+        let script = r#"
+            var marker = {};
+            let desc = Object.getOwnPropertyDescriptor(this, "globalThis");
+            globalThis === this &&
+            globalThis.globalThis === globalThis &&
+            globalThis.marker === marker &&
+            desc.enumerable === false &&
+            desc.writable === true &&
+            desc.configurable === true
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_strict_assignment_to_readonly_global_throws() {
+        let script = r#"
+            let nanThrows = false;
+            let undefinedThrows = false;
+            try {
+                eval("'use strict'; NaN = 12;");
+            } catch (err) {
+                nanThrows = err instanceof TypeError;
+            }
+            try {
+                eval("'use strict'; undefined = 12;");
+            } catch (err) {
+                undefinedThrows = err instanceof TypeError;
+            }
+            nanThrows && undefinedThrows
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_json_stringify() {
         let script = "JSON.stringify(42)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

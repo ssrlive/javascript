@@ -720,6 +720,34 @@ fn test_map_for_each_validates_callback_and_propagates_errors() {
 }
 
 #[test]
+fn test_map_for_each_tracks_live_mutations() {
+    let result = evaluate_script(
+        r#"
+        const map = new Map();
+        map.set("foo", 0);
+        map.set("bar", 1);
+        const seen = [];
+        let count = 0;
+        map.forEach(function(value, key) {
+          if (count === 0) {
+            map.delete("foo");
+            map.set("foo", "baz");
+            map.set("baz", 2);
+            map.delete("baz");
+          }
+          seen.push(key + ":" + value);
+          count++;
+        });
+        seen.join("|") === "foo:0|bar:1|foo:baz"
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_set_constructor_uses_add_for_iterables() {
     let result = evaluate_script(
         r#"

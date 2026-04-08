@@ -28447,13 +28447,47 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
 
-                    let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
                     let map_ref = receiver.clone();
                     let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                    for (k, v) in &entries {
-                        if let Err(err) = self.vm_call_function_value(ctx, &callback, &this_arg, &[v.clone(), k.clone(), map_ref.clone()]) {
+                    let mut scheduled = m.borrow().entries.clone();
+                    let mut idx = 0;
+
+                    while idx < scheduled.len() {
+                        let (key, value) = scheduled[idx].clone();
+                        idx += 1;
+
+                        let still_present = {
+                            let borrow = m.borrow();
+                            borrow.entries.iter().any(|(existing_key, existing_value)| {
+                                self.values_same_zero(existing_key, &key) && self.values_same_zero(existing_value, &value)
+                            })
+                        };
+                        if !still_present {
+                            let current_entries = m.borrow().entries.clone();
+                            for (new_key, new_value) in current_entries {
+                                if !scheduled.iter().any(|(scheduled_key, scheduled_value)| {
+                                    self.values_same_zero(scheduled_key, &new_key) && self.values_same_zero(scheduled_value, &new_value)
+                                }) {
+                                    scheduled.push((new_key, new_value));
+                                }
+                            }
+                            continue;
+                        }
+
+                        if let Err(err) =
+                            self.vm_call_function_value(ctx, &callback, &this_arg, &[value.clone(), key.clone(), map_ref.clone()])
+                        {
                             self.set_pending_throw_from_error(&err);
                             return Value::Undefined;
+                        }
+
+                        let current_entries = m.borrow().entries.clone();
+                        for (new_key, new_value) in current_entries {
+                            if !scheduled.iter().any(|(scheduled_key, scheduled_value)| {
+                                self.values_same_zero(scheduled_key, &new_key) && self.values_same_zero(scheduled_value, &new_value)
+                            }) {
+                                scheduled.push((new_key, new_value));
+                            }
                         }
                     }
                     return Value::Undefined;

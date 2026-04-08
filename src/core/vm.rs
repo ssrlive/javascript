@@ -4664,7 +4664,8 @@ impl<'gc> VM<'gc> {
                 };
                 let b = buf_obj.borrow();
                 let is_sab = matches!(b.get("__type__"),
-                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer")
+                    && b.get("__buffer_bytes__").is_some();
                 if !is_sab {
                     drop(b);
                     self.pending_throw = Some(self.make_type_error_object(
@@ -4687,7 +4688,8 @@ impl<'gc> VM<'gc> {
                 };
                 let b = buf_obj.borrow();
                 let is_sab = matches!(b.get("__type__"),
-                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer")
+                    && b.get("__buffer_bytes__").is_some();
                 if !is_sab {
                     drop(b);
                     self.pending_throw = Some(self.make_type_error_object(
@@ -4715,7 +4717,8 @@ impl<'gc> VM<'gc> {
                 };
                 let b = buf_obj.borrow();
                 let is_sab = matches!(b.get("__type__"),
-                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer");
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer")
+                    && b.get("__buffer_bytes__").is_some();
                 if !is_sab {
                     drop(b);
                     self.pending_throw = Some(self.make_type_error_object(
@@ -4741,10 +4744,17 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                let new_len_f = match args.first() {
-                    Some(v) => to_number(v),
-                    _ => 0.0,
-                };
+                // ToIndex(newLength)
+                let new_len_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                if new_len_arg.is_symbol_value() {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                    return Value::Undefined;
+                }
+                let coerced = self.try_to_primitive(ctx, &new_len_arg, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let new_len_f = to_number(&coerced);
 
                 let mut b = buf_obj.borrow_mut(ctx);
                 let is_growable = matches!(b.get("__growable__"), Some(Value::Boolean(true)));
@@ -4773,6 +4783,176 @@ impl<'gc> VM<'gc> {
                     bytes_mut.elements.resize(new_len, Value::Number(0.0));
                 }
                 Value::Undefined
+            }
+            "sharedArrayBuffer.slice" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.throw_type_error(ctx, "SharedArrayBuffer.prototype.slice called on incompatible receiver");
+                    return Value::Undefined;
+                };
+                let is_sab = matches!(buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer")
+                    && buf_obj.borrow().get("__buffer_bytes__").is_some();
+                if !is_sab {
+                    self.throw_type_error(ctx, "SharedArrayBuffer.prototype.slice called on incompatible receiver");
+                    return Value::Undefined;
+                }
+
+                let (len, bytes_arr) = {
+                    let b = buf_obj.borrow();
+                    let len = b.get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
+                    let bytes_arr = b.get("__buffer_bytes__").cloned();
+                    (len, bytes_arr)
+                };
+
+                // ToIntegerOrInfinity(start) then ToIntegerOrInfinity(end)
+                let to_int_or_inf = |n: f64| -> isize {
+                    if n.is_nan() || n == 0.0 {
+                        0
+                    } else if n.is_infinite() {
+                        if n.is_sign_negative() { isize::MIN } else { isize::MAX }
+                    } else {
+                        n.trunc() as isize
+                    }
+                };
+
+                let start_v = args.first().cloned().unwrap_or(Value::Undefined);
+                let start_coerced = self.try_to_primitive(ctx, &start_v, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let start_n = to_number(&start_coerced);
+
+                let end_v = if args.len() > 1 && !matches!(args.get(1), Some(Value::Undefined)) {
+                    args.get(1).cloned().unwrap()
+                } else {
+                    Value::Number(len as f64)
+                };
+                let end_coerced = self.try_to_primitive(ctx, &end_v, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let end_n = to_number(&end_coerced);
+
+                let relative_start = to_int_or_inf(start_n);
+                let first = if relative_start < 0 {
+                    (len as isize + relative_start).max(0) as usize
+                } else {
+                    (relative_start as usize).min(len)
+                };
+                let relative_end = to_int_or_inf(end_n);
+                let final_idx = if relative_end < 0 {
+                    (len as isize + relative_end).max(0) as usize
+                } else {
+                    (relative_end as usize).min(len)
+                };
+                let new_len = final_idx.saturating_sub(first);
+
+                // SpeciesConstructor(O, SharedArrayBuffer)
+                let default_ctor = self.globals.get("SharedArrayBuffer").cloned().unwrap_or(Value::Undefined);
+                let ctor = self.read_named_property(ctx, this_val, "constructor");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                let species_ctor = if matches!(ctor, Value::Undefined) {
+                    default_ctor.clone()
+                } else {
+                    if !matches!(
+                        ctor,
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                    ) || ctor.is_symbol_value()
+                    {
+                        self.throw_type_error(ctx, "SharedArrayBuffer constructor property is not an object");
+                        return Value::Undefined;
+                    }
+
+                    let mut sc = ctor.clone();
+                    if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
+                        && let Some(species_symbol) = symbol_ctor.borrow().get("species").cloned()
+                        && let Some(species_key) = self.symbol_key_string(&species_symbol)
+                    {
+                        let species = self.read_named_property(ctx, &ctor, &species_key);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if matches!(species, Value::Undefined | Value::Null) {
+                            default_ctor.clone()
+                        } else {
+                            if !matches!(
+                                species,
+                                Value::VmObject(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                            ) || species.is_symbol_value()
+                            {
+                                self.throw_type_error(ctx, "SharedArrayBuffer @@species is not an object");
+                                return Value::Undefined;
+                            }
+                            sc = species;
+                            if !self.is_constructor_value(&sc) {
+                                self.throw_type_error(ctx, "SharedArrayBuffer species constructor is not a constructor");
+                                return Value::Undefined;
+                            }
+                            sc
+                        }
+                    } else {
+                        sc
+                    }
+                };
+
+                // Construct new buffer via species
+                let new_buffer = match self.construct_value(ctx, &species_ctor, &[Value::Number(new_len as f64)], None) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+
+                let Value::VmObject(new_buf_obj) = &new_buffer else {
+                    self.throw_type_error(ctx, "SharedArrayBuffer species constructor must return a SharedArrayBuffer");
+                    return Value::Undefined;
+                };
+
+                let is_new_sab = matches!(
+                    new_buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer"
+                ) && new_buf_obj.borrow().get("__buffer_bytes__").is_some();
+                if !is_new_sab {
+                    self.throw_type_error(ctx, "SharedArrayBuffer species constructor must return a SharedArrayBuffer");
+                    return Value::Undefined;
+                }
+
+                if Gc::ptr_eq(*new_buf_obj, *buf_obj) {
+                    self.throw_type_error(ctx, "SharedArrayBuffer species constructor returned the source buffer");
+                    return Value::Undefined;
+                }
+
+                let target_len = new_buf_obj.borrow().get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
+                if target_len < new_len {
+                    self.throw_type_error(ctx, "Derived SharedArrayBuffer constructor created a buffer which was too small");
+                    return Value::Undefined;
+                }
+
+                let Some(Value::VmArray(target_bytes)) = new_buf_obj.borrow().get("__buffer_bytes__").cloned() else {
+                    self.throw_type_error(ctx, "SharedArrayBuffer species constructor must return a SharedArrayBuffer");
+                    return Value::Undefined;
+                };
+
+                // Copy bytes
+                if let Some(Value::VmArray(src_arr)) = bytes_arr {
+                    let src = src_arr.borrow();
+                    let mut dst = target_bytes.borrow_mut(ctx);
+                    for i in 0..new_len {
+                        if i >= dst.elements.len() {
+                            break;
+                        }
+                        if let Some(v) = src.get(first + i).cloned() {
+                            dst.elements[i] = v;
+                        }
+                    }
+                }
+
+                new_buffer
             }
             "arrayBuffer.slice" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
@@ -15149,6 +15329,9 @@ impl<'gc> VM<'gc> {
 
         let mut shared_array_buffer_map = IndexMap::new();
         shared_array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_SHAREDARRAYBUFFER as f64));
+        shared_array_buffer_map.insert("length".to_string(), Value::Number(1.0));
+        shared_array_buffer_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        shared_array_buffer_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
         let mut sab_proto = IndexMap::new();
         sab_proto.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
         sab_proto.insert("@@sym:4".to_string(), Value::from("SharedArrayBuffer"));
@@ -15174,15 +15357,26 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.grow", "grow", 1.0, false),
         );
         sab_proto.insert("__nonenumerable_grow__".to_string(), Value::Boolean(true));
+        sab_proto.insert(
+            "slice".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.slice", "slice", 2.0, false),
+        );
+        sab_proto.insert("__nonenumerable_slice__".to_string(), Value::Boolean(true));
         let sab_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, sab_proto));
         shared_array_buffer_map.insert("prototype".to_string(), sab_proto_val);
         shared_array_buffer_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
         shared_array_buffer_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
         shared_array_buffer_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
-        self.globals.insert(
-            "SharedArrayBuffer".to_string(),
-            Value::VmObject(new_gc_cell_ptr(ctx, shared_array_buffer_map)),
-        );
+        let sab_ctor = Value::VmObject(new_gc_cell_ptr(ctx, shared_array_buffer_map));
+        if let Value::VmObject(ctor_obj) = &sab_ctor
+            && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
+        {
+            proto_obj.borrow_mut(ctx).insert("constructor".to_string(), sab_ctor.clone());
+            proto_obj
+                .borrow_mut(ctx)
+                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        }
+        self.globals.insert("SharedArrayBuffer".to_string(), sab_ctor);
 
         let mut atomics_map = IndexMap::new();
         atomics_map.insert(
@@ -17836,10 +18030,84 @@ impl<'gc> VM<'gc> {
                 }
             },
             BUILTIN_CTOR_SHAREDARRAYBUFFER => {
-                let len = match args.first() {
-                    Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as usize,
-                    _ => 0,
+                // Require 'new'
+                if self.new_target_stack.last().is_none() {
+                    self.throw_type_error(ctx, "Constructor SharedArrayBuffer requires 'new'");
+                    return Value::Undefined;
+                }
+
+                // ToIndex(length)
+                let length_v = args.first().cloned().unwrap_or(Value::Undefined);
+                let len = if matches!(length_v, Value::Undefined) {
+                    0usize
+                } else {
+                    if length_v.is_symbol_value() {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
+                    let mut prim = self.try_to_primitive(ctx, &length_v, "number");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if let Value::VmObject(obj) = prim.clone() {
+                        let this_obj = Value::VmObject(obj);
+                        let value_of = obj.borrow().get("valueOf").cloned();
+                        if let Some(value_of_fn) = value_of
+                            && matches!(
+                                value_of_fn,
+                                Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                                    | Value::Function(_)
+                                    | Value::VmObject(_)
+                            )
+                        {
+                            match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
+                                Ok(v) => prim = v,
+                                Err(err) => {
+                                    self.set_pending_throw_from_error(&err);
+                                    return Value::Undefined;
+                                }
+                            }
+                        }
+                        if matches!(prim, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                            let to_string = obj.borrow().get("toString").cloned();
+                            if let Some(to_string_fn) = to_string
+                                && matches!(
+                                    to_string_fn,
+                                    Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                        | Value::Function(_)
+                                        | Value::VmObject(_)
+                                )
+                            {
+                                match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
+                                    Ok(v) => prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if prim.is_symbol_value() {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        return Value::Undefined;
+                    }
+                    let n = to_number(&prim);
+                    let int_index = if n.is_nan() { 0.0 } else { n.trunc() };
+                    if !int_index.is_finite() || int_index < 0.0 {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                        err_map.insert("message".to_string(), Value::from("Invalid SharedArrayBuffer length"));
+                        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                        return Value::Undefined;
+                    }
+                    int_index as usize
                 };
+
                 // GetArrayBufferMaxByteLengthOption(options)
                 let opts_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let is_opts_object = matches!(&opts_arg, Value::VmObject(_) | Value::VmArray(_));
@@ -17852,7 +18120,10 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     if !matches!(mbl_val, Value::Undefined) {
-                        let mbl_num = if matches!(mbl_val, Value::VmObject(_) | Value::VmArray(_)) {
+                        let mbl_num = if mbl_val.is_symbol_value() {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                            return Value::Undefined;
+                        } else if matches!(mbl_val, Value::VmObject(_) | Value::VmArray(_)) {
                             let coerced = self.try_to_primitive(ctx, &mbl_val, "number");
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
@@ -17885,6 +18156,51 @@ impl<'gc> VM<'gc> {
                     }
                 }
 
+                // OrdinaryCreateFromConstructor with NewTarget prototype (step 1 of AllocateSharedArrayBuffer)
+                let new_target = self.new_target_stack.last().cloned().unwrap_or(Value::Undefined);
+                let selected_proto = {
+                    let proto_candidate = if let Value::VmObject(nt_obj) = &new_target {
+                        let getter = nt_obj.borrow().get("__get_prototype").cloned();
+                        if let Some(getter_fn) = getter {
+                            self.invoke_getter_with_receiver(ctx, &getter_fn, &new_target)
+                        } else {
+                            self.read_named_property(ctx, &new_target, "prototype")
+                        }
+                    } else {
+                        self.read_named_property(ctx, &new_target, "prototype")
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let proto_is_object = match &proto_candidate {
+                        Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
+                        Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
+                        _ => false,
+                    };
+                    if proto_is_object {
+                        proto_candidate
+                    } else {
+                        self.default_intrinsic_prototype_for_constructor(ctx, &new_target, "SharedArrayBuffer")
+                            .unwrap_or_else(|| {
+                                if let Some(Value::VmObject(sab_ctor)) = self.globals.get("SharedArrayBuffer").cloned() {
+                                    sab_ctor.borrow().get("prototype").cloned().unwrap_or(Value::Undefined)
+                                } else {
+                                    Value::Undefined
+                                }
+                            })
+                    }
+                };
+
+                // CreateByteDataBlock: allocation limit check (step 3 of AllocateSharedArrayBuffer)
+                const SAB_MAX_ALLOC: usize = 1 << 30; // ~1 GiB
+                if len > SAB_MAX_ALLOC || max_byte_length > SAB_MAX_ALLOC {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                    err_map.insert("message".to_string(), Value::from("Array buffer allocation failed"));
+                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                }
+
                 let bytes = vec![Value::Number(0.0); len];
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
@@ -17897,6 +18213,9 @@ impl<'gc> VM<'gc> {
                     "__buffer_bytes__".to_string(),
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
                 );
+                if !matches!(selected_proto, Value::Undefined) {
+                    map.insert("__proto__".to_string(), selected_proto);
+                }
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
             }
             BUILTIN_ATOMICS_ISLOCKFREE => {
@@ -28003,7 +28322,14 @@ impl<'gc> VM<'gc> {
         if id == BUILTIN_FN_APPLY {
             let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
             let call_args: Vec<Value<'gc>> = if let Some(Value::VmArray(arr)) = args.get(1) {
-                arr.borrow().iter().cloned().collect()
+                // Sync resizable TypedArray before reading elements
+                self.maybe_sync_resizable_ta(ctx, arr);
+                let b = arr.borrow();
+                if matches!(b.props.get("__out_of_bounds__"), Some(Value::Boolean(true))) {
+                    Vec::new()
+                } else {
+                    b.iter().cloned().collect()
+                }
             } else {
                 Vec::new()
             };
@@ -31102,6 +31428,18 @@ impl<'gc> VM<'gc> {
 
                 // ArrayBuffer: spec requires maxByteLength validation BEFORE OrdinaryCreateFromConstructor
                 if id == BUILTIN_CTOR_ARRAYBUFFER {
+                    let ctor_new_target = new_target.cloned().unwrap_or(target.clone());
+                    self.new_target_stack.push(ctor_new_target);
+                    let out = self.call_builtin(ctx, id, args);
+                    self.new_target_stack.pop();
+                    if let Some(thrown) = self.pending_throw.take() {
+                        return Err(self.vm_error_to_js_error(ctx, &thrown));
+                    }
+                    return Ok(out);
+                }
+
+                // SharedArrayBuffer: spec requires maxByteLength validation BEFORE OrdinaryCreateFromConstructor
+                if id == BUILTIN_CTOR_SHAREDARRAYBUFFER {
                     let ctor_new_target = new_target.cloned().unwrap_or(target.clone());
                     self.new_target_stack.push(ctor_new_target);
                     let out = self.call_builtin(ctx, id, args);

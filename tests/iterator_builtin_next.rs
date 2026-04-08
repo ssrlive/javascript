@@ -65,3 +65,33 @@ fn set_iterator_next_throws_on_primitive_receivers() {
     let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "true");
 }
+
+#[test]
+fn map_iterator_prototype_exposes_next_and_tostringtag() {
+    let script = r#"
+        let iterator = new Map([[1, 11]]).values();
+        let proto = Object.getPrototypeOf(iterator);
+        proto.next.name === "next" &&
+        proto.next.length === 0 &&
+        proto[Symbol.toStringTag] === "Map Iterator" &&
+        !Object.prototype.hasOwnProperty.call(iterator, "next")
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}
+
+#[test]
+fn set_iterator_prototype_exposes_next_and_tostringtag() {
+    let script = r#"
+        let iterator = new Set([1, 2]).values();
+        let proto = Object.getPrototypeOf(iterator);
+        proto.next.name === "next" &&
+        proto.next.length === 0 &&
+        proto[Symbol.toStringTag] === "Set Iterator" &&
+        !Object.prototype.hasOwnProperty.call(iterator, "next")
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}

@@ -15267,6 +15267,36 @@ impl<'gc> VM<'gc> {
             "__ArrayIteratorPrototype__".to_string(),
             Value::VmObject(new_gc_cell_ptr(ctx, array_iter_proto)),
         );
+        let mut map_iter_proto = IndexMap::new();
+        map_iter_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
+        );
+        map_iter_proto.insert("@@sym:1".to_string(), Self::make_host_fn(ctx, "iterator.self"));
+        map_iter_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        map_iter_proto.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
+        map_iter_proto.insert("@@sym:4".to_string(), Value::from("Map Iterator"));
+        map_iter_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        map_iter_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        self.globals.insert(
+            "__MapIteratorPrototype__".to_string(),
+            Value::VmObject(new_gc_cell_ptr(ctx, map_iter_proto)),
+        );
+        let mut set_iter_proto = IndexMap::new();
+        set_iter_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
+        );
+        set_iter_proto.insert("@@sym:1".to_string(), Self::make_host_fn(ctx, "iterator.self"));
+        set_iter_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        set_iter_proto.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
+        set_iter_proto.insert("@@sym:4".to_string(), Value::from("Set Iterator"));
+        set_iter_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        set_iter_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        self.globals.insert(
+            "__SetIteratorPrototype__".to_string(),
+            Value::VmObject(new_gc_cell_ptr(ctx, set_iter_proto)),
+        );
         // Create Array.prototype with iterator method
         let mut arr_proto = VmArrayData::new(Vec::new());
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
@@ -28820,8 +28850,9 @@ impl<'gc> VM<'gc> {
         obj.insert("__map_target__".to_string(), map_val);
         obj.insert("__index__".to_string(), Value::Number(0.0));
         obj.insert("__iter_kind__".to_string(), Value::String(crate::unicode::utf8_to_utf16(kind)));
-        obj.insert("next".to_string(), Value::VmNativeFunction(BUILTIN_ITERATOR_NEXT));
-        obj.insert("@@sym:1".to_string(), Self::make_host_fn(ctx, "iterator.self"));
+        if let Some(proto) = self.globals.get("__MapIteratorPrototype__").cloned() {
+            obj.insert("__proto__".to_string(), proto);
+        }
         Value::VmObject(new_gc_cell_ptr(ctx, obj))
     }
 
@@ -28832,8 +28863,9 @@ impl<'gc> VM<'gc> {
         obj.insert("__set_target__".to_string(), set_val);
         obj.insert("__index__".to_string(), Value::Number(0.0));
         obj.insert("__iter_kind__".to_string(), Value::String(crate::unicode::utf8_to_utf16(kind)));
-        obj.insert("next".to_string(), Value::VmNativeFunction(BUILTIN_ITERATOR_NEXT));
-        obj.insert("@@sym:1".to_string(), Self::make_host_fn(ctx, "iterator.self"));
+        if let Some(proto) = self.globals.get("__SetIteratorPrototype__").cloned() {
+            obj.insert("__proto__".to_string(), proto);
+        }
         Value::VmObject(new_gc_cell_ptr(ctx, obj))
     }
 

@@ -368,9 +368,9 @@ if (!isNode) {
 }
 
 {
-    // eval - a Function assigning into 'eval' will not throw any error
-    // if contained within strict mode and its body does not start with strict mode
-    console.log("==== Indirect eval of function assigning to 'eval' in strict mode ====");
+    // Function constructor bodies do not inherit outer strict mode.
+    // Without an internal "use strict" directive, assigning to `eval` is allowed here.
+    console.log("==== Function constructor assigning to 'eval' inside a strict-mode script ====");
     var f = Function('eval = 42;');
     f();
     assert(eval === 42, "eval should be assigned the value 42");

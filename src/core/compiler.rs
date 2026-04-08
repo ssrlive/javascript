@@ -964,6 +964,45 @@ impl<'gc> Compiler<'gc> {
         None
     }
 
+    /// Extract all binding names from a catch parameter pattern (for alias setup).
+    fn extract_catch_param_binding_names(param: &Option<CatchParamPattern>) -> Vec<String> {
+        fn collect_from_elements(elements: &[DestructuringElement], out: &mut Vec<String>) {
+            for elem in elements {
+                match elem {
+                    DestructuringElement::Variable(name, _) => out.push(name.clone()),
+                    DestructuringElement::Rest(name) => out.push(name.clone()),
+                    DestructuringElement::Property(_, inner) => {
+                        collect_from_element(inner, out);
+                    }
+                    DestructuringElement::ComputedProperty(_, inner) => {
+                        collect_from_element(inner, out);
+                    }
+                    DestructuringElement::RestPattern(inner) => {
+                        collect_from_element(inner, out);
+                    }
+                    DestructuringElement::NestedArray(inner, _) => {
+                        collect_from_elements(inner, out);
+                    }
+                    DestructuringElement::NestedObject(inner, _) => {
+                        collect_from_elements(inner, out);
+                    }
+                    DestructuringElement::Empty => {}
+                }
+            }
+        }
+        fn collect_from_element(elem: &DestructuringElement, out: &mut Vec<String>) {
+            collect_from_elements(std::slice::from_ref(elem), out);
+        }
+        let mut names = Vec::new();
+        match param {
+            Some(CatchParamPattern::Array(elements)) | Some(CatchParamPattern::Object(elements)) => {
+                collect_from_elements(elements, &mut names);
+            }
+            _ => {}
+        }
+        names
+    }
+
     fn emit_define_global_binding(&mut self, name: &str, const_like: bool) {
         let define_opcode = if const_like {
             Opcode::DefineGlobalConst
@@ -2230,55 +2269,163 @@ impl<'gc> Compiler<'gc> {
 
                 // Catch body (block-scoped)
                 let saved_catch = self.locals.len();
-                // handle_throw stores the caught value in globals under the catch
-                // parameter name.  Load it from globals and push as a local so
-                // it properly shadows any outer binding with the same name.
-                // When at scope_depth 0, bump to 1 so inner let/const
-                // declarations are compiled as locals (block-scoped) and can
-                // properly shadow the catch parameter local.
-                let catch_bumped_depth = self.scope_depth == 0 && tc.catch_param.is_some();
+                // At scope_depth 0 (global level), use block aliases so that
+                // let/const in the catch body are block-scoped while var stays
+                // function-scoped (global).  At scope_depth > 0, locals are
+                // naturally block-scoped via saved_catch.
+                let catch_use_aliases = self.scope_depth == 0;
+                let catch_bumped_depth = self.scope_depth == 0 && !catch_use_aliases && tc.catch_param.is_some();
                 if catch_bumped_depth {
                     self.scope_depth = 1;
                 }
-                if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
-                    // Load caught value from the unique internal global name
-                    let load_name = catch_internal_name.as_deref().unwrap_or(name);
-                    let load_u16 = crate::unicode::utf8_to_utf16(load_name);
-                    let load_idx = self.chunk.add_constant(Value::String(load_u16));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(load_idx);
-                    self.locals.push(name.clone());
-                } else if let Some(CatchParamPattern::Array(ref elements)) = tc.catch_param {
-                    // Load caught value onto stack for array destructuring
-                    let load_name = catch_internal_name.as_deref().unwrap();
-                    let load_u16 = crate::unicode::utf8_to_utf16(load_name);
-                    let load_idx = self.chunk.add_constant(Value::String(load_u16));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(load_idx);
-                    self.compile_array_destructuring(elements)?;
-                } else if let Some(CatchParamPattern::Object(ref elements)) = tc.catch_param {
-                    // Load caught value onto stack for object destructuring
-                    let load_name = catch_internal_name.as_deref().unwrap();
-                    let load_u16 = crate::unicode::utf8_to_utf16(load_name);
-                    let load_idx = self.chunk.add_constant(Value::String(load_u16));
-                    self.chunk.write_opcode(Opcode::GetGlobal);
-                    self.chunk.write_u16(load_idx);
-                    self.compile_object_destructuring_from_destr(elements)?;
-                }
-                if let Some(ref catch_body) = tc.catch_body {
-                    for s in catch_body {
-                        self.compile_statement(s, false)?;
+
+                // Phase 1: catch parameter
+                let mut catch_param_aliases_pushed = false;
+                if catch_use_aliases {
+                    // Set up alias for catch parameter name → catch_internal_name
+                    let mut param_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
+                    if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
+                        if let Some(ref internal) = catch_internal_name {
+                            param_aliases.insert(name.clone(), (internal.clone(), false));
+                        }
+                    } else if matches!(tc.catch_param, Some(CatchParamPattern::Array(_) | CatchParamPattern::Object(_))) {
+                        // For destructuring, extract binding names and create aliases
+                        let names = Self::extract_catch_param_binding_names(&tc.catch_param);
+                        for n in names {
+                            let alias = format!("__catch_param_alias_{}__", self.forin_counter);
+                            self.forin_counter = self.forin_counter.saturating_add(1);
+                            param_aliases.insert(n, (alias, false));
+                        }
                     }
-                }
-                // Save catch block's completion value for finally restore.
-                if has_finally {
-                    if let Some(tfc) = self.try_finally_stack.last() {
-                        if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
-                            let sv = sv.clone();
-                            let cv = cv.clone();
-                            self.emit_helper_get(&cv);
-                            self.emit_helper_set(&sv);
-                            self.chunk.write_opcode(Opcode::Pop);
+                    if !param_aliases.is_empty() {
+                        self.top_level_block_aliases.push(param_aliases);
+                        catch_param_aliases_pushed = true;
+                    }
+
+                    // For destructuring patterns, load caught value and destructure
+                    if let Some(CatchParamPattern::Array(ref elements)) = tc.catch_param {
+                        let load_name = catch_internal_name.as_deref().unwrap();
+                        let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                        let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(load_idx);
+                        self.compile_array_destructuring(elements)?;
+                    } else if let Some(CatchParamPattern::Object(ref elements)) = tc.catch_param {
+                        let load_name = catch_internal_name.as_deref().unwrap();
+                        let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                        let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(load_idx);
+                        self.compile_object_destructuring_from_destr(elements)?;
+                    }
+                    // For identifier, the alias handles reads transparently
+
+                    // Phase 2: catch body block aliases for let/const/class
+                    let mut body_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
+                    if let Some(ref catch_body) = tc.catch_body {
+                        for s in catch_body {
+                            match &*s.kind {
+                                StatementKind::Let(decls) => {
+                                    for (n, _) in decls {
+                                        if !body_aliases.contains_key(n) {
+                                            let alias = format!("__catch_body_alias_{}__", self.forin_counter);
+                                            self.forin_counter = self.forin_counter.saturating_add(1);
+                                            body_aliases.insert(n.clone(), (alias, false));
+                                        }
+                                    }
+                                }
+                                StatementKind::Const(decls) => {
+                                    for (n, _) in decls {
+                                        if !body_aliases.contains_key(n) {
+                                            let alias = format!("__catch_body_alias_{}__", self.forin_counter);
+                                            self.forin_counter = self.forin_counter.saturating_add(1);
+                                            body_aliases.insert(n.clone(), (alias, true));
+                                        }
+                                    }
+                                }
+                                StatementKind::Class(class_def) => {
+                                    if !class_def.name.is_empty() && !body_aliases.contains_key(&class_def.name) {
+                                        let alias = format!("__catch_body_alias_{}__", self.forin_counter);
+                                        self.forin_counter = self.forin_counter.saturating_add(1);
+                                        body_aliases.insert(class_def.name.clone(), (alias, false));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    let catch_body_aliases_pushed = !body_aliases.is_empty();
+                    if catch_body_aliases_pushed {
+                        self.top_level_block_aliases.push(body_aliases);
+                    }
+                    self.block_stmt_depth = self.block_stmt_depth.saturating_add(1);
+
+                    // Compile body statements
+                    if let Some(ref catch_body) = tc.catch_body {
+                        for s in catch_body {
+                            self.compile_statement(s, false)?;
+                        }
+                    }
+
+                    // Save catch block's completion value for finally restore.
+                    if has_finally {
+                        if let Some(tfc) = self.try_finally_stack.last() {
+                            if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
+                                let sv = sv.clone();
+                                let cv = cv.clone();
+                                self.emit_helper_get(&cv);
+                                self.emit_helper_set(&sv);
+                                self.chunk.write_opcode(Opcode::Pop);
+                            }
+                        }
+                    }
+
+                    self.block_stmt_depth = self.block_stmt_depth.saturating_sub(1);
+                    if catch_body_aliases_pushed {
+                        self.top_level_block_aliases.pop();
+                    }
+                    if catch_param_aliases_pushed {
+                        self.top_level_block_aliases.pop();
+                    }
+                } else {
+                    // scope_depth > 0: use local-based scoping
+                    if let Some(CatchParamPattern::Identifier(ref name)) = tc.catch_param {
+                        let load_name = catch_internal_name.as_deref().unwrap_or(name);
+                        let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                        let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(load_idx);
+                        self.locals.push(name.clone());
+                    } else if let Some(CatchParamPattern::Array(ref elements)) = tc.catch_param {
+                        let load_name = catch_internal_name.as_deref().unwrap();
+                        let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                        let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(load_idx);
+                        self.compile_array_destructuring(elements)?;
+                    } else if let Some(CatchParamPattern::Object(ref elements)) = tc.catch_param {
+                        let load_name = catch_internal_name.as_deref().unwrap();
+                        let load_u16 = crate::unicode::utf8_to_utf16(load_name);
+                        let load_idx = self.chunk.add_constant(Value::String(load_u16));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(load_idx);
+                        self.compile_object_destructuring_from_destr(elements)?;
+                    }
+                    if let Some(ref catch_body) = tc.catch_body {
+                        for s in catch_body {
+                            self.compile_statement(s, false)?;
+                        }
+                    }
+                    // Save catch block's completion value for finally restore.
+                    if has_finally {
+                        if let Some(tfc) = self.try_finally_stack.last() {
+                            if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
+                                let sv = sv.clone();
+                                let cv = cv.clone();
+                                self.emit_helper_get(&cv);
+                                self.emit_helper_set(&sv);
+                                self.chunk.write_opcode(Opcode::Pop);
+                            }
                         }
                     }
                 }
@@ -3155,10 +3302,12 @@ impl<'gc> Compiler<'gc> {
                 };
                 self.loop_stack.push(ctx);
 
-                // In strict mode at global scope, function declarations inside
-                // switch cases are block-scoped (AnnexB not honored).
+                // Create block scope for the CaseBlock (per spec 13.12.11).
+                // At global scope, use alias-based scoping for let/const/class/function.
+                // At function scope, locals are naturally block-scoped.
                 let mut pushed_switch_aliases = false;
-                if self.scope_depth == 0 && self.current_strict {
+                self.block_stmt_depth = self.block_stmt_depth.saturating_add(1);
+                if self.scope_depth == 0 {
                     let mut block_aliases: std::collections::HashMap<String, (String, bool)> = std::collections::HashMap::new();
                     for case in &sw.cases {
                         let body_stmts = match case {
@@ -3166,12 +3315,40 @@ impl<'gc> Compiler<'gc> {
                             crate::core::statement::SwitchCase::Default(body) => body,
                         };
                         for s in body_stmts {
-                            if let StatementKind::FunctionDeclaration(name, ..) = &*s.kind
-                                && !block_aliases.contains_key(name)
-                            {
-                                let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                self.forin_counter = self.forin_counter.saturating_add(1);
-                                block_aliases.insert(name.clone(), (alias, false));
+                            match &*s.kind {
+                                StatementKind::FunctionDeclaration(name, ..) if self.current_strict => {
+                                    if !block_aliases.contains_key(name) {
+                                        let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                        self.forin_counter = self.forin_counter.saturating_add(1);
+                                        block_aliases.insert(name.clone(), (alias, false));
+                                    }
+                                }
+                                StatementKind::Let(decls) => {
+                                    for (name, _) in decls {
+                                        if !block_aliases.contains_key(name) {
+                                            let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                            self.forin_counter = self.forin_counter.saturating_add(1);
+                                            block_aliases.insert(name.clone(), (alias, false));
+                                        }
+                                    }
+                                }
+                                StatementKind::Const(decls) => {
+                                    for (name, _) in decls {
+                                        if !block_aliases.contains_key(name) {
+                                            let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                            self.forin_counter = self.forin_counter.saturating_add(1);
+                                            block_aliases.insert(name.clone(), (alias, true));
+                                        }
+                                    }
+                                }
+                                StatementKind::Class(class_def) => {
+                                    if !class_def.name.is_empty() && !block_aliases.contains_key(&class_def.name) {
+                                        let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                        self.forin_counter = self.forin_counter.saturating_add(1);
+                                        block_aliases.insert(class_def.name.clone(), (alias, false));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -3253,6 +3430,7 @@ impl<'gc> Compiler<'gc> {
                 if pushed_switch_aliases {
                     self.top_level_block_aliases.pop();
                 }
+                self.block_stmt_depth = self.block_stmt_depth.saturating_sub(1);
 
                 if is_last {
                     self.emit_load_completion();
@@ -8282,10 +8460,7 @@ impl<'gc> Compiler<'gc> {
                 self.locals.push(name.to_string());
             }
         } else {
-            let name_u16 = crate::unicode::utf8_to_utf16(name);
-            let name_idx = self.chunk.add_constant(Value::String(name_u16));
-            self.chunk.write_opcode(Opcode::DefineGlobal);
-            self.chunk.write_u16(name_idx);
+            self.emit_define_global_binding(name, false);
         }
     }
 

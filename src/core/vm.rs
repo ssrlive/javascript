@@ -20225,7 +20225,11 @@ impl<'gc> VM<'gc> {
                 target
             }
             BUILTIN_JSON_STRINGIFY => {
-                let s = args.first().map(|v| self.json_stringify(v)).unwrap_or_default();
+                let gap = match self.json_gap_from_space(ctx, args.get(2)) {
+                    Some(gap) => gap,
+                    None => return Value::Undefined,
+                };
+                let s = args.first().map(|v| self.json_stringify_with_gap(v, &gap, "")).unwrap_or_default();
                 Value::from(&s)
             }
             BUILTIN_JSON_PARSE => {
@@ -34295,6 +34299,13 @@ impl<'gc> VM<'gc> {
         true
     }
 
+    fn json_stringify_string_units(&self, s: &[u16]) -> String {
+        format!(
+            "\"{}\"",
+            crate::unicode::utf16_to_utf8(s).replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
+
     /// JSON.stringify helper
     fn json_stringify(&self, val: &Value<'gc>) -> String {
         match val {
@@ -34307,10 +34318,7 @@ impl<'gc> VM<'gc> {
                     format!("{}", n)
                 }
             }
-            Value::String(s) => {
-                let rust_str = crate::unicode::utf16_to_utf8(s);
-                format!("\"{}\"", rust_str.replace('\\', "\\\\").replace('"', "\\\""))
-            }
+            Value::String(s) => self.json_stringify_string_units(s),
             Value::Boolean(b) => b.to_string(),
             Value::Null | Value::Undefined => "null".to_string(),
             Value::VmArray(arr) => {
@@ -34345,6 +34353,103 @@ impl<'gc> VM<'gc> {
                 format!("{{{}}}", parts.join(","))
             }
             _ => "null".to_string(),
+        }
+    }
+
+    fn json_stringify_with_gap(&self, val: &Value<'gc>, gap: &str, indent: &str) -> String {
+        if gap.is_empty() {
+            return self.json_stringify(val);
+        }
+
+        match val {
+            Value::VmArray(arr) => {
+                let borrow = arr.borrow();
+                let logical_len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
+                    if *n >= 0.0 { *n as usize } else { 0 }
+                } else {
+                    borrow.elements.len()
+                };
+                if logical_len == 0 {
+                    return "[]".to_string();
+                }
+                let next_indent = format!("{indent}{gap}");
+                let mut parts: Vec<String> = Vec::with_capacity(logical_len);
+                for i in 0..logical_len {
+                    let idx_key = i.to_string();
+                    let deleted_key = format!("__deleted_{}", i);
+                    let part = if let Some(v) = borrow.props.get(&idx_key) {
+                        self.json_stringify_with_gap(v, gap, &next_indent)
+                    } else if i < borrow.elements.len() && !borrow.props.contains_key(&deleted_key) {
+                        self.json_stringify_with_gap(&borrow.elements[i], gap, &next_indent)
+                    } else {
+                        "null".to_string()
+                    };
+                    parts.push(format!("{next_indent}{part}"));
+                }
+                format!("[\n{}\n{}]", parts.join(",\n"), indent)
+            }
+            Value::VmObject(map) => {
+                let m = map.borrow();
+                let next_indent = format!("{indent}{gap}");
+                let parts: Vec<String> = m
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with("__") && !k.starts_with("@@sym:"))
+                    .map(|(k, v)| {
+                        format!(
+                            "{next_indent}{}: {}",
+                            self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(k)),
+                            self.json_stringify_with_gap(v, gap, &next_indent)
+                        )
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    return "{}".to_string();
+                }
+                format!("{{\n{}\n{}}}", parts.join(",\n"), indent)
+            }
+            _ => self.json_stringify(val),
+        }
+    }
+
+    fn json_gap_from_space(&mut self, ctx: &GcContext<'gc>, space: Option<&Value<'gc>>) -> Option<String> {
+        let Some(space) = space else {
+            return Some(String::new());
+        };
+
+        let truncate_string_gap = |units: &[u16]| crate::unicode::utf16_to_utf8(&units.iter().take(10).cloned().collect::<Vec<u16>>());
+        let numeric_gap = |n: f64| {
+            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+            let count = n.clamp(0.0, 10.0) as usize;
+            " ".repeat(count)
+        };
+
+        match space {
+            Value::Number(n) => Some(numeric_gap(*n)),
+            Value::String(s) => Some(truncate_string_gap(s)),
+            Value::VmObject(obj) => {
+                let type_name = obj.borrow().get("__type__").map(value_to_string);
+                match type_name.as_deref() {
+                    Some("Number") => {
+                        let prim = self.try_to_primitive(ctx, space, "number");
+                        if self.pending_throw.is_some() {
+                            return None;
+                        }
+                        Some(numeric_gap(to_number(&prim)))
+                    }
+                    Some("String") => {
+                        let prim = self.try_to_primitive(ctx, space, "string");
+                        if self.pending_throw.is_some() {
+                            return None;
+                        }
+                        match prim {
+                            Value::String(s) => Some(truncate_string_gap(&s)),
+                            other => Some(truncate_string_gap(&crate::unicode::utf8_to_utf16(&self.vm_to_string(ctx, &other)))),
+                        }
+                    }
+                    _ => Some(String::new()),
+                }
+            }
+            _ => Some(String::new()),
         }
     }
 

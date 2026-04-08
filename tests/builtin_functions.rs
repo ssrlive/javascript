@@ -373,6 +373,16 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_stringify_space_formats_nested_values() {
+        let script = r#"
+            JSON.stringify({ a: { b: [1, 2] } }, null, "  ")
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let inner: String = serde_json::from_str(&result).unwrap();
+        assert_eq!(inner, "{\n  \"a\": {\n    \"b\": [\n      1,\n      2\n    ]\n  }\n}");
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

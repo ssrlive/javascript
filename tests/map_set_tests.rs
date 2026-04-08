@@ -599,6 +599,56 @@ fn test_map_symbol_iterator_aliases_entries() {
 }
 
 #[test]
+fn test_map_groupby_metadata_matches_spec() {
+    let result = evaluate_script(
+        r#"
+        Map.groupBy.name === "groupBy" &&
+        Map.groupBy.length === 2 &&
+        Object.prototype.propertyIsEnumerable.call(Map, "groupBy") === false
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_map_groupby_returns_map_with_arbitrary_keys() {
+    let result = evaluate_script(
+        r#"
+        const obj = { toString() { return "nope"; } };
+        const map = Map.groupBy([1, "1", obj], (value) => value);
+        map instanceof Map &&
+        map.size === 3 &&
+        map.get(1).length === 1 &&
+        map.get("1").length === 1 &&
+        map.get(obj).length === 1
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_map_groupby_normalizes_negative_zero_keys() {
+    let result = evaluate_script(
+        r#"
+        const map = Map.groupBy([-0, 0], (value) => value);
+        map.size === 1 &&
+        1 / Array.from(map.keys())[0] === Infinity &&
+        map.get(0).length === 2
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_set_constructor_uses_add_for_iterables() {
     let result = evaluate_script(
         r#"

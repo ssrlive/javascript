@@ -281,6 +281,7 @@ const BUILTIN_MAP_VALUES: FunctionID = 336;
 const BUILTIN_MAP_ENTRIES: FunctionID = 337;
 const BUILTIN_MAP_FOREACH: FunctionID = 338;
 const BUILTIN_MAP_CLEAR: FunctionID = 339;
+const BUILTIN_MAP_GROUPBY: FunctionID = 340;
 // ── Set (350–369) ───────────────────────────────────────────────────
 const BUILTIN_CTOR_SET: FunctionID = 350;
 const BUILTIN_SET_ADD: FunctionID = 351;
@@ -3387,6 +3388,7 @@ impl<'gc> VM<'gc> {
     fn native_function_name(id: FunctionID) -> &'static str {
         match id {
             BUILTIN_CTOR_MAP => "Map",
+            BUILTIN_MAP_GROUPBY => "groupBy",
             BUILTIN_CTOR_SET => "Set",
             BUILTIN_CTOR_PROMISE => "Promise",
             BUILTIN_PROMISE_RESOLVE => "resolve",
@@ -3552,6 +3554,7 @@ impl<'gc> VM<'gc> {
     fn native_function_length(id: FunctionID) -> f64 {
         match id {
             BUILTIN_CTOR_MAP => 0.0,
+            BUILTIN_MAP_GROUPBY => 2.0,
             BUILTIN_CTOR_SET => 0.0,
             BUILTIN_CTOR_PROMISE => 1.0,
             BUILTIN_PROMISE_RESOLVE => 1.0,
@@ -16733,6 +16736,8 @@ impl<'gc> VM<'gc> {
             let map_props = self.get_native_fn_props(ctx, BUILTIN_CTOR_MAP);
             let mut map_props_borrow = map_props.borrow_mut(ctx);
             map_props_borrow.insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
+            map_props_borrow.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_MAP_GROUPBY));
+            map_props_borrow.insert("__nonenumerable_groupBy__".to_string(), Value::Boolean(true));
             if !map_props_borrow.contains_key("__get_@@sym:5") {
                 Self::insert_species_getter(&mut map_props_borrow, ctx);
             }
@@ -23557,6 +23562,168 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, result))
             }
+            BUILTIN_MAP_GROUPBY => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    self.throw_type_error(ctx, "callbackfn is not callable");
+                    return Value::Undefined;
+                }
+
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "iterator missing");
+                    return Value::Undefined;
+                }
+
+                let iterable_for_get = match iterable {
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+                        iterable.clone()
+                    }
+                    _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&iterable)),
+                };
+
+                let iterator_key = {
+                    let sym_iter = if let Some(symbol_ctor) = self.globals.get("Symbol").cloned() {
+                        self.read_named_property(ctx, &symbol_ctor, "iterator")
+                    } else {
+                        Value::Undefined
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    match self.as_property_key_string(ctx, &sym_iter) {
+                        Ok(k) => k,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    }
+                };
+
+                let iterator_method = self.read_named_property(ctx, &iterable_for_get, &iterator_key);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut iterator_method = iterator_method;
+                if matches!(iterator_method, Value::Undefined | Value::Null) {
+                    let is_string_iterable = matches!(iterable, Value::String(_))
+                        || matches!(&iterable_for_get, Value::VmObject(obj)
+                            if matches!(obj.borrow().get("__type__"), Some(Value::String(t)) if crate::unicode::utf16_to_utf8(t) == "String"));
+                    if is_string_iterable {
+                        iterator_method = Self::make_bound_host_fn(ctx, "string.symbolIterator", &iterable_for_get);
+                    }
+                }
+                if matches!(iterator_method, Value::Undefined | Value::Null) || !self.is_value_callable(&iterator_method) {
+                    self.throw_type_error(ctx, "iterator missing");
+                    return Value::Undefined;
+                }
+
+                let iterator = match self.vm_call_function_value(ctx, &iterator_method, &iterable_for_get, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                if !matches!(
+                    iterator,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                ) {
+                    self.throw_type_error(ctx, "iterator is not an object");
+                    return Value::Undefined;
+                }
+
+                let next_method = self.read_named_property(ctx, &iterator, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&next_method) {
+                    self.throw_type_error(ctx, "iterator.next is not callable");
+                    return Value::Undefined;
+                }
+
+                let mut groups: Vec<(Value<'gc>, Vec<Value<'gc>>)> = Vec::new();
+                let mut index: usize = 0;
+                loop {
+                    let next = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    if !matches!(
+                        next,
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                    ) {
+                        self.throw_type_error(ctx, "iterator.next() must return an object");
+                        return Value::Undefined;
+                    }
+
+                    let done = self.read_named_property(ctx, &next, "done");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+
+                    let value = self.read_named_property(ctx, &next, "value");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+
+                    let key_val =
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[value.clone(), Value::Number(index as f64)])
+                        {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                        };
+
+                    let key = match key_val {
+                        Value::Number(n) if n == 0.0 => Value::Number(0.0),
+                        _ => key_val,
+                    };
+                    if let Some((_, values)) = groups.iter_mut().find(|(existing_key, _)| self.values_same(existing_key, &key)) {
+                        values.push(value);
+                    } else {
+                        groups.push((key, vec![value]));
+                    }
+                    index += 1;
+                }
+
+                let proto = self.read_named_property(ctx, &self.globals.get("Map").cloned().unwrap_or(Value::Undefined), "prototype");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                let map_handle = new_gc_cell_ptr(
+                    ctx,
+                    VmMapData {
+                        entries: Vec::new(),
+                        is_weak: false,
+                    },
+                );
+                let mut map_obj = IndexMap::new();
+                map_obj.insert("__map_data__".to_string(), Value::VmMap(map_handle));
+                map_obj.insert("__type__".to_string(), Value::from("Map"));
+                if !matches!(proto, Value::Undefined) {
+                    map_obj.insert("__proto__".to_string(), proto);
+                }
+                let map = Value::VmObject(new_gc_cell_ptr(ctx, map_obj));
+
+                let mut map_borrow = map_handle.borrow_mut(ctx);
+                for (key, values) in groups {
+                    map_borrow
+                        .entries
+                        .push((key, Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(values)))));
+                }
+                drop(map_borrow);
+                map
+            }
             BUILTIN_SYMBOL => {
                 // Symbol(description?) — create a unique symbol-like VmObject
                 let desc = args.first().and_then(|v| match v {
@@ -28852,6 +29019,9 @@ impl<'gc> VM<'gc> {
 
         // Object.* static methods: delegate to call_builtin
         if (BUILTIN_OBJECT_KEYS..=BUILTIN_OBJECT_DEFINEPROP).contains(&id) {
+            return self.call_builtin(ctx, id, args);
+        }
+        if id == BUILTIN_MAP_GROUPBY {
             return self.call_builtin(ctx, id, args);
         }
 

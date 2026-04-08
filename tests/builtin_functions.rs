@@ -482,6 +482,57 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_error_message_property_attributes() {
+        let script = r#"
+            let desc = Object.getOwnPropertyDescriptor(new Error("boom"), "message");
+            let empty = new Error();
+            desc.value === "boom" &&
+            desc.writable === true &&
+            desc.enumerable === false &&
+            desc.configurable === true &&
+            !empty.hasOwnProperty("message") &&
+            empty.message === Error.prototype.message
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_error_to_string_spec_cases() {
+        let script = r#"
+            let invalidReceiverThrows = false;
+            let symbolMessageThrows = false;
+            let toPrimitiveThrows = false;
+            try {
+                Error.prototype.toString.call(undefined);
+            } catch (err) {
+                invalidReceiverThrows = err instanceof TypeError;
+            }
+            try {
+                Error.prototype.toString.call({ message: Symbol() });
+            } catch (err) {
+                symbolMessageThrows = err instanceof TypeError;
+            }
+            try {
+                Error.prototype.toString.call({ message: { valueOf: undefined, toString: undefined } });
+            } catch (err) {
+                toPrimitiveThrows = err instanceof TypeError;
+            }
+            let errWithEmptyName = new Error("ErrorMessage");
+            errWithEmptyName.name = "";
+            let errWithoutMessage = new Error();
+            errWithoutMessage.name = "";
+            invalidReceiverThrows &&
+            symbolMessageThrows &&
+            toPrimitiveThrows &&
+            errWithEmptyName.toString() === "ErrorMessage" &&
+            errWithoutMessage.toString() === ""
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_encode_uri() {
         let script = "encodeURI('hello world')";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

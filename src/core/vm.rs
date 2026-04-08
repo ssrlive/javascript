@@ -8452,8 +8452,19 @@ impl<'gc> VM<'gc> {
             }
             "error.toString" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
-                if matches!(recv, Value::Undefined | Value::Null) {
-                    return Value::from("Error");
+                if !matches!(
+                    recv,
+                    Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmMap(_)
+                        | Value::VmSet(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)
+                ) || recv.is_symbol_value()
+                {
+                    self.throw_type_error(ctx, "Error.prototype.toString requires an object");
+                    return Value::Undefined;
                 }
 
                 let name_value = self.read_named_property(ctx, &recv, "name");
@@ -8465,26 +8476,25 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                let mut name = match name_value {
-                    Value::Undefined => String::new(),
-                    other => value_to_string(&other),
+                let name = match name_value {
+                    Value::Undefined => "Error".to_string(),
+                    other => match self.vm_to_string_like_spec(ctx, &other) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                            return Value::Undefined;
+                        }
+                    },
                 };
-                if name.is_empty()
-                    && let Value::VmObject(obj) = &recv
-                    && let Some(Value::String(type_name)) = obj.borrow().get("__type__")
-                {
-                    let type_name = crate::unicode::utf16_to_utf8(type_name);
-                    if Self::is_error_type_name(&type_name) {
-                        name = type_name;
-                    }
-                }
-                if name.is_empty() {
-                    name = "Error".to_string();
-                }
-
                 let message = match message_value {
                     Value::Undefined => String::new(),
-                    other => value_to_string(&other),
+                    other => match self.vm_to_string_like_spec(ctx, &other) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                            return Value::Undefined;
+                        }
+                    },
                 };
                 Value::from(Self::format_error_name_message(&name, &message))
             }
@@ -17063,7 +17073,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn format_error_name_message(name: &str, message: &str) -> String {
-        if message.is_empty() {
+        if name.is_empty() {
+            message.to_string()
+        } else if message.is_empty() {
             name.to_string()
         } else {
             format!("{}: {}", name, message)

@@ -5792,28 +5792,14 @@ impl<'gc> Compiler<'gc> {
                     return Err(raise_syntax_error!(format!("Unimplemented expression type for VM: {expr:?}")));
                 }
             }
-            // new Constructor(args) — for now, special-case Error
+            // new Constructor(args)
             Expr::New(constructor, args) => {
                 if let Expr::Var(name, ..) = &**constructor {
                     match name.as_str() {
-                        "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" => {
-                            // Push error type name
-                            let type_idx = self.chunk.add_constant(Value::from(name));
-                            self.chunk.write_opcode(Opcode::Constant);
-                            self.chunk.write_u16(type_idx);
-                            // Push message
-                            if let Some(arg) = args.first() {
-                                self.compile_expr(arg)?;
-                            } else {
-                                let idx = self.chunk.add_constant(Value::String(Vec::new()));
-                                self.chunk.write_opcode(Opcode::Constant);
-                                self.chunk.write_u16(idx);
-                            }
-                            self.chunk.write_opcode(Opcode::NewError);
-                        }
-                        "Object" | "Number" | "Boolean" | "String" => {
+                        "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" | "EvalError" | "URIError" | "Object"
+                        | "Number" | "Boolean" | "String" => {
                             // Route through normal NewCall so the VM runtime
-                            // can set __proto__ correctly (e.g. Boolean.prototype for new Object(true)).
+                            // can apply constructor semantics and select the correct prototype.
                             self.compile_expr(constructor)?;
                             for a in args {
                                 self.compile_expr(a)?;

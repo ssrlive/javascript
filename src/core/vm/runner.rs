@@ -8299,23 +8299,31 @@ impl<'gc> VM<'gc> {
                                 | BUILTIN_CTOR_SYNTAXERROR
                                 | BUILTIN_CTOR_RANGEERROR
                                 | BUILTIN_CTOR_REFERENCEERROR
+                                | BUILTIN_CTOR_EVALERROR
+                                | BUILTIN_CTOR_URIERROR
                         ) {
                             let type_name = self.error_type_name_from_constructor(ctx, &callee, id);
-                            let new_target = self.new_target_stack.last().cloned();
-                            let instance_proto = if let Some(new_target) = new_target {
-                                let proto = self.read_named_property(ctx, &new_target, "prototype");
-                                if matches!(proto, Value::Undefined) {
-                                    ctor_prototype.clone().unwrap_or(Value::Undefined)
-                                } else {
-                                    proto
+                            let proto_source = self.new_target_stack.last().cloned().unwrap_or_else(|| callee.clone());
+                            let instance_proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, &proto_source, &type_name) {
+                                Ok(Some(proto)) => proto,
+                                Ok(None) => ctor_prototype.clone().unwrap_or(Value::Undefined),
+                                Err(err) => {
+                                    let thrown = self.vm_value_from_error(ctx, &err);
+                                    self.handle_throw(ctx, &thrown)?;
+                                    return Ok(OpcodeAction::Continue);
                                 }
-                            } else {
-                                ctor_prototype.clone().unwrap_or(Value::Undefined)
                             };
                             let mut m = IndexMap::new();
                             m.insert("__type__".to_string(), Value::from(type_name.as_str()));
                             if let Some(message) = args.first().filter(|value| !matches!(value, Value::Undefined)) {
-                                let msg = self.vm_to_string(ctx, message);
+                                let msg = match self.vm_to_string_like_spec(ctx, message) {
+                                    Ok(msg) => msg,
+                                    Err(err) => {
+                                        let thrown = self.vm_value_from_error(ctx, &err);
+                                        self.handle_throw(ctx, &thrown)?;
+                                        return Ok(OpcodeAction::Continue);
+                                    }
+                                };
                                 Self::insert_property_with_attributes(&mut m, "message", &Value::from(msg.as_str()), true, false, true);
                             }
                             if !matches!(instance_proto, Value::Undefined) {

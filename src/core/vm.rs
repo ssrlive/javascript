@@ -4615,6 +4615,27 @@ impl<'gc> VM<'gc> {
                 // get [Symbol.species]() { return this; }
                 receiver.cloned().unwrap_or(Value::Undefined)
             }
+            "set.getSize" => {
+                let receiver_set = match receiver.unwrap_or(&Value::Undefined) {
+                    Value::VmSet(s) => Some(*s),
+                    Value::VmObject(obj) => match obj.borrow().get("__set_data__").cloned() {
+                        Some(Value::VmSet(s)) => Some(s),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(set) = receiver_set else {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method get Set.prototype.size called on incompatible receiver"));
+                    return Value::Undefined;
+                };
+                if set.borrow().is_weak {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method get Set.prototype.size called on incompatible receiver"));
+                    return Value::Undefined;
+                }
+                Value::Number(set.borrow().values.len() as f64)
+            }
             "arrayBuffer.getByteLength" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
@@ -16410,6 +16431,11 @@ impl<'gc> VM<'gc> {
                     proto.insert("__nonenumerable_has__".to_string(), Value::Boolean(true));
                     proto.insert("__nonenumerable_delete__".to_string(), Value::Boolean(true));
                     if ctor_id == BUILTIN_CTOR_SET {
+                        proto.insert(
+                            "__get_size".to_string(),
+                            Self::make_host_fn_with_name_len(ctx, "set.getSize", "get size", 0.0, false),
+                        );
+                        proto.insert("__nonenumerable_size__".to_string(), Value::Boolean(true));
                         proto.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_SET_VALUES));
                         proto.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_SET_VALUES));
                         proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_SET_VALUES));
@@ -27841,14 +27867,40 @@ impl<'gc> VM<'gc> {
                     return self.make_set_iterator(ctx, receiver.clone(), "entry");
                 }
                 BUILTIN_SET_FOREACH => {
-                    if let Some(callback) = args.first()
-                        && self.is_value_callable(callback)
-                    {
-                        let vals: Vec<Value<'gc>> = s.borrow().values.clone();
-                        let set_ref = receiver.clone();
-                        let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        for v in &vals {
-                            let _ = self.vm_call_function_value(ctx, callback, &this_arg, &[v.clone(), v.clone(), set_ref.clone()]);
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
+                    }
+
+                    let set_ref = receiver.clone();
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let mut scheduled = s.borrow().values.clone();
+                    let mut idx = 0;
+
+                    while idx < scheduled.len() {
+                        let value = scheduled[idx].clone();
+                        idx += 1;
+
+                        let before_live = s.borrow().values.clone();
+                        if !before_live.iter().any(|v| self.values_same_zero(v, &value)) {
+                            continue;
+                        }
+
+                        if let Err(err) =
+                            self.vm_call_function_value(ctx, &callback, &this_arg, &[value.clone(), value.clone(), set_ref.clone()])
+                        {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+
+                        let after_live = s.borrow().values.clone();
+                        for candidate in after_live {
+                            let was_present_before = before_live.iter().any(|v| self.values_same_zero(v, &candidate));
+                            let already_scheduled = scheduled[idx..].iter().any(|v| self.values_same_zero(v, &candidate));
+                            if !was_present_before && !already_scheduled {
+                                scheduled.push(candidate);
+                            }
                         }
                     }
                     return Value::Undefined;

@@ -344,3 +344,106 @@ fn test_set_prototype_methods_reject_weakset_receivers() {
     .unwrap();
     assert_eq!(result, "true");
 }
+
+#[test]
+fn test_set_size_descriptor_uses_getter() {
+    let result = evaluate_script(
+        r#"
+        const descriptor = Object.getOwnPropertyDescriptor(Set.prototype, "size");
+        typeof descriptor.get === "function" &&
+        descriptor.get.name === "get size" &&
+        descriptor.get.length === 0 &&
+        descriptor.set === undefined &&
+        descriptor.enumerable === false &&
+        descriptor.configurable === true
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_for_each_requires_callable_callback() {
+    let result = evaluate_script(
+        r#"
+        const set = new Set([1]);
+        [undefined, null, true, 1, "x", Symbol("x")].every(value => {
+          try {
+            set.forEach(value);
+            return false;
+          } catch (err) {
+            return err instanceof TypeError;
+          }
+        })
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_for_each_visits_values_added_during_iteration() {
+    let result = evaluate_script(
+        r#"
+        const set = new Set([1]);
+        const seen = [];
+        set.forEach(function(value) {
+          seen.push(value);
+          if (value === 1) set.add(2);
+          if (value === 2) set.add(3);
+        });
+        JSON.stringify(seen)
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "\"[1,2,3]\"");
+}
+
+#[test]
+fn test_set_for_each_revisits_delete_readd() {
+    let result = evaluate_script(
+        r#"
+        const set = new Set([1, 2, 3]);
+        const seen = [];
+        set.forEach(function(value) {
+          seen.push(value);
+          if (value === 2) set.delete(1);
+          if (value === 3) set.add(1);
+        });
+        JSON.stringify(seen)
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "\"[1,2,3,1]\"");
+}
+
+#[test]
+fn test_set_for_each_propagates_callback_errors() {
+    let result = evaluate_script(
+        r#"
+        const set = new Set([1]);
+        let counter = 0;
+        try {
+          set.forEach(function() {
+            counter++;
+            throw new Error("boom");
+          });
+          false
+        } catch (err) {
+          counter === 1 && err instanceof Error
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}

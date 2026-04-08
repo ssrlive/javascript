@@ -6112,6 +6112,66 @@ impl<'gc> VM<'gc> {
             depth += 1;
 
             match cur {
+                Value::VmObject(map) if map.borrow().contains_key("__proxy_target__") => {
+                    // Proxy: use ownKeys to get string keys, then filter by enumerable
+                    let proxy_val = Value::VmObject(map);
+                    let own_keys_result = self.call_host_fn(ctx, "reflect.ownKeys", None, std::slice::from_ref(&proxy_val));
+                    if self.pending_throw.is_some() {
+                        break;
+                    }
+                    let key_list: Vec<String> = match own_keys_result {
+                        Value::VmArray(arr) => arr
+                            .borrow()
+                            .iter()
+                            .filter_map(|v| {
+                                if let Value::String(s) = v {
+                                    Some(crate::unicode::utf16_to_utf8(s))
+                                } else {
+                                    None // skip symbols for for-in
+                                }
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    for key in &key_list {
+                        let first_seen = seen_any.insert(key.clone());
+                        if !first_seen {
+                            continue;
+                        }
+                        let desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[proxy_val.clone(), Value::from(key.as_str())]);
+                        if self.pending_throw.is_some() {
+                            break;
+                        }
+                        let enumerable = if let Value::VmObject(desc_obj) = desc {
+                            matches!(desc_obj.borrow().get("enumerable"), Some(Value::Boolean(true)))
+                        } else {
+                            false
+                        };
+                        if enumerable {
+                            out_keys.push(Value::from(key));
+                        }
+                    }
+                    if self.pending_throw.is_some() {
+                        break;
+                    }
+                    // Walk the proxy target's prototype chain
+                    let target = {
+                        if let Value::VmObject(m) = &proxy_val {
+                            m.borrow().get("__proxy_target__").cloned().unwrap_or(Value::Undefined)
+                        } else {
+                            Value::Undefined
+                        }
+                    };
+                    let proto = self.call_builtin(ctx, BUILTIN_OBJECT_GETPROTOTYPEOF, std::slice::from_ref(&target));
+                    if self.pending_throw.is_some() {
+                        break;
+                    }
+                    current = if matches!(proto, Value::Null | Value::Undefined) {
+                        None
+                    } else {
+                        Some(proto)
+                    };
+                }
                 Value::VmObject(map) => {
                     // Collect ALL own keys (enumerable + non-enumerable) for shadowing,
                     // but only add enumerable keys to the output.

@@ -7873,17 +7873,115 @@ impl<'gc> VM<'gc> {
                             .push(Value::VmMap(new_gc_cell_ptr(ctx, VmMapData { entries, is_weak: false })));
                     }
                     BUILTIN_CTOR_SET => {
-                        let mut values = Vec::new();
-                        // new Set(iterable) — iterable is an array
-                        if let Some(Value::VmArray(arr)) = args.first() {
-                            for item in arr.borrow().iter() {
-                                if !values.iter().any(|v| self.values_equal(v, item)) {
-                                    values.push(item.clone());
+                        let set_value = Value::VmSet(new_gc_cell_ptr(
+                            ctx,
+                            VmSetData {
+                                values: Vec::new(),
+                                is_weak: false,
+                            },
+                        ));
+                        let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                        if matches!(iterable, Value::Undefined | Value::Null) {
+                            self.stack.push(set_value);
+                            return Ok(OpcodeAction::Continue);
+                        }
+
+                        let set_prototype =
+                            self.read_named_property(ctx, &self.globals.get("Set").cloned().unwrap_or(Value::Undefined), "prototype");
+                        if self.pending_throw.is_some() {
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        let adder = self.read_named_property(ctx, &set_prototype, "add");
+                        if self.pending_throw.is_some() {
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        if !self.is_value_callable(&adder) {
+                            self.throw_type_error(ctx, "Set.prototype.add is not callable");
+                            return Ok(OpcodeAction::Continue);
+                        }
+
+                        let iterator_method = self.read_named_property(ctx, &iterable, "@@sym:1");
+                        if self.pending_throw.is_some() {
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        if matches!(iterator_method, Value::Undefined | Value::Null) {
+                            self.throw_type_error(ctx, "Value is not iterable");
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        if !self.is_value_callable(&iterator_method) {
+                            self.throw_type_error(ctx, "Set constructor iterator method is not callable");
+                            return Ok(OpcodeAction::Continue);
+                        }
+
+                        let iterator = match self.vm_call_function_value(ctx, &iterator_method, &iterable, &[]) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return Ok(OpcodeAction::Continue);
+                            }
+                        };
+                        if !matches!(
+                            iterator,
+                            Value::VmObject(_)
+                                | Value::VmArray(_)
+                                | Value::VmFunction(..)
+                                | Value::VmClosure(..)
+                                | Value::VmNativeFunction(_)
+                        ) {
+                            self.throw_type_error(ctx, "Set constructor iterator must return an object");
+                            return Ok(OpcodeAction::Continue);
+                        }
+
+                        let next_method = self.read_named_property(ctx, &iterator, "next");
+                        if self.pending_throw.is_some() {
+                            return Ok(OpcodeAction::Continue);
+                        }
+                        if !self.is_value_callable(&next_method) {
+                            self.throw_type_error(ctx, "Set constructor iterator next is not callable");
+                            return Ok(OpcodeAction::Continue);
+                        }
+
+                        loop {
+                            let next = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    self.set_pending_throw_from_error(&err);
+                                    return Ok(OpcodeAction::Continue);
                                 }
+                            };
+                            if !matches!(
+                                next,
+                                Value::VmObject(_)
+                                    | Value::VmArray(_)
+                                    | Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                            ) {
+                                self.throw_type_error(ctx, "Set constructor iterator must return an object");
+                                return Ok(OpcodeAction::Continue);
+                            }
+
+                            let done = self.read_named_property(ctx, &next, "done");
+                            if self.pending_throw.is_some() {
+                                return Ok(OpcodeAction::Continue);
+                            }
+                            if Self::value_is_truthy(&done) {
+                                break;
+                            }
+
+                            let next_value = self.read_named_property(ctx, &next, "value");
+                            if self.pending_throw.is_some() {
+                                return Ok(OpcodeAction::Continue);
+                            }
+
+                            if let Err(err) = self.vm_call_function_value(ctx, &adder, &set_value, &[next_value]) {
+                                self.iterator_close(ctx, &iterator);
+                                self.set_pending_throw_from_error(&err);
+                                return Ok(OpcodeAction::Continue);
                             }
                         }
-                        self.stack
-                            .push(Value::VmSet(new_gc_cell_ptr(ctx, VmSetData { values, is_weak: false })));
+
+                        self.stack.push(set_value);
                     }
                     BUILTIN_CTOR_WEAKMAP => {
                         // WeakMap: implemented as regular Map (no GC)

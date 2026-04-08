@@ -476,3 +476,101 @@ fn test_set_constructor_metadata_matches_spec() {
     .unwrap();
     assert_eq!(result, "true");
 }
+
+#[test]
+fn test_set_constructor_uses_add_for_iterables() {
+    let result = evaluate_script(
+        r#"
+        const originalAdd = Set.prototype.add;
+        let counter = 0;
+        Set.prototype.add = function(value) {
+          counter++;
+          return originalAdd.call(this, value);
+        };
+        new Set([1, 2]);
+        counter
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "2");
+}
+
+#[test]
+fn test_set_constructor_rejects_non_callable_add() {
+    let result = evaluate_script(
+        r#"
+        Set.prototype.add = null;
+        try {
+          new Set([1, 2]);
+          false
+        } catch (err) {
+          err instanceof TypeError
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_constructor_propagates_iterator_value_errors() {
+    let result = evaluate_script(
+        r#"
+        function MyError() {}
+        const iterable = {
+          [Symbol.iterator]() {
+            return {
+              next() {
+                return {
+                  get value() { throw new MyError(); },
+                  done: false
+                };
+              }
+            };
+          }
+        };
+        try {
+          new Set(iterable);
+          false
+        } catch (err) {
+          err instanceof MyError
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_constructor_closes_iterator_when_add_throws() {
+    let result = evaluate_script(
+        r#"
+        let closed = 0;
+        const iterable = {
+          [Symbol.iterator]() {
+            return {
+              next() { return { value: 1, done: false }; },
+              return() { closed++; }
+            };
+          }
+        };
+        Set.prototype.add = function() { throw new Error("boom"); };
+        try {
+          new Set(iterable);
+          false
+        } catch (err) {
+          closed === 1 && err instanceof Error
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}

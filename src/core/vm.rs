@@ -301,6 +301,10 @@ const BUILTIN_GEN_RETURN: FunctionID = 377;
 const BUILTIN_ASYNCGEN_NEXT: FunctionID = 380;
 const BUILTIN_ASYNCGEN_THROW: FunctionID = 381;
 const BUILTIN_ASYNCGEN_RETURN: FunctionID = 382;
+const BUILTIN_WEAKMAP_SET: FunctionID = 383;
+const BUILTIN_WEAKMAP_GET: FunctionID = 384;
+const BUILTIN_WEAKMAP_HAS: FunctionID = 385;
+const BUILTIN_WEAKMAP_DELETE: FunctionID = 386;
 // ── Weak collections / WeakRef (390–399) ────────────────────────────
 const BUILTIN_CTOR_WEAKMAP: FunctionID = 390;
 const BUILTIN_CTOR_WEAKSET: FunctionID = 391;
@@ -3389,6 +3393,15 @@ impl<'gc> VM<'gc> {
         match id {
             BUILTIN_CTOR_MAP => "Map",
             BUILTIN_MAP_GROUPBY => "groupBy",
+            BUILTIN_MAP_SET | BUILTIN_WEAKMAP_SET => "set",
+            BUILTIN_MAP_GET | BUILTIN_WEAKMAP_GET => "get",
+            BUILTIN_MAP_HAS | BUILTIN_WEAKMAP_HAS => "has",
+            BUILTIN_MAP_DELETE | BUILTIN_WEAKMAP_DELETE => "delete",
+            BUILTIN_MAP_KEYS => "keys",
+            BUILTIN_MAP_VALUES => "values",
+            BUILTIN_MAP_ENTRIES => "entries",
+            BUILTIN_MAP_FOREACH => "forEach",
+            BUILTIN_MAP_CLEAR => "clear",
             BUILTIN_CTOR_SET => "Set",
             BUILTIN_CTOR_PROMISE => "Promise",
             BUILTIN_PROMISE_RESOLVE => "resolve",
@@ -3555,6 +3568,11 @@ impl<'gc> VM<'gc> {
         match id {
             BUILTIN_CTOR_MAP => 0.0,
             BUILTIN_MAP_GROUPBY => 2.0,
+            BUILTIN_MAP_SET | BUILTIN_WEAKMAP_SET => 2.0,
+            BUILTIN_MAP_GET | BUILTIN_MAP_HAS | BUILTIN_MAP_DELETE => 1.0,
+            BUILTIN_WEAKMAP_GET | BUILTIN_WEAKMAP_HAS | BUILTIN_WEAKMAP_DELETE => 1.0,
+            BUILTIN_MAP_KEYS | BUILTIN_MAP_VALUES | BUILTIN_MAP_ENTRIES | BUILTIN_MAP_CLEAR => 0.0,
+            BUILTIN_MAP_FOREACH => 1.0,
             BUILTIN_CTOR_SET => 0.0,
             BUILTIN_CTOR_PROMISE => 1.0,
             BUILTIN_PROMISE_RESOLVE => 1.0,
@@ -4622,6 +4640,27 @@ impl<'gc> VM<'gc> {
             "species.getter" => {
                 // get [Symbol.species]() { return this; }
                 receiver.cloned().unwrap_or(Value::Undefined)
+            }
+            "map.getSize" => {
+                let receiver_map = match receiver.unwrap_or(&Value::Undefined) {
+                    Value::VmMap(m) => Some(*m),
+                    Value::VmObject(obj) => match obj.borrow().get("__map_data__").cloned() {
+                        Some(Value::VmMap(m)) => Some(m),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(map) = receiver_map else {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method get Map.prototype.size called on incompatible receiver"));
+                    return Value::Undefined;
+                };
+                if map.borrow().is_weak {
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method get Map.prototype.size called on incompatible receiver"));
+                    return Value::Undefined;
+                }
+                Value::Number(map.borrow().entries.len() as f64)
             }
             "set.getSize" => {
                 let receiver_set = match receiver.unwrap_or(&Value::Undefined) {
@@ -13960,17 +13999,26 @@ impl<'gc> VM<'gc> {
                     }
                     if depth == 1 {
                         if let Some(Value::VmMap(map_data)) = borrow.get("__map_data__").cloned() {
+                            let is_weak = map_data.borrow().is_weak;
                             match key {
-                                "size" if !map_data.borrow().is_weak => return Value::Number(map_data.borrow().entries.len() as f64),
-                                "set" => return Value::VmNativeFunction(BUILTIN_MAP_SET),
-                                "get" => return Value::VmNativeFunction(BUILTIN_MAP_GET),
-                                "has" => return Value::VmNativeFunction(BUILTIN_MAP_HAS),
-                                "delete" => return Value::VmNativeFunction(BUILTIN_MAP_DELETE),
-                                "keys" if !map_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_MAP_KEYS),
-                                "values" if !map_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_MAP_VALUES),
-                                "entries" if !map_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
-                                "forEach" if !map_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
-                                "clear" if !map_data.borrow().is_weak => return Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                                "size" if !is_weak => return Value::Number(map_data.borrow().entries.len() as f64),
+                                "set" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET });
+                                }
+                                "get" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET });
+                                }
+                                "has" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS });
+                                }
+                                "delete" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE });
+                                }
+                                "keys" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_KEYS),
+                                "values" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_VALUES),
+                                "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
+                                "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
+                                "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
                                 _ => {}
                             }
                         }
@@ -14588,15 +14636,31 @@ impl<'gc> VM<'gc> {
             }
             Value::VmMap(map) => match key {
                 "size" => Value::Number(map.borrow().entries.len() as f64),
-                "set" => Value::VmNativeFunction(BUILTIN_MAP_SET),
-                "get" => Value::VmNativeFunction(BUILTIN_MAP_GET),
-                "has" => Value::VmNativeFunction(BUILTIN_MAP_HAS),
-                "delete" => Value::VmNativeFunction(BUILTIN_MAP_DELETE),
-                "keys" => Value::VmNativeFunction(BUILTIN_MAP_KEYS),
-                "values" => Value::VmNativeFunction(BUILTIN_MAP_VALUES),
-                "entries" | "@@sym:1" => Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
-                "forEach" => Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
-                "clear" => Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                "set" => Value::VmNativeFunction(if map.borrow().is_weak {
+                    BUILTIN_WEAKMAP_SET
+                } else {
+                    BUILTIN_MAP_SET
+                }),
+                "get" => Value::VmNativeFunction(if map.borrow().is_weak {
+                    BUILTIN_WEAKMAP_GET
+                } else {
+                    BUILTIN_MAP_GET
+                }),
+                "has" => Value::VmNativeFunction(if map.borrow().is_weak {
+                    BUILTIN_WEAKMAP_HAS
+                } else {
+                    BUILTIN_MAP_HAS
+                }),
+                "delete" => Value::VmNativeFunction(if map.borrow().is_weak {
+                    BUILTIN_WEAKMAP_DELETE
+                } else {
+                    BUILTIN_MAP_DELETE
+                }),
+                "keys" if !map.borrow().is_weak => Value::VmNativeFunction(BUILTIN_MAP_KEYS),
+                "values" if !map.borrow().is_weak => Value::VmNativeFunction(BUILTIN_MAP_VALUES),
+                "entries" | "@@sym:1" if !map.borrow().is_weak => Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
+                "forEach" if !map.borrow().is_weak => Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
+                "clear" if !map.borrow().is_weak => Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
                 "toString" => Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING),
                 _ => Value::Undefined,
             },
@@ -16417,21 +16481,44 @@ impl<'gc> VM<'gc> {
             proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
             match ctor_id {
                 BUILTIN_CTOR_MAP | BUILTIN_CTOR_WEAKMAP => {
-                    proto.insert("set".to_string(), Value::VmNativeFunction(BUILTIN_MAP_SET));
-                    proto.insert("get".to_string(), Value::VmNativeFunction(BUILTIN_MAP_GET));
-                    proto.insert("has".to_string(), Value::VmNativeFunction(BUILTIN_MAP_HAS));
-                    proto.insert("delete".to_string(), Value::VmNativeFunction(BUILTIN_MAP_DELETE));
+                    let set_id = if ctor_id == BUILTIN_CTOR_WEAKMAP {
+                        BUILTIN_WEAKMAP_SET
+                    } else {
+                        BUILTIN_MAP_SET
+                    };
+                    let get_id = if ctor_id == BUILTIN_CTOR_WEAKMAP {
+                        BUILTIN_WEAKMAP_GET
+                    } else {
+                        BUILTIN_MAP_GET
+                    };
+                    let has_id = if ctor_id == BUILTIN_CTOR_WEAKMAP {
+                        BUILTIN_WEAKMAP_HAS
+                    } else {
+                        BUILTIN_MAP_HAS
+                    };
+                    let delete_id = if ctor_id == BUILTIN_CTOR_WEAKMAP {
+                        BUILTIN_WEAKMAP_DELETE
+                    } else {
+                        BUILTIN_MAP_DELETE
+                    };
+                    proto.insert("set".to_string(), Value::VmNativeFunction(set_id));
+                    proto.insert("get".to_string(), Value::VmNativeFunction(get_id));
+                    proto.insert("has".to_string(), Value::VmNativeFunction(has_id));
+                    proto.insert("delete".to_string(), Value::VmNativeFunction(delete_id));
                     proto.insert("__nonenumerable_set__".to_string(), Value::Boolean(true));
                     proto.insert("__nonenumerable_get__".to_string(), Value::Boolean(true));
                     proto.insert("__nonenumerable_has__".to_string(), Value::Boolean(true));
                     proto.insert("__nonenumerable_delete__".to_string(), Value::Boolean(true));
                     if ctor_id == BUILTIN_CTOR_MAP {
+                        let size_getter = Self::make_host_fn_with_name_len(ctx, "map.getSize", "get size", 0.0, false);
+                        Self::insert_getter_property_with_attributes(&mut proto, "size", &size_getter, false, true);
                         proto.insert("keys".to_string(), Value::VmNativeFunction(BUILTIN_MAP_KEYS));
                         proto.insert("values".to_string(), Value::VmNativeFunction(BUILTIN_MAP_VALUES));
                         proto.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_MAP_ENTRIES));
                         proto.insert("@@sym:1".to_string(), Value::VmNativeFunction(BUILTIN_MAP_ENTRIES));
                         proto.insert("forEach".to_string(), Value::VmNativeFunction(BUILTIN_MAP_FOREACH));
                         proto.insert("clear".to_string(), Value::VmNativeFunction(BUILTIN_MAP_CLEAR));
+                        proto.insert("__nonenumerable_size__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_keys__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_values__".to_string(), Value::Boolean(true));
                         proto.insert("__nonenumerable_entries__".to_string(), Value::Boolean(true));
@@ -28253,9 +28340,49 @@ impl<'gc> VM<'gc> {
             },
             _ => None,
         };
+        let receiver_map_is_weak = receiver_map.map(|m| m.borrow().is_weak);
+        if (matches!(
+            id,
+            BUILTIN_MAP_SET
+                | BUILTIN_MAP_GET
+                | BUILTIN_MAP_HAS
+                | BUILTIN_MAP_DELETE
+                | BUILTIN_MAP_KEYS
+                | BUILTIN_MAP_VALUES
+                | BUILTIN_MAP_ENTRIES
+                | BUILTIN_MAP_FOREACH
+                | BUILTIN_MAP_CLEAR
+        ) && receiver_map_is_weak != Some(false))
+            || (matches!(
+                id,
+                BUILTIN_WEAKMAP_SET | BUILTIN_WEAKMAP_GET | BUILTIN_WEAKMAP_HAS | BUILTIN_WEAKMAP_DELETE
+            ) && receiver_map_is_weak != Some(true))
+        {
+            let (proto_name, method_name) = match id {
+                BUILTIN_MAP_SET => ("Map", "set"),
+                BUILTIN_MAP_GET => ("Map", "get"),
+                BUILTIN_MAP_HAS => ("Map", "has"),
+                BUILTIN_MAP_DELETE => ("Map", "delete"),
+                BUILTIN_MAP_KEYS => ("Map", "keys"),
+                BUILTIN_MAP_VALUES => ("Map", "values"),
+                BUILTIN_MAP_ENTRIES => ("Map", "entries"),
+                BUILTIN_MAP_FOREACH => ("Map", "forEach"),
+                BUILTIN_MAP_CLEAR => ("Map", "clear"),
+                BUILTIN_WEAKMAP_SET => ("WeakMap", "set"),
+                BUILTIN_WEAKMAP_GET => ("WeakMap", "get"),
+                BUILTIN_WEAKMAP_HAS => ("WeakMap", "has"),
+                BUILTIN_WEAKMAP_DELETE => ("WeakMap", "delete"),
+                _ => unreachable!(),
+            };
+            self.throw_type_error(
+                ctx,
+                &format!("{}.prototype.{} called on incompatible receiver", proto_name, method_name),
+            );
+            return Value::Undefined;
+        }
         if let Some(m) = receiver_map {
             match id {
-                BUILTIN_MAP_SET => {
+                BUILTIN_MAP_SET | BUILTIN_WEAKMAP_SET => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let val = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let mut borrow = m.borrow_mut(ctx);
@@ -28269,7 +28396,7 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     // Update existing key or insert new
-                    if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_equal(k, &key)) {
+                    if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_same_zero(k, &key)) {
                         entry.1 = val;
                     } else {
                         borrow.entries.push((key, val));
@@ -28277,27 +28404,27 @@ impl<'gc> VM<'gc> {
                     drop(borrow);
                     return receiver.clone(); // Map.set returns the Map itself
                 }
-                BUILTIN_MAP_GET => {
+                BUILTIN_MAP_GET | BUILTIN_WEAKMAP_GET => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let borrow = m.borrow();
                     let val = borrow
                         .entries
                         .iter()
-                        .find(|(k, _)| self.values_equal(k, &key))
+                        .find(|(k, _)| self.values_same_zero(k, &key))
                         .map(|(_, v)| v.clone())
                         .unwrap_or(Value::Undefined);
                     return val;
                 }
-                BUILTIN_MAP_HAS => {
+                BUILTIN_MAP_HAS | BUILTIN_WEAKMAP_HAS => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let borrow = m.borrow();
-                    return Value::Boolean(borrow.entries.iter().any(|(k, _)| self.values_equal(k, &key)));
+                    return Value::Boolean(borrow.entries.iter().any(|(k, _)| self.values_same_zero(k, &key)));
                 }
-                BUILTIN_MAP_DELETE => {
+                BUILTIN_MAP_DELETE | BUILTIN_WEAKMAP_DELETE => {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = m.borrow_mut(ctx);
                     let len_before = borrow.entries.len();
-                    borrow.entries.retain(|(k, _)| !self.values_equal(k, &key));
+                    borrow.entries.retain(|(k, _)| !self.values_same_zero(k, &key));
                     return Value::Boolean(borrow.entries.len() < len_before);
                 }
                 BUILTIN_MAP_CLEAR => {
@@ -28314,14 +28441,19 @@ impl<'gc> VM<'gc> {
                     return self.make_map_iterator(ctx, receiver.clone(), "entry");
                 }
                 BUILTIN_MAP_FOREACH => {
-                    if let Some(callback) = args.first()
-                        && self.is_value_callable(callback)
-                    {
-                        let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
-                        let map_ref = receiver.clone();
-                        let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        for (k, v) in &entries {
-                            let _ = self.vm_call_function_value(ctx, callback, &this_arg, &[v.clone(), k.clone(), map_ref.clone()]);
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        self.throw_type_error(ctx, "Value is not a function");
+                        return Value::Undefined;
+                    }
+
+                    let entries: Vec<(Value<'gc>, Value<'gc>)> = m.borrow().entries.clone();
+                    let map_ref = receiver.clone();
+                    let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    for (k, v) in &entries {
+                        if let Err(err) = self.vm_call_function_value(ctx, &callback, &this_arg, &[v.clone(), k.clone(), map_ref.clone()]) {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
                         }
                     }
                     return Value::Undefined;

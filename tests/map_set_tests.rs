@@ -649,6 +649,77 @@ fn test_map_groupby_normalizes_negative_zero_keys() {
 }
 
 #[test]
+fn test_map_prototype_methods_have_expected_metadata() {
+    let result = evaluate_script(
+        r#"
+        const sizeDesc = Object.getOwnPropertyDescriptor(Map.prototype, "size");
+        Map.prototype.get.name === "get" &&
+        Map.prototype.get.length === 1 &&
+        Map.prototype.set.name === "set" &&
+        Map.prototype.set.length === 2 &&
+        Map.prototype.clear.name === "clear" &&
+        Map.prototype.clear.length === 0 &&
+        typeof sizeDesc.get === "function" &&
+        sizeDesc.get.name === "get size" &&
+        sizeDesc.get.length === 0
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_map_methods_reject_weakmap_receiver_and_use_same_value_zero() {
+    let result = evaluate_script(
+        r#"
+        const map = new Map();
+        map.set(NaN, 1);
+        let weakMapRejected = false;
+        try {
+          Map.prototype.get.call(new WeakMap(), {});
+        } catch (err) {
+          weakMapRejected = err instanceof TypeError;
+        }
+        weakMapRejected && map.get(NaN) === 1 && map.has(NaN) === true
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_map_for_each_validates_callback_and_propagates_errors() {
+    let result = evaluate_script(
+        r#"
+        const map = new Map([[1, 2]]);
+        let invalidRejected = false;
+        try {
+          map.forEach({});
+        } catch (err) {
+          invalidRejected = err instanceof TypeError;
+        }
+
+        let abruptRejected = false;
+        try {
+          map.forEach(function() { throw new Error("boom"); });
+        } catch (err) {
+          abruptRejected = err instanceof Error;
+        }
+
+        invalidRejected && abruptRejected
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_set_constructor_uses_add_for_iterables() {
     let result = evaluate_script(
         r#"

@@ -1362,6 +1362,10 @@ impl<'gc> Compiler<'gc> {
                 if is_last {
                     self.locals.truncate(saved_locals);
                 } else {
+                    if self.locals.len() > saved_locals {
+                        self.chunk.write_opcode(Opcode::ClearLocalCells);
+                        self.chunk.write_byte(saved_locals as u8);
+                    }
                     self.end_block_scope(saved_locals);
                 }
 
@@ -1547,13 +1551,14 @@ impl<'gc> Compiler<'gc> {
                     false
                 };
                 let saved_init_locals = self.locals.len();
+                let saved_force_local = self.force_local_let;
                 if is_lexical_init && self.scope_depth == 0 {
                     self.force_local_let = true;
                 }
                 if let Some(init) = &for_stmt.init {
                     self.compile_statement(init, false)?;
                 }
-                self.force_local_let = false;
+                self.force_local_let = saved_force_local;
                 self.completion_var = body_cv;
 
                 // Collect local slots for let/const-declared variables in the
@@ -2178,6 +2183,10 @@ impl<'gc> Compiler<'gc> {
                     self.compile_statement(s, false)?;
                 }
                 if is_lexical_binding {
+                    if self.locals.len() > body_saved {
+                        self.chunk.write_opcode(Opcode::ClearLocalCells);
+                        self.chunk.write_byte(body_saved as u8);
+                    }
                     self.end_block_scope(body_saved);
                 }
 
@@ -2220,6 +2229,10 @@ impl<'gc> Compiler<'gc> {
                 }
 
                 if is_lexical_binding {
+                    if self.locals.len() > saved_loop_locals {
+                        self.chunk.write_opcode(Opcode::ClearLocalCells);
+                        self.chunk.write_byte(saved_loop_locals as u8);
+                    }
                     self.end_block_scope(saved_loop_locals);
                     if forced_local {
                         self.scope_depth = 0;
@@ -2804,6 +2817,8 @@ impl<'gc> Compiler<'gc> {
                 let old_depth = self.scope_depth;
                 let old_loops = std::mem::take(&mut self.loop_stack);
                 let old_strict = self.current_strict;
+                let old_block_stmt_depth = self.block_stmt_depth;
+                let old_force_local_let = self.force_local_let;
                 // Save and set up parent scope info for closure capture
                 let old_parent_locals = std::mem::take(&mut self.parent_locals);
                 let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
@@ -2832,6 +2847,8 @@ impl<'gc> Compiler<'gc> {
                 self.allow_super_call = if self.allow_super_in_arrow_iife { old_allow_super } else { false };
                 self.function_depth = old_function_depth.saturating_add(1);
                 self.scope_depth = 1;
+                self.block_stmt_depth = 0;
+                self.force_local_let = false;
                 let mut non_rest_count = 0u8;
                 let mut fn_has_rest = false;
                 for (param_index, param) in params.iter().enumerate() {
@@ -2908,6 +2925,8 @@ impl<'gc> Compiler<'gc> {
                 self.loop_stack = old_loops;
                 self.current_strict = old_strict;
                 self.allow_super_call = old_allow_super;
+                self.block_stmt_depth = old_block_stmt_depth;
+                self.force_local_let = old_force_local_let;
                 self.parent_locals = old_parent_locals;
                 self.parent_upvalues = old_parent_upvalues;
                 self.upvalues = old_upvalues;
@@ -3115,6 +3134,10 @@ impl<'gc> Compiler<'gc> {
                     }
                     if self.scope_depth > 0 {
                         let body_locals_count = self.locals.len() - body_locals_start;
+                        if body_locals_count > 0 {
+                            self.chunk.write_opcode(Opcode::ClearLocalCells);
+                            self.chunk.write_byte(body_locals_start as u8);
+                        }
                         for _ in 0..body_locals_count {
                             self.chunk.write_opcode(Opcode::Pop);
                         }
@@ -3278,6 +3301,10 @@ impl<'gc> Compiler<'gc> {
 
                     if self.scope_depth > 0 {
                         let body_locals_count = self.locals.len() - body_locals_start;
+                        if body_locals_count > 0 {
+                            self.chunk.write_opcode(Opcode::ClearLocalCells);
+                            self.chunk.write_byte(body_locals_start as u8);
+                        }
                         for _ in 0..body_locals_count {
                             self.chunk.write_opcode(Opcode::Pop);
                         }
@@ -3327,17 +3354,29 @@ impl<'gc> Compiler<'gc> {
 
                     // Clean up for-of temporary locals (TDZ var, iterator, next_fn, hoisted vars)
                     if self.scope_depth > 0 && !forced_local && !is_tdz {
+                        if self.locals.len() > saved_locals {
+                            self.chunk.write_opcode(Opcode::ClearLocalCells);
+                            self.chunk.write_byte(saved_locals as u8);
+                        }
                         self.end_block_scope(saved_locals);
                     }
                 }
 
                 // Restore scope_depth and clean up forced-local stack slots
                 if is_tdz {
+                    if self.locals.len() > saved_locals {
+                        self.chunk.write_opcode(Opcode::ClearLocalCells);
+                        self.chunk.write_byte(saved_locals as u8);
+                    }
                     self.end_block_scope(saved_locals);
                     if forced_local {
                         self.scope_depth = 0;
                     }
                 } else if forced_local {
+                    if self.locals.len() > saved_locals {
+                        self.chunk.write_opcode(Opcode::ClearLocalCells);
+                        self.chunk.write_byte(saved_locals as u8);
+                    }
                     self.end_block_scope(saved_locals);
                     self.scope_depth = 0;
                 }
@@ -5200,6 +5239,8 @@ impl<'gc> Compiler<'gc> {
                 let old_depth = self.scope_depth;
                 let old_loops = std::mem::take(&mut self.loop_stack);
                 let old_strict = self.current_strict;
+                let old_block_stmt_depth = self.block_stmt_depth;
+                let old_force_local_let = self.force_local_let;
                 // Save and set up parent scope info for closure capture
                 let old_parent_locals = std::mem::take(&mut self.parent_locals);
                 let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
@@ -5228,6 +5269,8 @@ impl<'gc> Compiler<'gc> {
                 self.allow_super_call = false;
                 self.function_depth = old_function_depth.saturating_add(1);
                 self.scope_depth = 1;
+                self.block_stmt_depth = 0;
+                self.force_local_let = false;
                 let mut arrow_non_rest = 0u8;
                 let mut arrow_has_rest = false;
                 for (param_index, param) in params.iter().enumerate() {
@@ -5347,6 +5390,8 @@ impl<'gc> Compiler<'gc> {
                 self.loop_stack = old_loops;
                 self.current_strict = old_strict;
                 self.allow_super_call = old_allow_super;
+                self.block_stmt_depth = old_block_stmt_depth;
+                self.force_local_let = old_force_local_let;
                 self.parent_locals = old_parent_locals;
                 self.parent_upvalues = old_parent_upvalues;
                 self.upvalues = old_upvalues;
@@ -7970,6 +8015,10 @@ impl<'gc> Compiler<'gc> {
             self.compile_statement(s, false)?;
         }
         if is_lexical {
+            if self.locals.len() > body_saved {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(body_saved as u8);
+            }
             self.end_block_scope(body_saved);
         }
 
@@ -7991,6 +8040,10 @@ impl<'gc> Compiler<'gc> {
         }
 
         if forced_local {
+            if self.locals.len() > saved_locals {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(saved_locals as u8);
+            }
             self.end_block_scope(saved_locals);
         }
 
@@ -8117,6 +8170,10 @@ impl<'gc> Compiler<'gc> {
             self.compile_statement(s, false)?;
         }
         if is_lexical {
+            if self.locals.len() > body_saved {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(body_saved as u8);
+            }
             self.end_block_scope(body_saved);
         }
 
@@ -8138,6 +8195,10 @@ impl<'gc> Compiler<'gc> {
         }
 
         if forced_local {
+            if self.locals.len() > saved_locals {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(saved_locals as u8);
+            }
             self.end_block_scope(saved_locals);
         }
 
@@ -8251,6 +8312,10 @@ impl<'gc> Compiler<'gc> {
             self.compile_statement(s, false)?;
         }
         if is_lexical {
+            if self.locals.len() > body_saved {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(body_saved as u8);
+            }
             self.end_block_scope(body_saved);
         }
 
@@ -8271,6 +8336,10 @@ impl<'gc> Compiler<'gc> {
         }
 
         if forced_local {
+            if self.locals.len() > saved_locals {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(saved_locals as u8);
+            }
             self.end_block_scope(saved_locals);
         }
 
@@ -8381,6 +8450,10 @@ impl<'gc> Compiler<'gc> {
             self.compile_statement(s, false)?;
         }
         if is_lexical {
+            if self.locals.len() > body_saved {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(body_saved as u8);
+            }
             self.end_block_scope(body_saved);
         }
 
@@ -8401,6 +8474,10 @@ impl<'gc> Compiler<'gc> {
         }
 
         if forced_local {
+            if self.locals.len() > saved_locals {
+                self.chunk.write_opcode(Opcode::ClearLocalCells);
+                self.chunk.write_byte(saved_locals as u8);
+            }
             self.end_block_scope(saved_locals);
         }
 
@@ -8425,6 +8502,8 @@ impl<'gc> Compiler<'gc> {
         let old_depth = self.scope_depth;
         let old_loops = std::mem::take(&mut self.loop_stack);
         let old_label = self.pending_label.take();
+        let old_block_stmt_depth = self.block_stmt_depth;
+        let old_force_local_let = self.force_local_let;
         // Save and set up parent scope info for closure capture
         let old_parent_locals = std::mem::take(&mut self.parent_locals);
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
@@ -8443,6 +8522,8 @@ impl<'gc> Compiler<'gc> {
 
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
+        self.block_stmt_depth = 0;
+        self.force_local_let = false;
 
         // Eagerly capture parent locals/upvalues so deeper nested closures can
         // resolve transitive captures through intermediate functions that do
@@ -8552,6 +8633,8 @@ impl<'gc> Compiler<'gc> {
         self.scope_depth = old_depth;
         self.loop_stack = old_loops;
         self.pending_label = old_label;
+        self.block_stmt_depth = old_block_stmt_depth;
+        self.force_local_let = old_force_local_let;
         self.parent_locals = old_parent_locals;
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
@@ -8813,6 +8896,8 @@ impl<'gc> Compiler<'gc> {
         let old_depth = self.scope_depth;
         let old_loops = std::mem::take(&mut self.loop_stack);
         let old_label = self.pending_label.take();
+        let old_block_stmt_depth = self.block_stmt_depth;
+        let old_force_local_let = self.force_local_let;
         let old_parent_locals = std::mem::take(&mut self.parent_locals);
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
@@ -8839,6 +8924,8 @@ impl<'gc> Compiler<'gc> {
         self.allow_super_call = false;
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
+        self.block_stmt_depth = 0;
+        self.force_local_let = false;
 
         // Named async generator expression: immutable binding before params
         if is_expression
@@ -8933,6 +9020,8 @@ impl<'gc> Compiler<'gc> {
         self.scope_depth = old_depth;
         self.loop_stack = old_loops;
         self.pending_label = old_label;
+        self.block_stmt_depth = old_block_stmt_depth;
+        self.force_local_let = old_force_local_let;
         self.parent_locals = old_parent_locals;
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
@@ -8976,6 +9065,8 @@ impl<'gc> Compiler<'gc> {
         let old_depth = self.scope_depth;
         let old_loops = std::mem::take(&mut self.loop_stack);
         let old_label = self.pending_label.take();
+        let old_block_stmt_depth = self.block_stmt_depth;
+        let old_force_local_let = self.force_local_let;
         let old_parent_locals = std::mem::take(&mut self.parent_locals);
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
@@ -9002,6 +9093,8 @@ impl<'gc> Compiler<'gc> {
         self.allow_super_call = false;
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
+        self.block_stmt_depth = 0;
+        self.force_local_let = false;
 
         // Named generator expression: immutable binding before params
         if is_expression
@@ -9095,6 +9188,8 @@ impl<'gc> Compiler<'gc> {
         self.scope_depth = old_depth;
         self.loop_stack = old_loops;
         self.pending_label = old_label;
+        self.block_stmt_depth = old_block_stmt_depth;
+        self.force_local_let = old_force_local_let;
         self.parent_locals = old_parent_locals;
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;
@@ -9987,6 +10082,8 @@ impl<'gc> Compiler<'gc> {
         let old_depth = self.scope_depth;
         let old_loops = std::mem::take(&mut self.loop_stack);
         let old_strict = self.current_strict;
+        let old_block_stmt_depth = self.block_stmt_depth;
+        let old_force_local_let = self.force_local_let;
         let old_parent_locals = std::mem::take(&mut self.parent_locals);
         let old_parent_upvalues = std::mem::take(&mut self.parent_upvalues);
         let old_upvalues = std::mem::take(&mut self.upvalues);
@@ -10014,6 +10111,8 @@ impl<'gc> Compiler<'gc> {
         self.allow_super_call = true;
         self.function_depth = old_function_depth.saturating_add(1);
         self.scope_depth = 1;
+        self.block_stmt_depth = 0;
+        self.force_local_let = false;
         let mut ctor_non_rest = 0u8;
         for (param_index, p) in ctor_params.iter().enumerate() {
             match p {
@@ -10084,6 +10183,8 @@ impl<'gc> Compiler<'gc> {
         self.loop_stack = old_loops;
         self.current_strict = old_strict;
         self.allow_super_call = old_allow_super;
+        self.block_stmt_depth = old_block_stmt_depth;
+        self.force_local_let = old_force_local_let;
         self.parent_locals = old_parent_locals;
         self.parent_upvalues = old_parent_upvalues;
         self.upvalues = old_upvalues;

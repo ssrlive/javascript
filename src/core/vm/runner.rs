@@ -169,6 +169,7 @@ impl<'gc> VM<'gc> {
                 Opcode::AssertIterResult => self.run_opcode_assert_iter_result(ctx)?,
                 Opcode::BoxLocal => self.run_opcode_box_local(ctx)?,
                 Opcode::ReboxLocal => self.run_opcode_rebox_local(ctx)?,
+                Opcode::ClearLocalCells => self.run_opcode_clear_local_cells()?,
                 Opcode::InitNamedFnSelf => self.run_opcode_init_named_fn_self(ctx)?,
                 Opcode::FreezeTemplate => self.run_opcode_freeze_template(ctx)?,
             };
@@ -3531,7 +3532,7 @@ impl<'gc> VM<'gc> {
         };
         let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
         let mut captures: Vec<VmUpvalueCell<'gc>> = Vec::with_capacity(capture_count);
-        for _ in 0..capture_count {
+        for _cap_i in 0..capture_count {
             let is_local = self.read_byte() != 0;
             let index = self.read_byte() as usize;
             if is_local {
@@ -3562,16 +3563,9 @@ impl<'gc> VM<'gc> {
                     } else {
                         Value::Undefined
                     };
-                    let cell = new_gc_cell_ptr(ctx, val);
+                    let cell = new_gc_cell_ptr(ctx, val.clone());
                     captures.push(cell);
-                    // Only persist the cell in module mode where live import
-                    // bindings require shared cells.  In script mode, each
-                    // closure gets its own cell so per-iteration bindings
-                    // (for-of/for-in with const/let) work correctly and stale
-                    // cells don't leak across block scopes (breaking TDZ).
-                    if self.is_module_mode {
-                        self.top_level_cells.insert(index, cell);
-                    }
+                    self.top_level_cells.insert(index, cell);
                 }
             } else {
                 // Capture from current frame's upvalues — share the cell
@@ -8779,9 +8773,6 @@ impl<'gc> VM<'gc> {
         if let Some(frame) = self.frames.last_mut() {
             frame.local_cells.insert(index, cell);
         } else {
-            // BoxLocal is only emitted for class-name heritage pre-boxing,
-            // where a shared cell is required so closures in the heritage
-            // expression and the later SetLocal share the same binding.
             self.top_level_cells.insert(index, cell);
         }
         Ok(OpcodeAction::Continue)
@@ -8815,6 +8806,19 @@ impl<'gc> VM<'gc> {
             frame.local_cells.insert(index, new_cell);
         } else {
             self.top_level_cells.insert(index, new_cell);
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::ClearLocalCells — remove all local_cells / top_level_cells entries
+    // with index >= start_index.  Used at the end of for-of/for-in body iterations
+    // to prevent stale cells from leaking into subsequent iterations.
+    fn run_opcode_clear_local_cells(&mut self) -> Result<OpcodeAction<'gc>, JSError> {
+        let start_index = self.read_byte() as usize;
+        if let Some(frame) = self.frames.last_mut() {
+            frame.local_cells.retain(|&k, _| k < start_index);
+        } else {
+            self.top_level_cells.retain(|&k, _| k < start_index);
         }
         Ok(OpcodeAction::Continue)
     }

@@ -14578,6 +14578,7 @@ impl<'gc> VM<'gc> {
                     | Opcode::NewCall
                     | Opcode::BoxLocal
                     | Opcode::ReboxLocal
+                    | Opcode::ClearLocalCells
                     | Opcode::CallSpread
                     | Opcode::ThrowIfNotConstructor,
                 ) => {
@@ -19849,6 +19850,7 @@ impl<'gc> VM<'gc> {
                                         | Opcode::GetArguments
                                         | Opcode::BoxLocal
                                         | Opcode::ReboxLocal
+                                        | Opcode::ClearLocalCells
                                         | Opcode::CallSpread
                                         | Opcode::ThrowIfNotConstructor,
                                     ) => pc += 1,

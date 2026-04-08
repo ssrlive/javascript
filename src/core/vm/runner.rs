@@ -7866,22 +7866,10 @@ impl<'gc> VM<'gc> {
                 self.stack.pop(); // pop constructor
                 match id {
                     BUILTIN_CTOR_MAP => {
-                        let mut entries = Vec::new();
-                        // new Map(iterable) — iterable is an array of [key, value] pairs
-                        if let Some(Value::VmArray(arr)) = args.first() {
-                            for item in arr.borrow().iter() {
-                                if let Value::VmArray(pair) = item {
-                                    let p = pair.borrow();
-                                    let k = p.first().cloned().unwrap_or(Value::Undefined);
-                                    let v = p.get(1).cloned().unwrap_or(Value::Undefined);
-                                    entries.push((k, v));
-                                } else {
-                                    entries.push((item.clone(), Value::Undefined));
-                                }
-                            }
-                        }
-                        self.stack
-                            .push(Value::VmMap(new_gc_cell_ptr(ctx, VmMapData { entries, is_weak: false })));
+                        self.new_target_stack.push(Value::VmNativeFunction(id));
+                        let out = self.call_builtin(ctx, id, &args);
+                        self.new_target_stack.pop();
+                        self.stack.push(out);
                     }
                     BUILTIN_CTOR_SET => {
                         self.new_target_stack.push(Value::VmNativeFunction(id));

@@ -507,6 +507,85 @@ fn test_map_constructor_metadata_matches_spec() {
 }
 
 #[test]
+fn test_map_constructor_requires_new() {
+    let result = evaluate_script(
+        r#"
+        try {
+          Map();
+          false
+        } catch (err) {
+          err instanceof TypeError
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_new_map_uses_map_prototype() {
+    let result = evaluate_script(
+        r#"
+        Object.getPrototypeOf(new Map()) === Map.prototype
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_map_constructor_uses_set_for_iterables() {
+    let result = evaluate_script(
+        r#"
+        const originalSet = Map.prototype.set;
+        let counter = 0;
+        Map.prototype.set = function(key, value) {
+          counter++;
+          return originalSet.call(this, key, value);
+        };
+        new Map([["a", 1], ["b", 2]]);
+        counter === 2
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_map_constructor_closes_iterator_when_set_throws() {
+    let result = evaluate_script(
+        r#"
+        let closed = 0;
+        const iterable = {
+          [Symbol.iterator]() {
+            return {
+              next() { return { value: ["a", 1], done: false }; },
+              return() { closed++; }
+            };
+          }
+        };
+        Map.prototype.set = function() { throw new Error("boom"); };
+        try {
+          new Map(iterable);
+          false
+        } catch (err) {
+          closed === 1 && err instanceof Error
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_set_constructor_uses_add_for_iterables() {
     let result = evaluate_script(
         r#"

@@ -17608,6 +17608,141 @@ impl<'gc> VM<'gc> {
         Err(crate::raise_type_error!("Cannot convert object to primitive value"))
     }
 
+    fn map_constructor_consume_iterable(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        map_value: &Value<'gc>,
+        adder_base: &Value<'gc>,
+        iterable: &Value<'gc>,
+    ) -> Value<'gc> {
+        let adder = self.read_named_property(ctx, adder_base, "set");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        if !self.is_value_callable(&adder) {
+            self.throw_type_error(ctx, "Map.prototype.set is not callable");
+            return Value::Undefined;
+        }
+
+        let iterator_method = self.read_named_property(ctx, iterable, "@@sym:1");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        if matches!(iterator_method, Value::Undefined | Value::Null) {
+            self.throw_type_error(ctx, "Value is not iterable");
+            return Value::Undefined;
+        }
+        if !self.is_value_callable(&iterator_method) {
+            self.throw_type_error(ctx, "Map constructor iterator method is not callable");
+            return Value::Undefined;
+        }
+
+        let iterator = match self.vm_call_function_value(ctx, &iterator_method, iterable, &[]) {
+            Ok(v) => v,
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                return Value::Undefined;
+            }
+        };
+        if !matches!(
+            iterator,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) {
+            self.throw_type_error(ctx, "Map constructor iterator must return an object");
+            return Value::Undefined;
+        }
+
+        let next_method = self.read_named_property(ctx, &iterator, "next");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        if !self.is_value_callable(&next_method) {
+            self.throw_type_error(ctx, "Map constructor iterator next is not callable");
+            return Value::Undefined;
+        }
+
+        loop {
+            let next = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                    return Value::Undefined;
+                }
+            };
+            if !matches!(
+                next,
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            ) {
+                self.throw_type_error(ctx, "Map constructor iterator must return an object");
+                return Value::Undefined;
+            }
+
+            let done = self.read_named_property(ctx, &next, "done");
+            if self.pending_throw.is_some() {
+                let original = self.pending_throw.take();
+                self.iterator_close(ctx, &iterator);
+                if let Some(original) = original {
+                    self.pending_throw = Some(original);
+                }
+                return Value::Undefined;
+            }
+            if Self::value_is_truthy(&done) {
+                break;
+            }
+
+            let next_item = self.read_named_property(ctx, &next, "value");
+            if self.pending_throw.is_some() {
+                let original = self.pending_throw.take();
+                self.iterator_close(ctx, &iterator);
+                if let Some(original) = original {
+                    self.pending_throw = Some(original);
+                }
+                return Value::Undefined;
+            }
+            if !matches!(
+                next_item,
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            ) || next_item.is_symbol_value()
+            {
+                let original = self.make_type_error_object(ctx, "Map iterator value is not an object");
+                self.pending_throw = Some(original.clone());
+                self.iterator_close(ctx, &iterator);
+                self.pending_throw = Some(original);
+                return Value::Undefined;
+            }
+
+            let key = self.read_named_property(ctx, &next_item, "0");
+            if self.pending_throw.is_some() {
+                let original = self.pending_throw.take();
+                self.iterator_close(ctx, &iterator);
+                if let Some(original) = original {
+                    self.pending_throw = Some(original);
+                }
+                return Value::Undefined;
+            }
+
+            let value = self.read_named_property(ctx, &next_item, "1");
+            if self.pending_throw.is_some() {
+                let original = self.pending_throw.take();
+                self.iterator_close(ctx, &iterator);
+                if let Some(original) = original {
+                    self.pending_throw = Some(original);
+                }
+                return Value::Undefined;
+            }
+
+            if let Err(err) = self.vm_call_function_value(ctx, &adder, map_value, &[key, value]) {
+                let original = self.vm_value_from_error(ctx, &err);
+                self.pending_throw = Some(original.clone());
+                self.iterator_close(ctx, &iterator);
+                self.pending_throw = Some(original);
+                return Value::Undefined;
+            }
+        }
+
+        map_value.clone()
+    }
+
     fn vm_construct_aggregate_error(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -18475,6 +18610,51 @@ impl<'gc> VM<'gc> {
                 }
 
                 set_value
+            }
+            BUILTIN_CTOR_MAP => {
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    self.throw_type_error(ctx, "Map constructor requires 'new'");
+                    return Value::Undefined;
+                };
+
+                let proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, &new_target, "Map") {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
+
+                let map_handle = new_gc_cell_ptr(
+                    ctx,
+                    VmMapData {
+                        entries: Vec::new(),
+                        is_weak: false,
+                    },
+                );
+                let mut map_obj = IndexMap::new();
+                map_obj.insert("__map_data__".to_string(), Value::VmMap(map_handle));
+                map_obj.insert("__type__".to_string(), Value::from("Map"));
+                if let Some(proto_value) = proto.clone() {
+                    map_obj.insert("__proto__".to_string(), proto_value);
+                }
+                let map_value = Value::VmObject(new_gc_cell_ptr(ctx, map_obj));
+
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    return map_value;
+                }
+
+                let adder_base = if let Some(proto_value) = proto {
+                    proto_value
+                } else {
+                    self.read_named_property(ctx, &self.globals.get("Map").cloned().unwrap_or(Value::Undefined), "prototype")
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                self.map_constructor_consume_iterable(ctx, &map_value, &adder_base, &iterable)
             }
             BUILTIN_PROMISE_ALL => {
                 let mut settled_values: Vec<Value<'gc>> = Vec::new();
@@ -23626,27 +23806,39 @@ impl<'gc> VM<'gc> {
                 }
             }
             BUILTIN_CTOR_MAP => {
+                if self
+                    .new_target_stack
+                    .last()
+                    .is_none_or(|new_target| matches!(new_target, Value::Undefined))
+                {
+                    self.throw_type_error(ctx, "Map constructor requires 'new'");
+                    return Value::Undefined;
+                }
                 if let Value::VmObject(obj) = receiver {
-                    let mut entries = Vec::new();
-                    if let Some(Value::VmArray(arr)) = args.first() {
-                        for item in arr.borrow().iter() {
-                            if let Value::VmArray(pair) = item {
-                                let p = pair.borrow();
-                                let k = p.first().cloned().unwrap_or(Value::Undefined);
-                                let v = p.get(1).cloned().unwrap_or(Value::Undefined);
-                                entries.push((k, v));
-                            } else {
-                                entries.push((item.clone(), Value::Undefined));
-                            }
-                        }
+                    let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                    let adder_base = obj.borrow().get("__proto__").cloned().unwrap_or_else(|| {
+                        self.read_named_property(ctx, &self.globals.get("Map").cloned().unwrap_or(Value::Undefined), "prototype")
+                    });
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
                     }
                     let mut borrow = obj.borrow_mut(ctx);
                     borrow.insert(
                         "__map_data__".to_string(),
-                        Value::VmMap(new_gc_cell_ptr(ctx, VmMapData { entries, is_weak: false })),
+                        Value::VmMap(new_gc_cell_ptr(
+                            ctx,
+                            VmMapData {
+                                entries: Vec::new(),
+                                is_weak: false,
+                            },
+                        )),
                     );
                     borrow.insert("__type__".to_string(), Value::from("Map"));
-                    return receiver.clone();
+                    drop(borrow);
+                    if matches!(iterable, Value::Undefined | Value::Null) {
+                        return receiver.clone();
+                    }
+                    return self.map_constructor_consume_iterable(ctx, receiver, &adder_base, &iterable);
                 }
             }
             BUILTIN_CTOR_SET => {

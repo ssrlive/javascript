@@ -971,6 +971,16 @@ pub struct VM<'gc> {
     // with its own builtins, globals, and constructors. Use Option + take() pattern
     // for borrow-checker-safe mutable access.
     child_realms: Vec<Option<Box<VM<'gc>>>>,
+    // Raw pointer to parent VM for cross-realm callback (child → parent).
+    // Set only during __realm_eval__ dispatch. When the child encounters a
+    // VmFunction/VmClosure whose IP exceeds its own chunk, it calls through
+    // this pointer so that parent-compiled functions (proxy traps, closures)
+    // execute on the parent VM with the parent's globals.
+    // SAFETY: The pointer is valid for the duration of the child's call_host_fn
+    // invocation. The parent's &mut is "suspended" on the call stack and not
+    // accessed concurrently. The child is take()n from child_realms so there
+    // is no aliasing through the parent's data.
+    realm_parent_ptr: Option<*mut VM<'gc>>,
     // REPL compatibility mode: allow lexical declarations to persist across snippets.
     repl_lexical_persist: bool,
     // When handle_throw catches a throw, the target stack depth is saved here.
@@ -1282,6 +1292,7 @@ impl<'gc> VM<'gc> {
             regexp_home_proto_temp: None,
             dynamic_function_kind_override: None,
             child_realms: Vec::new(),
+            realm_parent_ptr: None,
             repl_lexical_persist: false,
             throw_caught_stack_depth: None,
             is_module_mode: false,
@@ -12521,87 +12532,104 @@ impl<'gc> VM<'gc> {
                 proto_for_lookup = Some(Value::VmObject(obj_proto));
             }
             // If key doesn't exist on own properties and proto is a proxy, delegate to proxy's [[Set]]
-            if !key_exists
-                && !is_frozen
-                && !is_readonly
-                && let Some(ref proto_val) = proto_for_lookup
-                && let Value::VmObject(proto_map) = proto_val
-                && proto_map.borrow().contains_key("__proxy_target__")
-            {
-                let setter_key_clone = setter_key.clone();
-                let has_own_setter = borrow.get(&setter_key_clone).is_some();
-                drop(borrow);
-                if !has_own_setter && let Some(result) = self.try_proxy_set(ctx, proto_val, key, val, Some(&setter_receiver))? {
-                    if matches!(result, Value::Boolean(false)) {
-                        if self.current_execution_is_strict() {
-                            let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
-                            self.handle_throw(ctx, &err)?;
-                        }
-                        return Ok(val.clone());
+            // Walk the full prototype chain looking for a proxy trap (spec: OrdinarySet step 2b)
+            if !key_exists && !is_frozen && !is_readonly {
+                let has_own_setter = borrow.get(&setter_key).is_some();
+                let mut proxy_chain = proto_for_lookup.clone();
+                let mut found_proxy = None;
+                let mut chain_depth = 0;
+                while let Some(ref pv) = proxy_chain {
+                    if chain_depth > 128 {
+                        break;
                     }
-                    return Ok(result);
-                }
-                // Re-borrow after try_proxy_set
-                let borrow = map.borrow();
-                let proto_prop = proto_for_lookup
-                    .as_ref()
-                    .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
-                let own_prop_has_getter = matches!(own_prop.as_ref(), Some(Value::Property { getter: Some(_), .. }));
-                let proto_prop_has_getter = matches!(proto_prop.as_ref(), Some(Value::Property { getter: Some(_), .. }));
-                let own_prop_setter = match own_prop.as_ref() {
-                    Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => {
-                        Some((**setter).clone())
+                    chain_depth += 1;
+                    if let Value::VmObject(pm) = pv
+                        && pm.borrow().contains_key("__proxy_target__")
+                    {
+                        found_proxy = Some(pv.clone());
+                        break;
                     }
-                    _ => None,
-                };
-                let proto_prop_setter = match proto_prop.as_ref() {
-                    Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => {
-                        Some((**setter).clone())
-                    }
-                    _ => None,
-                };
-                let has_getter = borrow.get(&getter_key).is_some()
-                    || own_prop_has_getter
-                    || proto_prop_has_getter
-                    || proto_for_lookup
-                        .as_ref()
-                        .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
-                        .is_some();
-                let setter_fn = own_prop_setter
-                    .or_else(|| borrow.get(&setter_key).cloned())
-                    .or(proto_prop_setter)
-                    .or_else(|| {
-                        proto_for_lookup
-                            .as_ref()
-                            .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
-                    });
-                drop(borrow);
-                // Execute setter or store value
-                let getter_only = has_getter && setter_fn.is_none();
-                if let Some(setter_fn_val) = setter_fn {
-                    if self.is_value_callable(&setter_fn_val) {
-                        let saved = std::mem::take(&mut self.try_stack);
-                        let out = self.vm_call_function_value(ctx, &setter_fn_val, &setter_receiver, std::slice::from_ref(val));
-                        self.try_stack = saved;
-                        if let Err(err) = out {
-                            self.set_pending_throw_from_error(&err);
-                        }
-                    }
-                } else if self.check_receiver_namespace_tdz_set(ctx, receiver, key)? {
-                    // Receiver is a module namespace → TDZ check done + TypeError thrown
-                } else if is_frozen || (is_non_ext && !key_exists) || is_readonly || getter_only {
-                    let msg = if getter_only {
-                        format!("Cannot set property {} of object which has only a getter", key)
-                    } else {
-                        format!("Cannot add property {}, object is not extensible", key)
+                    // Walk further
+                    proxy_chain = match pv {
+                        Value::VmObject(m) => m.borrow().get("__proto__").cloned(),
+                        _ => None,
                     };
-                    let err = self.make_type_error_object(ctx, &msg);
-                    self.handle_throw(ctx, &err)?;
-                } else {
-                    let mut b = map.borrow_mut(ctx);
-                    b.insert(key.to_string(), val.clone());
                 }
-                return Ok(val.clone());
+                if let Some(ref proxy_val) = found_proxy {
+                    drop(borrow);
+                    if !has_own_setter && let Some(result) = self.try_proxy_set(ctx, proxy_val, key, val, Some(&setter_receiver))? {
+                        if matches!(result, Value::Boolean(false)) {
+                            if self.current_execution_is_strict() {
+                                let err =
+                                    self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                                self.handle_throw(ctx, &err)?;
+                            }
+                            return Ok(val.clone());
+                        }
+                        return Ok(result);
+                    }
+                    // Re-borrow after try_proxy_set
+                    let borrow = map.borrow();
+                    let proto_prop = proto_for_lookup
+                        .as_ref()
+                        .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
+                    let own_prop_has_getter = matches!(own_prop.as_ref(), Some(Value::Property { getter: Some(_), .. }));
+                    let proto_prop_has_getter = matches!(proto_prop.as_ref(), Some(Value::Property { getter: Some(_), .. }));
+                    let own_prop_setter = match own_prop.as_ref() {
+                        Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => {
+                            Some((**setter).clone())
+                        }
+                        _ => None,
+                    };
+                    let proto_prop_setter = match proto_prop.as_ref() {
+                        Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => {
+                            Some((**setter).clone())
+                        }
+                        _ => None,
+                    };
+                    let has_getter = borrow.get(&getter_key).is_some()
+                        || own_prop_has_getter
+                        || proto_prop_has_getter
+                        || proto_for_lookup
+                            .as_ref()
+                            .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
+                            .is_some();
+                    let setter_fn = own_prop_setter
+                        .or_else(|| borrow.get(&setter_key).cloned())
+                        .or(proto_prop_setter)
+                        .or_else(|| {
+                            proto_for_lookup
+                                .as_ref()
+                                .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
+                        });
+                    drop(borrow);
+                    // Execute setter or store value
+                    let getter_only = has_getter && setter_fn.is_none();
+                    if let Some(setter_fn_val) = setter_fn {
+                        if self.is_value_callable(&setter_fn_val) {
+                            let saved = std::mem::take(&mut self.try_stack);
+                            let out = self.vm_call_function_value(ctx, &setter_fn_val, &setter_receiver, std::slice::from_ref(val));
+                            self.try_stack = saved;
+                            if let Err(err) = out {
+                                self.set_pending_throw_from_error(&err);
+                            }
+                        }
+                    } else if self.check_receiver_namespace_tdz_set(ctx, receiver, key)? {
+                        // Receiver is a module namespace → TDZ check done + TypeError thrown
+                    } else if is_frozen || (is_non_ext && !key_exists) || is_readonly || getter_only {
+                        let msg = if getter_only {
+                            format!("Cannot set property {} of object which has only a getter", key)
+                        } else {
+                            format!("Cannot add property {}, object is not extensible", key)
+                        };
+                        let err = self.make_type_error_object(ctx, &msg);
+                        self.handle_throw(ctx, &err)?;
+                    } else {
+                        let mut b = map.borrow_mut(ctx);
+                        b.insert(key.to_string(), val.clone());
+                    }
+                    return Ok(val.clone());
+                }
             }
             // If the key exists as an own data property (not accessor), just overwrite directly.
             // Do not look at prototype chain for setters.
@@ -13329,7 +13357,83 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(val.clone());
             }
-            log::warn!("SetProperty on non-object: {}", value_to_string(obj));
+            // Primitive base (Number, String, Boolean, Symbol): spec PutValue step 6.a
+            // ToObject(base) wraps in a temporary object; walk prototype chain for setters / proxy traps.
+            let type_name = match obj {
+                Value::Number(_) => Some("Number"),
+                Value::String(_) => Some("String"),
+                Value::Boolean(_) => Some("Boolean"),
+                _ if obj.is_symbol_value() => Some("Symbol"),
+                _ => None,
+            };
+            if let Some(tn) = type_name {
+                if let Some(Value::VmObject(ctor)) = self.globals.get(tn)
+                    && let Some(proto_val) = ctor.borrow().get("prototype").cloned()
+                {
+                    // Walk the prototype chain from Type.prototype looking for a setter or proxy
+                    let mut cur = Some(proto_val);
+                    while let Some(ref cv) = cur {
+                        // Check for proxy set trap
+                        if let Value::VmObject(pm) = cv
+                            && pm.borrow().contains_key("__proxy_target__")
+                            && let Some(result) = self.try_proxy_set(ctx, cv, key, val, Some(obj))?
+                        {
+                            if matches!(result, Value::Boolean(false)) && self.current_execution_is_strict() {
+                                let err =
+                                    self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                                self.handle_throw(ctx, &err)?;
+                            }
+                            return Ok(val.clone());
+                        }
+                        // Check for setter accessor on this chain link
+                        if let Value::VmObject(m) = cv {
+                            let setter_key = format!("__set_{}", key);
+                            let borrow = m.borrow();
+                            if let Some(sf) = borrow.get(&setter_key).cloned() {
+                                drop(borrow);
+                                let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
+                                return Ok(val.clone());
+                            }
+                            if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
+                                && !matches!(&**sf, Value::Undefined)
+                            {
+                                let sf_clone = (**sf).clone();
+                                drop(borrow);
+                                let _ = self.vm_call_function_value(ctx, &sf_clone, obj, std::slice::from_ref(val))?;
+                                return Ok(val.clone());
+                            }
+                            // Check for readonly property
+                            let readonly_key = format!("__readonly_{}__", key);
+                            if matches!(borrow.get(&readonly_key), Some(Value::Boolean(true))) {
+                                drop(borrow);
+                                if self.current_execution_is_strict() {
+                                    let err = self
+                                        .make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                                    self.handle_throw(ctx, &err)?;
+                                }
+                                return Ok(val.clone());
+                            }
+                            cur = borrow.get("__proto__").cloned();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                // Primitive property set with no interceptors: silently ignored (temp wrapper is discarded)
+                // In strict mode this should throw TypeError since the receiver is not an object.
+                if self.current_execution_is_strict() {
+                    let err = self.make_type_error_object(
+                        ctx,
+                        &format!(
+                            "Cannot create property '{}' on {} '{}'",
+                            key,
+                            tn.to_lowercase(),
+                            value_to_string(obj)
+                        ),
+                    );
+                    self.handle_throw(ctx, &err)?;
+                }
+            }
             Ok(val.clone())
         }
     }
@@ -16968,6 +17072,16 @@ impl<'gc> VM<'gc> {
                     self.child_realms[realm_id] = Some(child);
                     return Ok(result);
                 }
+                if *ip >= self.chunk.code.len()
+                    && let Some(parent_ptr) = self.realm_parent_ptr
+                {
+                    // SAFETY: parent_ptr is valid for the duration of this call.
+                    // The parent's &mut is suspended on the call stack and not
+                    // accessed concurrently. self (child) was take()n from parent's
+                    // child_realms so there is no aliasing through parent's data.
+                    let parent = unsafe { &mut *parent_ptr };
+                    return parent.vm_call_function_value(ctx, func, this_arg, args);
+                }
                 if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
                     if self.chunk.named_fn_self_ips.contains(ip) {
                         self.named_fn_callee_stack.push(func.clone());
@@ -17026,6 +17140,12 @@ impl<'gc> VM<'gc> {
                     self.sync_runtime_from_child(&child);
                     self.child_realms[realm_id] = Some(child);
                     return Ok(result);
+                }
+                if *ip >= self.chunk.code.len()
+                    && let Some(parent_ptr) = self.realm_parent_ptr
+                {
+                    let parent = unsafe { &mut *parent_ptr };
+                    return parent.vm_call_function_value(ctx, func, this_arg, args);
                 }
                 if self.chunk.async_function_ips.contains(ip) && !self.chunk.generator_function_ips.contains(ip) {
                     let uv = (**upv).to_vec();
@@ -17104,7 +17224,11 @@ impl<'gc> VM<'gc> {
                     {
                         self.sync_runtime_to_child(&mut child);
                         child.regexp_home_proto_temp = self.regexp_home_proto_temp.take();
+                        if host_name == "__realm_eval__" {
+                            child.realm_parent_ptr = Some(self as *mut VM<'gc>);
+                        }
                         let result = child.call_host_fn(ctx, &host_name, Some(this_arg), args);
+                        child.realm_parent_ptr = None;
                         if let Some(thrown) = child.pending_throw.take() {
                             self.pending_throw = Some(thrown);
                         }

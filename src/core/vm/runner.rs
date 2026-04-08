@@ -941,7 +941,13 @@ impl<'gc> VM<'gc> {
                     {
                         self.sync_runtime_to_child(&mut child);
                         child.regexp_home_proto_temp = self.regexp_home_proto_temp.take();
+                        // For __realm_eval__: give child a callback to parent so it can
+                        // execute parent-compiled functions (proxy traps, closures).
+                        if host_name == "__realm_eval__" {
+                            child.realm_parent_ptr = Some(self as *mut VM<'gc>);
+                        }
                         let r = child.call_host_fn(ctx, &host_name, recv.as_ref(), &args_collected);
+                        child.realm_parent_ptr = None;
                         if let Some(thrown) = child.pending_throw.take() {
                             self.pending_throw = Some(thrown);
                         }
@@ -4061,6 +4067,14 @@ impl<'gc> VM<'gc> {
                             || borrow.contains_key("__fn_body__")
                             || borrow.contains_key("__bound_target__");
                         let mut proto = borrow.get("__proto__").cloned();
+                        // Cross-realm fix: symbol values should resolve properties
+                        // through the current realm's Symbol.prototype, not the
+                        // symbol's own __proto__ (which may be from a foreign realm).
+                        if borrow.contains_key("__vm_symbol__")
+                            && let Some(Value::VmObject(sym_ctor)) = self.globals.get("Symbol")
+                        {
+                            proto = sym_ctor.borrow().get("prototype").cloned();
+                        }
                         drop(borrow);
                         if proto.is_none()
                             && let Some(type_name) = type_name.as_deref()

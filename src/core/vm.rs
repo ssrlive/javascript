@@ -13343,11 +13343,16 @@ impl<'gc> VM<'gc> {
                 continue;
             }
             if let Some(home_obj) = self.fn_home_objects.get(&func_ip).cloned() {
-                let base = match home_obj {
+                let base = match &home_obj {
                     Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
                     Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                        let props = self.get_fn_props(ctx, ip, arity);
-                        props.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
+                        let shared = self.get_fn_props(ctx, *ip, *arity);
+                        let overlay_proto = self
+                            .get_closure_overlay(&home_obj)
+                            .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                        overlay_proto
+                            .or_else(|| shared.borrow().get("__proto__").cloned())
+                            .unwrap_or(Value::Null)
                     }
                     _ => Value::Null,
                 };
@@ -13362,25 +13367,31 @@ impl<'gc> VM<'gc> {
             let direct_proto = match receiver {
                 Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
                 Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
-                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => self
-                    .get_fn_props(ctx, *ip, *arity)
-                    .borrow()
-                    .get("__proto__")
-                    .cloned()
-                    .unwrap_or(Value::Null),
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let shared = self.get_fn_props(ctx, *ip, *arity);
+                    let overlay_proto = self
+                        .get_closure_overlay(receiver)
+                        .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                    overlay_proto
+                        .or_else(|| shared.borrow().get("__proto__").cloned())
+                        .unwrap_or(Value::Null)
+                }
                 _ => Value::Null,
             };
             let base = if self.chunk.class_constructor_ips.contains(&func_ip) {
-                match direct_proto {
+                match &direct_proto {
                     Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
                     Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
-                    Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => self
-                        .get_fn_props(ctx, ip, arity)
-                        .borrow()
-                        .get("__proto__")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    other => other,
+                    Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                        let shared = self.get_fn_props(ctx, *ip, *arity);
+                        let overlay_proto = self
+                            .get_closure_overlay(&direct_proto)
+                            .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                        overlay_proto
+                            .or_else(|| shared.borrow().get("__proto__").cloned())
+                            .unwrap_or(Value::Null)
+                    }
+                    other => other.clone(),
                 }
             } else {
                 direct_proto
@@ -32781,13 +32792,15 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
-            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => self
-                .get_fn_props_for_value(ctx, target)
-                .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity))
-                .borrow()
-                .get("__proto__")
-                .cloned()
-                .unwrap_or(Value::Null),
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                let shared = self.get_fn_props(ctx, *ip, *arity);
+                let overlay_proto = self
+                    .get_closure_overlay(target)
+                    .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                overlay_proto
+                    .or_else(|| shared.borrow().get("__proto__").cloned())
+                    .unwrap_or(Value::Null)
+            }
             _ => return Ok(false),
         };
 

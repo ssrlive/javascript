@@ -4819,6 +4819,9 @@ impl<'gc> VM<'gc> {
             })
             .filter(|v| !matches!(v, Value::Undefined | Value::Null));
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+            }
             return Ok(OpcodeAction::Continue);
         };
         // Per spec §9.1.9 OrdinarySet: look up setter on super_base chain,
@@ -4864,6 +4867,9 @@ impl<'gc> VM<'gc> {
             })
             .filter(|v| !matches!(v, Value::Undefined | Value::Null));
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+            }
             return Ok(OpcodeAction::Continue);
         };
         // Now convert key (ToPropertyKey may have side effects)
@@ -4925,6 +4931,9 @@ impl<'gc> VM<'gc> {
             })
             .filter(|v| !matches!(v, Value::Undefined | Value::Null));
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+            }
             return Ok(OpcodeAction::Continue);
         };
         let value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
@@ -4949,6 +4958,9 @@ impl<'gc> VM<'gc> {
             })
             .filter(|v| !matches!(v, Value::Undefined | Value::Null));
         let Some(super_base) = super_base_for_arrow.or_else(|| self.ensure_super_base(ctx, &receiver)) else {
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+            }
             return Ok(OpcodeAction::Continue);
         };
         // Now convert key (ToPropertyKey may call toString() which can mutate prototype chain)

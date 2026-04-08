@@ -112,6 +112,7 @@ pub enum Opcode {
     CheckGeneratorReturn = 106,    // push true if generator_return_pending is set, else push false
     SetGeneratorReturn = 107,      // pop value and set generator_return_pending = Some(value)
     ThrowIfNotConstructor = 108,   // pop TOS, throw TypeError if it's not a constructor
+    ReboxLocal = 109,              // create a fresh upvalue cell for a local, copying the old value (per-iteration let)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -228,6 +229,7 @@ impl TryFrom<u8> for Opcode {
             106 => Opcode::CheckGeneratorReturn,
             107 => Opcode::SetGeneratorReturn,
             108 => Opcode::ThrowIfNotConstructor,
+            109 => Opcode::ReboxLocal,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

@@ -168,6 +168,7 @@ impl<'gc> VM<'gc> {
                 Opcode::IteratorCloseAbrupt => self.run_opcode_iterator_close_abrupt(ctx)?,
                 Opcode::AssertIterResult => self.run_opcode_assert_iter_result(ctx)?,
                 Opcode::BoxLocal => self.run_opcode_box_local(ctx)?,
+                Opcode::ReboxLocal => self.run_opcode_rebox_local(ctx)?,
                 Opcode::InitNamedFnSelf => self.run_opcode_init_named_fn_self(ctx)?,
                 Opcode::FreezeTemplate => self.run_opcode_freeze_template(ctx)?,
             };
@@ -8686,6 +8687,38 @@ impl<'gc> VM<'gc> {
             // where a shared cell is required so closures in the heritage
             // expression and the later SetLocal share the same binding.
             self.top_level_cells.insert(index, cell);
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::ReboxLocal — create a fresh upvalue cell for a local, copying the
+    // old value.  Used for per-iteration `let` bindings in `for` loops so that
+    // each iteration's closures capture an independent cell.
+    fn run_opcode_rebox_local(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let index = self.read_byte() as usize;
+        let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
+        // Read the current value (through cell if boxed, else from stack)
+        let val = if let Some(frame) = self.frames.last() {
+            if let Some(cell) = frame.local_cells.get(&index) {
+                cell.borrow().clone()
+            } else if bp + index < self.stack.len() {
+                self.stack[bp + index].clone()
+            } else {
+                Value::Undefined
+            }
+        } else if let Some(cell) = self.top_level_cells.get(&index) {
+            cell.borrow().clone()
+        } else if bp + index < self.stack.len() {
+            self.stack[bp + index].clone()
+        } else {
+            Value::Undefined
+        };
+        // Always create a fresh cell (even if not yet boxed — BoxLocal will no-op later)
+        let new_cell = new_gc_cell_ptr(ctx, val);
+        if let Some(frame) = self.frames.last_mut() {
+            frame.local_cells.insert(index, new_cell);
+        } else {
+            self.top_level_cells.insert(index, new_cell);
         }
         Ok(OpcodeAction::Continue)
     }

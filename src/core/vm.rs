@@ -7524,14 +7524,11 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 }
-                // For strings: create a character iterator
+                // For strings: create a code-point iterator (preserves lone surrogates)
                 if let Value::String(s) = &iterable {
-                    let chars: Vec<Value<'gc>> = crate::unicode::utf16_to_utf8(s)
-                        .chars()
-                        .map(|ch| Value::from(&ch.to_string()))
-                        .collect();
-                    let arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(chars)));
-                    // Get array iterator via [Symbol.iterator]()
+                    let chars = Self::utf16_code_point_strings(s);
+                    let vals: Vec<Value<'gc>> = chars.into_iter().map(|v| Value::String(v)).collect();
+                    let arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vals)));
                     let arr_iter_fn = self.read_named_property(ctx, &arr, "@@sym:1");
                     if self.is_value_callable(&arr_iter_fn) {
                         match self.vm_call_function_value(ctx, &arr_iter_fn, &arr, &[]) {
@@ -7548,11 +7545,9 @@ impl<'gc> VM<'gc> {
                 if let Value::VmObject(map) = &iterable
                     && let Some(Value::String(s)) = map.borrow().get("__value__").cloned()
                 {
-                    let chars: Vec<Value<'gc>> = crate::unicode::utf16_to_utf8(&s)
-                        .chars()
-                        .map(|ch| Value::from(&ch.to_string()))
-                        .collect();
-                    let arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(chars)));
+                    let chars = Self::utf16_code_point_strings(&s);
+                    let vals: Vec<Value<'gc>> = chars.into_iter().map(|v| Value::String(v)).collect();
+                    let arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vals)));
                     let arr_iter_fn = self.read_named_property(ctx, &arr, "@@sym:1");
                     if self.is_value_callable(&arr_iter_fn) {
                         match self.vm_call_function_value(ctx, &arr_iter_fn, &arr, &[]) {
@@ -29183,6 +29178,28 @@ impl<'gc> VM<'gc> {
             Value::BigInt(_) => Ok(prim),
             _ => Ok(Value::Number(to_number(&prim))),
         }
+    }
+
+    /// Iterate a UTF-16 slice by code points (spec §11.1.4 CodePointAt).
+    /// Returns each code point as its own `Vec<u16>` — a surrogate pair becomes
+    /// a two-element vec, a lone surrogate stays as a single-element vec.
+    fn utf16_code_point_strings(s: &[u16]) -> Vec<Vec<u16>> {
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            let cu = s[i];
+            if cu >= 0xD800 && cu <= 0xDBFF && i + 1 < s.len() {
+                let cu2 = s[i + 1];
+                if cu2 >= 0xDC00 && cu2 <= 0xDFFF {
+                    result.push(vec![cu, cu2]);
+                    i += 2;
+                    continue;
+                }
+            }
+            result.push(vec![cu]);
+            i += 1;
+        }
+        result
     }
 
     fn is_value_callable(&self, value: &Value<'gc>) -> bool {

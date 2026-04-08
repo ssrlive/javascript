@@ -298,10 +298,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         *index += 1;
                     }
                     let body = parse_statement_item(t, index)?;
-                    let body_stmts = match *body.kind {
-                        StatementKind::Block(b) => b,
-                        _ => vec![body],
-                    };
+                    let body_stmts = vec![body];
                     let kind = if is_for_await {
                         StatementKind::ForAwaitOf(Some(crate::core::VarDeclKind::AwaitUsing), first_name, iterable, body_stmts)
                     } else {
@@ -377,10 +374,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     *index += 1;
                 }
                 let body = parse_statement_item(t, index)?;
-                let body_stmts = match *body.kind {
-                    StatementKind::Block(b) => b,
-                    _ => vec![body],
-                };
+                let body_stmts = vec![body];
                 let init_stmt = Some(Box::new(Statement {
                     kind: Box::new(if is_for_await {
                         StatementKind::AwaitUsing(using_decls)
@@ -478,10 +472,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             *index += 1;
         }
         let body = parse_statement_item(t, index)?;
-        let body_stmts = match *body.kind {
-            StatementKind::Block(stmts) => stmts,
-            _ => vec![body],
-        };
+        // Keep Block as-is so its block-scope (alias mechanism at scope_depth 0)
+        // is preserved — unwrapping loses let/const scoping in the for body.
+        let body_stmts = vec![body];
         let decl_kind_mapped: Option<crate::core::VarDeclKind> = decl_kind.and_then(|tk| match tk {
             crate::Token::Var => Some(crate::core::VarDeclKind::Var),
             crate::Token::Let => Some(crate::core::VarDeclKind::Let),
@@ -600,10 +593,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 Expr::Var(name, _, _) => {
                     *index += 1;
                     let body = parse_statement_item(t, index)?;
-                    let body_stmts = match *body.kind {
-                        StatementKind::Block(b) => b,
-                        _ => vec![body],
-                    };
+                    let body_stmts = vec![body];
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForIn(None, name, right_expr, body_stmts)),
                         line,
@@ -613,10 +603,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 Expr::Property(_, _) | Expr::Index(_, _) | Expr::PrivateMember(_, _) => {
                     *index += 1;
                     let body = parse_statement_item(t, index)?;
-                    let body_stmts = match *body.kind {
-                        StatementKind::Block(b) => b,
-                        _ => vec![body],
-                    };
+                    let body_stmts = vec![body];
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForInExpr(*left, right_expr, body_stmts)),
                         line,
@@ -637,10 +624,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             *index += 1;
         }
         let body = parse_statement_item(t, index)?;
-        let body_stmts = match *body.kind {
-            StatementKind::Block(b) => b,
-            _ => vec![body],
-        };
+        let body_stmts = vec![body];
         if let Some(pattern) = for_of_pattern {
             if for_pattern_init.is_some() {
                 return Err(raise_parse_error!(
@@ -802,10 +786,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         *index += 1;
     }
     let body = parse_statement_item(t, index)?;
-    let body_stmts = match *body.kind {
-        StatementKind::Block(b) => b,
-        _ => vec![body],
-    };
+    let body_stmts = vec![body];
     let init_stmt = if is_decl {
         let k = if let Some(d) = init_decls {
             let decls = d;

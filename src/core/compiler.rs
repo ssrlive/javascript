@@ -68,6 +68,9 @@ pub struct Compiler<'gc> {
     // Nested block depth while compiling statements. Used to distinguish
     // function-body declarations from inner block declarations.
     block_stmt_depth: u32,
+    // When true, `let`/`const` in a for-init compiles as locals even at
+    // scope_depth 0 so per-iteration ReboxLocal can create fresh cells.
+    force_local_let: bool,
     // Brand info for classes with private members: stack of Option<(brand_local_name, class_id)>
     current_class_brand_info: Vec<Option<(String, usize)>>,
     /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
@@ -1122,7 +1125,7 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_u16(idx);
                     }
 
-                    if self.scope_depth > 0 {
+                    if self.scope_depth > 0 || self.force_local_let {
                         if self.scope_depth == 1
                             && self.block_stmt_depth == 0
                             && self.hoisted_function_lexicals.contains(name)
@@ -1209,7 +1212,7 @@ impl<'gc> Compiler<'gc> {
                     if let Some(ip) = func_ip {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
                     }
-                    if self.scope_depth > 0 {
+                    if self.scope_depth > 0 || self.force_local_let {
                         if self.scope_depth == 1
                             && self.block_stmt_depth == 0
                             && self.hoisted_function_lexicals.contains(name)
@@ -1529,10 +1532,46 @@ impl<'gc> Compiler<'gc> {
                 }
                 // Init should not affect completion value
                 let body_cv = self.completion_var.take();
+                // At scope_depth 0, force let/const in for-init to compile as
+                // locals (not globals) so ReboxLocal can create per-iteration cells.
+                let is_lexical_init = if let Some(init) = &for_stmt.init {
+                    matches!(&*init.kind, StatementKind::Let(_) | StatementKind::Const(_))
+                } else {
+                    false
+                };
+                let saved_init_locals = self.locals.len();
+                if is_lexical_init && self.scope_depth == 0 {
+                    self.force_local_let = true;
+                }
                 if let Some(init) = &for_stmt.init {
                     self.compile_statement(init, false)?;
                 }
+                self.force_local_let = false;
                 self.completion_var = body_cv;
+
+                // Collect local slots for let/const-declared variables in the
+                // init clause.  Per spec §14.7.4.2, each iteration gets a fresh
+                // binding so closures capture independent values.
+                let let_slots: Vec<u8> = if let Some(init) = &for_stmt.init {
+                    let names: Vec<String> = match &*init.kind {
+                        StatementKind::Let(decls) => decls.iter().map(|(name, _)| name.clone()).collect(),
+                        StatementKind::Const(decls) => decls.iter().map(|(name, _)| name.clone()).collect(),
+                        _ => Vec::new(),
+                    };
+                    names
+                        .iter()
+                        .filter_map(|name| self.locals.iter().rposition(|l| l == name).and_then(|idx| u8::try_from(idx).ok()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                // Step 2: CreatePerIterationEnvironment before first test
+                for &slot in &let_slots {
+                    self.chunk.write_opcode(Opcode::ReboxLocal);
+                    self.chunk.write_byte(slot);
+                }
+
                 // Loop start: test
                 let loop_start = self.chunk.code.len();
                 let ctx = self.make_loop_context(loop_start);
@@ -1560,6 +1599,11 @@ impl<'gc> Compiler<'gc> {
                 for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
                     self.patch_jump_to(*cp, update_ip);
                 }
+                // Step 3e: CreatePerIterationEnvironment before increment
+                for &slot in &let_slots {
+                    self.chunk.write_opcode(Opcode::ReboxLocal);
+                    self.chunk.write_byte(slot);
+                }
                 if let Some(update) = &for_stmt.update {
                     self.compile_statement(update, false)?;
                 }
@@ -1573,6 +1617,11 @@ impl<'gc> Compiler<'gc> {
                 let ctx = self.loop_stack.pop().unwrap();
                 for bp in ctx.break_patches {
                     self.patch_jump(bp);
+                }
+
+                // Pop for-init lexical locals (let/const forced to local at scope_depth 0)
+                if is_lexical_init {
+                    self.end_block_scope(saved_init_locals);
                 }
 
                 if is_last {

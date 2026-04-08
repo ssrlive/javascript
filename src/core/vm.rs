@@ -29307,24 +29307,6 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn push_accessor_keys(
-        &self,
-        out: &mut Vec<String>,
-        keys: impl Iterator<Item = String>,
-        is_nonenumerable: impl Fn(&str) -> bool,
-        enumerable_only: bool,
-    ) {
-        for key in keys {
-            if out.contains(&key) {
-                continue;
-            }
-            if enumerable_only && is_nonenumerable(&key) {
-                continue;
-            }
-            out.push(key);
-        }
-    }
-
     fn collect_object_map_keys(&self, map: &IndexMap<String, Value<'gc>>, enumerable_only: bool) -> Vec<String> {
         if map.contains_key("__vm_symbol__") {
             // Symbol wrapper objects expose no own string-keyed properties.
@@ -29422,36 +29404,37 @@ impl<'gc> VM<'gc> {
             keys.push("length".to_string());
         }
 
-        for key in array.props.keys() {
-            if key.starts_with("__") || key.starts_with("@@sym:") {
+        // Process named properties and accessor keys in insertion order
+        for raw_key in array.props.keys() {
+            if raw_key.starts_with("@@sym:") {
                 continue;
             }
-            // TypedArrays: skip internal properties that are not user-defined
-            if is_typed_array {
-                match key.as_str() {
-                    "length" | "buffer" | "byteLength" | "byteOffset" => continue,
-                    _ => {}
+            let candidate = if let Some(rest) = raw_key.strip_prefix("__get_") {
+                if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
+            } else if let Some(rest) = raw_key.strip_prefix("__set_") {
+                if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
+            } else if raw_key.starts_with("__") {
+                None
+            } else {
+                // TypedArrays: skip internal properties that are not user-defined
+                if is_typed_array {
+                    match raw_key.as_str() {
+                        "length" | "buffer" | "byteLength" | "byteOffset" => continue,
+                        _ => {}
+                    }
                 }
-            }
-            if enumerable_only && array.props.contains_key(&format!("__nonenumerable_{}__", key)) {
-                continue;
-            }
-            if !keys.contains(key) {
-                keys.push(key.clone());
+                Some(raw_key.clone())
+            };
+            if let Some(key) = candidate {
+                if keys.contains(&key) {
+                    continue;
+                }
+                if enumerable_only && array.props.contains_key(&format!("__nonenumerable_{}__", key)) {
+                    continue;
+                }
+                keys.push(key);
             }
         }
-
-        self.push_accessor_keys(
-            &mut keys,
-            array.props.keys().filter_map(|key| {
-                key.strip_prefix("__get_")
-                    .or_else(|| key.strip_prefix("__set_"))
-                    .filter(|k| !k.starts_with("@@sym:"))
-                    .map(str::to_string)
-            }),
-            |key| array.props.contains_key(&format!("__nonenumerable_{}__", key)),
-            enumerable_only,
-        );
 
         keys
     }

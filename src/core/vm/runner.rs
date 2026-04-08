@@ -6101,22 +6101,19 @@ impl<'gc> VM<'gc> {
 
             match cur {
                 Value::VmObject(map) => {
-                    let mut own_keys: Vec<String> = Vec::new();
-                    let key_values = self.call_builtin(ctx, BUILTIN_OBJECT_KEYS, &[Value::VmObject(map)]);
-                    if let Value::VmArray(arr) = key_values {
-                        for value in arr.borrow().iter() {
-                            if let Ok(key) = self.as_property_key_string(ctx, value) {
-                                own_keys.push(key);
-                            }
-                        }
-                    }
+                    // Collect ALL own keys (enumerable + non-enumerable) for shadowing,
+                    // but only add enumerable keys to the output.
+                    let borrow = map.borrow();
+                    let all_keys = self.collect_object_map_keys(&borrow, false);
+                    let enumerable_keys = self.collect_object_map_keys(&borrow, true);
+                    let enumerable_set: std::collections::HashSet<&str> = enumerable_keys.iter().map(|k| k.as_str()).collect();
+                    drop(borrow);
 
-                    for key in own_keys {
+                    for key in &all_keys {
                         let first_seen = seen_any.insert(key.clone());
-                        if !first_seen {
-                            continue;
+                        if first_seen && enumerable_set.contains(key.as_str()) {
+                            out_keys.push(Value::from(key));
                         }
-                        out_keys.push(Value::from(&key));
                     }
                     let borrow = map.borrow();
                     let mut next = borrow.get("__proto__").cloned();
@@ -6141,14 +6138,15 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmArray(arr) => {
                     let borrow = arr.borrow();
-                    let own_keys = self.collect_array_keys(ctx, &borrow, true, false);
+                    let all_keys = self.collect_array_keys(ctx, &borrow, false, false);
+                    let enumerable_keys = self.collect_array_keys(ctx, &borrow, true, false);
+                    let enumerable_set: std::collections::HashSet<&str> = enumerable_keys.iter().map(|k| k.as_str()).collect();
 
-                    for key in own_keys {
+                    for key in &all_keys {
                         let first_seen = seen_any.insert(key.clone());
-                        if !first_seen {
-                            continue;
+                        if first_seen && enumerable_set.contains(key.as_str()) {
+                            out_keys.push(Value::from(key));
                         }
-                        out_keys.push(Value::from(&key));
                     }
 
                     current = borrow.props.get("__proto__").cloned();

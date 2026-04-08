@@ -97,6 +97,8 @@ struct TryFinallyContext {
     action_id_var: String,            // synthetic variable name for pending control-flow action id
     return_value_var: String,         // synthetic variable name for pending return value
     saved_cv_var: Option<String>,     // synthetic variable to save completion value before finally
+    has_exc_var: String,              // flag: 1.0 if an exception is pending for re-throw after finally
+    exc_var: String,                  // variable holding the pending exception value
     finally_jump_patches: Vec<usize>, // Jump addresses to patch to finally body start
     pending_actions: Vec<PendingFinallyAction>,
 }
@@ -2207,10 +2209,31 @@ impl<'gc> Compiler<'gc> {
                     } else {
                         None
                     };
+
+                    // Exception tracking for finally: flag + stored exception
+                    let has_exc_name = format!("__tf_hexc_{}__", id);
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(zero);
+                    if self.scope_depth > 0 {
+                        self.locals.push(has_exc_name.clone());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16(&has_exc_name);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+
+                    // exc_var must always be a global because handle_throw
+                    // stores the caught value via self.globals.insert().
+                    let exc_name = format!("__tf_exc_{}__", id);
+                    self.emit_define_helper_slot(&exc_name);
+
                     self.try_finally_stack.push(TryFinallyContext {
                         action_id_var: action_name.clone(),
                         return_value_var: ret_name.clone(),
                         saved_cv_var: saved_cv_name,
+                        has_exc_var: has_exc_name.clone(),
+                        exc_var: exc_name.clone(),
                         finally_jump_patches: Vec::new(),
                         pending_actions: Vec::new(),
                     });
@@ -2223,7 +2246,16 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::SetupTry);
                 let catch_placeholder = self.chunk.code.len();
                 self.chunk.write_u32(0xffff_ffff); // placeholder for catch ip
-                self.chunk.write_u16(binding_idx);
+                // For try-finally without catch: use exc_var as binding so
+                // handle_throw stores the exception there for re-throw after finally.
+                let setup_binding = if has_finally && tc.catch_body.is_none() {
+                    let exc_var = &self.try_finally_stack.last().unwrap().exc_var;
+                    let n = crate::unicode::utf8_to_utf16(exc_var);
+                    self.chunk.add_constant(Value::String(n))
+                } else {
+                    binding_idx
+                };
+                self.chunk.write_u16(setup_binding);
 
                 // Try body (block-scoped)
                 let saved_try = self.locals.len();
@@ -2263,6 +2295,34 @@ impl<'gc> Compiler<'gc> {
                 let skip_catch_for_return = if has_finally {
                     self.chunk.write_opcode(Opcode::CheckGeneratorReturn);
                     Some(self.emit_jump(Opcode::JumpIfTrue))
+                } else {
+                    None
+                };
+
+                // For try-finally without catch: the exception is stored in
+                // exc_var by handle_throw (via the binding).  Set the flag here
+                // so we re-throw after finally.
+                if has_finally && tc.catch_body.is_none() {
+                    let has_exc = self.try_finally_stack.last().unwrap().has_exc_var.clone();
+                    let one_idx = self.chunk.add_constant(Value::Number(1.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(one_idx);
+                    self.emit_helper_set(&has_exc);
+                    self.chunk.write_opcode(Opcode::Pop);
+                }
+
+                // For try-catch-finally: wrap catch body with a second SetupTry
+                // so that if the catch block throws, the exception is captured
+                // and finally still runs before re-throwing.
+                let catch_exc_placeholder = if has_finally && tc.catch_body.is_some() {
+                    let exc_name = self.try_finally_stack.last().unwrap().exc_var.clone();
+                    let n = crate::unicode::utf8_to_utf16(&exc_name);
+                    let exc_binding_idx = self.chunk.add_constant(Value::String(n));
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    let placeholder = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    self.chunk.write_u16(exc_binding_idx);
+                    Some(placeholder)
                 } else {
                     None
                 };
@@ -2434,7 +2494,38 @@ impl<'gc> Compiler<'gc> {
                 }
                 self.end_block_scope(saved_catch);
 
+                // For try-catch-finally: tear down the catch→finally handler
+                // and jump over the exception handler code.
+                let jump_over_exc = if catch_exc_placeholder.is_some() {
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    Some(self.emit_jump(Opcode::Jump))
+                } else {
+                    None
+                };
+
+                // Emit the catch_exc_ip handler: when catch body throws,
+                // handle_throw stores exception in exc_var and jumps here.
+                if let Some(placeholder) = catch_exc_placeholder {
+                    let catch_exc_ip = self.chunk.code.len();
+                    self.chunk.code[placeholder] = (catch_exc_ip & 0xff) as u8;
+                    self.chunk.code[placeholder + 1] = ((catch_exc_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[placeholder + 2] = ((catch_exc_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[placeholder + 3] = ((catch_exc_ip >> 24) & 0xff) as u8;
+                    // Set has_exc_var = 1.0
+                    let has_exc = self.try_finally_stack.last().unwrap().has_exc_var.clone();
+                    let one_idx = self.chunk.add_constant(Value::Number(1.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(one_idx);
+                    self.emit_helper_set(&has_exc);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    // Fall through to finally body
+                }
+
                 self.patch_jump(jump_over_catch);
+
+                if let Some(jp) = jump_over_exc {
+                    self.patch_jump(jp);
+                }
 
                 // Patch the gen.return() skip-catch jump to land here (finally start)
                 if let Some(jp) = skip_catch_for_return {
@@ -2458,6 +2549,11 @@ impl<'gc> Compiler<'gc> {
                 // finally's own completion value.  For normal completion,
                 // we restore the try/catch cv from saved_cv_var below.
                 let saved_finally = self.locals.len();
+                // Reset completion value so finally starts with undefined.
+                // If finally completes normally, we restore saved_cv below.
+                if has_finally {
+                    self.emit_set_completion_undefined();
+                }
                 if let Some(ref finally_body) = tc.finally_body {
                     for s in finally_body {
                         self.compile_statement(s, false)?;
@@ -2478,6 +2574,7 @@ impl<'gc> Compiler<'gc> {
 
                 // After finally: check break flag and restore cv, then jump to break target
                 if let Some(tfc) = finally_context {
+                    let mut orphan_jumps: Vec<usize> = Vec::new();
                     for action in &tfc.pending_actions {
                         self.emit_helper_get(&tfc.action_id_var);
                         let id_idx = self.chunk.add_constant(Value::Number(action.id as f64));
@@ -2500,12 +2597,15 @@ impl<'gc> Compiler<'gc> {
                                     if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
                                         ctx.break_patches.push(break_jump);
                                     } else {
-                                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for break", label)));
+                                        // Target loop/switch was inside the try body and
+                                        // already cleaned up — jump to end of dispatch
+                                        // (will be patched below as a noop).
+                                        orphan_jumps.push(break_jump);
                                     }
                                 } else if let Some(ctx) = self.loop_stack.last_mut() {
                                     ctx.break_patches.push(break_jump);
                                 } else {
-                                    return Err(crate::raise_syntax_error!("break statement not in loop or switch"));
+                                    orphan_jumps.push(break_jump);
                                 }
                             }
                             PendingFinallyActionKind::Continue => {
@@ -2514,12 +2614,12 @@ impl<'gc> Compiler<'gc> {
                                     if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
                                         ctx.continue_patches.push(continue_jump);
                                     } else {
-                                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
+                                        orphan_jumps.push(continue_jump);
                                     }
                                 } else if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| !c.is_switch) {
                                     ctx.continue_patches.push(continue_jump);
                                 } else {
-                                    return Err(crate::raise_syntax_error!("continue statement not in loop"));
+                                    orphan_jumps.push(continue_jump);
                                 }
                             }
                             PendingFinallyActionKind::Return => {
@@ -2530,12 +2630,33 @@ impl<'gc> Compiler<'gc> {
 
                         self.patch_jump(next_check);
                     }
+                    // Patch orphan break/continue jumps whose targets were local
+                    // to the try body (already cleaned up).
+                    let orphan_ip = self.chunk.code.len();
+                    for jp in orphan_jumps {
+                        self.patch_jump_to(jp, orphan_ip);
+                    }
+
+                    // Re-throw pending exception from try/catch after finally
+                    // completes normally.  Must be emitted before locals cleanup
+                    // so emit_helper_get can still find the synthetic locals.
+                    self.emit_helper_get(&tfc.has_exc_var);
+                    let zero_idx = self.chunk.add_constant(Value::Number(0.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(zero_idx);
+                    self.chunk.write_opcode(Opcode::StrictNotEqual);
+                    let skip_rethrow = self.emit_jump(Opcode::JumpIfFalse);
+                    self.emit_helper_get(&tfc.exc_var);
+                    self.chunk.write_opcode(Opcode::Throw);
+                    self.patch_jump(skip_rethrow);
 
                     if self.scope_depth > 0 {
                         self.locals.retain(|l| l != &tfc.action_id_var && l != &tfc.return_value_var);
                         if let Some(sv) = &tfc.saved_cv_var {
                             self.locals.retain(|l| l != sv);
                         }
+                        self.locals.retain(|l| l != &tfc.has_exc_var);
+                        // exc_var is always a global, no local cleanup needed
                     }
                 }
 

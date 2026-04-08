@@ -227,6 +227,8 @@ const BUILTIN_CTOR_TYPEERROR: FunctionID = 261;
 const BUILTIN_CTOR_SYNTAXERROR: FunctionID = 262;
 const BUILTIN_CTOR_RANGEERROR: FunctionID = 263;
 const BUILTIN_CTOR_REFERENCEERROR: FunctionID = 264;
+const BUILTIN_CTOR_EVALERROR: FunctionID = 265;
+const BUILTIN_CTOR_URIERROR: FunctionID = 266;
 // ── Date (270–319) ──────────────────────────────────────────────────
 const BUILTIN_CTOR_DATE: FunctionID = 270;
 const BUILTIN_DATE_NOW: FunctionID = 271;
@@ -3698,6 +3700,8 @@ impl<'gc> VM<'gc> {
                     | BUILTIN_CTOR_SYNTAXERROR
                     | BUILTIN_CTOR_RANGEERROR
                     | BUILTIN_CTOR_REFERENCEERROR
+                    | BUILTIN_CTOR_EVALERROR
+                    | BUILTIN_CTOR_URIERROR
                     | BUILTIN_CTOR_DATE
                     | BUILTIN_CTOR_FUNCTION
                     | BUILTIN_CTOR_NUMBER
@@ -15303,8 +15307,8 @@ impl<'gc> VM<'gc> {
                 ("SyntaxError", BUILTIN_CTOR_SYNTAXERROR),
                 ("RangeError", BUILTIN_CTOR_RANGEERROR),
                 ("ReferenceError", BUILTIN_CTOR_REFERENCEERROR),
-                ("EvalError", BUILTIN_CTOR_ERROR),
-                ("URIError", BUILTIN_CTOR_ERROR),
+                ("EvalError", BUILTIN_CTOR_EVALERROR),
+                ("URIError", BUILTIN_CTOR_URIERROR),
             ];
             for &(name, id) in error_types {
                 let mut proto = IndexMap::new();
@@ -16831,6 +16835,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_SYNTAXERROR => Some("SyntaxError"),
             BUILTIN_CTOR_RANGEERROR => Some("RangeError"),
             BUILTIN_CTOR_REFERENCEERROR => Some("ReferenceError"),
+            BUILTIN_CTOR_EVALERROR => Some("EvalError"),
+            BUILTIN_CTOR_URIERROR => Some("URIError"),
             _ => None,
         }
     }
@@ -20529,7 +20535,9 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_TYPEERROR
             | BUILTIN_CTOR_SYNTAXERROR
             | BUILTIN_CTOR_RANGEERROR
-            | BUILTIN_CTOR_REFERENCEERROR => {
+            | BUILTIN_CTOR_REFERENCEERROR
+            | BUILTIN_CTOR_EVALERROR
+            | BUILTIN_CTOR_URIERROR => {
                 let type_name = self.error_type_name_from_constructor(ctx, &Value::VmNativeFunction(id), id);
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from(type_name.as_str()));
@@ -23169,7 +23177,9 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_TYPEERROR
             | BUILTIN_CTOR_SYNTAXERROR
             | BUILTIN_CTOR_RANGEERROR
-            | BUILTIN_CTOR_REFERENCEERROR => {
+            | BUILTIN_CTOR_REFERENCEERROR
+            | BUILTIN_CTOR_EVALERROR
+            | BUILTIN_CTOR_URIERROR => {
                 if let Value::VmObject(obj) = receiver {
                     let inherited_name = self.read_named_property(ctx, receiver, "name");
                     if self.pending_throw.is_some() {
@@ -31675,6 +31685,8 @@ impl<'gc> VM<'gc> {
                         | BUILTIN_CTOR_SYNTAXERROR
                         | BUILTIN_CTOR_RANGEERROR
                         | BUILTIN_CTOR_REFERENCEERROR
+                        | BUILTIN_CTOR_EVALERROR
+                        | BUILTIN_CTOR_URIERROR
                 ) {
                     let type_name = self.error_type_name_from_constructor(ctx, target, id);
                     // Use GetPrototypeFromConstructor(newTarget, "%<ErrorType>Prototype%")

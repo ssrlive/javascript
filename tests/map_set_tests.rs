@@ -478,6 +478,35 @@ fn test_set_constructor_metadata_matches_spec() {
 }
 
 #[test]
+fn test_map_constructor_metadata_matches_spec() {
+    let result = evaluate_script(
+        r#"
+        const globalDesc = Object.getOwnPropertyDescriptor(this, "Map");
+        const speciesDesc = Object.getOwnPropertyDescriptor(Map, Symbol.species);
+        Map.name === "Map" &&
+        Map.length === 0 &&
+        globalDesc &&
+        globalDesc.writable === true &&
+        globalDesc.enumerable === false &&
+        globalDesc.configurable === true &&
+        Object.getPrototypeOf(Map) === Function.prototype &&
+        speciesDesc &&
+        typeof speciesDesc.get === "function" &&
+        speciesDesc.get.name === "get [Symbol.species]" &&
+        speciesDesc.get.length === 0 &&
+        speciesDesc.set === undefined &&
+        speciesDesc.enumerable === false &&
+        speciesDesc.configurable === true &&
+        Map[Symbol.species] === Map
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_set_constructor_uses_add_for_iterables() {
     let result = evaluate_script(
         r#"

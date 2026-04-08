@@ -3386,6 +3386,7 @@ impl<'gc> VM<'gc> {
 
     fn native_function_name(id: FunctionID) -> &'static str {
         match id {
+            BUILTIN_CTOR_MAP => "Map",
             BUILTIN_CTOR_SET => "Set",
             BUILTIN_CTOR_PROMISE => "Promise",
             BUILTIN_PROMISE_RESOLVE => "resolve",
@@ -3550,6 +3551,7 @@ impl<'gc> VM<'gc> {
 
     fn native_function_length(id: FunctionID) -> f64 {
         match id {
+            BUILTIN_CTOR_MAP => 0.0,
             BUILTIN_CTOR_SET => 0.0,
             BUILTIN_CTOR_PROMISE => 1.0,
             BUILTIN_PROMISE_RESOLVE => 1.0,
@@ -16382,6 +16384,12 @@ impl<'gc> VM<'gc> {
         self.globals.insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
         self.global_this
             .borrow_mut(ctx)
+            .insert("Map".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_MAP));
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("__nonenumerable_Map__".to_string(), Value::Boolean(true));
+        self.global_this
+            .borrow_mut(ctx)
             .insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
         self.global_this
             .borrow_mut(ctx)
@@ -16717,6 +16725,14 @@ impl<'gc> VM<'gc> {
         ] {
             if let Some(Value::VmObject(ctor)) = self.globals.get(*ctor_name) {
                 ctor.borrow_mut(ctx).insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
+            }
+        }
+        {
+            let map_props = self.get_native_fn_props(ctx, BUILTIN_CTOR_MAP);
+            let mut map_props_borrow = map_props.borrow_mut(ctx);
+            map_props_borrow.insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
+            if !map_props_borrow.contains_key("__get_@@sym:5") {
+                Self::insert_species_getter(&mut map_props_borrow, ctx);
             }
         }
         {

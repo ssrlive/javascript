@@ -3386,6 +3386,7 @@ impl<'gc> VM<'gc> {
 
     fn native_function_name(id: FunctionID) -> &'static str {
         match id {
+            BUILTIN_CTOR_SET => "Set",
             BUILTIN_CTOR_PROMISE => "Promise",
             BUILTIN_PROMISE_RESOLVE => "resolve",
             BUILTIN_PROMISE_ALL => "all",
@@ -3548,6 +3549,7 @@ impl<'gc> VM<'gc> {
 
     fn native_function_length(id: FunctionID) -> f64 {
         match id {
+            BUILTIN_CTOR_SET => 0.0,
             BUILTIN_CTOR_PROMISE => 1.0,
             BUILTIN_PROMISE_RESOLVE => 1.0,
             BUILTIN_PROMISE_ALL => 1.0,
@@ -16367,6 +16369,12 @@ impl<'gc> VM<'gc> {
         // Map / Set constructors
         self.globals.insert("Map".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_MAP));
         self.globals.insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("__nonenumerable_Set__".to_string(), Value::Boolean(true));
         self.globals
             .insert("WeakMap".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKMAP));
         self.globals
@@ -16697,6 +16705,14 @@ impl<'gc> VM<'gc> {
         ] {
             if let Some(Value::VmObject(ctor)) = self.globals.get(*ctor_name) {
                 ctor.borrow_mut(ctx).insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
+            }
+        }
+        {
+            let set_props = self.get_native_fn_props(ctx, BUILTIN_CTOR_SET);
+            let mut set_props_borrow = set_props.borrow_mut(ctx);
+            set_props_borrow.insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
+            if !set_props_borrow.contains_key("__get_@@sym:5") {
+                Self::insert_species_getter(&mut set_props_borrow, ctx);
             }
         }
         if let Some(error_ctor) = self.globals.get("Error").cloned() {

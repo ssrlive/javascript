@@ -447,3 +447,32 @@ fn test_set_for_each_propagates_callback_errors() {
     .unwrap();
     assert_eq!(result, "true");
 }
+
+#[test]
+fn test_set_constructor_metadata_matches_spec() {
+    let result = evaluate_script(
+        r#"
+        const globalDesc = Object.getOwnPropertyDescriptor(this, "Set");
+        const speciesDesc = Object.getOwnPropertyDescriptor(Set, Symbol.species);
+        Set.name === "Set" &&
+        Set.length === 0 &&
+        globalDesc &&
+        globalDesc.writable === true &&
+        globalDesc.enumerable === false &&
+        globalDesc.configurable === true &&
+        Object.getPrototypeOf(Set) === Function.prototype &&
+        speciesDesc &&
+        typeof speciesDesc.get === "function" &&
+        speciesDesc.get.name === "get [Symbol.species]" &&
+        speciesDesc.get.length === 0 &&
+        speciesDesc.set === undefined &&
+        speciesDesc.enumerable === false &&
+        speciesDesc.configurable === true &&
+        Set[Symbol.species] === Set
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}

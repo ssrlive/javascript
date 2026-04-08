@@ -20237,61 +20237,10 @@ impl<'gc> VM<'gc> {
                     Ok(v) => {
                         match v {
                             Value::VmFunction(..) | Value::VmClosure(..) => {
-                                // Class constructors should NOT be re-wrapped: they
-                                // carry fn_props (prototype, static methods) that must
-                                // be preserved.  The eval chunk was already merged into
-                                // the host chunk, so VmFunction IPs are valid.
-                                let is_class_ctor = match &v {
-                                    Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => self.chunk.class_constructor_ips.contains(ip),
-                                    _ => false,
-                                };
-                                let trimmed = code.trim().trim_end_matches(';').trim();
-                                let tail = trimmed.rsplit(';').next().unwrap_or(trimmed).trim();
-                                if !is_class_ctor && (tail.contains("=>") || tail.starts_with("function") || tail.starts_with("(")) {
-                                    // Function values produced by a temporary eval VM cannot be called safely
-                                    // in the current VM. Re-wrap as a callable body executed in current context.
-                                    let mut map = IndexMap::new();
-                                    map.insert("__fn_body__".to_string(), Value::from(&format!("({tail})()")));
-                                    map.insert("__type__".to_string(), Value::from("Function"));
-                                    let tail_lower = tail.to_ascii_lowercase();
-                                    let mut needs_async_gen_own_prototype = false;
-                                    if tail_lower.contains("async function*") {
-                                        map.insert("__async_dynamic_generator_function__".to_string(), Value::Boolean(true));
-                                        if let Some(proto) = self.globals.get("__async_generator_function_prototype").cloned() {
-                                            map.insert("__proto__".to_string(), proto);
-                                            needs_async_gen_own_prototype = true;
-                                        }
-                                    } else if tail_lower.contains("async function") {
-                                        map.insert("__async_dynamic_function__".to_string(), Value::Boolean(true));
-                                        if let Some(proto) = self.globals.get("__async_function_prototype").cloned() {
-                                            map.insert("__proto__".to_string(), proto);
-                                        }
-                                    } else if tail_lower.contains("function*") {
-                                        map.insert("__dynamic_generator_function__".to_string(), Value::Boolean(true));
-                                        if !matches!(self.generator_function_prototype, Value::Undefined) {
-                                            map.insert("__proto__".to_string(), self.generator_function_prototype.clone());
-                                        }
-                                    } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
-                                        && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
-                                    {
-                                        map.insert("__proto__".to_string(), fn_proto);
-                                    }
-                                    let wrapped_fn = new_gc_cell_ptr(ctx, map);
-                                    if needs_async_gen_own_prototype {
-                                        let async_gen_proto =
-                                            self.globals.get("__async_generator_prototype").cloned().unwrap_or(Value::Undefined);
-                                        let mut fn_proto = IndexMap::new();
-                                        fn_proto.insert("__proto__".to_string(), async_gen_proto);
-                                        // Per spec §27.4.3.1: AsyncGeneratorFunction .prototype has no constructor
-                                        let mut b = wrapped_fn.borrow_mut(ctx);
-                                        b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                                        b.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-                                        b.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
-                                    }
-                                    Value::VmObject(wrapped_fn)
-                                } else {
-                                    v
-                                }
+                                // The eval chunk was already merged into the host chunk
+                                // via merge_eval_chunk, so VmFunction/VmClosure IPs are
+                                // valid and the values are directly callable.
+                                v
                             }
                             _ => v,
                         }

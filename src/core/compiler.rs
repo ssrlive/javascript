@@ -1334,12 +1334,27 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
 
+                let effective_count = statements
+                    .iter()
+                    .filter(|s| !(use_block_locals && matches!(*s.kind, StatementKind::FunctionDeclaration(..))))
+                    .count();
                 for (i, s) in statements.iter().enumerate() {
                     if use_block_locals && matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
                         continue;
                     }
                     let s_is_last = is_last && i == statements.len() - 1;
                     self.compile_statement(s, s_is_last)?;
+                }
+                // Empty block as last statement: per spec, empty completion should
+                // not override a prior non-empty completion value.
+                if is_last && effective_count == 0 {
+                    if self.completion_var.is_some() {
+                        self.emit_load_completion();
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
                 }
                 // Clean up block-scoped locals
                 if is_last {

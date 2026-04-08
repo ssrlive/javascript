@@ -26,7 +26,7 @@ crossbeam-channel = "0.5.15"
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae", features = [
     "indexmap",
 ] }
-indexmap = "2.13.0"
+indexmap = "2.13.1"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
@@ -38,7 +38,7 @@ thiserror = "2.0.18"
 unicode-normalization = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.183", optional = true }
+libc = { version = "0.2.184", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = [

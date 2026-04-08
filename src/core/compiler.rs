@@ -3191,7 +3191,9 @@ impl<'gc> Compiler<'gc> {
                             // push __switch__, push case value, compare
                             self.emit_helper_get(&switch_name);
                             self.compile_expr(val_expr)?;
-                            self.chunk.write_opcode(Opcode::Equal);
+                            // Switch uses === (strict equality); synthesize via !(a !== b)
+                            self.chunk.write_opcode(Opcode::StrictNotEqual);
+                            self.chunk.write_opcode(Opcode::Not);
                             let body_jump = self.emit_jump(Opcode::JumpIfTrue);
                             case_body_patches.push((i, body_jump));
                         }

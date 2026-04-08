@@ -3412,85 +3412,203 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::ForOfExpr(lhs_expr, iterable_expr, body) | StatementKind::ForAwaitOfExpr(lhs_expr, iterable_expr, body) => {
-                // Same as ForOf/ForAwaitOf but assigns to an expression LHS instead
-                // of a declared variable.
+                // Lazy iteration with IteratorClose on early exit, assigns to expression LHS
                 let saved_cv = self.completion_var.clone();
                 if is_last {
                     self.setup_completion_var();
                 }
                 let is_for_await = matches!(*stmt.kind, StatementKind::ForAwaitOfExpr(..));
-                self.compile_expr(&Expr::Call(
-                    Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
-                    vec![iterable_expr.clone()],
-                ))?;
-                if self.scope_depth > 0 {
-                    self.locals.push("__forofArr__".to_string());
-                } else {
-                    let n = crate::unicode::utf8_to_utf16("__forofArr__");
-                    let ni = self.chunk.add_constant(Value::String(n));
-                    self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_u16(ni);
-                }
-                let zero_idx = self.chunk.add_constant(Value::Number(0.0));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(zero_idx);
-                if self.scope_depth > 0 {
-                    self.locals.push("__forofIdx__".to_string());
-                } else {
-                    let n = crate::unicode::utf8_to_utf16("__forofIdx__");
-                    let ni = self.chunk.add_constant(Value::String(n));
-                    self.chunk.write_opcode(Opcode::DefineGlobal);
-                    self.chunk.write_u16(ni);
-                }
-                let loop_start = self.chunk.code.len();
-                let ctx = self.make_loop_context(loop_start);
-                self.loop_stack.push(ctx);
-                self.emit_helper_get("__forofIdx__");
-                self.emit_helper_get("__forofArr__");
-                let len_key = crate::unicode::utf8_to_utf16("length");
-                let len_idx = self.chunk.add_constant(Value::String(len_key));
-                self.chunk.write_opcode(Opcode::GetProperty);
-                self.chunk.write_u16(len_idx);
-                self.chunk.write_opcode(Opcode::LessThan);
-                let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
+                let fid = self.forin_counter;
+                self.forin_counter = self.forin_counter.saturating_add(1);
+                let iter_var = format!("__forofIter_{}__", fid);
+                let next_fn_var = format!("__forofNext_{}__", fid);
 
                 if is_for_await {
+                    // For-await-of: keep using __forOfValues for async iteration
+                    self.compile_expr(&Expr::Call(
+                        Box::new(Expr::Var(INTERNAL_FOROF_HELPER.to_string(), None, None)),
+                        vec![iterable_expr.clone()],
+                    ))?;
+                    if self.scope_depth > 0 {
+                        self.locals.push("__forofArr__".to_string());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16("__forofArr__");
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+                    let zero_idx = self.chunk.add_constant(Value::Number(0.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(zero_idx);
+                    if self.scope_depth > 0 {
+                        self.locals.push("__forofIdx__".to_string());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16("__forofIdx__");
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+                    let loop_start = self.chunk.code.len();
+                    let ctx = self.make_loop_context(loop_start);
+                    self.loop_stack.push(ctx);
+                    self.emit_helper_get("__forofIdx__");
+                    self.emit_helper_get("__forofArr__");
+                    let len_key = crate::unicode::utf8_to_utf16("length");
+                    let len_idx = self.chunk.add_constant(Value::String(len_key));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(len_idx);
+                    self.chunk.write_opcode(Opcode::LessThan);
+                    let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+
                     let undef_idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(undef_idx);
                     self.chunk.write_opcode(Opcode::Await);
                     self.chunk.write_opcode(Opcode::Pop);
-                }
 
-                // lhs_expr = arr[idx]
-                self.emit_helper_get("__forofArr__");
-                self.emit_helper_get("__forofIdx__");
-                self.chunk.write_opcode(Opcode::GetIndex);
-                if is_for_await {
+                    self.emit_helper_get("__forofArr__");
+                    self.emit_helper_get("__forofIdx__");
+                    self.chunk.write_opcode(Opcode::GetIndex);
                     self.chunk.write_opcode(Opcode::Await);
-                }
-                self.compile_expr_assign_to_target(lhs_expr)?;
+                    self.compile_expr_assign_to_target(lhs_expr)?;
 
-                for s in body {
-                    self.compile_statement(s, false)?;
+                    for s in body {
+                        self.compile_statement(s, false)?;
+                    }
+
+                    let update_ip = self.chunk.code.len();
+                    for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+                        self.patch_jump_to(*cp, update_ip);
+                    }
+                    self.emit_helper_get("__forofIdx__");
+                    self.chunk.write_opcode(Opcode::Increment);
+                    self.emit_helper_set("__forofIdx__");
+                    self.chunk.write_opcode(Opcode::Pop);
+                    self.emit_loop(loop_start);
+                    self.patch_jump(exit_jump);
+                    let ctx = self.loop_stack.pop().unwrap();
+                    for bp in ctx.break_patches {
+                        self.patch_jump(bp);
+                    }
+                } else {
+                    // Synchronous for-of: lazy iteration with IteratorClose on early exit
+                    // Get iterator
+                    self.compile_expr(&Expr::Call(
+                        Box::new(Expr::Var(INTERNAL_GETITER_HELPER.to_string(), None, None)),
+                        vec![iterable_expr.clone()],
+                    ))?;
+                    if self.scope_depth > 0 {
+                        self.locals.push(iter_var.clone());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16(&iter_var);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+
+                    // Cache .next
+                    self.emit_helper_get(&iter_var);
+                    {
+                        let next_key = crate::unicode::utf8_to_utf16("next");
+                        let next_idx = self.chunk.add_constant(Value::String(next_key));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(next_idx);
+                    }
+                    if self.scope_depth > 0 {
+                        self.locals.push(next_fn_var.clone());
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16(&next_fn_var);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+
+                    // Loop start
+                    let loop_start = self.chunk.code.len();
+                    let mut lctx = self.make_loop_context(loop_start);
+                    lctx.for_of_iter_var = Some(iter_var.clone());
+                    self.loop_stack.push(lctx);
+
+                    // Call next_fn.call(iter) → result
+                    self.emit_helper_get(&iter_var);
+                    self.emit_helper_get(&next_fn_var);
+                    self.emit_call_opcode(0, 0x80);
+
+                    // IteratorResult type check
+                    self.chunk.write_opcode(Opcode::AssertIterResult);
+
+                    // Check result.done
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let done_key = crate::unicode::utf8_to_utf16("done");
+                    let done_idx = self.chunk.add_constant(Value::String(done_key));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(done_idx);
+                    let exit_jump = self.emit_jump(Opcode::JumpIfTrue);
+
+                    // Get result.value
+                    let val_key = crate::unicode::utf8_to_utf16("value");
+                    let val_idx = self.chunk.add_constant(Value::String(val_key));
+                    self.chunk.write_opcode(Opcode::GetProperty);
+                    self.chunk.write_u16(val_idx);
+
+                    // SetupTry for iterator close on throw
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    let try_catch_placeholder = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    let exc_binding = self
+                        .chunk
+                        .add_constant(Value::String(crate::unicode::utf8_to_utf16("__forofExc__")));
+                    self.chunk.write_u16(exc_binding);
+
+                    // Assign to expression LHS
+                    self.compile_expr_assign_to_target(lhs_expr)?;
+
+                    // Body
+                    for s in body {
+                        self.compile_statement(s, false)?;
+                    }
+
+                    // TeardownTry — normal completion
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+                    // Catch: close iterator, re-throw
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[try_catch_placeholder] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 2] = ((catch_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 3] = ((catch_ip >> 24) & 0xff) as u8;
+                    self.emit_helper_get(&iter_var);
+                    self.chunk.write_opcode(Opcode::IteratorCloseAbrupt);
+                    {
+                        let exc_key = crate::unicode::utf8_to_utf16("__forofExc__");
+                        let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(exc_idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Throw);
+
+                    self.patch_jump(jump_over_catch);
+
+                    // Continue target
+                    let update_ip = self.chunk.code.len();
+                    for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
+                        self.patch_jump_to(*cp, update_ip);
+                    }
+
+                    self.emit_loop(loop_start);
+
+                    // Exit: pop result object
+                    self.patch_jump(exit_jump);
+                    self.chunk.write_opcode(Opcode::Pop);
+
+                    let lctx = self.loop_stack.pop().unwrap();
+                    for bp in lctx.break_patches {
+                        self.patch_jump(bp);
+                    }
                 }
 
-                let update_ip = self.chunk.code.len();
-                for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
-                    self.patch_jump_to(*cp, update_ip);
-                }
-                self.emit_helper_get("__forofIdx__");
-                self.chunk.write_opcode(Opcode::Increment);
-                self.emit_helper_set("__forofIdx__");
-                self.chunk.write_opcode(Opcode::Pop);
-                self.emit_loop(loop_start);
-                self.patch_jump(exit_jump);
-                let ctx = self.loop_stack.pop().unwrap();
-                for bp in ctx.break_patches {
-                    self.patch_jump(bp);
-                }
-                // Keep synthetic loop locals in the table so local indices stay
-                // aligned with the stack slots that still hold them.
                 if is_last {
                     self.emit_load_completion();
                 } else {

@@ -3459,6 +3459,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_KEYS => "keys",
             BUILTIN_OBJECT_ASSIGN => "assign",
             BUILTIN_REFLECT_APPLY => "apply",
+            BUILTIN_JSON_STRINGIFY => "stringify",
+            BUILTIN_JSON_PARSE => "parse",
             BUILTIN_DATE_GETTIME => "getTime",
             BUILTIN_DATE_VALUEOF => "valueOf",
             BUILTIN_DATE_TOSTRING => "toString",
@@ -3619,6 +3621,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_GROUPBY => 2.0,
             BUILTIN_OBJECT_ASSIGN => 2.0,
             BUILTIN_REFLECT_APPLY => 3.0,
+            BUILTIN_JSON_STRINGIFY => 3.0,
+            BUILTIN_JSON_PARSE => 2.0,
             // Date getters: all length 0
             BUILTIN_DATE_GETTIME
             | BUILTIN_DATE_VALUEOF

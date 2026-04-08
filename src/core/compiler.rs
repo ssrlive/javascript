@@ -943,18 +943,20 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
-    /// Emit IteratorClose for all enclosing for-of loops (innermost first)
+    /// Emit TeardownTry + IteratorClose for all enclosing for-of loops (innermost first)
     fn emit_for_of_close_all(&mut self) {
         let iter_vars: Vec<String> = self.loop_stack.iter().rev().filter_map(|ctx| ctx.for_of_iter_var.clone()).collect();
         for var in iter_vars {
+            self.chunk.write_opcode(Opcode::TeardownTry);
             self.emit_helper_get(&var);
             self.chunk.write_opcode(Opcode::IteratorClose);
         }
     }
 
-    /// Emit IteratorClose for the innermost for-of loop only (for break)
-    fn emit_for_of_close_current(&mut self) {
+    /// Emit TeardownTry + IteratorClose for the innermost for-of loop (for break inside try-wrapped body)
+    fn emit_for_of_close_current_with_teardown(&mut self) {
         if let Some(var) = self.loop_stack.last().and_then(|ctx| ctx.for_of_iter_var.clone()) {
+            self.chunk.write_opcode(Opcode::TeardownTry);
             self.emit_helper_get(&var);
             self.chunk.write_opcode(Opcode::IteratorClose);
         }
@@ -1793,7 +1795,7 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::Pop);
                         }
                     }
-                    // Emit IteratorClose for for-of loops being broken out of
+                    // Emit TeardownTry + IteratorClose for for-of loops being broken out of
                     if let Some(label) = label_opt {
                         let iter_vars: Vec<String> = {
                             let mut vars = Vec::new();
@@ -1808,11 +1810,12 @@ impl<'gc> Compiler<'gc> {
                             vars
                         };
                         for var in &iter_vars {
+                            self.chunk.write_opcode(Opcode::TeardownTry);
                             self.emit_helper_get(var);
                             self.chunk.write_opcode(Opcode::IteratorClose);
                         }
                     } else {
-                        self.emit_for_of_close_current();
+                        self.emit_for_of_close_current_with_teardown();
                     }
                     let patch = self.emit_jump(Opcode::Jump);
                     if let Some(label) = label_opt {
@@ -1872,6 +1875,27 @@ impl<'gc> Compiler<'gc> {
                         let to_pop = self.locals.len().saturating_sub(saved);
                         for _ in 0..to_pop {
                             self.chunk.write_opcode(Opcode::Pop);
+                        }
+                    }
+                    // For labeled continue that exits a for-of loop, teardown the
+                    // try wrapper and close the iterator before jumping.
+                    if let Some(label) = label_opt {
+                        let iter_vars: Vec<String> = {
+                            let mut vars = Vec::new();
+                            for ctx in self.loop_stack.iter().rev() {
+                                if ctx.label.as_deref() == Some(label) {
+                                    break;
+                                }
+                                if let Some(ref v) = ctx.for_of_iter_var {
+                                    vars.push(v.clone());
+                                }
+                            }
+                            vars
+                        };
+                        for var in &iter_vars {
+                            self.chunk.write_opcode(Opcode::TeardownTry);
+                            self.emit_helper_get(var);
+                            self.chunk.write_opcode(Opcode::IteratorClose);
                         }
                     }
                     let patch = self.emit_jump(Opcode::Jump);
@@ -3113,6 +3137,7 @@ impl<'gc> Compiler<'gc> {
                 } else {
                     // Regular for-of: lazy iteration with IteratorClose on early exit
                     let iter_var = format!("__forofIter_{}__", self.forin_counter);
+                    let next_fn_var = format!("__forofNext_{}__", self.forin_counter);
                     self.forin_counter = self.forin_counter.saturating_add(1);
 
                     // Get iterator via __getIterator(iterable)
@@ -3131,6 +3156,28 @@ impl<'gc> Compiler<'gc> {
                         }
                     } else {
                         let n = crate::unicode::utf8_to_utf16(&iter_var);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(ni);
+                    }
+
+                    // Cache iterator.next (spec: GetIterator reads .next once)
+                    self.emit_helper_get(&iter_var);
+                    {
+                        let next_key = crate::unicode::utf8_to_utf16("next");
+                        let next_idx = self.chunk.add_constant(Value::String(next_key));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(next_idx);
+                    }
+                    if self.scope_depth > 0 {
+                        let next_pos = self.locals.len() as u8;
+                        self.locals.push(next_fn_var.clone());
+                        if forced_local {
+                            self.chunk.write_opcode(Opcode::SetLocal);
+                            self.chunk.write_byte(next_pos);
+                        }
+                    } else {
+                        let n = crate::unicode::utf8_to_utf16(&next_fn_var);
                         let ni = self.chunk.add_constant(Value::String(n));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(ni);
@@ -3155,18 +3202,15 @@ impl<'gc> Compiler<'gc> {
                         self.emit_hoisted_function_lexical_slots(body);
                     }
 
-                    // Loop start: call iterator.next()
+                    // Loop start: call cached_next.call(iterator) → result
                     let loop_start = self.chunk.code.len();
                     let mut ctx = self.make_loop_context(loop_start);
                     ctx.for_of_iter_var = Some(iter_var.clone());
                     self.loop_stack.push(ctx);
 
-                    // iter.next() → result
+                    // Push iterator (this) then cached next function
                     self.emit_helper_get(&iter_var);
-                    let next_key = crate::unicode::utf8_to_utf16("next");
-                    let next_idx = self.chunk.add_constant(Value::String(next_key));
-                    self.chunk.write_opcode(Opcode::GetMethod);
-                    self.chunk.write_u16(next_idx);
+                    self.emit_helper_get(&next_fn_var);
                     self.emit_call_opcode(0, 0x80); // method call → result
 
                     // Spec 7.4.2: IteratorNext — result must be an object
@@ -3185,6 +3229,16 @@ impl<'gc> Compiler<'gc> {
                     let val_idx = self.chunk.add_constant(Value::String(val_key));
                     self.chunk.write_opcode(Opcode::GetProperty);
                     self.chunk.write_u16(val_idx);
+
+                    // SetupTry around LHS assignment + body for IteratorClose on throw
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    let try_catch_placeholder = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    // binding index: use 0xFFFF (no binding — we re-throw manually)
+                    let no_binding = self
+                        .chunk
+                        .add_constant(Value::String(crate::unicode::utf8_to_utf16("__forofExc__")));
+                    self.chunk.write_u16(no_binding);
 
                     // Assign value to loop variable
                     let loop_value_name = current_value_name.as_deref().unwrap_or(var_name);
@@ -3228,6 +3282,30 @@ impl<'gc> Compiler<'gc> {
                         self.locals.truncate(body_locals_start);
                     }
 
+                    // TeardownTry — normal completion, no iterator close needed
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+                    // Catch block: close iterator then re-throw
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[try_catch_placeholder] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 2] = ((catch_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 3] = ((catch_ip >> 24) & 0xff) as u8;
+                    // The exception is bound to __forofExc__ global; load it for re-throw
+                    self.emit_helper_get(&iter_var);
+                    self.chunk.write_opcode(Opcode::IteratorCloseAbrupt);
+                    // Re-throw: load the exception and throw
+                    {
+                        let exc_key = crate::unicode::utf8_to_utf16("__forofExc__");
+                        let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(exc_idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Throw);
+
+                    self.patch_jump(jump_over_catch);
+
                     // Continue target (just loop back, no idx update needed)
                     let update_ip = self.chunk.code.len();
                     for cp in &self.loop_stack.last().unwrap().continue_patches.clone() {
@@ -3245,7 +3323,7 @@ impl<'gc> Compiler<'gc> {
                         self.patch_jump(bp);
                     }
 
-                    // Clean up for-of temporary locals (TDZ var, iterator, hoisted vars)
+                    // Clean up for-of temporary locals (TDZ var, iterator, next_fn, hoisted vars)
                     if self.scope_depth > 0 && !forced_local && !is_tdz {
                         self.end_block_scope(saved_locals);
                     }

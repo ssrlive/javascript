@@ -8671,7 +8671,15 @@ impl<'gc> VM<'gc> {
     // Opcode::AssertIterResult
     fn run_opcode_assert_iter_result(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         if let Some(top) = self.stack.last() {
-            let is_object = matches!(top, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_));
+            let is_object = match top {
+                Value::VmObject(h) => {
+                    let b = h.borrow();
+                    // Symbols are VmObject internally but are not JS objects
+                    !b.contains_key("__vm_symbol__")
+                }
+                Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
+                _ => false,
+            };
             if !is_object {
                 let err = self.make_type_error_object(ctx, "Iterator result is not an object");
                 self.handle_throw(ctx, &err)?;

@@ -574,3 +574,34 @@ fn test_set_constructor_closes_iterator_when_add_throws() {
     .unwrap();
     assert_eq!(result, "true");
 }
+
+#[test]
+fn test_set_constructor_requires_new() {
+    let result = evaluate_script(
+        r#"
+        try {
+          Set();
+          false
+        } catch (err) {
+          err instanceof TypeError
+        }
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_new_set_uses_set_prototype() {
+    let result = evaluate_script(
+        r#"
+        Object.getPrototypeOf(new Set()) === Set.prototype
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}

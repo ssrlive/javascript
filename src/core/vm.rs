@@ -18320,6 +18320,132 @@ impl<'gc> VM<'gc> {
                 self.resolve_promise_value(ctx, &promise_obj, &value);
                 promise_obj
             }
+            BUILTIN_CTOR_SET => {
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    self.throw_type_error(ctx, "Set constructor requires 'new'");
+                    return Value::Undefined;
+                };
+
+                let proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, &new_target, "Set") {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+
+                let set_handle = new_gc_cell_ptr(
+                    ctx,
+                    VmSetData {
+                        values: Vec::new(),
+                        is_weak: false,
+                    },
+                );
+                let mut set_obj = IndexMap::new();
+                set_obj.insert("__set_data__".to_string(), Value::VmSet(set_handle));
+                set_obj.insert("__type__".to_string(), Value::from("Set"));
+                if let Some(proto_value) = proto.clone() {
+                    set_obj.insert("__proto__".to_string(), proto_value);
+                }
+                let set_value = Value::VmObject(new_gc_cell_ptr(ctx, set_obj));
+
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    return set_value;
+                }
+
+                let adder_base = if let Some(proto_value) = proto {
+                    proto_value
+                } else {
+                    self.read_named_property(ctx, &self.globals.get("Set").cloned().unwrap_or(Value::Undefined), "prototype")
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let adder = self.read_named_property(ctx, &adder_base, "add");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&adder) {
+                    self.throw_type_error(ctx, "Set.prototype.add is not callable");
+                    return Value::Undefined;
+                }
+
+                let iterator_method = self.read_named_property(ctx, &iterable, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(iterator_method, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Value is not iterable");
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&iterator_method) {
+                    self.throw_type_error(ctx, "Set constructor iterator method is not callable");
+                    return Value::Undefined;
+                }
+
+                let iterator = match self.vm_call_function_value(ctx, &iterator_method, &iterable, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                if !matches!(
+                    iterator,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                ) {
+                    self.throw_type_error(ctx, "Set constructor iterator must return an object");
+                    return Value::Undefined;
+                }
+
+                let next_method = self.read_named_property(ctx, &iterator, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&next_method) {
+                    self.throw_type_error(ctx, "Set constructor iterator next is not callable");
+                    return Value::Undefined;
+                }
+
+                loop {
+                    let next = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    if !matches!(
+                        next,
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                    ) {
+                        self.throw_type_error(ctx, "Set constructor iterator must return an object");
+                        return Value::Undefined;
+                    }
+
+                    let done = self.read_named_property(ctx, &next, "done");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+
+                    let next_value = self.read_named_property(ctx, &next, "value");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+
+                    if let Err(err) = self.vm_call_function_value(ctx, &adder, &set_value, &[next_value]) {
+                        self.iterator_close(ctx, &iterator);
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                }
+
+                set_value
+            }
             BUILTIN_PROMISE_ALL => {
                 let mut settled_values: Vec<Value<'gc>> = Vec::new();
                 let mut rejection: Option<Value<'gc>> = None;
@@ -23494,6 +23620,14 @@ impl<'gc> VM<'gc> {
                 }
             }
             BUILTIN_CTOR_SET => {
+                if self
+                    .new_target_stack
+                    .last()
+                    .is_none_or(|new_target| matches!(new_target, Value::Undefined))
+                {
+                    self.throw_type_error(ctx, "Set constructor requires 'new'");
+                    return Value::Undefined;
+                }
                 if let Value::VmObject(obj) = receiver {
                     let mut values = Vec::new();
                     if let Some(Value::VmArray(arr)) = args.first() {
@@ -32463,10 +32597,27 @@ impl<'gc> VM<'gc> {
         constructor: &Value<'gc>,
         intrinsic_ctor_name: &str,
     ) -> Option<Value<'gc>> {
+        let read_ctor_prototype = |vm: &mut Self, ctor: &Value<'gc>| -> Option<Value<'gc>> {
+            let proto = vm.read_named_property(ctx, ctor, "prototype");
+            if vm.pending_throw.is_some() {
+                vm.pending_throw = None;
+                return None;
+            }
+            if matches!(
+                proto,
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            ) && !proto.is_symbol_value()
+            {
+                Some(proto)
+            } else {
+                None
+            }
+        };
+
         if let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, constructor) {
             let found = origin_global.borrow().get(intrinsic_ctor_name).cloned();
-            if let Some(Value::VmObject(object_ctor)) = found
-                && let Some(default_proto) = object_ctor.borrow().get("prototype").cloned()
+            if let Some(object_ctor) = found
+                && let Some(default_proto) = read_ctor_prototype(self, &object_ctor)
             {
                 return Some(default_proto);
             }
@@ -32511,15 +32662,15 @@ impl<'gc> VM<'gc> {
         if self.pending_throw.is_none()
             && !self.values_same(&ctor_fn, constructor)
             && let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, &ctor_fn)
-            && let Some(Value::VmObject(object_ctor)) = origin_global.borrow().get(intrinsic_ctor_name).cloned()
-            && let Some(default_proto) = object_ctor.borrow().get("prototype").cloned()
+            && let Some(object_ctor) = origin_global.borrow().get(intrinsic_ctor_name).cloned()
+            && let Some(default_proto) = read_ctor_prototype(self, &object_ctor)
         {
             return Some(default_proto);
         }
         self.pending_throw = None;
 
-        if let Some(Value::VmObject(object_ctor)) = self.globals.get(intrinsic_ctor_name) {
-            return object_ctor.borrow().get("prototype").cloned();
+        if let Some(object_ctor) = self.globals.get(intrinsic_ctor_name).cloned() {
+            return read_ctor_prototype(self, &object_ctor);
         }
 
         None

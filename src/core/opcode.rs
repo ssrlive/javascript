@@ -1,6 +1,6 @@
 use crate::core::{Collect, GcTrace, JSError, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Opcode {
     Return = 0,
@@ -523,7 +523,7 @@ impl<'gc> Chunk<'gc> {
                 | 105..=107 => {}
 
                 // u8 operand, no adjustment needed
-                16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 | 108 => {
+                16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 | 108 | 109 => {
                     i += 1;
                 }
 

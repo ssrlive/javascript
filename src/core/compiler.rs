@@ -1593,6 +1593,10 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::ReboxLocal);
                     self.chunk.write_byte(slot);
                 }
+                // Record snapshot after for-init locals are available for eval
+                if is_lexical_init {
+                    self.record_top_level_locals_snapshot();
+                }
 
                 // Loop start: test
                 let loop_start = self.chunk.code.len();
@@ -1644,6 +1648,7 @@ impl<'gc> Compiler<'gc> {
                 // Pop for-init lexical locals (let/const forced to local at scope_depth 0)
                 if is_lexical_init {
                     self.end_block_scope(saved_init_locals);
+                    self.record_top_level_locals_snapshot();
                 }
 
                 if is_last {
@@ -6993,7 +6998,7 @@ impl<'gc> Compiler<'gc> {
     /// Record a snapshot of the current top-level locals for direct eval support.
     /// Only effective when compiling at scope_depth 0 (top-level code).
     fn record_top_level_locals_snapshot(&mut self) {
-        if self.scope_depth != 0 {
+        if self.function_depth != 0 {
             return;
         }
         let ip = self.chunk.code.len();

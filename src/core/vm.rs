@@ -14577,6 +14577,7 @@ impl<'gc> VM<'gc> {
                     | Opcode::GetArguments
                     | Opcode::NewCall
                     | Opcode::BoxLocal
+                    | Opcode::ReboxLocal
                     | Opcode::CallSpread
                     | Opcode::ThrowIfNotConstructor,
                 ) => {
@@ -19847,6 +19848,7 @@ impl<'gc> VM<'gc> {
                                         | Opcode::CollectRest
                                         | Opcode::GetArguments
                                         | Opcode::BoxLocal
+                                        | Opcode::ReboxLocal
                                         | Opcode::CallSpread
                                         | Opcode::ThrowIfNotConstructor,
                                     ) => pc += 1,

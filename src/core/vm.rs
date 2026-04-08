@@ -3524,6 +3524,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_NUM_TOSTRING => "toString",
             BUILTIN_NUM_TOLOCALESTRING => "toLocaleString",
             BUILTIN_NUM_VALUEOF => "valueOf",
+            BUILTIN_SET_ADD => "add",
             BUILTIN_BIGINT_ASINTN => "asIntN",
             BUILTIN_BIGINT_ASUINTN => "asUintN",
             BUILTIN_BIGINT_TOSTRING => "toString",
@@ -27723,6 +27724,10 @@ impl<'gc> VM<'gc> {
             },
             _ => None,
         };
+        if receiver_set.is_none() && id == BUILTIN_SET_ADD {
+            self.throw_type_error(ctx, "Set.prototype.add called on incompatible receiver");
+            return Value::Undefined;
+        }
         if let Some(s) = receiver_set {
             match id {
                 BUILTIN_SET_ADD => {

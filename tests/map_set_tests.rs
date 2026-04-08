@@ -207,3 +207,30 @@ fn test_set_values() {
     .unwrap();
     assert_eq!(result, "\"2\"");
 }
+
+#[test]
+fn test_set_add_rejects_invalid_receivers() {
+    let result = evaluate_script(
+        r#"
+        const values = [undefined, null, true, 1, "x", {}];
+        values.every(function(value) {
+            try {
+                Set.prototype.add.call(value, 1);
+                return false;
+            } catch (err) {
+                return err instanceof TypeError;
+            }
+        })
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_add_has_standard_name() {
+    let result = evaluate_script("Set.prototype.add.name", false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"add\"");
+}

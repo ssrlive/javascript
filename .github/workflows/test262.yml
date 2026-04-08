@@ -245,10 +245,12 @@ jobs:
             32)
               TITLE='"built-ins/DisposableStack" - "built-ins/isNaN"'
               FOCUS='built-ins/DisposableStack,built-ins/Error,built-ins/eval,built-ins/FinalizationRegistry,built-ins/Function,built-ins/GeneratorFunction,built-ins/GeneratorPrototype,built-ins/global,built-ins/Infinity,built-ins/isFinite,built-ins/isNaN'
+              RUN_TESTS='true'
               ;;
             33)
               TITLE='"built-ins/Iterator" - "built-ins/SetIteratorPrototype"'
               FOCUS='built-ins/Iterator,built-ins/JSON,built-ins/Map,built-ins/MapIteratorPrototype,built-ins/Set,built-ins/SetIteratorPrototype'
+              RUN_TESTS='true'
               ;;
             34)
               TITLE='"built-ins/Math" - "built-ins/parseInt"'

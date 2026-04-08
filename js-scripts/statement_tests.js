@@ -373,6 +373,7 @@ if (!isNode) {
     console.log("==== Indirect eval of function assigning to 'eval' in strict mode ====");
     var f = Function('eval = 42;');
     f();
+    assert(eval === 42, "eval should be assigned the value 42");
 }
 
 console.log("All tests passed.");

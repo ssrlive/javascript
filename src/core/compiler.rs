@@ -89,6 +89,7 @@ struct LoopContext {
     break_patches: Vec<usize>,        // offsets to patch with post-loop address
     for_of_iter_var: Option<String>,  // iterator variable name for for-of loops (IteratorClose on early exit)
     body_saved_locals: Option<usize>, // locals count at start of loop body (for cleaning up block-scoped lets on continue/break)
+    is_switch: bool,                  // true for switch statements (continue should skip these)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1098,9 +1099,13 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    if self.completion_var.is_some() {
+                        self.emit_load_completion();
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
                 }
             }
             StatementKind::Var(decls) => {
@@ -1146,9 +1151,13 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    if self.completion_var.is_some() {
+                        self.emit_load_completion();
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
                 }
             }
             StatementKind::Const(decls) => {
@@ -1177,9 +1186,13 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
                 if is_last {
-                    let idx = self.chunk.add_constant(Value::Undefined);
-                    self.chunk.write_opcode(Opcode::Constant);
-                    self.chunk.write_u16(idx);
+                    if self.completion_var.is_some() {
+                        self.emit_load_completion();
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
                 }
             }
             StatementKind::Assign(name, expr) => {
@@ -1327,23 +1340,76 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(&if_stmt.condition)?;
                 let then_jump = self.emit_jump(Opcode::JumpIfFalse);
 
-                // Then branch
-                for (i, s) in if_stmt.then_body.iter().enumerate() {
-                    let s_is_last = is_last && i == if_stmt.then_body.len() - 1 && if_stmt.else_body.is_none();
-                    self.compile_statement(s, s_is_last)?;
-                }
+                // When completion_var is active, branches save to cv and we load
+                // cv at the end.  When not, branches push directly via is_last.
+                let use_cv = self.completion_var.is_some();
+                let branch_is_last = is_last && !use_cv;
+
+                // UpdateEmpty: set cv to undefined before each branch so empty
+                // completions (e.g. break;) produce undefined rather than retaining
+                // a stale value from a prior statement.
+                self.emit_set_completion_undefined();
 
                 if let Some(else_body) = &if_stmt.else_body {
+                    for (i, s) in if_stmt.then_body.iter().enumerate() {
+                        let s_is_last = branch_is_last && i == if_stmt.then_body.len() - 1;
+                        self.compile_statement(s, s_is_last)?;
+                    }
+                    if branch_is_last && if_stmt.then_body.is_empty() {
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                    }
+
                     let else_jump = self.emit_jump(Opcode::Jump);
                     self.patch_jump(then_jump);
 
+                    self.emit_set_completion_undefined();
+
                     for (i, s) in else_body.iter().enumerate() {
-                        let s_is_last = is_last && i == else_body.len() - 1;
+                        let s_is_last = branch_is_last && i == else_body.len() - 1;
                         self.compile_statement(s, s_is_last)?;
                     }
+                    if branch_is_last && else_body.is_empty() {
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                    }
+
                     self.patch_jump(else_jump);
                 } else {
-                    self.patch_jump(then_jump);
+                    // No else clause
+                    for (i, s) in if_stmt.then_body.iter().enumerate() {
+                        let s_is_last = branch_is_last && i == if_stmt.then_body.len() - 1;
+                        self.compile_statement(s, s_is_last)?;
+                    }
+                    if branch_is_last && if_stmt.then_body.is_empty() {
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                    }
+
+                    if branch_is_last {
+                        // No cv: true path leaves value; skip false-path undefined push
+                        let after_jump = self.emit_jump(Opcode::Jump);
+                        self.patch_jump(then_jump);
+                        let undef = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef);
+                        self.patch_jump(after_jump);
+                    } else if use_cv {
+                        // cv active: true path skips false-path cv=undefined
+                        let skip = self.emit_jump(Opcode::Jump);
+                        self.patch_jump(then_jump);
+                        self.emit_set_completion_undefined();
+                        self.patch_jump(skip);
+                    } else {
+                        self.patch_jump(then_jump);
+                    }
+                }
+
+                if is_last && use_cv {
+                    self.emit_load_completion();
                 }
             }
             StatementKind::DoWhile(body, cond) => {
@@ -1683,10 +1749,11 @@ impl<'gc> Compiler<'gc> {
                     self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
                 } else {
                     // Pop block-scoped locals from the loop body before jumping to update.
+                    // For unlabeled continue, skip switch contexts to find enclosing loop.
                     if let Some(ctx) = if let Some(label) = label_opt {
                         self.loop_stack.iter().rev().find(|c| c.label.as_deref() == Some(label.as_str()))
                     } else {
-                        self.loop_stack.last()
+                        self.loop_stack.iter().rev().find(|c| !c.is_switch)
                     } && let Some(saved) = ctx.body_saved_locals
                     {
                         let to_pop = self.locals.len().saturating_sub(saved);
@@ -1701,8 +1768,8 @@ impl<'gc> Compiler<'gc> {
                         } else {
                             return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
                         }
-                    } else if self.loop_stack.last().is_some() {
-                        self.loop_stack.last_mut().unwrap().continue_patches.push(patch);
+                    } else if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| !c.is_switch) {
+                        ctx.continue_patches.push(patch);
                     } else {
                         return Err(crate::raise_syntax_error!("continue statement not in loop"));
                     }
@@ -2127,6 +2194,20 @@ impl<'gc> Compiler<'gc> {
                 self.end_block_scope(saved_try);
                 self.chunk.write_opcode(Opcode::TeardownTry);
 
+                // Save try block's completion value before jumping over catch.
+                // Per spec, if finally completes normally, use try/catch's completion.
+                if has_finally {
+                    if let Some(tfc) = self.try_finally_stack.last() {
+                        if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
+                            let sv = sv.clone();
+                            let cv = cv.clone();
+                            self.emit_helper_get(&cv);
+                            self.emit_helper_set(&sv);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                    }
+                }
+
                 // Jump over catch block
                 let jump_over_catch = self.emit_jump(Opcode::Jump);
 
@@ -2189,6 +2270,18 @@ impl<'gc> Compiler<'gc> {
                         self.compile_statement(s, false)?;
                     }
                 }
+                // Save catch block's completion value for finally restore.
+                if has_finally {
+                    if let Some(tfc) = self.try_finally_stack.last() {
+                        if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
+                            let sv = sv.clone();
+                            let cv = cv.clone();
+                            self.emit_helper_get(&cv);
+                            self.emit_helper_set(&sv);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                    }
+                }
                 if catch_bumped_depth {
                     self.scope_depth = 0;
                 }
@@ -2213,6 +2306,10 @@ impl<'gc> Compiler<'gc> {
                 };
 
                 // Finally body (block-scoped)
+                // Keep completion_var active during finally so that abrupt
+                // completions (break/continue/return) in finally use the
+                // finally's own completion value.  For normal completion,
+                // we restore the try/catch cv from saved_cv_var below.
                 let saved_finally = self.locals.len();
                 if let Some(ref finally_body) = tc.finally_body {
                     for s in finally_body {
@@ -2220,6 +2317,17 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
                 self.end_block_scope(saved_finally);
+
+                // Restore try/catch completion value from saved_cv_var
+                if let Some(ref tfc) = finally_context {
+                    if let (Some(sv), Some(cv)) = (&tfc.saved_cv_var, &self.completion_var) {
+                        let sv = sv.clone();
+                        let cv = cv.clone();
+                        self.emit_helper_get(&sv);
+                        self.emit_helper_set(&cv);
+                        self.chunk.write_opcode(Opcode::Pop);
+                    }
+                }
 
                 // After finally: check break flag and restore cv, then jump to break target
                 if let Some(tfc) = finally_context {
@@ -2261,7 +2369,7 @@ impl<'gc> Compiler<'gc> {
                                     } else {
                                         return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
                                     }
-                                } else if let Some(ctx) = self.loop_stack.last_mut() {
+                                } else if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| !c.is_switch) {
                                     ctx.continue_patches.push(continue_jump);
                                 } else {
                                     return Err(crate::raise_syntax_error!("continue statement not in loop"));
@@ -3042,6 +3150,7 @@ impl<'gc> Compiler<'gc> {
                 let switch_saved_locals = if self.scope_depth > 0 { Some(self.locals.len()) } else { None };
                 let ctx = LoopContext {
                     body_saved_locals: switch_saved_locals,
+                    is_switch: true,
                     ..LoopContext::default()
                 };
                 self.loop_stack.push(ctx);
@@ -3578,6 +3687,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(idx);
                 }
+            }
+            StatementKind::Debugger => {
+                // debugger statement is a no-op in this engine
             }
             _ => {
                 return Err(crate::raise_syntax_error!(format!(
@@ -6361,6 +6473,17 @@ impl<'gc> Compiler<'gc> {
     fn emit_save_completion(&mut self) {
         if let Some(ref cv) = self.completion_var.clone() {
             self.emit_helper_set(cv);
+        }
+    }
+
+    /// Emit code to set the completion variable to undefined (for UpdateEmpty semantics).
+    fn emit_set_completion_undefined(&mut self) {
+        if let Some(ref cv) = self.completion_var.clone() {
+            let undef = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef);
+            self.emit_helper_set(cv);
+            self.chunk.write_opcode(Opcode::Pop);
         }
     }
 

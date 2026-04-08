@@ -17141,7 +17141,10 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_this__".to_string(), this_arg.clone());
                         }
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
+                        let saved_direct_eval = child.direct_eval;
+                        child.direct_eval = false;
                         let result = child.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
+                        child.direct_eval = saved_direct_eval;
                         let thrown = child.pending_throw.take();
                         child.globals.shift_remove("__repl_call_args__");
                         child.globals.shift_remove("__repl_call_this__");
@@ -17176,7 +17179,12 @@ impl<'gc> VM<'gc> {
                     }
 
                     let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
+                    // Function constructor creates sloppy-mode code per spec,
+                    // so force direct_eval=false to relax strict binding checks.
+                    let saved_direct_eval = self.direct_eval;
+                    self.direct_eval = false;
                     let result = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
+                    self.direct_eval = saved_direct_eval;
 
                     match saved_args {
                         Some(v) => {
@@ -19546,10 +19554,16 @@ impl<'gc> VM<'gc> {
                 }
                 // Compile and run eval'd code in a temporary VM that shares globals
                 let result = (|| -> Result<Value<'gc>, JSError> {
-                    let tokens = crate::core::tokenize(&code)?;
-                    let mut index = 0;
+                    let is_direct = self.direct_eval;
+                    // Indirect eval runs as global (sloppy) code: relax strict-mode
+                    // binding restrictions so `var eval` / `arguments = 42` are allowed.
+                    let do_parse = |code: &str| -> Result<Vec<crate::core::statement::Statement>, JSError> {
+                        let tokens = crate::core::tokenize(code)?;
+                        let mut index = 0;
+                        Ok(crate::core::parse_statements(&tokens, &mut index)?)
+                    };
                     // For direct eval inside class bodies, push private names so parser accepts #field access
-                    let privns_context = if self.direct_eval {
+                    let privns_context = if is_direct {
                         self.frames
                             .last()
                             .and_then(|f| self.chunk.fn_private_name_context.get(&f.func_ip).cloned())
@@ -19561,7 +19575,19 @@ impl<'gc> VM<'gc> {
                             ctx.iter().flat_map(|(_, names)| names.iter().cloned()).collect();
                         crate::core::push_private_names_for_eval(all_names)
                     });
-                    let statements = crate::core::parse_statements(&tokens, &mut index)?;
+                    let statements = if is_direct {
+                        do_parse(&code)?
+                    } else {
+                        // Indirect eval: relax strict-mode binding checks unless
+                        // the eval'd code itself starts with "use strict".
+                        let code_trimmed = code.trim();
+                        let eval_code_is_strict = code_trimmed.starts_with("'use strict'") || code_trimmed.starts_with("\"use strict\"");
+                        if eval_code_is_strict {
+                            do_parse(&code)?
+                        } else {
+                            crate::core::parse_without_strict_binding_checks(|| do_parse(&code))?
+                        }
+                    };
                     // Check for bare return statements — illegal at top level of eval
                     for stmt in &statements {
                         if matches!(*stmt.kind, crate::core::StatementKind::Return(_)) {

@@ -140,6 +140,10 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
 }
 thread_local! {
     static AWAIT_CONTEXT : RefCell < usize > = const { RefCell::new(0) };
+    /// When true (default), the parser rejects `eval` / `arguments` as binding
+    /// names and assignment targets (strict-mode restriction).  Cleared for
+    /// indirect-eval and `Function()` constructor code that runs in sloppy mode.
+    static STRICT_BINDING_CHECKS : Cell < bool > = const { Cell::new(true) };
 }
 pub(crate) fn in_await_context() -> bool {
     AWAIT_CONTEXT.with(|c| *c.borrow() > 0)
@@ -149,6 +153,19 @@ pub(crate) fn push_await_context() {
 }
 pub(crate) fn pop_await_context() {
     AWAIT_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+fn strict_binding_checks() -> bool {
+    STRICT_BINDING_CHECKS.with(|c| c.get())
+}
+/// Temporarily disable strict-mode binding checks (for indirect eval / Function ctor).
+pub(crate) fn parse_without_strict_binding_checks<T, F: FnOnce() -> T>(f: F) -> T {
+    STRICT_BINDING_CHECKS.with(|c| {
+        let prev = c.get();
+        c.set(false);
+        let out = f();
+        c.set(prev);
+        out
+    })
 }
 fn with_cleared_await_context<T, F: FnOnce() -> T>(f: F) -> T {
     AWAIT_CONTEXT.with(|c| {
@@ -1299,6 +1316,12 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             if *index < t.len() {
                 match &t[*index].token {
                     Token::Identifier(name) => {
+                        if strict_binding_checks() && (name == "eval" || name == "arguments") {
+                            return Err(raise_parse_error_with_token!(
+                                t.get(*index).unwrap(),
+                                format!("Binding '{}' in strict mode", name)
+                            ));
+                        }
                         catch_param = Some(CatchParamPattern::Identifier(name.clone()));
                         *index += 1;
                     }
@@ -2099,6 +2122,13 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
         match &t[*index].token {
             Token::Identifier(name) => {
                 let name = name.clone();
+                // Strict mode: 'eval' and 'arguments' cannot be used as binding names
+                if strict_binding_checks() && (name == "eval" || name == "arguments") {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        format!("'{}' can't be defined or assigned to in strict mode code", name)
+                    ));
+                }
                 *index += 1;
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
@@ -2426,6 +2456,13 @@ pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<D
                 }
                 params.push(DestructuringElement::NestedArray(pattern, default_expr));
             } else if let Some(Token::Identifier(param)) = tokens.get(*index).map(|t| &t.token).cloned() {
+                // Strict mode: 'eval' and 'arguments' cannot be used as parameter names
+                if strict_binding_checks() && (param == "eval" || param == "arguments") {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index],
+                        format!("'{}' can't be defined or assigned to in strict mode code", param)
+                    ));
+                }
                 *index += 1;
                 let mut default_expr: Option<Box<Expr>> = None;
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
@@ -2920,6 +2957,17 @@ pub fn parse_assignment(tokens: &[TokenData], index: &mut usize) -> Result<Expr,
     if let Some(ctor) = get_assignment_ctor(&tokens[*index].token) {
         if contains_optional_chain(&left) {
             return Err(raise_parse_error_at!(tokens.get(*index)));
+        }
+        // Strict mode: cannot assign to 'eval' or 'arguments'
+        if strict_binding_checks() {
+            if let Expr::Var(ref name, _, _) = left {
+                if name == "eval" || name == "arguments" {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index - 1],
+                        format!("'{}' can't be defined or assigned to in strict mode code", name)
+                    ));
+                }
+            }
         }
         *index += 1;
         let right = parse_assignment(tokens, index)?;

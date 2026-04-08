@@ -1065,6 +1065,74 @@ impl<'gc> VM<'gc> {
         None
     }
 
+    /// Fast path for `eval("/pattern/flags")` — skips full tokenize/parse/compile/execute.
+    fn eval_regex_literal_fast_path(&mut self, ctx: &GcContext<'gc>, code: &str) -> Option<Value<'gc>> {
+        let trimmed = code.trim();
+        if !trimmed.starts_with('/') || trimmed.len() < 2 {
+            return None;
+        }
+        let chars: Vec<char> = trimmed.chars().collect();
+        let mut i = 1; // skip opening /
+        let mut in_class = false;
+        let is_line_terminator = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+        loop {
+            if i >= chars.len() {
+                return None; // no closing /
+            }
+            let c = chars[i];
+            if is_line_terminator(c) {
+                return None; // line terminator in regex → let full path handle (SyntaxError)
+            }
+            match c {
+                '\\' => {
+                    i += 1;
+                    if i >= chars.len() || is_line_terminator(chars[i]) {
+                        return None; // escaped line terminator → let full path handle
+                    }
+                }
+                '[' if !in_class => in_class = true,
+                ']' if in_class => in_class = false,
+                '/' if !in_class => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        // Collect pattern as String (chars 1..i)
+        let pattern: String = chars[1..i].iter().collect();
+        let after: String = chars[i + 1..].iter().collect();
+        // Flags: only ASCII letters immediately after closing /
+        let flag_end = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+        let flags = &after[..flag_end];
+        let rest = after[flag_end..].trim();
+        if !rest.is_empty() && rest != ";" {
+            return None;
+        }
+        if let Some(err_msg) = Self::validate_regexp_flags(flags) {
+            self.throw_syntax_error(ctx, &err_msg);
+            return Some(Value::Undefined);
+        }
+        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+        let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
+        if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
+            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
+            return Some(Value::Undefined);
+        }
+        let mut map = IndexMap::new();
+        map.insert("__regex_pattern__".to_string(), Value::from(pattern.as_str()));
+        map.insert("__regex_flags__".to_string(), Value::from(flags));
+        map.insert("__type__".to_string(), Value::from("RegExp"));
+        map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
+        map.insert("lastIndex".to_string(), Value::Number(0.0));
+        if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
+            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+        {
+            map.insert("__proto__".to_string(), proto);
+        }
+        map.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
+        map.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
+        Some(Value::VmObject(new_gc_cell_ptr(ctx, map)))
+    }
+
     fn parse_simple_module_namespace(&self, ctx: &GcContext<'gc>, source_text: &str) -> Value<'gc> {
         let mut map = IndexMap::new();
 
@@ -19428,6 +19496,10 @@ impl<'gc> VM<'gc> {
                 }
                 let code = value_to_string(first_arg);
                 if let Some(v) = self.eval_comment_only_fast_path(&code) {
+                    return v;
+                }
+                // Fast path: eval of a bare regex literal like /pattern/ or /pattern/flags
+                if let Some(v) = self.eval_regex_literal_fast_path(ctx, &code) {
                     return v;
                 }
                 if code.contains("?.") {

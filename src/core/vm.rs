@@ -27839,13 +27839,15 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT
         {
-            let (idx, has_iter_target_slot, iter_target, items_snapshot, iter_kind, map_target, set_target) = {
+            let (idx, has_iter_target_slot, has_map_target_slot, has_set_target_slot, iter_target, items_snapshot, iter_kind, map_target, set_target) = {
                 let borrow = obj.borrow();
                 let idx = match borrow.get("__index__") {
                     Some(Value::Number(n)) => *n as usize,
                     _ => 0,
                 };
                 let has_iter_target_slot = borrow.contains_key("__iter_target__");
+                let has_map_target_slot = borrow.contains_key("__map_target__");
+                let has_set_target_slot = borrow.contains_key("__set_target__");
                 let iter_target = borrow.get("__iter_target__").cloned();
                 let items_snapshot = borrow.get("__items__").cloned();
                 let iter_kind = borrow.get("__iter_kind__").cloned();
@@ -27854,6 +27856,8 @@ impl<'gc> VM<'gc> {
                 (
                     idx,
                     has_iter_target_slot,
+                    has_map_target_slot,
+                    has_set_target_slot,
                     iter_target,
                     items_snapshot,
                     iter_kind,
@@ -28075,7 +28079,9 @@ impl<'gc> VM<'gc> {
             }
 
             // Live Map iterator: reads entries from the Map on each .next() call
-            if let Some(map_val) = map_target {
+            if let Some(map_val) = map_target
+                && !matches!(map_val, Value::Undefined)
+            {
                 let map_handle = match &map_val {
                     Value::VmMap(m) => Some(*m),
                     Value::VmObject(o) => match o.borrow().get("__map_data__").cloned() {
@@ -28103,6 +28109,7 @@ impl<'gc> VM<'gc> {
                         result.insert("done".to_string(), Value::Boolean(false));
                         return Value::VmObject(new_gc_cell_ptr(ctx, result));
                     }
+                    obj.borrow_mut(ctx).insert("__map_target__".to_string(), Value::Undefined);
                     let mut result = IndexMap::new();
                     result.insert("value".to_string(), Value::Undefined);
                     result.insert("done".to_string(), Value::Boolean(true));
@@ -28110,8 +28117,17 @@ impl<'gc> VM<'gc> {
                 }
             }
 
+            if has_map_target_slot {
+                let mut result = IndexMap::new();
+                result.insert("value".to_string(), Value::Undefined);
+                result.insert("done".to_string(), Value::Boolean(true));
+                return Value::VmObject(new_gc_cell_ptr(ctx, result));
+            }
+
             // Live Set iterator: reads values from the Set on each .next() call
-            if let Some(set_val) = set_target {
+            if let Some(set_val) = set_target
+                && !matches!(set_val, Value::Undefined)
+            {
                 let set_handle = match &set_val {
                     Value::VmSet(s) => Some(*s),
                     Value::VmObject(o) => match o.borrow().get("__set_data__").cloned() {
@@ -28136,11 +28152,19 @@ impl<'gc> VM<'gc> {
                         result.insert("done".to_string(), Value::Boolean(false));
                         return Value::VmObject(new_gc_cell_ptr(ctx, result));
                     }
+                    obj.borrow_mut(ctx).insert("__set_target__".to_string(), Value::Undefined);
                     let mut result = IndexMap::new();
                     result.insert("value".to_string(), Value::Undefined);
                     result.insert("done".to_string(), Value::Boolean(true));
                     return Value::VmObject(new_gc_cell_ptr(ctx, result));
                 }
+            }
+
+            if has_set_target_slot {
+                let mut result = IndexMap::new();
+                result.insert("value".to_string(), Value::Undefined);
+                result.insert("done".to_string(), Value::Boolean(true));
+                return Value::VmObject(new_gc_cell_ptr(ctx, result));
             }
 
             let mut borrow = obj.borrow_mut(ctx);

@@ -95,3 +95,47 @@ fn set_iterator_prototype_exposes_next_and_tostringtag() {
     let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "true");
 }
+
+#[test]
+fn map_iterator_stays_done_after_mutation() {
+    let script = r#"
+        let map = new Map([[1, 11], [2, 22]]);
+        let iterator = map[Symbol.iterator]();
+        iterator.next();
+        map.set(3, 33);
+        iterator.next();
+        iterator.next();
+        let exhausted = iterator.next();
+        map.set(4, 44);
+        let repeated = iterator.next();
+        exhausted.value === undefined &&
+        exhausted.done === true &&
+        repeated.value === undefined &&
+        repeated.done === true
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}
+
+#[test]
+fn set_iterator_stays_done_after_mutation() {
+    let script = r#"
+        let set = new Set([1, 2]);
+        let iterator = set[Symbol.iterator]();
+        iterator.next();
+        set.add(3);
+        iterator.next();
+        iterator.next();
+        let exhausted = iterator.next();
+        set.add(4);
+        let repeated = iterator.next();
+        exhausted.value === undefined &&
+        exhausted.done === true &&
+        repeated.value === undefined &&
+        repeated.done === true
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}

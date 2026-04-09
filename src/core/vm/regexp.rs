@@ -323,6 +323,38 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            "regexp.symbolMatch" => match receiver {
+                Some(Value::VmObject(re_obj)) => {
+                    let input = match _args.first() {
+                        Some(v) => self.vm_to_string(ctx, v),
+                        None => String::new(),
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    self.regexp_string_match(ctx, &input, re_obj)
+                }
+                _ => {
+                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.match] called on incompatible receiver");
+                    Value::Undefined
+                }
+            },
+            "regexp.symbolMatchAll" => match receiver {
+                Some(Value::VmObject(re_obj)) => {
+                    let input = match _args.first() {
+                        Some(v) => self.vm_to_string(ctx, v),
+                        None => String::new(),
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    self.regexp_string_match(ctx, &input, re_obj)
+                }
+                _ => {
+                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.matchAll] called on incompatible receiver");
+                    Value::Undefined
+                }
+            },
             _ => {
                 log::warn!("Unknown regexp host function: {}", name);
                 Value::Undefined
@@ -384,6 +416,14 @@ impl<'gc> VM<'gc> {
             "__get_flags".to_string(),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_flags", "get flags", 0.0, false),
         );
+        regexp_proto.insert(
+            "@@sym:7".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "regexp.symbolMatch", "[Symbol.match]", 1.0, false),
+        );
+        regexp_proto.insert(
+            "@@sym:11".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "regexp.symbolMatchAll", "[Symbol.matchAll]", 1.0, false),
+        );
         regexp_proto.insert("__nonenumerable_source__".to_string(), Value::Boolean(true));
         regexp_proto.insert("__nonenumerable_global__".to_string(), Value::Boolean(true));
         regexp_proto.insert("__nonenumerable_ignoreCase__".to_string(), Value::Boolean(true));
@@ -397,6 +437,8 @@ impl<'gc> VM<'gc> {
         regexp_proto.insert("__nonenumerable_exec__".to_string(), Value::Boolean(true));
         regexp_proto.insert("__nonenumerable_test__".to_string(), Value::Boolean(true));
         regexp_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
+        regexp_proto.insert("__nonenumerable_@@sym:7__".to_string(), Value::Boolean(true));
+        regexp_proto.insert("__nonenumerable_@@sym:11__".to_string(), Value::Boolean(true));
         let regexp_proto_obj = new_gc_cell_ptr(ctx, regexp_proto);
         // Stamp each getter with a back-reference to this prototype so that
         // cross-realm identity checks work (spec: SameValue(R, %RegExpPrototype%)).

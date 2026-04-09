@@ -15207,7 +15207,8 @@ impl<'gc> VM<'gc> {
             .insert("import".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, import_map)));
         // Minimal Symbol object — callable via __native_id__, with well-known symbol properties
         // Well-known symbols are proper VmObject symbols with fixed IDs:
-        // iterator=1, hasInstance=2, toPrimitive=3, toStringTag=4, species=5, asyncIterator=6
+        // iterator=1, hasInstance=2, toPrimitive=3, toStringTag=4, species=5,
+        // asyncIterator=6, match=7, replace=8, search=9, split=10, matchAll=11
         let make_well_known_symbol = |id: u64, name: &str| -> Value<'gc> {
             let mut m = IndexMap::new();
             m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
@@ -15221,13 +15222,23 @@ impl<'gc> VM<'gc> {
         let sym_to_string_tag = make_well_known_symbol(4, "toStringTag");
         let sym_species = make_well_known_symbol(5, "species");
         let sym_async_iterator = make_well_known_symbol(6, "asyncIterator");
+        let sym_match = make_well_known_symbol(7, "match");
+        let sym_replace = make_well_known_symbol(8, "replace");
+        let sym_search = make_well_known_symbol(9, "search");
+        let sym_split = make_well_known_symbol(10, "split");
+        let sym_match_all = make_well_known_symbol(11, "matchAll");
         self.cache_symbol_value(1, &sym_iterator);
         self.cache_symbol_value(2, &sym_has_instance);
         self.cache_symbol_value(3, &sym_to_primitive);
         self.cache_symbol_value(4, &sym_to_string_tag);
         self.cache_symbol_value(5, &sym_species);
         self.cache_symbol_value(6, &sym_async_iterator);
-        self.symbol_counter = 6; // user symbols start from 7+
+        self.cache_symbol_value(7, &sym_match);
+        self.cache_symbol_value(8, &sym_replace);
+        self.cache_symbol_value(9, &sym_search);
+        self.cache_symbol_value(10, &sym_split);
+        self.cache_symbol_value(11, &sym_match_all);
+        self.symbol_counter = 11; // user symbols start from 12+
 
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
@@ -15237,7 +15248,24 @@ impl<'gc> VM<'gc> {
         sym_obj.insert("toStringTag".to_string(), sym_to_string_tag);
         sym_obj.insert("species".to_string(), sym_species);
         sym_obj.insert("asyncIterator".to_string(), sym_async_iterator);
-        for key in ["iterator", "hasInstance", "toPrimitive", "toStringTag", "species", "asyncIterator"] {
+        sym_obj.insert("match".to_string(), sym_match);
+        sym_obj.insert("replace".to_string(), sym_replace);
+        sym_obj.insert("search".to_string(), sym_search);
+        sym_obj.insert("split".to_string(), sym_split);
+        sym_obj.insert("matchAll".to_string(), sym_match_all);
+        for key in [
+            "iterator",
+            "hasInstance",
+            "toPrimitive",
+            "toStringTag",
+            "species",
+            "asyncIterator",
+            "match",
+            "replace",
+            "search",
+            "split",
+            "matchAll",
+        ] {
             sym_obj.insert(format!("__readonly_{}__", key), Value::Boolean(true));
             sym_obj.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
             sym_obj.insert(format!("__nonconfigurable_{}__", key), Value::Boolean(true));

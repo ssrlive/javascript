@@ -186,4 +186,16 @@ mod regexp_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"abcccx\"");
     }
+
+    #[test]
+    fn test_regexp_symbol_named_match_builtins_exist() {
+        let script = r#"
+            typeof RegExp.prototype[Symbol.match] === "function" &&
+            typeof RegExp.prototype[Symbol.matchAll] === "function" &&
+            typeof RegExp.prototype[Symbol.match]("abc") === "object" &&
+            typeof RegExp.prototype[Symbol.matchAll]("") === "object"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
 }

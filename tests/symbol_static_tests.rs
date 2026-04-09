@@ -87,4 +87,14 @@ mod symbol_static_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"error\"");
     }
+
+    #[test]
+    fn test_symbol_match_and_match_all_exist() {
+        let script = r#"
+            typeof Symbol.match === "symbol" &&
+            typeof Symbol.matchAll === "symbol"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
 }

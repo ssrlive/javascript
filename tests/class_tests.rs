@@ -353,4 +353,46 @@ mod class_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"P\"", "Expected super call in arrow function to work");
     }
+
+    #[test]
+    fn test_anonymous_class_expression_computed_method_key_uses_runtime_key() {
+        let script = r#"
+            Object.getOwnPropertyNames((class { ["g"]() {} }).prototype)[1] === "g"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_anonymous_class_expression_computed_accessors_use_runtime_key() {
+        let script = r#"
+            let instanceGetter = Object.getOwnPropertyDescriptor(
+              (class { get /* a */ ["g"]() { return 1; } }).prototype,
+              "g"
+            );
+            let instanceSetter = Object.getOwnPropertyDescriptor(
+              (class { set /* a */ ["s"](value) {} }).prototype,
+              "s"
+            );
+            let staticGetter = Object.getOwnPropertyDescriptor(
+              class { static get /* a */ ["sg"]() { return 1; } },
+              "sg"
+            );
+            let staticSetter = Object.getOwnPropertyDescriptor(
+              class { static set /* a */ ["ss"](value) {} },
+              "ss"
+            );
+
+            instanceGetter !== undefined &&
+            typeof instanceGetter.get === "function" &&
+            instanceSetter !== undefined &&
+            typeof instanceSetter.set === "function" &&
+            staticGetter !== undefined &&
+            typeof staticGetter.get === "function" &&
+            staticSetter !== undefined &&
+            typeof staticSetter.set === "function"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
 }

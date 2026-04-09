@@ -9856,6 +9856,7 @@ impl<'gc> Compiler<'gc> {
         // Pre-compute ALL computed property keys in source order at class definition time (spec step 27)
         // Both static and instance computed keys are evaluated here.
         let mut computed_key_counter = 0usize;
+        let computed_keys_use_hidden_globals = self.function_depth == 0;
         let mut cloned_members: Vec<crate::core::statement::ClassMember> = class_def.members.clone();
         for member in &mut cloned_members {
             match member {
@@ -9878,7 +9879,14 @@ impl<'gc> Compiler<'gc> {
                     let original_key = key_expr.clone();
                     self.compile_expr(&original_key)?;
                     self.chunk.write_opcode(Opcode::ToPropertyKey);
-                    self.locals.push(local_name.clone());
+                    if computed_keys_use_hidden_globals {
+                        let local_u16 = crate::unicode::utf8_to_utf16(&local_name);
+                        let local_idx = self.chunk.add_constant(Value::String(local_u16));
+                        self.chunk.write_opcode(Opcode::DefineGlobal);
+                        self.chunk.write_u16(local_idx);
+                    } else {
+                        self.locals.push(local_name.clone());
+                    }
                     *key_expr = Expr::Var(local_name, None, None);
                 }
                 _ => {}
@@ -10734,7 +10742,7 @@ impl<'gc> Compiler<'gc> {
         // they will be cleaned up when the enclosing scope exits.
         // At global scope (scope_depth 0) there is nothing above the computed keys
         // so simple Pops are safe.
-        if self.scope_depth == 0 {
+        if self.scope_depth == 0 && !computed_keys_use_hidden_globals {
             for _ in 0..computed_key_counter {
                 self.chunk.write_opcode(Opcode::Pop);
                 if let Some(pos) = self.locals.iter().rposition(|l| l.starts_with("__ck_")) {

@@ -18445,10 +18445,7 @@ impl<'gc> VM<'gc> {
                         }
                         Value::VmObject(obj) => {
                             if get_function_id(obj).is_some() {
-                                match vm.vm_call_function_value(ctx, &Value::VmObject(obj), &this_val, &arg_vals) {
-                                    Ok(value) => value,
-                                    Err(err) => return Err(err),
-                                }
+                                vm.vm_call_function_value(ctx, &Value::VmObject(obj), &this_val, &arg_vals)?
                             } else {
                                 return Err(crate::make_js_error!(crate::JSErrorKind::TypeError {
                                     message: "is not a function".to_string()
@@ -23849,10 +23846,7 @@ impl<'gc> VM<'gc> {
                             }
                         };
 
-                    let key = match key_val {
-                        Value::Number(n) if n == 0.0 => Value::Number(0.0),
-                        _ => key_val,
-                    };
+                    let key = key_val;
                     if let Some((_, values)) = groups.iter_mut().find(|(existing_key, _)| self.values_same(existing_key, &key)) {
                         values.push(value);
                     } else {
@@ -34492,6 +34486,7 @@ impl<'gc> VM<'gc> {
         stack.iter().any(|item| self.strict_equal(item, value))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn json_serialize_property(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -34594,6 +34589,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn json_serialize_array(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -34636,6 +34632,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn json_serialize_object(
         &mut self,
         ctx: &GcContext<'gc>,

@@ -2951,6 +2951,19 @@ impl<'gc> VM<'gc> {
         vm.run(ctx)
     }
 
+    /// Like `run_vm_snippet_local` but relaxes strict-mode binding checks
+    /// (allows `eval`/`arguments` as parameter names) for non-strict dynamic functions.
+    fn run_vm_snippet_local_relaxed(&mut self, ctx: &GcContext<'gc>, code: &str) -> Result<Value<'gc>, JSError> {
+        let tokens = crate::core::tokenize(code)?;
+        let mut index = 0;
+        let statements = crate::core::parse_without_strict_binding_checks(|| crate::core::parse_statements(&tokens, &mut index))?;
+        let compiler = crate::core::Compiler::new();
+        let chunk = compiler.compile(&statements)?;
+        let mut vm = Self::spawn_child_vm(chunk, ctx);
+        vm.set_source_context(code, None);
+        vm.run(ctx)
+    }
+
     fn global_object_has_own_property(&self, key: &str) -> bool {
         let getter_key = format!("__get_{}", key);
         let setter_key = format!("__set_{}", key);
@@ -17728,13 +17741,13 @@ impl<'gc> VM<'gc> {
                         _ => None,
                     };
                     let callable_expr = if is_async_dynamic_gen {
-                        format!("async function*({}){{{}}}", params_src, body)
+                        format!("async function*({}\n){{{}\n}}", params_src, body)
                     } else if is_async_dynamic_fn {
-                        format!("async function({}){{{}}}", params_src, body)
+                        format!("async function({}\n){{{}\n}}", params_src, body)
                     } else if is_dynamic_generator {
-                        format!("function*({}){{{}}}", params_src, body)
+                        format!("function*({}\n){{{}\n}}", params_src, body)
                     } else {
-                        format!("function({}){{{}}}", params_src, body)
+                        format!("function({}\n){{{}\n}}", params_src, body)
                     };
                     drop(borrow);
 
@@ -21326,7 +21339,20 @@ impl<'gc> VM<'gc> {
                 }
             }
             BUILTIN_NEW_FUNCTION | BUILTIN_CTOR_FUNCTION => {
-                // new Function(body): return a callable wrapper with __fn_body__
+                // CreateDynamicFunction: ToString params LEFT-TO-RIGHT first, then body (spec step 7-8)
+                let mut param_strings: Vec<String> = Vec::new();
+                if args.len() > 1 {
+                    for p in args.iter().take(args.len() - 1) {
+                        let raw = match self.vm_to_string_like_spec(ctx, p) {
+                            Ok(raw) => raw,
+                            Err(err) => {
+                                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                                return Value::Undefined;
+                            }
+                        };
+                        param_strings.push(raw);
+                    }
+                }
                 let body = if let Some(body_arg) = args.last() {
                     match self.vm_to_string_like_spec(ctx, body_arg) {
                         Ok(body) => body,
@@ -21338,24 +21364,6 @@ impl<'gc> VM<'gc> {
                 } else {
                     String::new()
                 };
-                let mut params: Vec<String> = Vec::new();
-                if args.len() > 1 {
-                    for p in args.iter().take(args.len() - 1) {
-                        let raw = match self.vm_to_string_like_spec(ctx, p) {
-                            Ok(raw) => raw,
-                            Err(err) => {
-                                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
-                                return Value::Undefined;
-                            }
-                        };
-                        for seg in raw.split(',') {
-                            let s = seg.trim();
-                            if !s.is_empty() {
-                                params.push(s.to_string());
-                            }
-                        }
-                    }
-                }
                 let current_new_target = self.new_target_stack.last().cloned();
                 // CreateDynamicFunction uses the constructor realm for body scope and the
                 // created "prototype" object's parent, while F.[[Prototype]] still comes
@@ -21373,24 +21381,63 @@ impl<'gc> VM<'gc> {
                 let is_async_gen_ctor = ctor_name.contains("AsyncGeneratorFunction");
                 let is_async_ctor = ctor_name.contains("AsyncFunction") && !is_async_gen_ctor;
                 let is_generator_ctor = ctor_name.contains("GeneratorFunction") && !ctor_name.contains("AsyncGeneratorFunction");
-                let params_src = params.join(",");
-                let validation_source = if is_async_gen_ctor {
-                    format!("(async function*({}){{{}}})", params_src, body)
-                } else if is_async_ctor {
-                    format!("(async function({}){{{}}})", params_src, body)
-                } else if is_generator_ctor {
-                    format!("(function*({}){{{}}})", params_src, body)
+                let params_src = param_strings.join(",");
+                // Count formal parameters from the joined source (for `length` property)
+                let param_count = if params_src.trim().is_empty() {
+                    0
                 } else {
-                    format!("(function({}){{{}}})", params_src, body)
+                    // Parse the parameter list to count top-level commas (not inside parens/brackets)
+                    let mut count = 1usize;
+                    let mut depth = 0i32;
+                    for ch in params_src.chars() {
+                        match ch {
+                            '(' | '[' | '{' => depth += 1,
+                            ')' | ']' | '}' => depth -= 1,
+                            ',' if depth == 0 => count += 1,
+                            _ => {}
+                        }
+                    }
+                    count
                 };
-                if let Err(err) = self.run_vm_snippet_local(ctx, &validation_source) {
+                // Use newlines after params and body to handle // line comments (spec step 11)
+                let validation_source = if is_async_gen_ctor {
+                    format!("(async function*({}\n){{{}\n}})", params_src, body)
+                } else if is_async_ctor {
+                    format!("(async function({}\n){{{}\n}})", params_src, body)
+                } else if is_generator_ctor {
+                    format!("(function*({}\n){{{}\n}})", params_src, body)
+                } else {
+                    format!("(function({}\n){{{}\n}})", params_src, body)
+                };
+                // Per spec step 20c-d: check if body contains "use strict" directive.
+                // If it does, apply strict binding checks (eval/arguments as param names are errors).
+                // If not, relax strict binding checks for parameter names.
+                let body_trimmed = body.trim();
+                let body_is_strict = body_trimmed.starts_with("'use strict'") || body_trimmed.starts_with("\"use strict\"");
+                let validation_result = if body_is_strict {
+                    // Reject `with` statements in strict-mode function bodies
+                    let tokens = crate::core::tokenize(&validation_source);
+                    if let Ok(ref toks) = tokens {
+                        for tok in toks {
+                            if matches!(tok.token, crate::core::Token::With) {
+                                let err = crate::raise_syntax_error!("Strict mode code may not include a with statement");
+                                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    self.run_vm_snippet_local(ctx, &validation_source)
+                } else {
+                    self.run_vm_snippet_local_relaxed(ctx, &validation_source)
+                };
+                if let Err(err) = validation_result {
                     self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
                     return Value::Undefined;
                 }
                 let mut map = IndexMap::new();
                 map.insert("__fn_body__".to_string(), Value::from(&body));
                 map.insert("__fn_params__".to_string(), Value::from(&params_src));
-                map.insert("length".to_string(), Value::Number(params.len() as f64));
+                map.insert("length".to_string(), Value::Number(param_count as f64));
                 map.insert("name".to_string(), Value::from("anonymous"));
                 map.insert("__readonly_length__".to_string(), Value::Boolean(true));
                 map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
@@ -29673,6 +29720,40 @@ impl<'gc> VM<'gc> {
             if !self.is_value_callable(receiver) {
                 self.throw_type_error(ctx, "Function.prototype.toString requires that 'this' be a Function");
                 return Value::Undefined;
+            }
+            // Dynamic functions: reconstruct source from stored params/body
+            if let Value::VmObject(obj) = receiver {
+                let borrow = obj.borrow();
+                if let Some(Value::String(body_u16)) = borrow.get("__fn_body__") {
+                    let body = crate::unicode::utf16_to_utf8(body_u16);
+                    let params = borrow
+                        .get("__fn_params__")
+                        .and_then(|v| match v {
+                            Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let is_gen = matches!(borrow.get("__dynamic_generator_function__"), Some(Value::Boolean(true)));
+                    let is_async = matches!(borrow.get("__async_dynamic_function__"), Some(Value::Boolean(true)));
+                    let is_async_gen = matches!(borrow.get("__async_dynamic_generator_function__"), Some(Value::Boolean(true)));
+                    drop(borrow);
+                    let prefix = if is_async_gen {
+                        "async function* anonymous"
+                    } else if is_async {
+                        "async function anonymous"
+                    } else if is_gen {
+                        "function* anonymous"
+                    } else {
+                        "function anonymous"
+                    };
+                    return Value::from(&format!("{}({}\n) {{\n{}\n}}", prefix, params, body));
+                }
+            }
+            // VmFunction/VmClosure: reconstruct from chunk source if available
+            if let Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) = receiver
+                && let Some(src) = self.chunk.fn_source_texts.get(ip)
+            {
+                return Value::from(src);
             }
             return Value::from("function () { [ native code ] }");
         }

@@ -500,7 +500,7 @@ impl<'gc> Chunk<'gc> {
     ///   SetProperty, GetMethod, DeleteProperty, TypeOfGlobal, DeleteGlobal,
     ///   GetSuperProperty, SetSuperProperty, InitProperty
     /// - Jump target (u32, needs ip_offset): Jump, JumpIfFalse, JumpIfTrue
-    /// - SetupTry: u32 jump + u16 const
+    /// - SetupTry: u32 jump + u16 const + u8 flags
     /// - MakeClosure: u16 const + u8 count + count×2 bytes
     /// - Call: u8 flags, conditionally +u16 (arg count, no adjustment)
     /// - ThrowIfNotConstructor: u8 stack depth, no adjustment
@@ -566,12 +566,13 @@ impl<'gc> Chunk<'gc> {
                     i += 4;
                 }
 
-                // SetupTry (36): u32 catch_ip (jump) + u16 binding_idx (const)
+                // SetupTry (36): u32 catch_ip (jump) + u16 binding_idx (const) + u8 flags
                 36 => {
                     Self::adjust_u32_at(code, i, ip_offset);
                     i += 4;
                     Self::adjust_u16_at(code, i, const_offset);
                     i += 2;
+                    i += 1; // flags byte (no adjustment needed)
                 }
 
                 // MakeClosure (71): u16 const_idx + u8 capture_count + count×2 bytes

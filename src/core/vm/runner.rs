@@ -313,6 +313,7 @@ impl<'gc> VM<'gc> {
                 stack_depth: try_frame.stack_depth - frame.bp,
                 frame_depth: try_frame.frame_depth - frame_depth,
                 catch_binding: try_frame.catch_binding.clone(),
+                for_finally: try_frame.for_finally,
             })
             .collect();
         self.async_function_states.insert(
@@ -5962,6 +5963,7 @@ impl<'gc> VM<'gc> {
         let _ = ctx;
         let catch_ip = self.read_u32() as usize;
         let binding_idx = self.read_u16();
+        let flags = self.read_byte();
         let catch_binding = if binding_idx == 0xffff {
             None
         } else {
@@ -5977,6 +5979,7 @@ impl<'gc> VM<'gc> {
             stack_depth: self.stack.len(),
             frame_depth: self.frames.len(),
             catch_binding,
+            for_finally: (flags & 1) != 0,
         });
         Ok(OpcodeAction::Continue)
     }

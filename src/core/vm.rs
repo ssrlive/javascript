@@ -387,6 +387,7 @@ pub struct TryFrame {
     pub stack_depth: usize,            // stack depth at try entry
     pub frame_depth: usize,            // call frame depth at try entry
     pub catch_binding: Option<String>, // variable name for caught value
+    pub for_finally: bool,             // true if this try has a finally block
 }
 
 // JS ToNumber abstract operation
@@ -932,6 +933,8 @@ pub struct VM<'gc> {
     async_function_states: HashMap<usize, AsyncFunctionState<'gc>>,
     // Weak handles to generator objects; used to GC abandoned suspended states.
     generator_objects: HashMap<usize, VmObjectWeakHandle<'gc>>,
+    // Track which generator IDs are currently executing (for re-entrant detection).
+    generator_executing: std::collections::HashSet<usize>,
     next_generator_id: usize,
     next_async_function_id: usize,
     // Set by Opcode::Yield to signal generator suspension
@@ -1305,6 +1308,7 @@ impl<'gc> VM<'gc> {
             generator_states: HashMap::new(),
             async_function_states: HashMap::new(),
             generator_objects: HashMap::new(),
+            generator_executing: std::collections::HashSet::new(),
             next_generator_id: 1,
             next_async_function_id: 1,
             generator_yield_value: None,
@@ -4097,6 +4101,7 @@ impl<'gc> VM<'gc> {
                     stack_depth: bp + try_frame.stack_depth,
                     frame_depth: 1 + try_frame.frame_depth,
                     catch_binding: try_frame.catch_binding,
+                    for_finally: try_frame.for_finally,
                 })
                 .collect();
             vm.this_stack.push(state.this_val.clone());
@@ -17265,8 +17270,11 @@ impl<'gc> VM<'gc> {
             .borrow_mut(ctx)
             .insert("__abstract_module_source_ctor".to_string(), abs_mod_src_ctor);
 
-        // %GeneratorPrototype% — shared prototype for generator function .prototype objects
+        // %GeneratorPrototype% — shared prototype for generator iterator objects
         let mut gen_proto = IndexMap::new();
+        gen_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        gen_proto.insert("__nonenumerable_return__".to_string(), Value::Boolean(true));
+        gen_proto.insert("__nonenumerable_throw__".to_string(), Value::Boolean(true));
         gen_proto.insert("@@sym:4".to_string(), Value::from("Generator"));
         gen_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         gen_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
@@ -17275,12 +17283,29 @@ impl<'gc> VM<'gc> {
         {
             gen_proto.insert("__proto__".to_string(), obj_proto);
         }
-        self.generator_prototype = Value::VmObject(new_gc_cell_ptr(ctx, gen_proto));
+        let gen_proto_ptr = new_gc_cell_ptr(ctx, gen_proto);
+        // Install next/return/throw as proper function objects with name+length
+        {
+            let next_fn = Self::make_native_fn(ctx, BUILTIN_GEN_NEXT, "next", 1.0);
+            let return_fn = Self::make_native_fn(ctx, BUILTIN_GEN_RETURN, "return", 1.0);
+            let throw_fn = Self::make_native_fn(ctx, BUILTIN_GEN_THROW, "throw", 1.0);
+            let iter_fn = Self::make_host_fn(ctx, "iterator.self");
+            let mut gp = gen_proto_ptr.borrow_mut(ctx);
+            gp.insert("next".to_string(), next_fn);
+            gp.insert("return".to_string(), return_fn);
+            gp.insert("throw".to_string(), throw_fn);
+            gp.insert("@@sym:1".to_string(), iter_fn);
+            gp.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
+        }
+        self.generator_prototype = Value::VmObject(gen_proto_ptr);
 
         // %GeneratorFunction.prototype% — proto for generator functions themselves
         // GeneratorFunction.prototype.prototype === %GeneratorPrototype%
         let mut gen_fn_proto = IndexMap::new();
         gen_fn_proto.insert("prototype".to_string(), self.generator_prototype.clone());
+        gen_fn_proto.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+        gen_fn_proto.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+        gen_fn_proto.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("@@sym:4".to_string(), Value::from("GeneratorFunction"));
         gen_fn_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
@@ -17316,6 +17341,17 @@ impl<'gc> VM<'gc> {
             proto_obj
                 .borrow_mut(ctx)
                 .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        }
+
+        // Set %GeneratorPrototype%.constructor = %GeneratorFunction.prototype%
+        if let Value::VmObject(gp) = &self.generator_prototype {
+            gp.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_proto_val.clone());
+            gp.borrow_mut(ctx)
+                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            gp.borrow_mut(ctx)
+                .insert("__readonly_constructor__".to_string(), Value::Boolean(true));
+            gp.borrow_mut(ctx)
+                .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
         }
 
         self.globals.insert("__generator_function_ctor".to_string(), gen_fn_ctor_val);
@@ -20802,7 +20838,7 @@ impl<'gc> VM<'gc> {
                                         | Opcode::FreezeTemplate,
                                     ) => pc += 2,
                                     Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => pc += 4,
-                                    Ok(Opcode::SetupTry) => pc += 6,
+                                    Ok(Opcode::SetupTry) => pc += 7,
                                     Ok(Opcode::Call) => {
                                         if pc < code.len() {
                                             let raw_arg_byte = code[pc];
@@ -35538,6 +35574,17 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(map) = &thrown {
             self.annotate_error_object(ctx, map);
         }
+        // When a generator return is pending, skip catch-only try frames
+        // so the return propagates to the enclosing finally handler.
+        while self.generator_return_pending.is_some() {
+            if let Some(frame) = self.try_stack.last() {
+                if !frame.for_finally {
+                    self.try_stack.pop();
+                    continue;
+                }
+            }
+            break;
+        }
         if let Some(try_frame) = self.try_stack.pop() {
             let dropped_this_bindings = self
                 .frames
@@ -35790,10 +35837,6 @@ impl<'gc> VM<'gc> {
                 gen_map.insert("__proto__".to_string(), async_gen_proto);
             }
         } else {
-            gen_map.insert("next".to_string(), Value::VmNativeFunction(BUILTIN_GEN_NEXT));
-            gen_map.insert("throw".to_string(), Value::VmNativeFunction(BUILTIN_GEN_THROW));
-            gen_map.insert("return".to_string(), Value::VmNativeFunction(BUILTIN_GEN_RETURN));
-            gen_map.insert("@@sym:1".to_string(), Self::make_host_fn(ctx, "iterator.self"));
             if let Some(proto) = fn_proto.clone()
                 && matches!(
                     proto,
@@ -35816,23 +35859,57 @@ impl<'gc> VM<'gc> {
     /// Resume a suspended generator. Returns {value, done} result object.
     /// `mode`: 0 = next(value), 1 = throw(value), 2 = return(value)
     fn resume_generator(&mut self, ctx: &GcContext<'gc>, gen_obj: &Value<'gc>, resume_value: &Value<'gc>, mode: u8) -> Value<'gc> {
+        // GeneratorValidate: If Type(generator) is not Object, throw TypeError.
         let gen_id = if let Value::VmObject(obj) = gen_obj {
             match obj.borrow().get("__gen_id__") {
                 Some(Value::Number(n)) => *n as usize,
-                _ => return self.make_gen_result(ctx, &Value::Undefined, true),
+                // Object but not a generator → TypeError
+                _ => {
+                    self.throw_type_error(ctx, "Method called on incompatible receiver");
+                    return self.make_gen_result(ctx, &Value::Undefined, true);
+                }
             }
         } else {
+            // Not an object → TypeError
+            self.throw_type_error(ctx, "Method called on incompatible receiver");
             return self.make_gen_result(ctx, &Value::Undefined, true);
         };
 
+        // GeneratorValidate: If state is "executing", throw TypeError.
+        if self.generator_executing.contains(&gen_id) {
+            self.throw_type_error(ctx, "Generator is already executing");
+            return self.make_gen_result(ctx, &Value::Undefined, true);
+        }
+
         let state = match self.generator_states.remove(&gen_id) {
             Some(s) => s,
-            None => return self.make_gen_result(ctx, &Value::Undefined, true),
+            None => {
+                // Generator has no state → completed or never started.
+                // For return(val), spec says return {value: val, done: true}.
+                if mode == 2 {
+                    return self.make_gen_result(ctx, resume_value, true);
+                }
+                // For throw(val), re-throw the value.
+                if mode == 1 {
+                    self.pending_throw = Some(resume_value.clone());
+                    return self.make_gen_result(ctx, &Value::Undefined, true);
+                }
+                return self.make_gen_result(ctx, &Value::Undefined, true);
+            }
         };
         let generator_this = state.this_val.clone();
 
         if state.done {
             self.generator_objects.remove(&gen_id);
+            // For return(val) on completed generator, return {value: val, done: true}.
+            if mode == 2 {
+                return self.make_gen_result(ctx, resume_value, true);
+            }
+            // For throw(val) on completed generator, re-throw.
+            if mode == 1 {
+                self.pending_throw = Some(resume_value.clone());
+                return self.make_gen_result(ctx, &Value::Undefined, true);
+            }
             return self.make_gen_result(ctx, &Value::Undefined, true);
         }
         let module_key = state.module_key.clone();
@@ -35909,7 +35986,9 @@ impl<'gc> VM<'gc> {
             }
 
             let min_depth = vm.frames.len();
+            vm.generator_executing.insert(gen_id);
             let result = vm.run_inner(ctx, min_depth);
+            vm.generator_executing.remove(&gen_id);
             vm.this_stack.truncate(saved_this_stack_len);
 
             let gen_result = if let Some(yielded) = vm.generator_yield_value.take() {
@@ -35948,7 +36027,14 @@ impl<'gc> VM<'gc> {
                 }
             } else if let Some(return_val) = vm.generator_return_pending.take() {
                 vm.generator_objects.remove(&gen_id);
-                vm.make_gen_result(ctx, &return_val, true)
+                match &result {
+                    // If run_inner returned Ok, the finally block had an explicit
+                    // return/completion that overrides the generator return value.
+                    Ok(value) => vm.make_gen_result(ctx, value, true),
+                    // If run_inner returned Err, the re-throw after finally
+                    // propagated — use the original generator_return_pending value.
+                    Err(_) => vm.make_gen_result(ctx, &return_val, true),
+                }
             } else {
                 vm.generator_objects.remove(&gen_id);
                 match &result {

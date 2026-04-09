@@ -2417,7 +2417,7 @@ impl<'gc> Compiler<'gc> {
                     None
                 };
 
-                // SetupTry <catch_ip:u32> <binding_idx:u16>
+                // SetupTry <catch_ip:u32> <binding_idx:u16> <flags:u8>
                 self.chunk.write_opcode(Opcode::SetupTry);
                 let catch_placeholder = self.chunk.code.len();
                 self.chunk.write_u32(0xffff_ffff); // placeholder for catch ip
@@ -2431,6 +2431,7 @@ impl<'gc> Compiler<'gc> {
                     binding_idx
                 };
                 self.chunk.write_u16(setup_binding);
+                self.chunk.write_byte(if has_finally { 1 } else { 0 });
 
                 // Try body (block-scoped)
                 let saved_try = self.locals.len();
@@ -2464,9 +2465,21 @@ impl<'gc> Compiler<'gc> {
                 // If this try has a finally block, gen.return() uses Throw to
                 // propagate through try handlers. Skip the catch body (only run
                 // finally) when generator_return_pending is set.
+                // Also set has_exc = 1 so the re-throw after finally fires,
+                // causing the generator to complete with the return value.
                 let skip_catch_for_return = if has_finally {
                     self.chunk.write_opcode(Opcode::CheckGeneratorReturn);
-                    Some(self.emit_jump(Opcode::JumpIfTrue))
+                    let not_gen_return = self.emit_jump(Opcode::JumpIfFalse);
+                    // Set has_exc flag so after finally, exception is re-thrown
+                    let has_exc = self.try_finally_stack.last().unwrap().has_exc_var.clone();
+                    let one_idx = self.chunk.add_constant(Value::Number(1.0));
+                    self.chunk.write_opcode(Opcode::Constant);
+                    self.chunk.write_u16(one_idx);
+                    self.emit_helper_set(&has_exc);
+                    self.chunk.write_opcode(Opcode::Pop);
+                    let jump_to_finally = self.emit_jump(Opcode::Jump);
+                    self.patch_jump(not_gen_return);
+                    Some(jump_to_finally)
                 } else {
                     None
                 };
@@ -2494,6 +2507,7 @@ impl<'gc> Compiler<'gc> {
                     let placeholder = self.chunk.code.len();
                     self.chunk.write_u32(0xffff_ffff);
                     self.chunk.write_u16(exc_binding_idx);
+                    self.chunk.write_byte(1); // for_finally
                     Some(placeholder)
                 } else {
                     None
@@ -3317,6 +3331,7 @@ impl<'gc> Compiler<'gc> {
                         .chunk
                         .add_constant(Value::String(crate::unicode::utf8_to_utf16("__forofExc__")));
                     self.chunk.write_u16(no_binding);
+                    self.chunk.write_byte(0); // flags: no finally
 
                     // Assign value to loop variable
                     let loop_value_name = current_value_name.as_deref().unwrap_or(var_name);
@@ -3654,6 +3669,7 @@ impl<'gc> Compiler<'gc> {
                         .chunk
                         .add_constant(Value::String(crate::unicode::utf8_to_utf16("__forofExc__")));
                     self.chunk.write_u16(exc_binding);
+                    self.chunk.write_byte(0); // flags: no finally
 
                     // Assign to expression LHS
                     self.compile_expr_assign_to_target(lhs_expr)?;
@@ -5675,6 +5691,7 @@ impl<'gc> Compiler<'gc> {
                         let catch_placeholder = self.chunk.code.len();
                         self.chunk.write_u32(0xffff_ffff);
                         self.chunk.write_u16(binding_const);
+                        self.chunk.write_byte(0); // flags: no finally
 
                         // YieldDirect ys_result (the entire inner result, not just .value)
                         // ys_result is already on the stack from the Dup above
@@ -7563,6 +7580,7 @@ impl<'gc> Compiler<'gc> {
         let placeholder = self.chunk.code.len();
         self.chunk.write_u32(0xffff_ffff);
         self.chunk.write_u16(cb_idx);
+        self.chunk.write_byte(0); // flags: no finally
         (placeholder, catch_binding)
     }
 
@@ -7755,6 +7773,7 @@ impl<'gc> Compiler<'gc> {
         let dstr_catch_placeholder = self.chunk.code.len();
         self.chunk.write_u32(0xffff_ffff);
         self.chunk.write_u16(catch_binding_idx);
+        self.chunk.write_byte(0); // flags: no finally
 
         for elem in elems.iter() {
             match elem {

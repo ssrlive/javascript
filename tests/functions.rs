@@ -273,6 +273,58 @@ mod function_tests {
     }
 
     #[test]
+    fn test_bound_function_name_length_and_restricted_props() {
+        let script = r#"
+            function target(a, b) {}
+            Object.defineProperty(target, "name", { value: "target" });
+            let bound = target.bind(null, 1);
+            let chained = bound.bind(null);
+            function weird() {}
+            Object.defineProperty(weird, "name", { value: 123 });
+            let weirdBound = weird.bind(null);
+            let nameDesc = Object.getOwnPropertyDescriptor(bound, "name");
+            let lengthDesc = Object.getOwnPropertyDescriptor(bound, "length");
+            let callerThrows = false;
+            let argumentsThrows = false;
+            try { bound.caller; } catch (e) { callerThrows = e instanceof TypeError; }
+            try { bound.arguments; } catch (e) { argumentsThrows = e instanceof TypeError; }
+            bound.name === "bound target" &&
+            chained.name === "bound bound target" &&
+            weirdBound.name === "bound " &&
+            bound.length === 1 &&
+            nameDesc.writable === false &&
+            nameDesc.enumerable === false &&
+            nameDesc.configurable === true &&
+            lengthDesc.writable === false &&
+            lengthDesc.enumerable === false &&
+            lengthDesc.configurable === true &&
+            callerThrows &&
+            argumentsThrows
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_bind_propagates_name_getter_errors() {
+        let script = r#"
+            function target() {}
+            Object.defineProperty(target, "name", {
+                get() { throw 42; }
+            });
+            let threw = false;
+            try {
+                target.bind(null);
+            } catch (e) {
+                threw = e === 42;
+            }
+            threw
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

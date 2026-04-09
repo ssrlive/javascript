@@ -13916,7 +13916,7 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     drop(borrow);
-                    Ok(self.call_host_fn(ctx, &host_name, Some(receiver), &[]))
+                    Ok(self.call_named_host_function_with_this(ctx, &host_name, Some(receiver), &[]))
                 } else {
                     Err(crate::raise_type_error!("Value is not a function"))
                 }
@@ -17576,6 +17576,7 @@ impl<'gc> VM<'gc> {
                     };
                     drop(borrow);
                     self.regexp_home_proto_temp = regexp_home;
+                    let receiver = host_this.as_ref().unwrap_or(this_arg);
                     // Cross-realm dispatch: run host function on child VM
                     if let Some(rid) = realm_id
                         && rid < self.child_realms.len()
@@ -17586,7 +17587,7 @@ impl<'gc> VM<'gc> {
                         if host_name == "__realm_eval__" {
                             child.realm_parent_ptr = Some(self as *mut VM<'gc>);
                         }
-                        let result = child.call_host_fn(ctx, &host_name, Some(this_arg), args);
+                        let result = child.call_named_host_function_with_this(ctx, &host_name, Some(receiver), args);
                         child.realm_parent_ptr = None;
                         if let Some(thrown) = child.pending_throw.take() {
                             self.pending_throw = Some(thrown);
@@ -17596,8 +17597,7 @@ impl<'gc> VM<'gc> {
                         self.child_realms[rid] = Some(child);
                         return Ok(result);
                     }
-                    let receiver = host_this.as_ref().unwrap_or(this_arg);
-                    Ok(self.call_host_fn(ctx, &host_name, Some(receiver), args))
+                    Ok(self.call_named_host_function_with_this(ctx, &host_name, Some(receiver), args))
                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
                     let bound_this = borrow.get("__bound_this__").cloned().unwrap_or(Value::Undefined);
                     let mut final_args: Vec<Value<'gc>> = match borrow.get("__bound_args__") {
@@ -29899,6 +29899,35 @@ impl<'gc> VM<'gc> {
             let bound_args: Vec<Value<'gc>> = args.iter().skip(1).cloned().collect();
             let is_callable = self.is_callable_value(receiver);
             if is_callable {
+                let target_name = match self.read_named_property(ctx, receiver, "name") {
+                    Value::String(s) => crate::unicode::utf16_to_utf8(&s),
+                    _ => String::new(),
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                let target_length = self.read_named_property(ctx, receiver, "length");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                let bound_length = match target_length {
+                    Value::Number(n) if n.is_infinite() => {
+                        if n.is_sign_negative() {
+                            0.0
+                        } else {
+                            f64::INFINITY
+                        }
+                    }
+                    Value::Number(n) => {
+                        let target_len = if n.is_nan() { 0.0 } else { n.trunc() };
+                        let normalized = if target_len == 0.0 { 0.0 } else { target_len };
+                        (normalized - bound_args.len() as f64).max(0.0)
+                    }
+                    _ => 0.0,
+                };
+
                 let mut m = IndexMap::new();
                 m.insert("__bound_target__".to_string(), receiver.clone());
                 m.insert("__bound_this__".to_string(), this_arg);
@@ -29907,6 +29936,20 @@ impl<'gc> VM<'gc> {
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bound_args))),
                 );
                 m.insert("__type__".to_string(), Value::from("Function"));
+                if let Some(proto) = match receiver {
+                    Value::VmObject(obj) => obj.borrow().get("__proto__").cloned(),
+                    _ => None,
+                }
+                .or_else(|| {
+                    self.globals.get("Function").and_then(|value| match value {
+                        Value::VmObject(function_ctor) => function_ctor.borrow().get("prototype").cloned(),
+                        _ => None,
+                    })
+                }) {
+                    m.insert("__proto__".to_string(), proto);
+                }
+                Self::insert_property_with_attributes(&mut m, "length", &Value::Number(bound_length), false, false, true);
+                Self::insert_property_with_attributes(&mut m, "name", &Value::from(format!("bound {}", target_name)), false, false, true);
                 return Value::VmObject(new_gc_cell_ptr(ctx, m));
             }
             return Value::Undefined;

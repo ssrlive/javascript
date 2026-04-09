@@ -408,6 +408,20 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_parse_invalid_input_throws_syntax_error() {
+        let script = r#"
+            try {
+              JSON.parse("\u000b1234");
+              false
+            } catch (err) {
+              err instanceof SyntaxError
+            }
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

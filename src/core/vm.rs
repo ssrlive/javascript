@@ -34474,12 +34474,12 @@ impl<'gc> VM<'gc> {
     }
 
     /// JSON.parse helper (simple subset)
-    fn json_parse(&self, ctx: &GcContext<'gc>, s: &str) -> Value<'gc> {
-        let trimmed = s.trim();
+    fn json_parse(&mut self, ctx: &GcContext<'gc>, s: &str) -> Value<'gc> {
         // Use serde_json for robust parsing, then convert to Value
-        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(s) {
             return self.json_to_value(ctx, &json_val);
         }
+        self.pending_throw = Some(self.make_syntax_error_object(ctx, "Invalid JSON"));
         Value::Undefined
     }
 

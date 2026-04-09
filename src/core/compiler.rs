@@ -7737,7 +7737,9 @@ impl<'gc> Compiler<'gc> {
         let dstr_catch_placeholder = self.chunk.code.len();
         self.chunk.write_u32(0xffff_ffff);
         self.chunk.write_u16(catch_binding_idx);
-        self.chunk.write_byte(0); // flags: no finally
+        // Mark as for_finally so generator return completions don't skip this
+        // handler — IteratorClose must run even on return completions (§7.4.6).
+        self.chunk.write_byte(1); // flags: has finally semantics
 
         for elem in elems.iter() {
             match elem {

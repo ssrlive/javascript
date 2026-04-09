@@ -22848,7 +22848,10 @@ impl<'gc> VM<'gc> {
                     }
                     // Cross-realm objects: delegate getPrototypeOf to the child VM
                     // so the child's own Object.prototype identity check works.
-                    if let Some(Value::Number(rid)) = map.borrow().get("__realm_id__").cloned() {
+                    // Skip proxies — their trap validation must run in the current realm.
+                    if !map.borrow().contains_key("__proxy_target__")
+                        && let Some(Value::Number(rid)) = map.borrow().get("__realm_id__").cloned()
+                    {
                         let realm_id = rid as usize;
                         if let Some(mut child) = self.child_realms.get_mut(realm_id).and_then(Option::take) {
                             self.sync_runtime_to_child(&mut child);
@@ -33608,11 +33611,11 @@ impl<'gc> VM<'gc> {
                         Some(Value::Number(n)) => Some(*n as usize),
                         _ => None,
                     };
-                    let needs_child_construct = borrow.contains_key("__proxy_target__")
-                        || borrow.contains_key("__bound_target__")
-                        || borrow.contains_key("__host_fn__")
-                        || borrow.contains_key("__native_id__")
-                        || borrow.contains_key("__fn_body__");
+                    let needs_child_construct = !borrow.contains_key("__proxy_target__")
+                        && (borrow.contains_key("__bound_target__")
+                            || borrow.contains_key("__host_fn__")
+                            || borrow.contains_key("__native_id__")
+                            || borrow.contains_key("__fn_body__"));
                     (realm_id, needs_child_construct)
                 };
                 if let Some(realm_id) = realm_id
@@ -34631,9 +34634,51 @@ impl<'gc> VM<'gc> {
 
     fn child_error_to_parent_pending(&mut self, ctx: &GcContext<'gc>, child: &mut VM<'gc>, err: JSError) -> JSError {
         let thrown = child.pending_throw.take().unwrap_or_else(|| child.vm_value_from_error(ctx, &err));
-        let js_err = self.vm_error_to_js_error(ctx, &thrown);
-        self.pending_throw = Some(thrown);
+        // Convert child-realm built-in error objects to parent-realm equivalents
+        // so that `instanceof TypeError` etc. works correctly across realms.
+        let converted = self.convert_cross_realm_error(ctx, &thrown);
+        let js_err = self.vm_error_to_js_error(ctx, &converted);
+        self.pending_throw = Some(converted);
         js_err
+    }
+
+    /// If `error_val` is a built-in error type (TypeError, RangeError, etc.) from a
+    /// child realm, re-create it as a parent-realm error with the same message so that
+    /// `instanceof` checks work against the current realm's constructors.
+    fn convert_cross_realm_error(&mut self, ctx: &GcContext<'gc>, error_val: &Value<'gc>) -> Value<'gc> {
+        let Value::VmObject(obj) = error_val else {
+            return error_val.clone();
+        };
+        let borrow = obj.borrow();
+        let err_type = match borrow.get("__type__") {
+            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+            _ => return error_val.clone(),
+        };
+        // Only convert well-known engine error types
+        if !matches!(
+            err_type.as_str(),
+            "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" | "EvalError" | "URIError" | "Error"
+        ) {
+            return error_val.clone();
+        }
+        let message = match borrow.get("message") {
+            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+            _ => String::new(),
+        };
+        drop(borrow);
+        match err_type.as_str() {
+            "TypeError" => self.make_type_error_object(ctx, &message),
+            "RangeError" => self.make_range_error_object(ctx, &message),
+            "ReferenceError" => self.make_reference_error(ctx, &message),
+            "SyntaxError" => self.make_syntax_error_object(ctx, &message),
+            _ => {
+                // EvalError, URIError, Error — create a generic error object
+                let mut m = IndexMap::new();
+                m.insert("__type__".to_string(), Value::from(err_type.as_str()));
+                m.insert("message".to_string(), Value::from(message.as_str()));
+                Value::VmObject(new_gc_cell_ptr(ctx, m))
+            }
+        }
     }
 
     fn sync_runtime_to_child(&self, child: &mut VM<'gc>) {
@@ -34762,8 +34807,12 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmObject(obj) => {
-                let mut visited = std::collections::HashSet::new();
-                Self::stamp_realm_id_recursive(ctx, obj, realm_id, &mut visited);
+                // Only stamp the top-level object — do NOT recurse, because
+                // sub-objects may be parent-realm objects (e.g. a proxy's target
+                // or handler) and stamping them would pollute the parent realm's
+                // prototype graph (Object.prototype, TypeError, etc.).
+                obj.borrow_mut(ctx)
+                    .insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
                 Value::VmObject(obj)
             }
             Value::VmArray(arr) => {

@@ -34513,7 +34513,8 @@ impl<'gc> VM<'gc> {
             serde_json::Value::Object(obj) => {
                 let mut map = IndexMap::new();
                 for (key, val) in obj {
-                    map.insert(key.clone(), self.json_to_value(ctx, val));
+                    let storage_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key.as_str() };
+                    map.insert(storage_key.to_string(), self.json_to_value(ctx, val));
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
             }
@@ -34574,11 +34575,12 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
+                    let storage_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key.as_str() };
                     let mut borrow = obj.borrow_mut(ctx);
                     if matches!(revived, Value::Undefined) {
-                        borrow.shift_remove(&key);
+                        borrow.shift_remove(storage_key);
                     } else {
-                        borrow.insert(key, revived);
+                        borrow.insert(storage_key.to_string(), revived);
                     }
                 }
             }

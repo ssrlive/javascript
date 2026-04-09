@@ -426,6 +426,25 @@ impl<'gc> VM<'gc> {
         let callee = self.stack[callee_idx].clone();
         match callee {
             Value::VmFunction(target_ip, arity) => {
+                // Class constructors cannot be called without `new` — check
+                // early so cross-realm dispatch doesn't bypass the guard.
+                if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                    let base = callee_idx;
+                    self.stack.truncate(base);
+                    // Create TypeError from the function's realm (cross-realm or current).
+                    let err = if let Some(&realm_id) = self.fn_realm.get(&target_ip)
+                        && realm_id < self.child_realms.len()
+                        && let Some(child) = self.child_realms[realm_id].take()
+                    {
+                        let e = child.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'");
+                        self.child_realms[realm_id] = Some(child);
+                        e
+                    } else {
+                        self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'")
+                    };
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
                 if let Some(&realm_id) = self.fn_realm.get(&target_ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -544,11 +563,6 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
                 }
-                if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
-                    let err = self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'");
-                    self.handle_throw(ctx, &err)?;
-                    return Ok(OpcodeAction::Continue);
-                }
                 // Pad missing args with Undefined
                 if (arg_count as u8) < arity {
                     for _ in 0..(arity as usize - arg_count) {
@@ -626,6 +640,24 @@ impl<'gc> VM<'gc> {
                 self.ip = target_ip;
             }
             Value::VmClosure(target_ip, arity, ref upvals) => {
+                // Class constructors cannot be called without `new` — check
+                // early so cross-realm dispatch doesn't bypass the guard.
+                if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
+                    let base = callee_idx;
+                    self.stack.truncate(base);
+                    let err = if let Some(&realm_id) = self.fn_realm.get(&target_ip)
+                        && realm_id < self.child_realms.len()
+                        && let Some(child) = self.child_realms[realm_id].take()
+                    {
+                        let e = child.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'");
+                        self.child_realms[realm_id] = Some(child);
+                        e
+                    } else {
+                        self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'")
+                    };
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
                 if let Some(&realm_id) = self.fn_realm.get(&target_ip)
                     && realm_id < self.child_realms.len()
                     && let Some(mut child) = self.child_realms[realm_id].take()
@@ -743,11 +775,6 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
                         return Ok(OpcodeAction::Continue);
                     }
-                }
-                if !is_method && self.chunk.class_constructor_ips.contains(&target_ip) {
-                    let err = self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'");
-                    self.handle_throw(ctx, &err)?;
-                    return Ok(OpcodeAction::Continue);
                 }
                 if (arg_count as u8) < arity {
                     for _ in 0..(arity as usize - arg_count) {

@@ -22758,7 +22758,7 @@ impl<'gc> VM<'gc> {
                         let realm_id = rid as usize;
                         if let Some(mut child) = self.child_realms.get_mut(realm_id).and_then(Option::take) {
                             self.sync_runtime_to_child(&mut child);
-                            let result = child.call_builtin(ctx, BUILTIN_OBJECT_GETPROTOTYPEOF, &[target.clone()]);
+                            let result = child.call_builtin(ctx, BUILTIN_OBJECT_GETPROTOTYPEOF, std::slice::from_ref(target));
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             return result;
@@ -30240,7 +30240,17 @@ impl<'gc> VM<'gc> {
             if let Some(ip) = ctor_ip
                 && self.chunk.class_constructor_ips.contains(&ip)
             {
-                self.pending_throw = Some(self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'"));
+                let err = if let Some(&realm_id) = self.fn_realm.get(&ip)
+                    && realm_id < self.child_realms.len()
+                    && let Some(child) = self.child_realms[realm_id].take()
+                {
+                    let e = child.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'");
+                    self.child_realms[realm_id] = Some(child);
+                    e
+                } else {
+                    self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'")
+                };
+                self.pending_throw = Some(err);
                 return Value::Undefined;
             }
             let result = self.vm_call_function_value(ctx, receiver, &this_arg, &call_args);
@@ -30274,7 +30284,17 @@ impl<'gc> VM<'gc> {
             if let Some(ip) = ctor_ip
                 && self.chunk.class_constructor_ips.contains(&ip)
             {
-                self.pending_throw = Some(self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'"));
+                let err = if let Some(&realm_id) = self.fn_realm.get(&ip)
+                    && realm_id < self.child_realms.len()
+                    && let Some(child) = self.child_realms[realm_id].take()
+                {
+                    let e = child.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'");
+                    self.child_realms[realm_id] = Some(child);
+                    e
+                } else {
+                    self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'")
+                };
+                self.pending_throw = Some(err);
                 return Value::Undefined;
             }
             let result = self.vm_call_function_value(ctx, receiver, &this_arg, &call_args);
@@ -33353,9 +33373,29 @@ impl<'gc> VM<'gc> {
                     let result = match child.construct_value(ctx, &local_target, args, local_new_target.as_ref()) {
                         Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
                         Err(err) => {
+                            // Re-throw boundary errors from the caller realm (parent) per spec.
+                            let msg = err.message();
+                            let is_derived_return = msg.contains("Derived constructors may only return object or undefined");
+                            let is_super_not_called = msg.contains("Must call super constructor in derived class");
                             let js_err = self.child_error_to_parent_pending(ctx, &mut child, err);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
+                            if is_derived_return {
+                                let parent_err =
+                                    self.make_type_error_object(ctx, "Derived constructors may only return object or undefined");
+                                self.pending_throw = Some(parent_err);
+                                return Err(crate::raise_type_error!("Derived constructors may only return object or undefined"));
+                            }
+                            if is_super_not_called {
+                                let parent_err = self.make_reference_error(
+                                    ctx,
+                                    "Must call super constructor in derived class before returning from derived constructor",
+                                );
+                                self.pending_throw = Some(parent_err);
+                                return Err(crate::raise_type_error!(
+                                    "Must call super constructor in derived class before returning from derived constructor"
+                                ));
+                            }
                             return Err(js_err);
                         }
                     };
@@ -33454,7 +33494,17 @@ impl<'gc> VM<'gc> {
                     Value::VmClosure(ip, arity, upvals) => Ok(Value::VmClosure(ip, arity, upvals)),
                     Value::VmNativeFunction(id) => Ok(Value::VmNativeFunction(id)),
                     Value::Function(name) => Ok(Value::Function(name)),
-                    _ => Ok(bound_this),
+                    Value::Undefined => Ok(bound_this),
+                    other => {
+                        // Derived constructors must not return non-object, non-undefined values.
+                        if self.chunk.derived_constructor_ips.contains(&target_ip) {
+                            return Err(crate::raise_type_error!("Derived constructors may only return object or undefined"));
+                        }
+                        // For base constructors, non-object returns are
+                        // ignored and the newly-created `this` is returned.
+                        let _ = other;
+                        Ok(bound_this)
+                    }
                 }
             }
             Value::VmObject(map) => {
@@ -34544,6 +34594,7 @@ impl<'gc> VM<'gc> {
                 let handle = child.get_fn_props(ctx, ip, arity);
                 self.fn_props.insert(remapped, handle);
                 self.fn_realm.insert(remapped, realm_id);
+                Self::copy_ip_metadata(&child.chunk, &mut self.chunk, ip, remapped);
                 Value::VmFunction(remapped, arity)
             }
             Value::VmClosure(ip, arity, upvals) => {
@@ -34554,9 +34605,33 @@ impl<'gc> VM<'gc> {
                 let handle = child.get_fn_props(ctx, ip, arity);
                 self.fn_props.insert(remapped, handle);
                 self.fn_realm.insert(remapped, realm_id);
+                Self::copy_ip_metadata(&child.chunk, &mut self.chunk, ip, remapped);
                 Value::VmClosure(remapped, arity, upvals)
             }
             other => self.remap_cross_realm_value(ctx, other, realm_id),
+        }
+    }
+
+    /// Copy IP-based metadata (class_constructor, derived_constructor, async,
+    /// generator, method, arrow flags) from `src` chunk to `dst` chunk.
+    fn copy_ip_metadata(src: &crate::core::Chunk, dst: &mut crate::core::Chunk, src_ip: usize, dst_ip: usize) {
+        if src.class_constructor_ips.contains(&src_ip) {
+            dst.class_constructor_ips.insert(dst_ip);
+        }
+        if src.derived_constructor_ips.contains(&src_ip) {
+            dst.derived_constructor_ips.insert(dst_ip);
+        }
+        if src.async_function_ips.contains(&src_ip) {
+            dst.async_function_ips.insert(dst_ip);
+        }
+        if src.generator_function_ips.contains(&src_ip) {
+            dst.generator_function_ips.insert(dst_ip);
+        }
+        if src.method_function_ips.contains(&src_ip) {
+            dst.method_function_ips.insert(dst_ip);
+        }
+        if src.arrow_function_ips.contains(&src_ip) {
+            dst.arrow_function_ips.insert(dst_ip);
         }
     }
 

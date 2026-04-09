@@ -518,6 +518,48 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_stringify_replacer_array_filters_and_orders_keys() {
+        let script = r#"
+            JSON.stringify({b: 1, a: 2, c: 3}, ['c', 'b', 'a']) === '{"c":3,"b":1,"a":2}'
+              && JSON.stringify([1, {a: 2}], []) === '[1,{}]'
+              && JSON.stringify({undefined: 1}, [undefined]) === '{}'
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_json_stringify_replacer_array_observes_proxy_and_abrupt_length() {
+        let script = r#"
+            let proxyOk = JSON.stringify({a: 1, b: 2}, new Proxy(['b'], {})) === '{"b":2}';
+
+            let abruptLength = false;
+            try {
+              JSON.stringify(null, new Proxy([], {
+                get(_target, key) {
+                  if (key === 'length') throw new Error('boom');
+                }
+              }));
+            } catch (e) {
+              abruptLength = e.name === 'Error';
+            }
+
+            let revoked = Proxy.revocable([], {});
+            revoked.revoke();
+            let revokedErr = false;
+            try {
+              JSON.stringify({}, revoked.proxy);
+            } catch (e) {
+              revokedErr = e.name === 'TypeError';
+            }
+
+            proxyOk && abruptLength && revokedErr
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

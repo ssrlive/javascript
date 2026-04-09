@@ -20254,7 +20254,15 @@ impl<'gc> VM<'gc> {
                 };
                 let input = args.first().cloned().unwrap_or(Value::Undefined);
                 let replacer_fn = args.get(1).filter(|value| self.is_value_callable(value));
-                let Some(s) = self.json_stringify_root(ctx, &input, replacer_fn, &gap) else {
+                let property_list = if replacer_fn.is_none() {
+                    self.json_property_list_from_replacer(ctx, args.get(1))
+                } else {
+                    None
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let Some(s) = self.json_stringify_root(ctx, &input, replacer_fn, property_list.as_deref(), &gap) else {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
@@ -34380,6 +34388,7 @@ impl<'gc> VM<'gc> {
         ctx: &GcContext<'gc>,
         value: &Value<'gc>,
         replacer_fn: Option<&Value<'gc>>,
+        property_list: Option<&[String]>,
         gap: &str,
     ) -> Option<String> {
         let mut wrapper = IndexMap::new();
@@ -34391,7 +34400,7 @@ impl<'gc> VM<'gc> {
         wrapper.insert(String::new(), value.clone());
         let wrapper = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
         let mut stack = Vec::new();
-        self.json_serialize_property(ctx, &wrapper, "", replacer_fn, gap, "", &mut stack)
+        self.json_serialize_property(ctx, &wrapper, "", replacer_fn, property_list, gap, "", &mut stack)
     }
 
     fn json_stringify_prepare_value(&mut self, ctx: &GcContext<'gc>, value: Value<'gc>) -> Option<Value<'gc>> {
@@ -34469,6 +34478,7 @@ impl<'gc> VM<'gc> {
         holder: &Value<'gc>,
         key: &str,
         replacer_fn: Option<&Value<'gc>>,
+        property_list: Option<&[String]>,
         gap: &str,
         indent: &str,
         stack: &mut Vec<Value<'gc>>,
@@ -34554,9 +34564,9 @@ impl<'gc> VM<'gc> {
                 }
                 stack.push(value.clone());
                 let result = if is_array {
-                    self.json_serialize_array(ctx, &value, replacer_fn, gap, indent, stack)
+                    self.json_serialize_array(ctx, &value, replacer_fn, property_list, gap, indent, stack)
                 } else {
-                    self.json_serialize_object(ctx, &value, replacer_fn, gap, indent, stack)
+                    self.json_serialize_object(ctx, &value, replacer_fn, property_list, gap, indent, stack)
                 };
                 stack.pop();
                 result
@@ -34569,6 +34579,7 @@ impl<'gc> VM<'gc> {
         ctx: &GcContext<'gc>,
         array: &Value<'gc>,
         replacer_fn: Option<&Value<'gc>>,
+        property_list: Option<&[String]>,
         gap: &str,
         indent: &str,
         stack: &mut Vec<Value<'gc>>,
@@ -34587,7 +34598,7 @@ impl<'gc> VM<'gc> {
         for idx in 0..len {
             let key = idx.to_string();
             let part = self
-                .json_serialize_property(ctx, array, &key, replacer_fn, gap, &next_indent, stack)
+                .json_serialize_property(ctx, array, &key, replacer_fn, property_list, gap, &next_indent, stack)
                 .unwrap_or_else(|| "null".to_string());
             if gap.is_empty() {
                 parts.push(part);
@@ -34610,19 +34621,26 @@ impl<'gc> VM<'gc> {
         ctx: &GcContext<'gc>,
         object: &Value<'gc>,
         replacer_fn: Option<&Value<'gc>>,
+        property_list: Option<&[String]>,
         gap: &str,
         indent: &str,
         stack: &mut Vec<Value<'gc>>,
     ) -> Option<String> {
-        let keys = self.collect_enumerable_own_keys(ctx, object);
-        if self.pending_throw.is_some() {
-            return None;
-        }
+        let keys = if let Some(property_list) = property_list {
+            property_list.to_vec()
+        } else {
+            let keys = self.collect_enumerable_own_keys(ctx, object);
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            keys
+        };
 
         let next_indent = format!("{indent}{gap}");
         let mut parts = Vec::new();
         for key in keys {
-            if let Some(serialized) = self.json_serialize_property(ctx, object, &key, replacer_fn, gap, &next_indent, stack) {
+            if let Some(serialized) = self.json_serialize_property(ctx, object, &key, replacer_fn, property_list, gap, &next_indent, stack)
+            {
                 let json_key = self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(&key));
                 if gap.is_empty() {
                     parts.push(format!("{json_key}:{serialized}"));
@@ -34642,6 +34660,71 @@ impl<'gc> VM<'gc> {
         } else {
             Some(format!("{{\n{}\n{}}}", parts.join(",\n"), indent))
         }
+    }
+
+    fn json_property_list_from_replacer(&mut self, ctx: &GcContext<'gc>, replacer: Option<&Value<'gc>>) -> Option<Vec<String>> {
+        let replacer = replacer?;
+        let is_array = matches!(
+            self.call_builtin(ctx, BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(replacer)),
+            Value::Boolean(true)
+        );
+        if self.pending_throw.is_some() || !is_array {
+            return None;
+        }
+
+        let len_value = self.read_named_property(ctx, replacer, "length");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let len = self.json_to_length(ctx, &len_value);
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        let mut property_list = Vec::new();
+        for idx in 0..len {
+            let item_value = self.read_named_property(ctx, replacer, &idx.to_string());
+            if self.pending_throw.is_some() {
+                return None;
+            }
+
+            let item = match &item_value {
+                Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
+                Value::Number(_) => match self.vm_to_string_like_spec(ctx, &item_value) {
+                    Ok(s) => Some(s),
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return None;
+                    }
+                },
+                Value::VmObject(obj) => {
+                    let type_name = obj.borrow().get("__type__").and_then(|value| match value {
+                        Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
+                        _ => None,
+                    });
+                    if matches!(type_name.as_deref(), Some("String" | "Number")) {
+                        match self.vm_to_string_like_spec(ctx, &item_value) {
+                            Ok(s) => Some(s),
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return None;
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(item) = item
+                && !property_list.contains(&item)
+            {
+                property_list.push(item);
+            }
+        }
+
+        Some(property_list)
     }
 
     fn json_gap_from_space(&mut self, ctx: &GcContext<'gc>, space: Option<&Value<'gc>>) -> Option<String> {

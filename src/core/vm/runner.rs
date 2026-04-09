@@ -66,6 +66,7 @@ impl<'gc> VM<'gc> {
                 Opcode::YieldDirect => self.run_opcode_yield_direct(ctx)?,
                 Opcode::CheckGeneratorReturn => self.run_opcode_check_generator_return()?,
                 Opcode::SetGeneratorReturn => self.run_opcode_set_generator_return()?,
+                Opcode::ClearGeneratorReturn => self.run_opcode_clear_generator_return()?,
                 Opcode::ThrowIfNotConstructor => self.run_opcode_throw_if_not_constructor(ctx)?,
                 Opcode::GeneratorParamInitDone => self.run_opcode_generator_param_init_done(ctx)?,
                 Opcode::Await => self.run_opcode_await(ctx)?,
@@ -262,6 +263,13 @@ impl<'gc> VM<'gc> {
     fn run_opcode_set_generator_return(&mut self) -> Result<OpcodeAction<'gc>, JSError> {
         let val = self.stack.pop().unwrap_or(Value::Undefined);
         self.generator_return_pending = Some(val);
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::ClearGeneratorReturn — clear generator_return_pending so errors
+    // thrown during yield* return delegation can be caught normally.
+    fn run_opcode_clear_generator_return(&mut self) -> Result<OpcodeAction<'gc>, JSError> {
+        self.generator_return_pending = None;
         Ok(OpcodeAction::Continue)
     }
 

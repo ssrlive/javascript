@@ -114,6 +114,7 @@ pub enum Opcode {
     ThrowIfNotConstructor = 108,   // pop TOS, throw TypeError if it's not a constructor
     ReboxLocal = 109,              // create a fresh upvalue cell for a local, copying the old value (per-iteration let)
     ClearLocalCells = 110,         // clear local_cells / top_level_cells entries with index >= operand byte
+    ClearGeneratorReturn = 111,    // clear generator_return_pending (set to None)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -232,6 +233,7 @@ impl TryFrom<u8> for Opcode {
             108 => Opcode::ThrowIfNotConstructor,
             109 => Opcode::ReboxLocal,
             110 => Opcode::ClearLocalCells,
+            111 => Opcode::ClearGeneratorReturn,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

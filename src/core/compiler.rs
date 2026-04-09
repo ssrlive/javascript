@@ -5689,7 +5689,7 @@ impl<'gc> Compiler<'gc> {
                         let catch_placeholder = self.chunk.code.len();
                         self.chunk.write_u32(0xffff_ffff);
                         self.chunk.write_u16(binding_const);
-                        self.chunk.write_byte(0); // flags: no finally
+                        self.chunk.write_byte(1); // flags: for_finally=true so return delegation isn't skipped
 
                         // YieldDirect ys_result (the entire inner result, not just .value)
                         // ys_result is already on the stack from the Dup above
@@ -5779,6 +5779,10 @@ impl<'gc> Compiler<'gc> {
                         // === Return delegation path (spec §14.4.7 step 5.c) ===
                         self.patch_jump(return_delegation_jump);
 
+                        // Clear generator_return_pending so errors thrown during
+                        // return delegation can be caught by user catch handlers.
+                        self.chunk.write_opcode(Opcode::ClearGeneratorReturn);
+
                         // c.ii: let return = GetMethod(iterator, "return")
                         self.emit_helper_get(&ys_iter);
                         let ret_key_rd = crate::unicode::utf8_to_utf16("return");
@@ -5835,9 +5839,12 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::Throw);
 
                         // c.iii: return is undefined — return Completion(received)
-                        // generator_return_pending already has the correct value from gen.return()
+                        // Restore generator_return_pending before throwing so the return
+                        // propagates through finally handlers as a return completion.
                         self.patch_jump(has_return_method);
                         self.emit_helper_get(&ys_thrown);
+                        self.chunk.write_opcode(Opcode::Dup);
+                        self.chunk.write_opcode(Opcode::SetGeneratorReturn);
                         self.chunk.write_opcode(Opcode::Throw);
 
                         // Done: ys_result is on stack (from the Dup before done check)

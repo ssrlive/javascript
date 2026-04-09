@@ -20229,10 +20229,14 @@ impl<'gc> VM<'gc> {
                     Some(gap) => gap,
                     None => return Value::Undefined,
                 };
-                let s = args
-                    .first()
-                    .map(|v| self.json_stringify_with_gap(ctx, v, &gap, ""))
-                    .unwrap_or_default();
+                let input = args.first().cloned().unwrap_or(Value::Undefined);
+                let replacer_fn = args.get(1).filter(|value| self.is_value_callable(value));
+                let Some(s) = self.json_stringify_root(ctx, &input, replacer_fn, &gap) else {
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    return Value::Undefined;
+                };
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
@@ -34330,128 +34334,275 @@ impl<'gc> VM<'gc> {
     }
 
     fn json_stringify_string_units(&self, s: &[u16]) -> String {
-        format!(
-            "\"{}\"",
-            crate::unicode::utf16_to_utf8(s).replace('\\', "\\\\").replace('"', "\\\"")
-        )
+        let mut out = String::from("\"");
+        for ch in crate::unicode::utf16_to_utf8(s).chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\u{08}' => out.push_str("\\b"),
+                '\u{09}' => out.push_str("\\t"),
+                '\u{0A}' => out.push_str("\\n"),
+                '\u{0C}' => out.push_str("\\f"),
+                '\u{0D}' => out.push_str("\\r"),
+                c if c <= '\u{1F}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
     }
 
-    /// JSON.stringify helper
-    fn json_stringify(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
-        match val {
+    fn json_stringify_root(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        replacer_fn: Option<&Value<'gc>>,
+        gap: &str,
+    ) -> Option<String> {
+        let mut wrapper = IndexMap::new();
+        if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+            && let Some(proto) = object_ctor.borrow().get("prototype").cloned()
+        {
+            wrapper.insert("__proto__".to_string(), proto);
+        }
+        wrapper.insert(String::new(), value.clone());
+        let wrapper = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
+        let mut stack = Vec::new();
+        self.json_serialize_property(ctx, &wrapper, "", replacer_fn, gap, "", &mut stack)
+    }
+
+    fn json_stringify_prepare_value(&mut self, ctx: &GcContext<'gc>, value: Value<'gc>) -> Option<Value<'gc>> {
+        let mut current = value;
+        loop {
+            if current.is_symbol_value() {
+                return None;
+            }
+            if self.is_value_callable(&current) {
+                return None;
+            }
+            match &current {
+                Value::Undefined => return None,
+                Value::VmObject(obj) => {
+                    let type_name = obj.borrow().get("__type__").and_then(|v| match v {
+                        Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
+                        _ => None,
+                    });
+                    match type_name.as_deref() {
+                        Some("String") => match self.vm_to_string_like_spec(ctx, &current) {
+                            Ok(s) => {
+                                current = Value::from(s.as_str());
+                                continue;
+                            }
+                            Err(err) => {
+                                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                                return None;
+                            }
+                        },
+                        Some("Number") => {
+                            let prim = self.try_to_primitive(ctx, &current, "number");
+                            if self.pending_throw.is_some() {
+                                return None;
+                            }
+                            if prim.is_symbol_value() {
+                                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                                return None;
+                            }
+                            current = Value::Number(to_number(&prim));
+                            continue;
+                        }
+                        Some("Boolean") => {
+                            let prim = self.try_to_primitive(ctx, &current, "number");
+                            if self.pending_throw.is_some() {
+                                return None;
+                            }
+                            current = Value::Boolean(prim.to_truthy());
+                            continue;
+                        }
+                        Some("BigInt") => {
+                            let prim = self.try_to_primitive(ctx, &current, "number");
+                            if self.pending_throw.is_some() {
+                                return None;
+                            }
+                            current = prim;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                Value::Function(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => return None,
+                _ => {}
+            }
+            return Some(current);
+        }
+    }
+
+    fn json_stack_contains(&self, stack: &[Value<'gc>], value: &Value<'gc>) -> bool {
+        stack.iter().any(|item| self.strict_equal(item, value))
+    }
+
+    fn json_serialize_property(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        holder: &Value<'gc>,
+        key: &str,
+        replacer_fn: Option<&Value<'gc>>,
+        gap: &str,
+        indent: &str,
+        stack: &mut Vec<Value<'gc>>,
+    ) -> Option<String> {
+        let mut value = self.read_named_property(ctx, holder, key);
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        if matches!(
+            value,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) {
+            let to_json = self.read_named_property(ctx, &value, "toJSON");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            if self.is_value_callable(&to_json) {
+                value = match self.vm_call_function_value(ctx, &to_json, &value, &[Value::from(key)]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return None;
+                    }
+                };
+            }
+        }
+
+        if let Some(replacer_fn) = replacer_fn {
+            value = match self.vm_call_function_value(ctx, replacer_fn, holder, &[Value::from(key), value]) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    return None;
+                }
+            };
+        }
+
+        let value = self.json_stringify_prepare_value(ctx, value)?;
+        match &value {
+            Value::Null => Some("null".to_string()),
+            Value::Boolean(b) => Some(b.to_string()),
+            Value::String(s) => Some(self.json_stringify_string_units(s)),
             Value::Number(n) => {
                 if n.is_nan() || n.is_infinite() {
-                    "null".to_string()
+                    Some("null".to_string())
                 } else if *n == (*n as i64) as f64 {
-                    format!("{}", *n as i64)
+                    Some(format!("{}", *n as i64))
                 } else {
-                    format!("{}", n)
+                    Some(format!("{}", n))
                 }
             }
-            Value::String(s) => self.json_stringify_string_units(s),
-            Value::Boolean(b) => b.to_string(),
-            Value::Null | Value::Undefined => "null".to_string(),
-            Value::VmArray(arr) => {
-                let borrow = arr.borrow();
-                let logical_len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
-                    if *n >= 0.0 { *n as usize } else { 0 }
-                } else {
-                    borrow.elements.len()
-                };
-                let mut parts: Vec<String> = Vec::with_capacity(logical_len);
-                for i in 0..logical_len {
-                    let idx_key = i.to_string();
-                    let deleted_key = format!("__deleted_{}", i);
-                    let part = if let Some(v) = borrow.props.get(&idx_key) {
-                        self.json_stringify(ctx, v)
-                    } else if i < borrow.elements.len() && !borrow.props.contains_key(&deleted_key) {
-                        self.json_stringify(ctx, &borrow.elements[i])
-                    } else {
-                        "null".to_string()
-                    };
-                    parts.push(part);
-                }
-                format!("[{}]", parts.join(","))
+            Value::BigInt(_) => {
+                self.throw_type_error(ctx, "Do not know how to serialize a BigInt");
+                None
             }
-            Value::VmObject(_) => {
-                let keys = self.collect_enumerable_own_keys(ctx, val);
+            _ => {
+                let is_array = matches!(
+                    self.call_builtin(ctx, BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&value)),
+                    Value::Boolean(true)
+                );
                 if self.pending_throw.is_some() {
-                    return String::new();
+                    return None;
                 }
-                let mut parts = Vec::new();
-                for key in keys {
-                    let value = self.read_named_property(ctx, val, &key);
-                    if self.pending_throw.is_some() {
-                        return String::new();
-                    }
-                    parts.push(format!(
-                        "{}:{}",
-                        self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(&key)),
-                        self.json_stringify(ctx, &value)
-                    ));
+                if self.json_stack_contains(stack, &value) {
+                    self.throw_type_error(ctx, "Converting circular structure to JSON");
+                    return None;
                 }
-                format!("{{{}}}", parts.join(","))
+                stack.push(value.clone());
+                let result = if is_array {
+                    self.json_serialize_array(ctx, &value, replacer_fn, gap, indent, stack)
+                } else {
+                    self.json_serialize_object(ctx, &value, replacer_fn, gap, indent, stack)
+                };
+                stack.pop();
+                result
             }
-            _ => "null".to_string(),
         }
     }
 
-    fn json_stringify_with_gap(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, gap: &str, indent: &str) -> String {
-        if gap.is_empty() {
-            return self.json_stringify(ctx, val);
+    fn json_serialize_array(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        array: &Value<'gc>,
+        replacer_fn: Option<&Value<'gc>>,
+        gap: &str,
+        indent: &str,
+        stack: &mut Vec<Value<'gc>>,
+    ) -> Option<String> {
+        let len_value = self.read_named_property(ctx, array, "length");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let len = self.json_to_length(ctx, &len_value);
+        if self.pending_throw.is_some() {
+            return None;
         }
 
-        match val {
-            Value::VmArray(arr) => {
-                let borrow = arr.borrow();
-                let logical_len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
-                    if *n >= 0.0 { *n as usize } else { 0 }
+        let next_indent = format!("{indent}{gap}");
+        let mut parts: Vec<String> = Vec::with_capacity(len);
+        for idx in 0..len {
+            let key = idx.to_string();
+            let part = self
+                .json_serialize_property(ctx, array, &key, replacer_fn, gap, &next_indent, stack)
+                .unwrap_or_else(|| "null".to_string());
+            if gap.is_empty() {
+                parts.push(part);
+            } else {
+                parts.push(format!("{next_indent}{part}"));
+            }
+        }
+
+        if gap.is_empty() {
+            Some(format!("[{}]", parts.join(",")))
+        } else if parts.is_empty() {
+            Some("[]".to_string())
+        } else {
+            Some(format!("[\n{}\n{}]", parts.join(",\n"), indent))
+        }
+    }
+
+    fn json_serialize_object(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        object: &Value<'gc>,
+        replacer_fn: Option<&Value<'gc>>,
+        gap: &str,
+        indent: &str,
+        stack: &mut Vec<Value<'gc>>,
+    ) -> Option<String> {
+        let keys = self.collect_enumerable_own_keys(ctx, object);
+        if self.pending_throw.is_some() {
+            return None;
+        }
+
+        let next_indent = format!("{indent}{gap}");
+        let mut parts = Vec::new();
+        for key in keys {
+            if let Some(serialized) = self.json_serialize_property(ctx, object, &key, replacer_fn, gap, &next_indent, stack) {
+                let json_key = self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(&key));
+                if gap.is_empty() {
+                    parts.push(format!("{json_key}:{serialized}"));
                 } else {
-                    borrow.elements.len()
-                };
-                if logical_len == 0 {
-                    return "[]".to_string();
+                    parts.push(format!("{next_indent}{json_key}: {serialized}"));
                 }
-                let next_indent = format!("{indent}{gap}");
-                let mut parts: Vec<String> = Vec::with_capacity(logical_len);
-                for i in 0..logical_len {
-                    let idx_key = i.to_string();
-                    let deleted_key = format!("__deleted_{}", i);
-                    let part = if let Some(v) = borrow.props.get(&idx_key) {
-                        self.json_stringify_with_gap(ctx, v, gap, &next_indent)
-                    } else if i < borrow.elements.len() && !borrow.props.contains_key(&deleted_key) {
-                        self.json_stringify_with_gap(ctx, &borrow.elements[i], gap, &next_indent)
-                    } else {
-                        "null".to_string()
-                    };
-                    parts.push(format!("{next_indent}{part}"));
-                }
-                format!("[\n{}\n{}]", parts.join(",\n"), indent)
             }
-            Value::VmObject(_) => {
-                let keys = self.collect_enumerable_own_keys(ctx, val);
-                if self.pending_throw.is_some() {
-                    return String::new();
-                }
-                let next_indent = format!("{indent}{gap}");
-                let mut parts = Vec::new();
-                for key in keys {
-                    let value = self.read_named_property(ctx, val, &key);
-                    if self.pending_throw.is_some() {
-                        return String::new();
-                    }
-                    parts.push(format!(
-                        "{next_indent}{}: {}",
-                        self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(&key)),
-                        self.json_stringify_with_gap(ctx, &value, gap, &next_indent)
-                    ));
-                }
-                if parts.is_empty() {
-                    return "{}".to_string();
-                }
-                format!("{{\n{}\n{}}}", parts.join(",\n"), indent)
+            if self.pending_throw.is_some() {
+                return None;
             }
-            _ => self.json_stringify(ctx, val),
+        }
+
+        if gap.is_empty() {
+            Some(format!("{{{}}}", parts.join(",")))
+        } else if parts.is_empty() {
+            Some("{}".to_string())
+        } else {
+            Some(format!("{{\n{}\n{}}}", parts.join(",\n"), indent))
         }
     }
 

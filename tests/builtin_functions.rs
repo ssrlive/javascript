@@ -560,6 +560,40 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_function_prototype_tostring_returns_native_function_syntax() {
+        let script = r#"
+            const src = (function example() {}).toString();
+            src === "function () { [ native code ] }"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_prototype_tostring_throws_on_non_callable_receiver() {
+        let script = r#"
+            let threw = false;
+            try {
+              Function.prototype.toString.call({});
+            } catch (e) {
+              threw = e.name === "TypeError";
+            }
+            threw
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_builtin_function_string_coercion_uses_function_tostring() {
+        let script = r#"
+            ("" + Object.prototype.hasOwnProperty) === "function () { [ native code ] }"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

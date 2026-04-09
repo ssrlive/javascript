@@ -214,6 +214,7 @@ const BUILTIN_CTOR_FUNCTION: FunctionID = 230;
 const BUILTIN_FN_CALL: FunctionID = 231;
 const BUILTIN_FN_BIND: FunctionID = 232;
 const BUILTIN_FN_APPLY: FunctionID = 233;
+const BUILTIN_FN_TOSTRING: FunctionID = 234;
 // ── JSON (240–249) ──────────────────────────────────────────────────
 const BUILTIN_JSON_STRINGIFY: FunctionID = 240;
 const BUILTIN_JSON_PARSE: FunctionID = 241;
@@ -3458,6 +3459,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_ENTRIES => "entries",
             BUILTIN_OBJECT_KEYS => "keys",
             BUILTIN_OBJECT_ASSIGN => "assign",
+            BUILTIN_FN_TOSTRING => "toString",
             BUILTIN_REFLECT_APPLY => "apply",
             BUILTIN_JSON_STRINGIFY => "stringify",
             BUILTIN_JSON_PARSE => "parse",
@@ -3614,6 +3616,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_GETOWNPROPDESC => 2.0,
             BUILTIN_OBJ_TOSTRING => 0.0,
             BUILTIN_OBJ_HASOWNPROPERTY => 1.0,
+            BUILTIN_FN_TOSTRING => 0.0,
             BUILTIN_OBJECT_CREATE | BUILTIN_OBJECT_DEFINEPROPS => 2.0,
             BUILTIN_OBJECT_DEFINEPROP => 3.0,
             BUILTIN_OBJECT_SETPROTOTYPEOF => 2.0,
@@ -14456,6 +14459,7 @@ impl<'gc> VM<'gc> {
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
                             "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            "toString" => Value::VmNativeFunction(BUILTIN_FN_TOSTRING),
                             _ => Value::Undefined,
                         },
                     },
@@ -14512,6 +14516,7 @@ impl<'gc> VM<'gc> {
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
                             "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            "toString" => Value::VmNativeFunction(BUILTIN_FN_TOSTRING),
                             _ => Value::Undefined,
                         },
                     },
@@ -14541,6 +14546,7 @@ impl<'gc> VM<'gc> {
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
                             "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            "toString" => Value::VmNativeFunction(BUILTIN_FN_TOSTRING),
                             _ => Value::Undefined,
                         },
                     },
@@ -16726,7 +16732,7 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("call".to_string(), Value::VmNativeFunction(BUILTIN_FN_CALL));
         fn_proto.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_FN_APPLY));
         fn_proto.insert("bind".to_string(), Value::VmNativeFunction(BUILTIN_FN_BIND));
-        fn_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING));
+        fn_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_FN_TOSTRING));
         let restricted_thrower = Value::Function("Function.prototype.restrictedThrow".to_string());
         fn_proto.insert(
             "arguments".to_string(),
@@ -29378,6 +29384,15 @@ impl<'gc> VM<'gc> {
             };
         }
 
+        // Function.prototype.toString()
+        if id == BUILTIN_FN_TOSTRING {
+            if !self.is_value_callable(receiver) {
+                self.throw_type_error(ctx, "Function.prototype.toString requires that 'this' be a Function");
+                return Value::Undefined;
+            }
+            return Value::from("function () { [ native code ] }");
+        }
+
         // Object.prototype.toString()
         if id == BUILTIN_OBJ_TOSTRING {
             // TypedArray: return [object Uint8Array] etc.
@@ -29825,7 +29840,12 @@ impl<'gc> VM<'gc> {
     fn try_to_primitive(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, hint: &str) -> Value<'gc> {
         let is_object_like = |v: &Value<'gc>| match v {
             Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
+            Value::VmArray(_)
+            | Value::VmMap(_)
+            | Value::VmSet(_)
+            | Value::VmFunction(..)
+            | Value::VmClosure(..)
+            | Value::VmNativeFunction(_) => true,
             _ => false,
         };
 

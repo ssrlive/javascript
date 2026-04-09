@@ -232,11 +232,11 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
                 chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
             };
             if name.is_empty() {
-                "function () { [native code] }".to_string()
+                "function () { [ native code ] }".to_string()
             } else if is_identifier_name(name) || name.starts_with('[') {
-                format!("function {name}() {{ [native code] }}")
+                format!("function {name}() {{ [ native code ] }}")
             } else {
-                format!("function [{name}]() {{ [native code] }}")
+                format!("function [{name}]() {{ [ native code ] }}")
             }
         }
         Value::Property { .. } => "[Property]".to_string(),

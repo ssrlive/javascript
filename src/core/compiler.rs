@@ -76,6 +76,9 @@ pub struct Compiler<'gc> {
     /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
     /// Populated by the module loader before compilation so the compiler can resolve external imports.
     loaded_module_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// After compiling an anonymous class expression, holds the constructor's IP
+    /// so callers can apply NamedEvaluation (e.g. `let C = class {}`  → name "C").
+    last_class_ctor_ip: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1121,11 +1124,7 @@ impl<'gc> Compiler<'gc> {
             StatementKind::Let(decls) => {
                 for (name, init_opt) in decls {
                     if let Some(init) = init_opt {
-                        let func_ip = self.peek_func_ip(init);
-                        self.compile_expr(init)?;
-                        if let Some(ip) = func_ip {
-                            self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
-                        }
+                        self.compile_expr_with_name_inference(init, name)?;
                     } else {
                         let idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
@@ -1171,11 +1170,7 @@ impl<'gc> Compiler<'gc> {
                     }
 
                     if let Some(init) = init_opt {
-                        let func_ip = self.peek_func_ip(init);
-                        self.compile_expr(init)?;
-                        if let Some(ip) = func_ip {
-                            self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
-                        }
+                        self.compile_expr_with_name_inference(init, name)?;
                     } else {
                         let idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
@@ -1213,11 +1208,7 @@ impl<'gc> Compiler<'gc> {
             StatementKind::Const(decls) => {
                 for (name, init) in decls {
                     // Infer function name for anonymous function/arrow
-                    let func_ip = self.peek_func_ip(init);
-                    self.compile_expr(init)?;
-                    if let Some(ip) = func_ip {
-                        self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
-                    }
+                    self.compile_expr_with_name_inference(init, name)?;
                     if self.scope_depth > 0 || self.force_local_let {
                         if ((self.scope_depth == 1 && self.block_stmt_depth == 0) || (self.scope_depth == 0 && self.force_local_let))
                             && self.hoisted_function_lexicals.contains(name)
@@ -4998,12 +4989,23 @@ impl<'gc> Compiler<'gc> {
                             if !*is_computed && let Expr::StringLit(s) = key {
                                 let key_name = crate::unicode::utf16_to_utf8(s);
                                 let is_proto_colon = *has_colon && key_name == "__proto__";
-                                if let Some(ip) = self.peek_func_ip(val)
-                                    && !is_proto_colon
-                                {
+                                let func_ip = if !is_proto_colon { self.peek_func_ip(val) } else { None };
+                                self.last_class_ctor_ip = None;
+                                self.compile_expr(val)?;
+                                let effective_ip = if !is_proto_colon {
+                                    if matches!(val, Expr::Class(..)) {
+                                        func_ip.or(self.last_class_ctor_ip.take())
+                                    } else {
+                                        self.last_class_ctor_ip = None;
+                                        func_ip
+                                    }
+                                } else {
+                                    self.last_class_ctor_ip = None;
+                                    None
+                                };
+                                if let Some(ip) = effective_ip {
                                     self.chunk.fn_names.entry(ip).or_insert_with(|| key_name.clone());
                                 }
-                                self.compile_expr(val)?;
                                 let idx = self.chunk.add_constant(Value::String(s.clone()));
                                 self.chunk.write_opcode(if is_proto_colon {
                                     Opcode::SetProperty
@@ -5040,6 +5042,9 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::Pop);
 
                             self.compile_expr(val)?;
+                            // Runtime InitIndex handles computed-key name inference;
+                            // clear any leaked last_class_ctor_ip from nested class exprs.
+                            self.last_class_ctor_ip = None;
                             self.emit_helper_set(&val_tmp);
                             self.chunk.write_opcode(Opcode::Pop);
 
@@ -5172,13 +5177,22 @@ impl<'gc> Compiler<'gc> {
                     // Infer function name for anonymous function/arrow assigned to a variable
                     // Parenthesized identifier targets are represented as Var(name, None, None)
                     // and must not trigger NamedEvaluation name inference.
-                    let func_ip = if line.is_some() || column.is_some() {
-                        self.peek_func_ip(right)
+                    let should_infer = line.is_some() || column.is_some();
+                    let func_ip = if should_infer { self.peek_func_ip(right) } else { None };
+                    self.last_class_ctor_ip = None;
+                    self.compile_expr(right)?;
+                    let effective_ip = if should_infer {
+                        if matches!(&**right, Expr::Class(..)) {
+                            func_ip.or(self.last_class_ctor_ip.take())
+                        } else {
+                            self.last_class_ctor_ip = None;
+                            func_ip
+                        }
                     } else {
+                        self.last_class_ctor_ip = None;
                         None
                     };
-                    self.compile_expr(right)?;
-                    if let Some(ip) = func_ip {
+                    if let Some(ip) = effective_ip {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
                     }
                     if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
@@ -6806,8 +6820,15 @@ impl<'gc> Compiler<'gc> {
 
             // NamedEvaluation: if RHS is anonymous function/arrow/class and LHS is identifier
             let func_ip = if lhs_name.is_some() { self.peek_func_ip(rhs) } else { None };
+            self.last_class_ctor_ip = None;
             self.compile_expr(rhs)?;
-            if let (Some(ip), Some(name)) = (func_ip, &lhs_name) {
+            let effective_ip = if matches!(rhs, Expr::Class(..)) {
+                func_ip.or(self.last_class_ctor_ip.take())
+            } else {
+                self.last_class_ctor_ip = None;
+                func_ip
+            };
+            if let (Some(ip), Some(name)) = (effective_ip, &lhs_name) {
                 self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
             }
 
@@ -7176,7 +7197,6 @@ impl<'gc> Compiler<'gc> {
             Expr::AsyncFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 5),
             Expr::AsyncGeneratorFunction(name, ..) if name.is_none() || name.as_deref() == Some("") => Some(self.chunk.code.len() + 5),
             Expr::Getter(inner) | Expr::Setter(inner) => self.peek_func_ip(inner),
-            Expr::Class(class_def) if class_def.name.is_empty() => Some(self.chunk.code.len() + 5),
             Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..) => Some(self.chunk.code.len() + 5),
             _ => None,
         }
@@ -7287,9 +7307,10 @@ impl<'gc> Compiler<'gc> {
                 let skip_default = self.emit_jump(Opcode::JumpIfTrue);
                 self.chunk.write_opcode(Opcode::Pop);
                 if let Expr::Var(name, ..) = &**inner_target {
-                    self.maybe_infer_anonymous_binding_name(name, default_expr);
+                    self.compile_expr_with_name_inference(default_expr, name)?;
+                } else {
+                    self.compile_expr(default_expr)?;
                 }
-                self.compile_expr(default_expr)?;
                 self.patch_jump(skip_default);
                 self.compile_expr_assign_to_target(inner_target)?;
             }
@@ -7635,9 +7656,10 @@ impl<'gc> Compiler<'gc> {
                     let skip_default = self.emit_jump(Opcode::JumpIfTrue);
                     self.chunk.write_opcode(Opcode::Pop);
                     if let Expr::Var(name, ..) = lhs.as_ref() {
-                        self.maybe_infer_anonymous_binding_name(name, default_expr);
+                        self.compile_expr_with_name_inference(default_expr, name)?;
+                    } else {
+                        self.compile_expr(default_expr)?;
                     }
-                    self.compile_expr(default_expr)?;
                     self.patch_jump(skip_default);
                     lhs.as_ref()
                 }
@@ -8767,10 +8789,28 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Throw);
     }
 
-    fn maybe_infer_anonymous_binding_name(&mut self, binding_name: &str, expr: &Expr) {
-        if let Some(ip) = self.peek_func_ip(expr) {
-            self.chunk.fn_names.entry(ip).or_insert_with(|| binding_name.to_string());
+    /// Compile an expression and apply NamedEvaluation if it is an anonymous
+    /// function, arrow, or class expression.  Handles both the peek-predicted
+    /// IP (for functions/arrows) and the deferred `last_class_ctor_ip` (for
+    /// anonymous class expressions whose constructor IP cannot be predicted).
+    fn compile_expr_with_name_inference(&mut self, expr: &Expr, name: &str) -> Result<(), JSError> {
+        let func_ip = self.peek_func_ip(expr);
+        self.last_class_ctor_ip = None;
+        self.compile_expr(expr)?;
+        // Only consume last_class_ctor_ip when the expression itself is a
+        // class expression.  For compound expressions (object literals, calls,
+        // etc.) a nested class would set the field, but the name belongs to
+        // the inner property/argument — not to the outer binding.
+        let effective_ip = if matches!(expr, Expr::Class(..)) {
+            func_ip.or(self.last_class_ctor_ip.take())
+        } else {
+            self.last_class_ctor_ip = None;
+            func_ip
+        };
+        if let Some(ip) = effective_ip {
+            self.chunk.fn_names.entry(ip).or_insert_with(|| name.to_string());
         }
+        Ok(())
     }
 
     fn expr_references_any_identifier(expr: &Expr, names: &[String]) -> bool {
@@ -9305,8 +9345,7 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         let skip_default = self.emit_jump(Opcode::JumpIfTrue);
                         self.chunk.write_opcode(Opcode::Pop);
-                        self.maybe_infer_anonymous_binding_name(name, def_expr);
-                        self.compile_expr(def_expr)?;
+                        self.compile_expr_with_name_inference(def_expr, name)?;
                         self.patch_jump(skip_default);
                     }
                     self.emit_define_var(name);
@@ -9551,8 +9590,7 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::StrictNotEqual);
                     let skip_default = self.emit_jump(Opcode::JumpIfTrue);
                     self.chunk.write_opcode(Opcode::Pop);
-                    self.maybe_infer_anonymous_binding_name(name, def_expr);
-                    self.compile_expr(def_expr)?;
+                    self.compile_expr_with_name_inference(def_expr, name)?;
                     self.patch_jump(skip_default);
                 }
                 self.emit_define_var(name);
@@ -9682,8 +9720,7 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         let skip_default = self.emit_jump(Opcode::JumpIfTrue);
                         self.chunk.write_opcode(Opcode::Pop);
-                        self.maybe_infer_anonymous_binding_name(name, def_expr);
-                        self.compile_expr(def_expr)?;
+                        self.compile_expr_with_name_inference(def_expr, name)?;
                         self.patch_jump(skip_default);
                     }
                     self.emit_define_var(name);
@@ -10232,6 +10269,9 @@ impl<'gc> Compiler<'gc> {
         // Register constructor name
         if !name.is_empty() {
             self.chunk.fn_names.insert(fn_start, name.clone());
+        } else {
+            // Anonymous class: record constructor IP so the caller can apply NamedEvaluation
+            self.last_class_ctor_ip = Some(fn_start);
         }
         self.chunk.class_constructor_ips.insert(fn_start);
         if class_def.extends.is_some() {
@@ -11321,6 +11361,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::EnterFieldInit);
                 let locals_before = self.locals.len();
                 let func_ip = self.peek_func_ip(init_expr);
+                self.last_class_ctor_ip = None;
                 self.compile_expr(init_expr)?;
                 self.chunk.write_opcode(Opcode::LeaveFieldInit);
                 // Class expressions leave dead locals (brand, temp, etc.) on the stack
@@ -11336,7 +11377,13 @@ impl<'gc> Compiler<'gc> {
                 while self.locals.len() > locals_before {
                     self.locals.pop();
                 }
-                if let Some(ip) = func_ip {
+                let effective_ip = if matches!(init_expr, Expr::Class(..)) {
+                    func_ip.or(self.last_class_ctor_ip.take())
+                } else {
+                    self.last_class_ctor_ip = None;
+                    func_ip
+                };
+                if let Some(ip) = effective_ip {
                     self.chunk.fn_names.entry(ip).or_insert_with(|| fname.clone());
                 }
                 let fk = self.chunk.add_constant(Value::from(fname));
@@ -11355,6 +11402,7 @@ impl<'gc> Compiler<'gc> {
                 let private_name = self.resolve_private_key(fname);
                 let locals_before = self.locals.len();
                 let func_ip = self.peek_func_ip(init_expr);
+                self.last_class_ctor_ip = None;
                 self.compile_expr(init_expr)?;
                 self.chunk.write_opcode(Opcode::LeaveFieldInit);
                 // Same dead-local cleanup as Property above
@@ -11366,7 +11414,13 @@ impl<'gc> Compiler<'gc> {
                 while self.locals.len() > locals_before {
                     self.locals.pop();
                 }
-                if let Some(ip) = func_ip {
+                let effective_ip = if matches!(init_expr, Expr::Class(..)) {
+                    func_ip.or(self.last_class_ctor_ip.take())
+                } else {
+                    self.last_class_ctor_ip = None;
+                    func_ip
+                };
+                if let Some(ip) = effective_ip {
                     // Display name is #name, not \0#name
                     self.chunk.fn_names.entry(ip).or_insert_with(|| format!("#{}", fname));
                 }
@@ -11476,8 +11530,15 @@ impl<'gc> Compiler<'gc> {
                     self.const_locals.insert(class_name.to_string());
                 }
                 let func_ip = self.peek_func_ip(init_expr);
+                self.last_class_ctor_ip = None;
                 self.compile_expr(init_expr)?;
-                if let Some(ip) = func_ip {
+                let effective_ip = if matches!(init_expr, Expr::Class(..)) {
+                    func_ip.or(self.last_class_ctor_ip.take())
+                } else {
+                    self.last_class_ctor_ip = None;
+                    func_ip
+                };
+                if let Some(ip) = effective_ip {
                     self.chunk.fn_names.entry(ip).or_insert_with(|| fname.clone());
                 }
                 self.chunk.write_opcode(Opcode::Return);
@@ -11514,8 +11575,15 @@ impl<'gc> Compiler<'gc> {
                 }
                 let private_name = self.resolve_private_key(fname);
                 let func_ip = self.peek_func_ip(init_expr);
+                self.last_class_ctor_ip = None;
                 self.compile_expr(init_expr)?;
-                if let Some(ip) = func_ip {
+                let effective_ip = if matches!(init_expr, Expr::Class(..)) {
+                    func_ip.or(self.last_class_ctor_ip.take())
+                } else {
+                    self.last_class_ctor_ip = None;
+                    func_ip
+                };
+                if let Some(ip) = effective_ip {
                     // Display name is #name, not \0#name
                     self.chunk.fn_names.entry(ip).or_insert_with(|| format!("#{}", fname));
                 }

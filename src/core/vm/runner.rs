@@ -1085,6 +1085,10 @@ impl<'gc> VM<'gc> {
                     }
                     let is_async_ctor = matches!(borrow.get("__async_function_constructor__"), Some(Value::Boolean(true)));
                     let is_async_gen_ctor = matches!(borrow.get("__async_generator_function_constructor__"), Some(Value::Boolean(true)));
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
                     let ctor_for_realm = self.stack.get(callee_idx).cloned().unwrap_or(Value::Undefined);
                     drop(borrow);
                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
@@ -1110,7 +1114,24 @@ impl<'gc> VM<'gc> {
                             return Ok(OpcodeAction::Continue);
                         }
                     }
-                    let mut result = if let Some(recv) = method_receiver.as_ref() {
+                    let mut result = if let Some(rid) = realm_id
+                        && rid < self.child_realms.len()
+                        && let Some(mut child) = self.child_realms[rid].take()
+                    {
+                        self.sync_runtime_to_child(&mut child);
+                        let out = if let Some(recv) = method_receiver.as_ref() {
+                            child.call_method_builtin(ctx, id, recv, &args_collected)
+                        } else {
+                            child.call_builtin(ctx, id, &args_collected)
+                        };
+                        if let Some(thrown) = child.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                        }
+                        let out = self.register_cross_realm_fn(ctx, &mut child, out, rid);
+                        self.sync_runtime_from_child(&child);
+                        self.child_realms[rid] = Some(child);
+                        out
+                    } else if let Some(recv) = method_receiver.as_ref() {
                         self.call_method_builtin(ctx, id, recv, &args_collected)
                     } else {
                         self.call_builtin(ctx, id, &args_collected)
@@ -3101,6 +3122,10 @@ impl<'gc> VM<'gc> {
                     let function_id = get_function_id(*map);
                     let borrow = map.borrow();
                     if let Some(id) = function_id {
+                        let realm_id = match borrow.get("__realm_id__") {
+                            Some(Value::Number(n)) => Some(*n as usize),
+                            _ => None,
+                        };
                         drop(borrow);
                         let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                         self.stack.pop(); // pop callee
@@ -3109,7 +3134,24 @@ impl<'gc> VM<'gc> {
                         } else {
                             None
                         };
-                        let result = if let Some(recv) = method_receiver.as_ref() {
+                        let result = if let Some(rid) = realm_id
+                            && rid < self.child_realms.len()
+                            && let Some(mut child) = self.child_realms[rid].take()
+                        {
+                            self.sync_runtime_to_child(&mut child);
+                            let out = if let Some(recv) = method_receiver.as_ref() {
+                                child.call_method_builtin(ctx, id, recv, &args_collected)
+                            } else {
+                                child.call_builtin(ctx, id, &args_collected)
+                            };
+                            if let Some(thrown) = child.pending_throw.take() {
+                                self.pending_throw = Some(thrown);
+                            }
+                            let out = self.register_cross_realm_fn(ctx, &mut child, out, rid);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[rid] = Some(child);
+                            out
+                        } else if let Some(recv) = method_receiver.as_ref() {
                             if id == BUILTIN_CTOR_FUNCTION {
                                 self.new_target_stack.push(callee.clone());
                             }

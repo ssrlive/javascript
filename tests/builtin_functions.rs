@@ -488,6 +488,36 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_stringify_calls_bigint_tojson_before_throwing() {
+        let script = r#"
+            BigInt.prototype.toJSON = function () { return "ok"; };
+            JSON.stringify(1n) === '"ok"'
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_json_stringify_uses_cross_realm_bigint_wrapper_tojson() {
+        let script = r#"
+            let other = __createRealm__().global;
+            let wrapped = other.Object(other.BigInt(100));
+            let threw = false;
+            try {
+              JSON.stringify(wrapped);
+            } catch (e) {
+              threw = e.constructor === TypeError;
+            }
+            other.BigInt.prototype.toJSON = function () { return this.toString(); };
+            threw
+              && Object.getPrototypeOf(wrapped) === other.BigInt.prototype
+              && JSON.stringify(wrapped) === '"100"'
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

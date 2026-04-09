@@ -13767,13 +13767,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn invoke_getter_with_receiver(&mut self, ctx: &GcContext<'gc>, getter: &Value<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
-        match self.vm_call_function_value(ctx, getter, receiver, &[]) {
-            Ok(v) => v,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                Value::Undefined
-            }
-        }
+        self._invoke_getter_with_receiver_mc(ctx, getter, receiver)
     }
 
     fn _invoke_getter_with_receiver_mc(&mut self, ctx: &GcContext<'gc>, getter: &Value<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
@@ -14116,17 +14110,25 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Some("BigInt") => {
-                                // Check if BigInt.prototype has a getter override (e.g. Object.defineProperty)
-                                if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
-                                    && let Some(Value::VmObject(bi_proto)) = bi_ctor.borrow().get("prototype").cloned()
-                                {
-                                    let getter_key = format!("__get_{}", key);
-                                    let bp = bi_proto.borrow();
-                                    if bp.contains_key(&getter_key) || bp.contains_key(key) {
-                                        drop(bp);
+                                let getter_key = format!("__get_{}", key);
+                                if let Some(proto) = borrow.get("__proto__").cloned() {
+                                    let has_override = matches!(
+                                        &proto,
+                                        Value::VmObject(proto_obj)
+                                            if {
+                                                let bp = proto_obj.borrow();
+                                                bp.contains_key(&getter_key) || bp.contains_key(key)
+                                            }
+                                    );
+                                    if has_override {
                                         drop(borrow);
-                                        return self.read_named_property(ctx, &Value::VmObject(bi_proto), key);
+                                        return self.read_named_property_with_receiver(ctx, &proto, key, receiver);
                                     }
+                                } else if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
+                                    && let Some(proto) = bi_ctor.borrow().get("prototype").cloned()
+                                {
+                                    drop(borrow);
+                                    return self.read_named_property_with_receiver(ctx, &proto, key, receiver);
                                 }
                                 let resolved = match key {
                                     "toString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING)),
@@ -17631,6 +17633,10 @@ impl<'gc> VM<'gc> {
                     }
                     self.vm_call_function_value(ctx, &target, this_arg, args)
                 } else if let Some(native_id) = function_id {
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
                     drop(borrow);
                     if native_id == BUILTIN_CTOR_PROXY {
                         let err = self.make_type_error_object(ctx, "Constructor Proxy requires 'new'");
@@ -17644,6 +17650,20 @@ impl<'gc> VM<'gc> {
                     if native_id == BUILTIN_CTOR_PROMISE && !promise_construct_context {
                         let err = self.make_type_error_object(ctx, "Promise constructor requires 'new'");
                         return Err(self.vm_error_to_js_error(ctx, &err));
+                    }
+                    if let Some(rid) = realm_id
+                        && rid < self.child_realms.len()
+                        && let Some(mut child) = self.child_realms[rid].take()
+                    {
+                        self.sync_runtime_to_child(&mut child);
+                        let result = child.call_method_builtin(ctx, native_id, this_arg, args);
+                        if let Some(thrown) = child.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                        }
+                        let result = self.register_cross_realm_fn(ctx, &mut child, result, rid);
+                        self.sync_runtime_from_child(&child);
+                        self.child_realms[rid] = Some(child);
+                        return Ok(result);
                     }
                     Ok(self.call_method_builtin(ctx, native_id, this_arg, args))
                 } else {
@@ -18418,8 +18438,11 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         Value::VmObject(obj) => {
-                            if let Some(native_id) = get_function_id(obj) {
-                                vm.call_builtin(ctx, native_id, &arg_vals)
+                            if get_function_id(obj).is_some() {
+                                match vm.vm_call_function_value(ctx, &Value::VmObject(obj), &this_val, &arg_vals) {
+                                    Ok(value) => value,
+                                    Err(err) => return Err(err),
+                                }
                             } else {
                                 return Err(crate::make_js_error!(crate::JSErrorKind::TypeError {
                                     message: "is not a function".to_string()
@@ -34457,9 +34480,24 @@ impl<'gc> VM<'gc> {
 
         if matches!(
             value,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            Value::BigInt(_)
+                | Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
         ) {
-            let to_json = self.read_named_property(ctx, &value, "toJSON");
+            let to_json = if matches!(value, Value::BigInt(_)) {
+                if let Some(Value::VmObject(bigint_ctor)) = self.globals.get("BigInt")
+                    && let Some(proto) = bigint_ctor.borrow().get("prototype").cloned()
+                {
+                    self.read_named_property_with_receiver(ctx, &proto, "toJSON", &value)
+                } else {
+                    Value::Undefined
+                }
+            } else {
+                self.read_named_property(ctx, &value, "toJSON")
+            };
             if self.pending_throw.is_some() {
                 return None;
             }
@@ -34671,7 +34709,11 @@ impl<'gc> VM<'gc> {
             serde_json::Value::Object(obj) => {
                 let mut map = IndexMap::new();
                 for (key, val) in obj {
-                    let storage_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key.as_str() };
+                    let storage_key = if key == "__proto__" {
+                        OWN_DUNDER_PROTO_DATA_KEY
+                    } else {
+                        key.as_str()
+                    };
                     map.insert(storage_key.to_string(), self.json_to_value(ctx, val));
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
@@ -34679,13 +34721,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn json_internalize_property(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        holder: &Value<'gc>,
-        name: &str,
-        reviver: &Value<'gc>,
-    ) -> Value<'gc> {
+    fn json_internalize_property(&mut self, ctx: &GcContext<'gc>, holder: &Value<'gc>, name: &str, reviver: &Value<'gc>) -> Value<'gc> {
         let val = self.read_named_property(ctx, holder, name);
         if self.pending_throw.is_some() {
             return Value::Undefined;
@@ -34769,12 +34805,7 @@ impl<'gc> VM<'gc> {
         desc.insert("enumerable".to_string(), Value::Boolean(true));
         desc.insert("configurable".to_string(), Value::Boolean(true));
         let desc_obj = self.wrap_descriptor_object(ctx, desc);
-        let _ = self.call_host_fn(
-            ctx,
-            "reflect.defineProperty",
-            None,
-            &[target.clone(), Value::from(key), desc_obj],
-        );
+        let _ = self.call_host_fn(ctx, "reflect.defineProperty", None, &[target.clone(), Value::from(key), desc_obj]);
     }
 
     fn json_to_length(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> usize {

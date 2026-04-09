@@ -3461,6 +3461,9 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_ENTRIES => "entries",
             BUILTIN_OBJECT_KEYS => "keys",
             BUILTIN_OBJECT_ASSIGN => "assign",
+            BUILTIN_FN_CALL => "call",
+            BUILTIN_FN_BIND => "bind",
+            BUILTIN_FN_APPLY => "apply",
             BUILTIN_FN_TOSTRING => "toString",
             BUILTIN_REFLECT_APPLY => "apply",
             BUILTIN_JSON_STRINGIFY => "stringify",
@@ -3618,6 +3621,9 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_GETOWNPROPDESC => 2.0,
             BUILTIN_OBJ_TOSTRING => 0.0,
             BUILTIN_OBJ_HASOWNPROPERTY => 1.0,
+            BUILTIN_FN_CALL => 1.0,
+            BUILTIN_FN_BIND => 1.0,
+            BUILTIN_FN_APPLY => 2.0,
             BUILTIN_FN_TOSTRING => 0.0,
             BUILTIN_OBJECT_CREATE | BUILTIN_OBJECT_DEFINEPROPS => 2.0,
             BUILTIN_OBJECT_DEFINEPROP => 3.0,
@@ -12511,7 +12517,6 @@ impl<'gc> VM<'gc> {
 
         let mut props = IndexMap::new();
         props.insert("__native_id__".to_string(), Value::Number(id as f64));
-        Self::insert_property_with_attributes(&mut props, "name", &Value::from(Self::native_function_name(id)), false, false, true);
         Self::insert_property_with_attributes(
             &mut props,
             "length",
@@ -12520,6 +12525,7 @@ impl<'gc> VM<'gc> {
             false,
             true,
         );
+        Self::insert_property_with_attributes(&mut props, "name", &Value::from(Self::native_function_name(id)), false, false, true);
         if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
             && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
         {
@@ -16846,9 +16852,9 @@ impl<'gc> VM<'gc> {
         let fn_proto_val = Value::VmObject(fn_proto_obj);
         let mut function_map = IndexMap::new();
         function_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
+        function_map.insert("length".to_string(), Value::Number(1.0));
         function_map.insert("name".to_string(), Value::from("Function"));
         function_map.insert("prototype".to_string(), fn_proto_val);
-        function_map.insert("length".to_string(), Value::Number(1.0));
         function_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
         function_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         function_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
@@ -16939,8 +16945,8 @@ impl<'gc> VM<'gc> {
         // %AsyncFunction% constructor and %AsyncFunction.prototype%
         let mut async_fn_ctor = IndexMap::new();
         async_fn_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
-        async_fn_ctor.insert("name".to_string(), Value::from("AsyncFunction"));
         async_fn_ctor.insert("length".to_string(), Value::Number(1.0));
+        async_fn_ctor.insert("name".to_string(), Value::from("AsyncFunction"));
         async_fn_ctor.insert("__readonly_name__".to_string(), Value::Boolean(true));
         async_fn_ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         async_fn_ctor.insert("__readonly_length__".to_string(), Value::Boolean(true));
@@ -17064,8 +17070,8 @@ impl<'gc> VM<'gc> {
 
         let mut async_gen_ctor = IndexMap::new();
         async_gen_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
-        async_gen_ctor.insert("name".to_string(), Value::from("AsyncGeneratorFunction"));
         async_gen_ctor.insert("length".to_string(), Value::Number(1.0));
+        async_gen_ctor.insert("name".to_string(), Value::from("AsyncGeneratorFunction"));
         async_gen_ctor.insert("__readonly_name__".to_string(), Value::Boolean(true));
         async_gen_ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
         async_gen_ctor.insert("__readonly_length__".to_string(), Value::Boolean(true));
@@ -17235,8 +17241,8 @@ impl<'gc> VM<'gc> {
 
         let mut gen_fn_ctor = IndexMap::new();
         gen_fn_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
-        gen_fn_ctor.insert("name".to_string(), Value::from("GeneratorFunction"));
         gen_fn_ctor.insert("length".to_string(), Value::Number(1.0));
+        gen_fn_ctor.insert("name".to_string(), Value::from("GeneratorFunction"));
         gen_fn_ctor.insert("prototype".to_string(), gen_fn_proto_val.clone());
         gen_fn_ctor.insert("__readonly_name__".to_string(), Value::Boolean(true));
         gen_fn_ctor.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));

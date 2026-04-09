@@ -234,6 +234,29 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_builtin_metadata_and_property_order() {
+        let script = r#"
+            let applyName = Object.getOwnPropertyDescriptor(Function.prototype.apply, "name");
+            let applyLength = Object.getOwnPropertyDescriptor(Function.prototype.apply, "length");
+            let callName = Object.getOwnPropertyDescriptor(Function.prototype.call, "name");
+            let props = Object.getOwnPropertyNames(Function);
+            applyName.value === "apply" &&
+            applyName.writable === false &&
+            applyName.enumerable === false &&
+            applyName.configurable === true &&
+            applyLength.value === 2 &&
+            applyLength.writable === false &&
+            applyLength.enumerable === false &&
+            applyLength.configurable === true &&
+            callName.value === "call" &&
+            props.indexOf("length") >= 0 &&
+            props.indexOf("name") === props.indexOf("length") + 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

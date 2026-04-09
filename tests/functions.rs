@@ -337,6 +337,37 @@ mod function_tests {
     }
 
     #[test]
+    fn test_bound_constructor_preserves_explicit_wrapper_returns() {
+        let script = r#"
+            function makeBool() {
+                return new Boolean(arguments.length === 1 && arguments[0] === true);
+            }
+            let Bound = makeBool.bind(null, true);
+            let out = new Bound();
+            Object.getPrototypeOf(out) === Boolean.prototype &&
+            out.valueOf() === true
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_derived_constructor_retargets_wrapper_prototype() {
+        let script = r#"
+            class DerivedBoolean extends Boolean {
+                constructor(value) {
+                    super(value);
+                }
+            }
+            let out = new DerivedBoolean(true);
+            Object.getPrototypeOf(out) === DerivedBoolean.prototype &&
+            out.valueOf() === true
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

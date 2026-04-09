@@ -33044,7 +33044,7 @@ impl<'gc> VM<'gc> {
                     Value::VmObject(ret_obj) => {
                         // Some built-in constructor implementations return a wrapper object
                         // with a generic prototype; normalize it to the constructor prototype.
-                        let should_patch_wrapper_proto = {
+                        let should_patch_wrapper_proto = self.chunk.derived_constructor_ips.contains(&target_ip) && {
                             let b = ret_obj.borrow();
                             matches!(
                                 b.get("__type__"),

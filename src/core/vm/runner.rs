@@ -6409,7 +6409,19 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         let method = match &obj {
-            Value::VmObject(_) => self.read_named_property(ctx, &obj, &key),
+            Value::VmObject(map) => {
+                // Private field access bypasses proxy traps — read directly from the object's map
+                if key.contains(PRIVATE_KEY_PREFIX) {
+                    let b = map.borrow();
+                    if let Some(val) = b.get(&key) {
+                        val.clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    self.read_named_property(ctx, &obj, &key)
+                }
+            }
             Value::VmArray(arr) => {
                 let borrow = arr.borrow();
                 let is_generator = matches!(borrow.props.get("__generator__"), Some(Value::Boolean(true)));

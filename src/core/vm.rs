@@ -21549,7 +21549,27 @@ impl<'gc> VM<'gc> {
                 // CreateDynamicFunction uses the constructor realm for body scope and the
                 // created "prototype" object's parent, while F.[[Prototype]] still comes
                 // from newTarget via GetPrototypeFromConstructor below.
-                let dynamic_origin_global = Some(Value::VmObject(self.global_this));
+                // If the newTarget belongs to a child realm, use that realm's globalThis
+                // so the created function's __origin_global is correct for cross-realm
+                // GetPrototypeFromConstructor lookups.
+                let dynamic_origin_global = {
+                    let mut origin = Value::VmObject(self.global_this);
+                    if let Some(ref nt) = current_new_target {
+                        let realm_id_opt = match nt {
+                            Value::VmObject(m) => m.borrow().get("__realm_id__").cloned(),
+                            _ => None,
+                        };
+                        if let Some(Value::Number(n)) = realm_id_opt {
+                            let rid = n as usize;
+                            if rid < self.child_realms.len()
+                                && let Some(ref child) = self.child_realms[rid]
+                            {
+                                origin = Value::VmObject(child.global_this);
+                            }
+                        }
+                    }
+                    Some(origin)
+                };
                 // Use dynamic_function_kind_override when available (set by construct_value
                 // for Reflect.construct(AsyncFunction, args, newTarget) scenarios).
                 let ctor_name = if let Some(ref kind) = self.dynamic_function_kind_override {
@@ -34094,10 +34114,42 @@ impl<'gc> VM<'gc> {
 
         if let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, constructor) {
             let found = origin_global.borrow().get(intrinsic_ctor_name).cloned();
-            if let Some(object_ctor) = found
-                && let Some(default_proto) = read_ctor_prototype(self, &object_ctor)
-            {
-                return Some(default_proto);
+            if let Some(ref object_ctor) = found {
+                // When the origin global is a child realm and the constructor is a
+                // bare VmNativeFunction, read the prototype from the child VM's
+                // native function props instead of the parent's (they share the
+                // same FunctionID but have separate prototype objects).
+                if let Value::VmNativeFunction(nf_id) = object_ctor
+                    && !Gc::ptr_eq(origin_global, self.global_this)
+                {
+                    let realm_id_opt = origin_global.borrow().get("__realm_id__").cloned();
+                    if let Some(Value::Number(n)) = realm_id_opt {
+                        let rid = n as usize;
+                        if rid < self.child_realms.len()
+                            && let Some(mut child) = self.child_realms[rid].take()
+                        {
+                            let child_props = child.get_native_fn_props(ctx, *nf_id);
+                            let proto = child_props.borrow().get("prototype").cloned();
+                            self.child_realms[rid] = Some(child);
+                            if let Some(ref p) = proto
+                                && matches!(
+                                    p,
+                                    Value::VmObject(_)
+                                        | Value::VmArray(_)
+                                        | Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                )
+                                && !p.is_symbol_value()
+                            {
+                                return Some(p.clone());
+                            }
+                        }
+                    }
+                }
+                if let Some(default_proto) = read_ctor_prototype(self, object_ctor) {
+                    return Some(default_proto);
+                }
             }
 
             if intrinsic_ctor_name == "AsyncGeneratorFunction" || intrinsic_ctor_name == "AsyncFunction" {

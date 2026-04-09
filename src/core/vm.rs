@@ -14650,6 +14650,26 @@ impl<'gc> VM<'gc> {
                 let wrapper_value = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
                 self.read_named_property_with_receiver(ctx, &wrapper_value, key, obj)
             }
+            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                // Symbol primitives: use dynamic prototype resolution like
+                // Number/String/Boolean so cross-realm property access uses
+                // the current realm's Symbol.prototype, not the creating realm's.
+                {
+                    let borrow = map.borrow();
+                    if let Some(val) = borrow.get(key)
+                        && !key.starts_with("__")
+                    {
+                        return val.clone();
+                    }
+                }
+                if let Some(Value::VmObject(sym_ctor)) = self.globals.get("Symbol")
+                    && let Some(proto) = sym_ctor.borrow().get("prototype").cloned()
+                {
+                    self.read_named_property_with_receiver(ctx, &proto, key, obj)
+                } else {
+                    Value::Undefined
+                }
+            }
             Value::VmObject(_) => self.read_named_property_with_receiver(ctx, obj, key, obj),
             Value::VmFunction(ip, arity) => {
                 let current_fn = Value::VmFunction(*ip, *arity);

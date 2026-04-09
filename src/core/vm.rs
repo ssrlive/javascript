@@ -20239,7 +20239,14 @@ impl<'gc> VM<'gc> {
                 Value::from(&s)
             }
             BUILTIN_JSON_PARSE => {
-                let s = args.first().map(value_to_string).unwrap_or_default();
+                let raw = args.first().cloned().unwrap_or(Value::Undefined);
+                let s = match self.vm_to_string_like_spec(ctx, &raw) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
                 let parsed = self.json_parse(ctx, &s);
                 if self.pending_throw.is_some() {
                     return Value::Undefined;

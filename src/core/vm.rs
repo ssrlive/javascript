@@ -34540,58 +34540,66 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
 
-        match &val {
-            Value::VmArray(arr) => {
-                let len = {
-                    let borrow = arr.borrow();
-                    if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
-                        if *n >= 0.0 { *n as usize } else { 0 }
-                    } else {
-                        borrow.elements.len()
-                    }
-                };
-                for idx in 0..len {
-                    let key = idx.to_string();
-                    let revived = self.json_internalize_property(ctx, &val, &key, reviver);
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    let mut borrow = arr.borrow_mut(ctx);
-                    if matches!(revived, Value::Undefined) {
-                        borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
-                        if idx < borrow.elements.len() {
-                            borrow.elements[idx] = Value::Undefined;
-                        } else {
-                            borrow.props.shift_remove(&key);
-                        }
-                    } else if idx < borrow.elements.len() {
-                        borrow.elements[idx] = revived;
-                        borrow.props.shift_remove(&format!("__deleted_{}", idx));
-                    } else {
-                        borrow.props.insert(key, revived);
-                    }
-                }
+        let is_array = matches!(
+            self.call_builtin(ctx, BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&val)),
+            Value::Boolean(true)
+        );
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        if is_array {
+            let len_value = self.read_named_property(ctx, &val, "length");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
             }
-            Value::VmObject(obj) => {
-                let keys = self.collect_enumerable_own_keys(ctx, &val);
+            let len = self.json_to_length(ctx, &len_value);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            for idx in 0..len {
+                let key = idx.to_string();
+                let revived = self.json_internalize_property(ctx, &val, &key, reviver);
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                for key in keys {
-                    let revived = self.json_internalize_property(ctx, &val, &key, reviver);
+                if matches!(revived, Value::Undefined) {
+                    let _ = self.call_host_fn(ctx, "reflect.deleteProperty", None, &[val.clone(), Value::from(key.as_str())]);
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    let storage_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key.as_str() };
-                    let mut borrow = obj.borrow_mut(ctx);
-                    if matches!(revived, Value::Undefined) {
-                        borrow.shift_remove(storage_key);
-                    } else {
-                        borrow.insert(storage_key.to_string(), revived);
+                } else {
+                    self.json_define_data_property(ctx, &val, &key, &revived);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
                     }
                 }
             }
-            _ => {}
+        } else if matches!(
+            val,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) {
+            let keys = self.collect_enumerable_own_keys(ctx, &val);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            for key in keys {
+                let revived = self.json_internalize_property(ctx, &val, &key, reviver);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(revived, Value::Undefined) {
+                    let _ = self.call_host_fn(ctx, "reflect.deleteProperty", None, &[val.clone(), Value::from(key.as_str())]);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                } else {
+                    self.json_define_data_property(ctx, &val, &key, &revived);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                }
+            }
         }
 
         match self.vm_call_function_value(ctx, reviver, holder, &[Value::from(name), val]) {
@@ -34601,6 +34609,43 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
         }
+    }
+
+    fn json_define_data_property(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>, key: &str, value: &Value<'gc>) {
+        let mut desc = IndexMap::new();
+        desc.insert("value".to_string(), value.clone());
+        desc.insert("writable".to_string(), Value::Boolean(true));
+        desc.insert("enumerable".to_string(), Value::Boolean(true));
+        desc.insert("configurable".to_string(), Value::Boolean(true));
+        let desc_obj = self.wrap_descriptor_object(ctx, desc);
+        let _ = self.call_host_fn(
+            ctx,
+            "reflect.defineProperty",
+            None,
+            &[target.clone(), Value::from(key), desc_obj],
+        );
+    }
+
+    fn json_to_length(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> usize {
+        let prim = self.try_to_primitive(ctx, value, "number");
+        if self.pending_throw.is_some() {
+            return 0;
+        }
+        if prim.is_symbol_value() {
+            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+            return 0;
+        }
+        let n = to_number(&prim);
+        if !n.is_finite() {
+            if n.is_sign_positive() {
+                return 9_007_199_254_740_991u64.min(usize::MAX as u64) as usize;
+            }
+            return 0;
+        }
+        if n <= 0.0 || n.is_nan() {
+            return 0;
+        }
+        n.floor().min(9_007_199_254_740_991.0).min(usize::MAX as f64) as usize
     }
 
     /// Handle a thrown value: unwind to nearest try/catch or return error

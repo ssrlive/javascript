@@ -836,10 +836,7 @@ impl<'gc> VM<'gc> {
             Value::Number(n) => *n == 0.0 && !n.is_sign_negative(),
             _ => false,
         };
-        if !is_zero
-            && let Err(thrown) =
-                self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0))
-        {
+        if !is_zero && let Err(thrown) = self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0)) {
             self.pending_throw = Some(thrown);
             return Value::Undefined;
         }
@@ -859,8 +856,7 @@ impl<'gc> VM<'gc> {
         // 5. If SameValue(currentLastIndex, previousLastIndex) is false, then
         //    Perform ? Set(rx, "lastIndex", previousLastIndex, true).
         if !self.values_same(&current_last_index, &previous_last_index)
-            && let Err(thrown) =
-                self.host_fn_set_property(ctx, rx, "lastIndex", &previous_last_index)
+            && let Err(thrown) = self.host_fn_set_property(ctx, rx, "lastIndex", &previous_last_index)
         {
             self.pending_throw = Some(thrown);
             return Value::Undefined;
@@ -1008,10 +1004,7 @@ impl<'gc> VM<'gc> {
             None
         };
 
-        if global
-            && let Err(thrown) =
-                self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0))
-        {
+        if global && let Err(thrown) = self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0)) {
             self.pending_throw = Some(thrown);
             return Value::Undefined;
         }
@@ -1342,16 +1335,17 @@ impl<'gc> VM<'gc> {
         let lim = match limit {
             Value::Undefined => 0xFFFFFFFFu32,
             v => {
-                // ToUint32(limit): ToPrimitive→ToNumber, then modulo 2^32
-                let prim = self.try_to_primitive(ctx, v, "number");
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                let n = to_number(&prim);
+                // ToUint32(limit): ToNumber, then modulo 2^32
+                let n = match self.host_fn_to_number(ctx, v) {
+                    Ok(n) => n,
+                    Err(thrown) => {
+                        self.pending_throw = Some(thrown);
+                        return Value::Undefined;
+                    }
+                };
                 if n.is_nan() || n.is_infinite() || n == 0.0 {
                     0u32
                 } else {
-                    // ToUint32: sign(n)*floor(abs(n)) modulo 2^32
                     let int_val = n.signum() * n.abs().floor();
                     let modulo = int_val % 4294967296.0;
                     let result = if modulo < 0.0 { modulo + 4294967296.0 } else { modulo };
@@ -1405,15 +1399,12 @@ impl<'gc> VM<'gc> {
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
-            let prim = self.try_to_primitive(ctx, &e_val, "number");
-            if self.pending_throw.is_some() {
-                return Value::Undefined;
-            }
-            let n = to_number(&prim);
-            let e = if n.is_nan() || n <= 0.0 {
-                0usize
-            } else {
-                (n.min(9007199254740991.0) as usize).min(size)
+            let e = match self.host_fn_to_length(ctx, &e_val) {
+                Ok(n) => (n as usize).min(size),
+                Err(thrown) => {
+                    self.pending_throw = Some(thrown);
+                    return Value::Undefined;
+                }
             };
 
             if e == p {
@@ -1437,16 +1428,12 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                // ToLength coercion for length
-                let prim = self.try_to_primitive(ctx, &len_val, "number");
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                let n = to_number(&prim);
-                let len = if n.is_nan() || n <= 0.0 {
-                    0i64
-                } else {
-                    n.min(9007199254740991.0) as i64
+                let len = match self.host_fn_to_length(ctx, &len_val) {
+                    Ok(n) => n as i64,
+                    Err(thrown) => {
+                        self.pending_throw = Some(thrown);
+                        return Value::Undefined;
+                    }
                 };
                 if len > 1 { (len - 1) as usize } else { 0 }
             };
@@ -1666,7 +1653,8 @@ impl<'gc> VM<'gc> {
         if !matches!(
             c,
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-        ) {
+        ) || c.is_symbol_value()
+        {
             self.throw_type_error(ctx, "Species constructor is not an Object");
             return Value::Undefined;
         }
@@ -1750,27 +1738,24 @@ impl<'gc> VM<'gc> {
         }
         // Step 4: If argument has a [[RegExpMatcher]] internal slot, return true.
         if let Value::VmObject(map) = argument
-            && map
-                .borrow()
-                .get("__type__")
-                .map(value_to_string)
-                .as_deref()
-                == Some("RegExp")
+            && map.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
         {
             return Ok(true);
         }
         Ok(false)
     }
 
-    /// ToLength/ToNumber with proper Symbol rejection for host functions.
+    /// ToNumber with proper Symbol rejection for host functions.
+    /// Hides try_stack to prevent handle_throw from corrupting VM state.
     /// Returns `Err(thrown_value)` if the value cannot be coerced to a number.
-    #[allow(dead_code)]
-    fn host_fn_to_length(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Result<f64, Value<'gc>> {
+    fn host_fn_to_number(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Result<f64, Value<'gc>> {
         if val.is_symbol_value() {
             let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
             return Err(err);
         }
+        let saved = std::mem::take(&mut self.try_stack);
         let prim = self.try_to_primitive(ctx, val, "number");
+        self.try_stack = saved;
         if let Some(thrown) = self.pending_throw.take() {
             return Err(thrown);
         }
@@ -1778,7 +1763,13 @@ impl<'gc> VM<'gc> {
             let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
             return Err(err);
         }
-        let n = to_number(&prim);
+        Ok(to_number(&prim))
+    }
+
+    /// ToLength with proper Symbol rejection for host functions.
+    /// Returns `Err(thrown_value)` if the value cannot be coerced to a number.
+    fn host_fn_to_length(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Result<f64, Value<'gc>> {
+        let n = self.host_fn_to_number(ctx, val)?;
         let result = if n.is_nan() || n <= 0.0 {
             0.0
         } else {

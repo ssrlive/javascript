@@ -3463,6 +3463,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_PROMISE_THEN => "then",
             BUILTIN_CTOR_WEAKREF => "WeakRef",
             BUILTIN_CTOR_FR => "FinalizationRegistry",
+            BUILTIN_FR_REGISTER => "register",
+            BUILTIN_FR_UNREGISTER => "unregister",
             BUILTIN_ARRAY_PUSH => "push",
             BUILTIN_ARRAY_POP => "pop",
             BUILTIN_ARRAY_JOIN => "join",
@@ -3736,6 +3738,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_PARSEINT | BUILTIN_BIGINT_ASINTN | BUILTIN_BIGINT_ASUINTN => 2.0,
             BUILTIN_PARSEFLOAT => 1.0,
             BUILTIN_SET_VALUES | BUILTIN_SET_ENTRIES | BUILTIN_SET_CLEAR => 0.0,
+            BUILTIN_FR_REGISTER => 2.0,
+            BUILTIN_FR_UNREGISTER => 1.0,
             _ => 1.0,
         }
     }
@@ -16811,6 +16815,8 @@ impl<'gc> VM<'gc> {
             fr_proto.insert("@@sym:4".to_string(), Value::from("FinalizationRegistry"));
             fr_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
             fr_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+            fr_proto.insert("constructor".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FR));
+            fr_proto.insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
             fr_proto.insert("register".to_string(), Value::VmNativeFunction(BUILTIN_FR_REGISTER));
             fr_proto.insert("__nonenumerable_register__".to_string(), Value::Boolean(true));
             fr_proto.insert("unregister".to_string(), Value::VmNativeFunction(BUILTIN_FR_UNREGISTER));
@@ -17038,11 +17044,26 @@ impl<'gc> VM<'gc> {
                 Self::insert_species_getter(&mut set_props_borrow, ctx);
             }
         }
+        // Patch __proto__ for WeakRef and FinalizationRegistry native fn props
+        // (they were created before Function was initialized)
+        for ctor_id in [BUILTIN_CTOR_WEAKREF, BUILTIN_CTOR_FR] {
+            let props = self.get_native_fn_props(ctx, ctor_id);
+            props.borrow_mut(ctx).insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
+        }
         if let Some(error_ctor) = self.globals.get("Error").cloned() {
             for sub in ["TypeError", "SyntaxError", "RangeError", "ReferenceError", "EvalError", "URIError"] {
                 if let Some(Value::VmObject(ctor)) = self.globals.get(sub) {
                     ctor.borrow_mut(ctx).insert("__proto__".to_string(), error_ctor.clone());
                 }
+            }
+        }
+        // Add WeakRef and FinalizationRegistry to globalThis (they are VmNativeFunction, not VmObject wrappers)
+        for name in ["WeakRef", "FinalizationRegistry"] {
+            if let Some(val) = self.globals.get(name).cloned() {
+                self.global_this.borrow_mut(ctx).insert(name.to_string(), val);
+                self.global_this
+                    .borrow_mut(ctx)
+                    .insert(format!("__nonenumerable_{name}__"), Value::Boolean(true));
             }
         }
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
@@ -18834,6 +18855,38 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_PROMISE_NOOP => Value::Undefined,
+            BUILTIN_CTOR_WEAKREF => {
+                self.throw_type_error(ctx, "WeakRef constructor requires 'new'");
+                Value::Undefined
+            }
+            BUILTIN_CTOR_FR => {
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    self.throw_type_error(ctx, "FinalizationRegistry constructor requires 'new'");
+                    return Value::Undefined;
+                };
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    self.throw_type_error(ctx, "FinalizationRegistry requires a callable cleanup callback");
+                    return Value::Undefined;
+                }
+                let mut m = IndexMap::new();
+                m.insert("__fr__".to_string(), Value::Boolean(true));
+                m.insert("__fr_callback__".to_string(), callback);
+                m.insert("__fr_count__".to_string(), Value::Number(0.0));
+                m.insert("__type__".to_string(), Value::from("FinalizationRegistry"));
+                match self.get_prototype_from_constructor_with_intrinsic(ctx, &new_target, "FinalizationRegistry") {
+                    Ok(Some(proto)) => {
+                        m.insert("__proto__".to_string(), proto);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        // Abrupt completion from GetPrototypeFromConstructor — re-throw original
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, m))
+            }
             BUILTIN_CTOR_PROMISE => {
                 let Some(new_target) = self.new_target_stack.last().cloned() else {
                     self.throw_type_error(ctx, "Promise constructor requires 'new'");
@@ -29288,52 +29341,87 @@ impl<'gc> VM<'gc> {
             return borrow.get("__target__").cloned().unwrap_or(Value::Undefined);
         }
 
-        // FinalizationRegistry.register — happy path (validation done by caller)
-        if let Value::VmObject(obj) = receiver
-            && id == BUILTIN_FR_REGISTER
-        {
+        // FinalizationRegistry.prototype.register(target, heldValue [, unregisterToken])
+        if id == BUILTIN_FR_REGISTER {
+            // Step 1: RequireInternalSlot(this, [[Cells]])
+            let is_fr = matches!(receiver, Value::VmObject(o) if o.borrow().contains_key("__fr__"));
+            if !is_fr {
+                self.throw_type_error(ctx, "FinalizationRegistry.prototype.register called on incompatible receiver");
+                return Value::Undefined;
+            }
             let target = args.first().cloned().unwrap_or(Value::Undefined);
+            // Step 2: If CanBeHeldWeakly(target) is false, throw TypeError
+            if !self.can_be_held_weakly(&target) {
+                self.throw_type_error(ctx, "target must be an object or a non-registered symbol");
+                return Value::Undefined;
+            }
+            // Step 3: If SameValue(target, heldValue) is true, throw TypeError
             let held = args.get(1).cloned().unwrap_or(Value::Undefined);
+            if self.values_same(&target, &held) {
+                self.throw_type_error(ctx, "target and holdings must not be the same");
+                return Value::Undefined;
+            }
+            // Step 4: If unregisterToken is not undefined and CanBeHeldWeakly(unregisterToken) is false, throw TypeError
             let token = args.get(2).cloned();
-
-            let mut borrow = obj.borrow_mut(ctx);
-            let count = match borrow.get("__fr_count__") {
-                Some(Value::Number(n)) => *n as usize,
-                _ => 0,
-            };
-            borrow.insert(format!("__fr_{}_target__", count), target);
-            borrow.insert(format!("__fr_{}_held__", count), held);
-            borrow.insert(format!("__fr_{}_token__", count), token.unwrap_or(Value::Undefined));
-            borrow.insert(format!("__fr_{}_alive__", count), Value::Boolean(true));
-            borrow.insert("__fr_count__".to_string(), Value::Number((count + 1) as f64));
+            if let Some(ref tok) = token
+                && !matches!(tok, Value::Undefined)
+                && !self.can_be_held_weakly(tok)
+            {
+                self.throw_type_error(ctx, "unregisterToken must be an object, a non-registered symbol, or undefined");
+                return Value::Undefined;
+            }
+            if let Value::VmObject(obj) = receiver {
+                let mut borrow = obj.borrow_mut(ctx);
+                let count = match borrow.get("__fr_count__") {
+                    Some(Value::Number(n)) => *n as usize,
+                    _ => 0,
+                };
+                borrow.insert(format!("__fr_{}_target__", count), target);
+                borrow.insert(format!("__fr_{}_held__", count), held);
+                borrow.insert(format!("__fr_{}_token__", count), token.unwrap_or(Value::Undefined));
+                borrow.insert(format!("__fr_{}_alive__", count), Value::Boolean(true));
+                borrow.insert("__fr_count__".to_string(), Value::Number((count + 1) as f64));
+            }
             return Value::Undefined;
         }
 
-        // FinalizationRegistry.unregister(token)
-        if let Value::VmObject(obj) = receiver
-            && id == BUILTIN_FR_UNREGISTER
-        {
-            let token = args.first().cloned().unwrap_or(Value::Undefined);
-            let mut borrow = obj.borrow_mut(ctx);
-            let count = match borrow.get("__fr_count__") {
-                Some(Value::Number(n)) => *n as usize,
-                _ => 0,
-            };
-            let mut removed = false;
-            for i in 0..count {
-                let alive_key = format!("__fr_{}_alive__", i);
-                if !matches!(borrow.get(&alive_key), Some(Value::Boolean(true))) {
-                    continue;
-                }
-                let token_key = format!("__fr_{}_token__", i);
-                if let Some(stored_token) = borrow.get(&token_key).cloned()
-                    && self.values_same(&token, &stored_token)
-                {
-                    borrow.insert(alive_key, Value::Boolean(false));
-                    removed = true;
-                }
+        // FinalizationRegistry.prototype.unregister(unregisterToken)
+        if id == BUILTIN_FR_UNREGISTER {
+            // Step 1: RequireInternalSlot(this, [[Cells]])
+            let is_fr = matches!(receiver, Value::VmObject(o) if o.borrow().contains_key("__fr__"));
+            if !is_fr {
+                self.throw_type_error(ctx, "FinalizationRegistry.prototype.unregister called on incompatible receiver");
+                return Value::Undefined;
             }
-            return Value::Boolean(removed);
+            let token = args.first().cloned().unwrap_or(Value::Undefined);
+            // Step 2: If CanBeHeldWeakly(unregisterToken) is false, throw TypeError
+            if !self.can_be_held_weakly(&token) {
+                self.throw_type_error(ctx, "unregisterToken must be an object or a non-registered symbol");
+                return Value::Undefined;
+            }
+            if let Value::VmObject(obj) = receiver {
+                let mut borrow = obj.borrow_mut(ctx);
+                let count = match borrow.get("__fr_count__") {
+                    Some(Value::Number(n)) => *n as usize,
+                    _ => 0,
+                };
+                let mut removed = false;
+                for i in 0..count {
+                    let alive_key = format!("__fr_{}_alive__", i);
+                    if !matches!(borrow.get(&alive_key), Some(Value::Boolean(true))) {
+                        continue;
+                    }
+                    let token_key = format!("__fr_{}_token__", i);
+                    if let Some(stored_token) = borrow.get(&token_key).cloned()
+                        && self.values_same(&token, &stored_token)
+                    {
+                        borrow.insert(alive_key, Value::Boolean(false));
+                        removed = true;
+                    }
+                }
+                return Value::Boolean(removed);
+            }
+            return Value::Boolean(false);
         }
 
         if id == BUILTIN_ITERATOR_NEXT && !matches!(receiver, Value::VmObject(_) | Value::VmArray(_)) {
@@ -31306,6 +31394,22 @@ impl<'gc> VM<'gc> {
                     || b.contains_key("__fn_body__")
                     || b.contains_key("__native_id__")
             }
+            _ => false,
+        }
+    }
+
+    /// CanBeHeldWeakly(v): Objects and non-registered Symbols can be held weakly.
+    fn can_be_held_weakly(&self, value: &Value<'gc>) -> bool {
+        match value {
+            Value::VmObject(obj) => {
+                let b = obj.borrow();
+                // Registered symbols (Symbol.for) cannot be held weakly
+                if b.contains_key("__vm_symbol__") {
+                    return !b.contains_key("__registered__");
+                }
+                true
+            }
+            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
             _ => false,
         }
     }

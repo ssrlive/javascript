@@ -874,54 +874,6 @@ impl<'gc> VM<'gc> {
                 }
                 if is_method {
                     let recv = self.stack.pop().unwrap_or(Value::Undefined);
-                    // FinalizationRegistry.register validation (needs to throw TypeError)
-                    if id == BUILTIN_FR_REGISTER {
-                        let target = args.first().cloned().unwrap_or(Value::Undefined);
-                        let held = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        let token = args.get(2).cloned();
-                        let target_is_object = matches!(
-                            target,
-                            Value::VmObject(_)
-                                | Value::VmArray(_)
-                                | Value::VmMap(_)
-                                | Value::VmSet(_)
-                                | Value::VmFunction(..)
-                                | Value::VmClosure(..)
-                        );
-                        if !target_is_object {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Invalid value used in FinalizationRegistry"));
-                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                            return Ok(OpcodeAction::Continue);
-                        }
-                        if self.values_same(&target, &held) {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("target and held value must not be the same"));
-                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                            return Ok(OpcodeAction::Continue);
-                        }
-                        if let Some(ref tok) = token {
-                            let tok_ok = matches!(
-                                tok,
-                                Value::Undefined
-                                    | Value::VmObject(_)
-                                    | Value::VmArray(_)
-                                    | Value::VmMap(_)
-                                    | Value::VmSet(_)
-                                    | Value::VmFunction(..)
-                                    | Value::VmClosure(..)
-                            );
-                            if !tok_ok {
-                                let mut err_map = IndexMap::new();
-                                err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                                err_map.insert("message".to_string(), Value::from("Invalid unregister token"));
-                                self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                                return Ok(OpcodeAction::Continue);
-                            }
-                        }
-                    }
                     let result = self.call_method_builtin(ctx, id, &recv, &args);
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
@@ -7827,36 +7779,14 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     BUILTIN_CTOR_FR => {
-                        // new FinalizationRegistry(callback)
-                        let callback = args.into_iter().next().unwrap_or(Value::Undefined);
-                        let is_callable = matches!(callback, Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_))
-                            || matches!(&callback, Value::VmObject(o) if {
-                                let b = o.borrow();
-                                b.contains_key("__fn_body__") || b.contains_key("__native_id__")
-                            });
-                        if !is_callable {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert(
-                                "message".to_string(),
-                                Value::from("FinalizationRegistry requires a callable cleanup callback"),
-                            );
-                            let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
-                            self.handle_throw(ctx, &err)?;
-                        } else {
-                            let mut m = IndexMap::new();
-                            m.insert("__fr__".to_string(), Value::Boolean(true));
-                            m.insert("__fr_callback__".to_string(), callback);
-                            m.insert("__fr_count__".to_string(), Value::Number(0.0));
-                            m.insert("__type__".to_string(), Value::from("FinalizationRegistry"));
-                            if let Some(fr_ctor) = self.globals.get("FinalizationRegistry").cloned() {
-                                let proto = self.read_named_property(ctx, &fr_ctor, "prototype");
-                                if !matches!(proto, Value::Undefined) {
-                                    m.insert("__proto__".to_string(), proto);
-                                }
-                            }
-                            self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
+                        self.new_target_stack.push(Value::VmNativeFunction(id));
+                        let out = self.call_builtin(ctx, id, &args);
+                        self.new_target_stack.pop();
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
                         }
+                        self.stack.push(out);
                     }
                     BUILTIN_CTOR_REGEXP => {
                         // new RegExp(pattern, flags)

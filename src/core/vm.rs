@@ -22752,6 +22752,18 @@ impl<'gc> VM<'gc> {
                     {
                         return Value::Null;
                     }
+                    // Cross-realm objects: delegate getPrototypeOf to the child VM
+                    // so the child's own Object.prototype identity check works.
+                    if let Some(Value::Number(rid)) = map.borrow().get("__realm_id__").cloned() {
+                        let realm_id = rid as usize;
+                        if let Some(mut child) = self.child_realms.get_mut(realm_id).and_then(Option::take) {
+                            self.sync_runtime_to_child(&mut child);
+                            let result = child.call_builtin(ctx, BUILTIN_OBJECT_GETPROTOTYPEOF, &[target.clone()]);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[realm_id] = Some(child);
+                            return result;
+                        }
+                    }
                     if map.borrow().contains_key("__host_fn__")
                         && !map.borrow().contains_key("__proto__")
                         && let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")

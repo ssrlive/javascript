@@ -422,6 +422,20 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_parse_reviver_visits_root_and_children() {
+        let script = r#"
+            const calls = [];
+            const result = JSON.parse('{"b":1,"a":{"c":2}}', function(key, value) {
+              calls.push(key);
+              return value;
+            });
+            result.a.c === 2 && calls[calls.length - 1] === ""
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

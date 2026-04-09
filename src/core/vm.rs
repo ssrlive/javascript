@@ -20240,7 +20240,24 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_JSON_PARSE => {
                 let s = args.first().map(value_to_string).unwrap_or_default();
-                self.json_parse(ctx, &s)
+                let parsed = self.json_parse(ctx, &s);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let reviver = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&reviver) {
+                    return parsed;
+                }
+
+                let mut wrapper = IndexMap::new();
+                if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+                    && let Some(proto) = object_ctor.borrow().get("prototype").cloned()
+                {
+                    wrapper.insert("__proto__".to_string(), proto);
+                }
+                wrapper.insert(String::new(), parsed);
+                let wrapper = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
+                self.json_internalize_property(ctx, &wrapper, "", &reviver)
             }
             BUILTIN_EVAL => {
                 let Some(first_arg) = args.first() else {
@@ -34499,6 +34516,80 @@ impl<'gc> VM<'gc> {
                     map.insert(key.clone(), self.json_to_value(ctx, val));
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
+            }
+        }
+    }
+
+    fn json_internalize_property(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        holder: &Value<'gc>,
+        name: &str,
+        reviver: &Value<'gc>,
+    ) -> Value<'gc> {
+        let val = self.read_named_property(ctx, holder, name);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        match &val {
+            Value::VmArray(arr) => {
+                let len = {
+                    let borrow = arr.borrow();
+                    if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
+                        if *n >= 0.0 { *n as usize } else { 0 }
+                    } else {
+                        borrow.elements.len()
+                    }
+                };
+                for idx in 0..len {
+                    let key = idx.to_string();
+                    let revived = self.json_internalize_property(ctx, &val, &key, reviver);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let mut borrow = arr.borrow_mut(ctx);
+                    if matches!(revived, Value::Undefined) {
+                        borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
+                        if idx < borrow.elements.len() {
+                            borrow.elements[idx] = Value::Undefined;
+                        } else {
+                            borrow.props.shift_remove(&key);
+                        }
+                    } else if idx < borrow.elements.len() {
+                        borrow.elements[idx] = revived;
+                        borrow.props.shift_remove(&format!("__deleted_{}", idx));
+                    } else {
+                        borrow.props.insert(key, revived);
+                    }
+                }
+            }
+            Value::VmObject(obj) => {
+                let keys = self.collect_enumerable_own_keys(ctx, &val);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                for key in keys {
+                    let revived = self.json_internalize_property(ctx, &val, &key, reviver);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let mut borrow = obj.borrow_mut(ctx);
+                    if matches!(revived, Value::Undefined) {
+                        borrow.shift_remove(&key);
+                    } else {
+                        borrow.insert(key, revived);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        match self.vm_call_function_value(ctx, reviver, holder, &[Value::from(name), val]) {
+            Ok(v) => v,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                Value::Undefined
             }
         }
     }

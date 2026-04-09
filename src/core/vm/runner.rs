@@ -1948,8 +1948,7 @@ impl<'gc> VM<'gc> {
         map.insert("__type__".to_string(), Value::from("Arguments"));
         if let Some(&is_strict) = self.chunk.fn_strictness.get(&func_ip) {
             if is_strict {
-                let thrower =
-                    Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+                let thrower = self.restricted_thrower_intrinsic(ctx);
                 let prop = Value::Property {
                     value: None,
                     getter: Some(Box::new(thrower.clone())),
@@ -1964,7 +1963,7 @@ impl<'gc> VM<'gc> {
                 map.insert("__nonenumerable_callee__".to_string(), Value::Boolean(true));
             }
         } else {
-            let thrower = Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+            let thrower = self.restricted_thrower_intrinsic(ctx);
             let prop = Value::Property {
                 value: None,
                 getter: Some(Box::new(thrower.clone())),
@@ -3959,7 +3958,7 @@ impl<'gc> VM<'gc> {
                     if let Some(Value::String(host_name_u16)) = host_name {
                         let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
                         self.regexp_home_proto_temp = regexp_home;
-                        let getter_result = self.call_host_fn(ctx, &host_name, Some(&obj), &[]);
+                        let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
                         self.stack.push(getter_result);
                     } else {
                         self.stack.push(Value::Undefined);
@@ -4227,7 +4226,8 @@ impl<'gc> VM<'gc> {
                                         if let Some(Value::String(host_name_u16)) = host_name_val {
                                             let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
                                             self.regexp_home_proto_temp = regexp_home;
-                                            let getter_result = self.call_host_fn(ctx, &host_name, Some(&obj), &[]);
+                                            let getter_result =
+                                                self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
                                             self.stack.push(getter_result);
                                         } else {
                                             self.stack.push(Value::Undefined);

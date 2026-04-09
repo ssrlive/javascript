@@ -257,6 +257,64 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_prototype_metadata_and_restricted_property_descriptors() {
+        let script = r#"
+            let nameDesc = Object.getOwnPropertyDescriptor(Function.prototype, "name");
+            let lengthDesc = Object.getOwnPropertyDescriptor(Function.prototype, "length");
+            let argumentsDesc = Object.getOwnPropertyDescriptor(Function.prototype, "arguments");
+            let callerDesc = Object.getOwnPropertyDescriptor(Function.prototype, "caller");
+            let thrower = (function(){ "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee").get; })();
+            let evalThrower = eval('(function() { "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee").get })()');
+            let argumentsThrow = false;
+            let callerThrow = false;
+            let restoreArgumentsThrow = false;
+            let restoreCallerThrow = false;
+            try { Function.prototype.arguments; } catch (e) { argumentsThrow = e instanceof TypeError; }
+            try { Function.prototype.caller; } catch (e) { callerThrow = e instanceof TypeError; }
+            Object.defineProperty(Function.prototype, "arguments", {
+                enumerable: false,
+                configurable: true,
+                get: argumentsDesc.get,
+                set: argumentsDesc.set
+            });
+            Object.defineProperty(Function.prototype, "caller", {
+                enumerable: false,
+                configurable: true,
+                get: callerDesc.get,
+                set: callerDesc.set
+            });
+            try { Function.prototype.arguments; } catch (e) { restoreArgumentsThrow = e instanceof TypeError; }
+            try { Function.prototype.caller; } catch (e) { restoreCallerThrow = e instanceof TypeError; }
+            nameDesc.value === "" &&
+            nameDesc.writable === false &&
+            nameDesc.enumerable === false &&
+            nameDesc.configurable === true &&
+            lengthDesc.value === 0 &&
+            lengthDesc.writable === false &&
+            lengthDesc.enumerable === false &&
+            lengthDesc.configurable === true &&
+            typeof argumentsDesc.get === "function" &&
+            argumentsDesc.get === argumentsDesc.set &&
+            argumentsDesc.enumerable === false &&
+            argumentsDesc.configurable === true &&
+            argumentsDesc.get === thrower &&
+            argumentsDesc.get === evalThrower &&
+            typeof callerDesc.get === "function" &&
+            callerDesc.get === callerDesc.set &&
+            callerDesc.enumerable === false &&
+            callerDesc.configurable === true &&
+            callerDesc.get === thrower &&
+            callerDesc.get === evalThrower &&
+            argumentsThrow &&
+            callerThrow &&
+            restoreArgumentsThrow &&
+            restoreCallerThrow
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_bound_native_constructor_targets_call_like_functions() {
         let script = r#"
             Number.bind(null)(42) === 42 &&

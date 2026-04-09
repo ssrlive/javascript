@@ -1033,6 +1033,8 @@ pub struct VM<'gc> {
     module_request_depth: usize,
     /// Cached intrinsic %Promise% constructor used by dynamic import.
     intrinsic_promise_ctor: Value<'gc>,
+    /// Per-realm %ThrowTypeError% intrinsic shared by restricted function properties.
+    restricted_thrower_intrinsic: Value<'gc>,
     /// When true, `run_opcode_await` at module top level exits early to support
     /// async module suspension (spec §16.2.1.5.2.1 InnerModuleEvaluation step 14).
     suspend_on_module_await: bool,
@@ -1057,6 +1059,14 @@ impl<'gc> VM<'gc> {
 }
 
 impl<'gc> VM<'gc> {
+    fn restricted_thrower_intrinsic(&mut self, ctx: &GcContext<'gc>) -> Value<'gc> {
+        if matches!(self.restricted_thrower_intrinsic, Value::Undefined) {
+            self.restricted_thrower_intrinsic =
+                Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+        }
+        self.restricted_thrower_intrinsic.clone()
+    }
+
     fn eval_comment_only_fast_path(&self, code: &str) -> Option<Value<'gc>> {
         let trimmed = code.trim();
         if trimmed.is_empty() {
@@ -1319,6 +1329,7 @@ impl<'gc> VM<'gc> {
             module_records: std::collections::HashMap::new(),
             module_request_depth: 0,
             intrinsic_promise_ctor: Value::Undefined,
+            restricted_thrower_intrinsic: Value::Undefined,
             suspend_on_module_await: false,
             module_await_suspended: false,
             suspended_module_states: Vec::new(),
@@ -16812,8 +16823,7 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_FN_APPLY));
         fn_proto.insert("bind".to_string(), Value::VmNativeFunction(BUILTIN_FN_BIND));
         fn_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_FN_TOSTRING));
-        let restricted_thrower =
-            Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+        let restricted_thrower = self.restricted_thrower_intrinsic(ctx);
         fn_proto.insert(
             "arguments".to_string(),
             Value::Property {
@@ -16836,12 +16846,8 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
         fn_proto.insert("__nonenumerable_arguments__".to_string(), Value::Boolean(true));
         fn_proto.insert("__nonenumerable_caller__".to_string(), Value::Boolean(true));
-        fn_proto.insert("__nonconfigurable_arguments__".to_string(), Value::Boolean(true));
-        fn_proto.insert("__nonconfigurable_caller__".to_string(), Value::Boolean(true));
-        fn_proto.insert("length".to_string(), Value::Number(0.0));
-        fn_proto.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
-        fn_proto.insert("name".to_string(), Value::from(""));
-        fn_proto.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        Self::insert_property_with_attributes(&mut fn_proto, "length", &Value::Number(0.0), false, false, true);
+        Self::insert_property_with_attributes(&mut fn_proto, "name", &Value::from(""), false, false, true);
         fn_proto.insert("__host_fn__".to_string(), Value::from("function.prototype.callable"));
         if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
@@ -20730,6 +20736,7 @@ impl<'gc> VM<'gc> {
                     let mut eval_vm: VM<'gc> = VM::new(self.chunk.clone(), ctx);
                     // Ensure unique brands across eval VMs
                     eval_vm.runtime_brand_counter = self.runtime_brand_counter;
+                    eval_vm.restricted_thrower_intrinsic = self.restricted_thrower_intrinsic.clone();
                     // Propagate strict mode to eval VM
                     eval_vm.force_strict = is_strict;
                     // Merge eval code into eval VM's chunk so it has access to
@@ -21000,6 +21007,7 @@ impl<'gc> VM<'gc> {
                     self.module_ns_objects = eval_vm.module_ns_objects.clone();
                     self.main_module_ip_start = eval_vm.main_module_ip_start;
                     self.intrinsic_promise_ctor = eval_vm.intrinsic_promise_ctor.clone();
+                    self.restricted_thrower_intrinsic = eval_vm.restricted_thrower_intrinsic.clone();
                     // Adjust VmFunction IPs in the result value (only on success)
                     let result = match &eval_result {
                         Ok(r) => Some(self.adjust_value_ips(ctx, r, code_offset, &eval_fn_ips)),

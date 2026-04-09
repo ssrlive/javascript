@@ -192,8 +192,8 @@ mod regexp_tests {
         let script = r#"
             typeof RegExp.prototype[Symbol.match] === "function" &&
             typeof RegExp.prototype[Symbol.matchAll] === "function" &&
-            typeof RegExp.prototype[Symbol.match]("abc") === "object" &&
-            typeof RegExp.prototype[Symbol.matchAll]("") === "object"
+            typeof /abc/[Symbol.match]("abc") === "object" &&
+            typeof /./[Symbol.matchAll]("") === "object"
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");

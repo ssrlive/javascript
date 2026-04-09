@@ -323,105 +323,128 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            "regexp.symbolMatch" => match receiver {
-                Some(Value::VmObject(re_obj)) => {
-                    let input = match _args.first() {
-                        Some(v) => self.vm_to_string(ctx, v),
-                        None => String::new(),
-                    };
-                    if self.pending_throw.is_some() {
+            "regexp.symbolMatch" => {
+                let rx = match receiver {
+                    Some(
+                        v @ (Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)),
+                    ) => v.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype[Symbol.match] requires that 'this' be an Object");
                         return Value::Undefined;
                     }
-                    self.regexp_string_match(ctx, &input, re_obj)
-                }
-                _ => {
-                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.match] called on incompatible receiver");
-                    Value::Undefined
-                }
-            },
-            "regexp.symbolMatchAll" => match receiver {
-                Some(Value::VmObject(re_obj)) => {
-                    let input = match _args.first() {
-                        Some(v) => self.vm_to_string(ctx, v),
-                        None => String::new(),
-                    };
-                    if self.pending_throw.is_some() {
+                };
+                let s_val = _args.first().cloned().unwrap_or(Value::Undefined);
+                let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
                         return Value::Undefined;
                     }
-                    self.regexp_string_match(ctx, &input, re_obj)
-                }
-                _ => {
-                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.matchAll] called on incompatible receiver");
-                    Value::Undefined
-                }
-            },
-            "regexp.symbolReplace" => match receiver {
-                Some(Value::VmObject(re_obj)) => {
-                    let input = match _args.first() {
-                        Some(v) => self.vm_to_string(ctx, v),
-                        None => String::new(),
-                    };
-                    if self.pending_throw.is_some() {
+                };
+                self.regexp_symbol_match(ctx, &rx, &s_str)
+            }
+            "regexp.symbolMatchAll" => {
+                let rx = match receiver {
+                    Some(
+                        v @ (Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)),
+                    ) => v.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype[Symbol.matchAll] requires that 'this' be an Object");
                         return Value::Undefined;
                     }
-                    let replacement = match _args.get(1) {
-                        Some(v) => self.vm_to_string(ctx, v),
-                        None => "undefined".to_string(),
-                    };
-                    if self.pending_throw.is_some() {
+                };
+                let s_val = _args.first().cloned().unwrap_or(Value::Undefined);
+                let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
                         return Value::Undefined;
                     }
-                    let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
-                    if flags.contains('g') {
-                        self.regexp_string_replace_all(&input, re_obj, &replacement)
-                    } else {
-                        self.regexp_string_replace(&input, re_obj, &replacement)
-                    }
-                }
-                _ => {
-                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.replace] called on incompatible receiver");
-                    Value::Undefined
-                }
-            },
-            "regexp.symbolSearch" => match receiver {
-                Some(Value::VmObject(re_obj)) => {
-                    let input = match _args.first() {
-                        Some(v) => self.vm_to_string(ctx, v),
-                        None => String::new(),
-                    };
-                    if self.pending_throw.is_some() {
+                };
+                self.regexp_symbol_match_all(ctx, &rx, &s_str)
+            }
+            "regexp.symbolReplace" => {
+                let rx = match receiver {
+                    Some(
+                        v @ (Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)),
+                    ) => v.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype[Symbol.replace] requires that 'this' be an Object");
                         return Value::Undefined;
                     }
-                    self.regexp_string_search(&input, re_obj)
-                }
-                _ => {
-                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.search] called on incompatible receiver");
-                    Value::Undefined
-                }
-            },
-            "regexp.symbolSplit" => match receiver {
-                Some(Value::VmObject(re_obj)) => {
-                    let input = match _args.first() {
-                        Some(v) => self.vm_to_string(ctx, v),
-                        None => String::new(),
-                    };
-                    if self.pending_throw.is_some() {
+                };
+                let s_val = _args.first().cloned().unwrap_or(Value::Undefined);
+                let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
                         return Value::Undefined;
                     }
-                    let limit = match _args.get(1) {
-                        None | Some(Value::Undefined) => None,
-                        Some(v) => Some(to_number(v) as usize),
-                    };
-                    if self.pending_throw.is_some() {
+                };
+                let replace_value = _args.get(1).cloned().unwrap_or(Value::Undefined);
+                self.regexp_symbol_replace(ctx, &rx, &s_str, &replace_value)
+            }
+            "regexp.symbolSearch" => {
+                let rx = match receiver {
+                    Some(
+                        v @ (Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)),
+                    ) => v.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype[Symbol.search] requires that 'this' be an Object");
                         return Value::Undefined;
                     }
-                    self.regexp_string_split(ctx, &input, re_obj, limit)
-                }
-                _ => {
-                    self.throw_type_error(ctx, "RegExp.prototype[Symbol.split] called on incompatible receiver");
-                    Value::Undefined
-                }
-            },
+                };
+                let s_val = _args.first().cloned().unwrap_or(Value::Undefined);
+                let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
+                        return Value::Undefined;
+                    }
+                };
+                self.regexp_symbol_search(ctx, &rx, &s_str)
+            }
+            "regexp.symbolSplit" => {
+                let rx = match receiver {
+                    Some(
+                        v @ (Value::VmObject(_)
+                        | Value::VmArray(_)
+                        | Value::VmFunction(..)
+                        | Value::VmClosure(..)
+                        | Value::VmNativeFunction(_)),
+                    ) => v.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "RegExp.prototype[Symbol.split] requires that 'this' be an Object");
+                        return Value::Undefined;
+                    }
+                };
+                let s_val = _args.first().cloned().unwrap_or(Value::Undefined);
+                let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
+                        return Value::Undefined;
+                    }
+                };
+                let limit = _args.get(1).cloned().unwrap_or(Value::Undefined);
+                self.regexp_symbol_split(ctx, &rx, &s_str, &limit)
+            }
             _ => {
                 log::warn!("Unknown regexp host function: {}", name);
                 Value::Undefined
@@ -726,6 +749,796 @@ impl<'gc> VM<'gc> {
             return Value::Number(m.map(|m| m.range.start as f64).unwrap_or(-1.0));
         }
         Value::Number(-1.0)
+    }
+
+    // ── Spec-compliant RegExpExec (ES2024 §22.2.5.2.1) ──────────────
+
+    /// Abstract RegExpExec(R, S): Checks for a custom `exec` method on the
+    /// object, calls it if callable (validating result), else falls back to
+    /// RegExpBuiltinExec.
+    fn regexp_abstract_exec(&mut self, ctx: &GcContext<'gc>, rx: &Value<'gc>, s: &str) -> Value<'gc> {
+        // 1. Let exec be ? Get(R, "exec").
+        let exec_val = self.read_named_property(ctx, rx, "exec");
+        if self.pending_throw.is_some() {
+            return Value::Null;
+        }
+        // 2. If IsCallable(exec) is true, then
+        if self.is_value_callable(&exec_val) {
+            let s_val = Value::from(s);
+            let result = match self.vm_call_function_value(ctx, &exec_val, rx, &[s_val]) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.set_pending_throw_from_error(&e);
+                    return Value::Null;
+                }
+            };
+            if self.pending_throw.is_some() {
+                return Value::Null;
+            }
+            // a. If result is not an Object and result is not null, throw a TypeError.
+            match &result {
+                Value::Null => return Value::Null,
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) => return result,
+                _ => {
+                    self.throw_type_error(ctx, "RegExp exec method returned something other than an Object or null");
+                    return Value::Null;
+                }
+            }
+        }
+        // 3. If R does not have a [[RegExpMatcher]] internal slot, throw a TypeError.
+        match rx {
+            Value::VmObject(obj) if obj.borrow().get("__regex_pattern__").is_some() => self.regex_exec(ctx, obj, s),
+            _ => {
+                self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
+                Value::Null
+            }
+        }
+    }
+
+    // ── Spec-compliant @@search (ES2024 §22.2.6.10) ────────────────
+
+    fn regexp_symbol_search(&mut self, ctx: &GcContext<'gc>, rx: &Value<'gc>, s: &str) -> Value<'gc> {
+        // 1. Let previousLastIndex be ? Get(rx, "lastIndex").
+        let previous_last_index = self.read_named_property(ctx, rx, "lastIndex");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // 2. If SameValue(previousLastIndex, +0𝔽) is false, then Perform ? Set(rx, "lastIndex", +0𝔽, true).
+        let is_zero = match &previous_last_index {
+            Value::Number(n) => *n == 0.0 && !n.is_sign_negative(),
+            _ => false,
+        };
+        if !is_zero {
+            if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
+                self.set_pending_throw_from_error(&e);
+            }
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+        }
+
+        // 3. Let result be ? RegExpExec(rx, S).
+        let result = self.regexp_abstract_exec(ctx, rx, s);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // 4. Let currentLastIndex be ? Get(rx, "lastIndex").
+        let current_last_index = self.read_named_property(ctx, rx, "lastIndex");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // 5. If SameValue(currentLastIndex, previousLastIndex) is false, then
+        //    Perform ? Set(rx, "lastIndex", previousLastIndex, true).
+        if !self.values_same(&current_last_index, &previous_last_index) {
+            if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &previous_last_index, None) {
+                self.set_pending_throw_from_error(&e);
+            }
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+        }
+
+        // 6. If result is null, return -1𝔽.
+        if matches!(result, Value::Null) {
+            return Value::Number(-1.0);
+        }
+
+        // 7. Return ? Get(result, "index").
+        let index = self.read_named_property(ctx, &result, "index");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        index
+    }
+
+    // ── Spec-compliant @@match (ES2024 §22.2.6.8) ──────────────────
+
+    fn regexp_symbol_match(&mut self, ctx: &GcContext<'gc>, rx: &Value<'gc>, s: &str) -> Value<'gc> {
+        // 1. Let flags be ? ToString(? Get(rx, "flags")).
+        let flags_val = self.read_named_property(ctx, rx, "flags");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return Value::Undefined;
+            }
+        };
+
+        let global = flags.contains('g');
+
+        // 2. If global is false, then
+        if !global {
+            // a. Return ? RegExpExec(rx, S).
+            return self.regexp_abstract_exec(ctx, rx, s);
+        }
+
+        // 3. Else (global is true)
+        let full_unicode = flags.contains('u') || flags.contains('v');
+
+        // a. Perform ? Set(rx, "lastIndex", +0𝔽, true).
+        if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
+            self.set_pending_throw_from_error(&e);
+        }
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        let mut results: Vec<Value<'gc>> = Vec::new();
+        loop {
+            // b. Let result be ? RegExpExec(rx, S).
+            let result = self.regexp_abstract_exec(ctx, rx, s);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            // c. If result is null, then
+            if matches!(result, Value::Null) {
+                return if results.is_empty() {
+                    Value::Null
+                } else {
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+                };
+            }
+
+            // d. Let matchStr be ? ToString(? Get(result, "0")).
+            let match_val = self.read_named_property(ctx, &result, "0");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let match_str = self.vm_to_string(ctx, &match_val);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            results.push(Value::from(&match_str));
+
+            // e. If matchStr is the empty String, then advance lastIndex
+            if match_str.is_empty() {
+                let this_index_val = self.read_named_property(ctx, rx, "lastIndex");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                // ToLength: first ToPrimitive→ToNumber, then clamp
+                let prim = self.try_to_primitive(ctx, &this_index_val, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let n = to_number(&prim);
+                let this_index = if n.is_nan() || n <= 0.0 {
+                    0usize
+                } else {
+                    n.min(9007199254740991.0) as usize
+                };
+                let next_index = if full_unicode {
+                    self.advance_string_index_unicode(s, this_index)
+                } else {
+                    this_index + 1
+                };
+                if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64), None) {
+                    self.set_pending_throw_from_error(&e);
+                }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+        }
+    }
+
+    // ── Spec-compliant @@replace (ES2024 §22.2.6.9) ────────────────
+
+    fn regexp_symbol_replace(&mut self, ctx: &GcContext<'gc>, rx: &Value<'gc>, s: &str, replace_value: &Value<'gc>) -> Value<'gc> {
+        let s_u16: Vec<u16> = s.encode_utf16().collect();
+        let length_s = s_u16.len();
+
+        // 1. Let flags be ? ToString(? Get(rx, "flags")).
+        let flags_val = self.read_named_property(ctx, rx, "flags");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return Value::Undefined;
+            }
+        };
+
+        let global = flags.contains('g');
+        let full_unicode = flags.contains('u') || flags.contains('v');
+        let functional_replace = self.is_value_callable(replace_value);
+
+        if global {
+            if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
+                self.set_pending_throw_from_error(&e);
+            }
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+        }
+
+        // Collect results
+        let mut results: Vec<Value<'gc>> = Vec::new();
+        loop {
+            let result = self.regexp_abstract_exec(ctx, rx, s);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            if matches!(result, Value::Null) {
+                break;
+            }
+            results.push(result.clone());
+
+            if !global {
+                break;
+            }
+
+            // If matchStr is "", advance lastIndex
+            let match_val = self.read_named_property(ctx, &result, "0");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let match_str = self.vm_to_string(ctx, &match_val);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            if match_str.is_empty() {
+                let this_index_val = self.read_named_property(ctx, rx, "lastIndex");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let prim = self.try_to_primitive(ctx, &this_index_val, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let n = to_number(&prim);
+                let this_index = if n.is_nan() || n <= 0.0 {
+                    0usize
+                } else {
+                    n.min(9007199254740991.0) as usize
+                };
+                let next_index = if full_unicode {
+                    self.advance_string_index_unicode(s, this_index)
+                } else {
+                    this_index + 1
+                };
+                if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64), None) {
+                    self.set_pending_throw_from_error(&e);
+                }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+        }
+
+        // Build accumulated result
+        let mut acc_u16: Vec<u16> = Vec::new();
+        let mut next_source_position: usize = 0;
+
+        for result in &results {
+            // Get nCaptures = max(ToLength(Get(result, "length")) - 1, 0)
+            let n_captures = {
+                let len_val = self.read_named_property(ctx, result, "length");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let prim = self.try_to_primitive(ctx, &len_val, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let n = to_number(&prim);
+                let len = if n.is_nan() || n <= 0.0 {
+                    0i64
+                } else {
+                    n.min(9007199254740991.0) as i64
+                };
+                if len > 1 { (len - 1) as usize } else { 0 }
+            };
+
+            let matched_val = self.read_named_property(ctx, result, "0");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let matched = self.vm_to_string(ctx, &matched_val);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let matched_u16: Vec<u16> = matched.encode_utf16().collect();
+            let match_length = matched_u16.len();
+
+            // position = max(min(ToIntegerOrInfinity(Get(result, "index")), lengthS), 0)
+            let position_val = self.read_named_property(ctx, result, "index");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let prim = self.try_to_primitive(ctx, &position_val, "number");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let pos_n = to_number(&prim);
+            let position = if pos_n.is_nan() || pos_n <= 0.0 {
+                0usize
+            } else {
+                (pos_n as usize).min(length_s)
+            };
+
+            // Collect captures
+            let mut captures: Vec<Value<'gc>> = Vec::new();
+            for i in 1..=n_captures {
+                let cap = self.read_named_property(ctx, result, &i.to_string());
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let cap = if matches!(cap, Value::Undefined) {
+                    cap
+                } else {
+                    let s = self.vm_to_string(ctx, &cap);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    Value::from(&s)
+                };
+                captures.push(cap);
+            }
+
+            // Get named captures
+            let named_captures = self.read_named_property(ctx, result, "groups");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            let replacement: String;
+            if functional_replace {
+                // Build args: matched, ...captures, position, S[, namedCaptures]
+                let mut call_args: Vec<Value<'gc>> = Vec::new();
+                call_args.push(Value::from(&matched));
+                call_args.extend(captures.iter().cloned());
+                call_args.push(Value::Number(position as f64));
+                call_args.push(Value::from(s));
+                if !matches!(named_captures, Value::Undefined) {
+                    call_args.push(named_captures);
+                }
+                let replace_result = match self.vm_call_function_value(ctx, replace_value, &Value::Undefined, &call_args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.set_pending_throw_from_error(&e);
+                        return Value::Undefined;
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                replacement = self.vm_to_string(ctx, &replace_result);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            } else {
+                let replace_str = self.vm_to_string(ctx, replace_value);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                replacement = self.get_substitution(&matched, s, position, &captures, &named_captures, &replace_str);
+            }
+
+            if position >= next_source_position {
+                acc_u16.extend_from_slice(&s_u16[next_source_position..position]);
+                acc_u16.extend(replacement.encode_utf16());
+                next_source_position = position + match_length;
+            }
+        }
+
+        if next_source_position < length_s {
+            acc_u16.extend_from_slice(&s_u16[next_source_position..]);
+        }
+
+        Value::String(acc_u16)
+    }
+
+    /// GetSubstitution (ES2024 §22.1.3.18.1)
+    fn get_substitution(
+        &mut self,
+        matched: &str,
+        s: &str,
+        position: usize,
+        captures: &[Value<'gc>],
+        named_captures: &Value<'gc>,
+        replacement: &str,
+    ) -> String {
+        let s_u16: Vec<u16> = s.encode_utf16().collect();
+        let matched_u16: Vec<u16> = matched.encode_utf16().collect();
+        let chars: Vec<char> = replacement.chars().collect();
+        let mut result = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() {
+                match chars[i + 1] {
+                    '$' => {
+                        result.push('$');
+                        i += 2;
+                    }
+                    '&' => {
+                        result.push_str(matched);
+                        i += 2;
+                    }
+                    '`' => {
+                        let before = &s_u16[..position.min(s_u16.len())];
+                        result.push_str(&crate::unicode::utf16_to_utf8(before));
+                        i += 2;
+                    }
+                    '\'' => {
+                        let tail_pos = (position + matched_u16.len()).min(s_u16.len());
+                        let after = &s_u16[tail_pos..];
+                        result.push_str(&crate::unicode::utf16_to_utf8(after));
+                        i += 2;
+                    }
+                    '<' => {
+                        // Named capture: $<name>
+                        if matches!(named_captures, Value::Undefined) {
+                            result.push_str("$<");
+                            i += 2;
+                        } else if let Some(close) = chars[i + 2..].iter().position(|&c| c == '>') {
+                            let name: String = chars[i + 2..i + 2 + close].iter().collect();
+                            let capture_val = self.read_named_property_str(named_captures, &name);
+                            if !matches!(capture_val, Value::Undefined) {
+                                result.push_str(&value_to_string(&capture_val));
+                            }
+                            i += 2 + close + 1; // skip $< name >
+                        } else {
+                            result.push_str("$<");
+                            i += 2;
+                        }
+                    }
+                    d if d.is_ascii_digit() => {
+                        // Check for two-digit group reference
+                        let d1 = d.to_digit(10).unwrap() as usize;
+                        if i + 2 < chars.len() && chars[i + 2].is_ascii_digit() {
+                            let d2 = chars[i + 2].to_digit(10).unwrap() as usize;
+                            let two_digit = d1 * 10 + d2;
+                            if two_digit >= 1 && two_digit <= captures.len() {
+                                let cap = &captures[two_digit - 1];
+                                if !matches!(cap, Value::Undefined) {
+                                    result.push_str(&value_to_string(cap));
+                                }
+                                i += 3;
+                                continue;
+                            }
+                        }
+                        if d1 >= 1 && d1 <= captures.len() {
+                            let cap = &captures[d1 - 1];
+                            if !matches!(cap, Value::Undefined) {
+                                result.push_str(&value_to_string(cap));
+                            }
+                            i += 2;
+                        } else if d1 == 0 {
+                            result.push_str("$0");
+                            i += 2;
+                        } else {
+                            result.push('$');
+                            result.push(d);
+                            i += 2;
+                        }
+                    }
+                    _ => {
+                        result.push('$');
+                        i += 1;
+                    }
+                }
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
+        }
+        result
+    }
+
+    // ── Spec-compliant @@split (ES2024 §22.2.6.11) ─────────────────
+
+    fn regexp_symbol_split(&mut self, ctx: &GcContext<'gc>, rx: &Value<'gc>, s: &str, limit: &Value<'gc>) -> Value<'gc> {
+        // For @@split, we use the built-in regex directly (similar to current approach)
+        // but follow the spec's observable steps for type checking and limit handling.
+
+        let s_u16: Vec<u16> = s.encode_utf16().collect();
+        let size = s_u16.len();
+
+        // 1. Let flags be ? ToString(? Get(rx, "flags")).
+        let flags_val = self.read_named_property(ctx, rx, "flags");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return Value::Undefined;
+            }
+        };
+
+        let unicode_matching = flags.contains('u') || flags.contains('v');
+
+        // Build new flags with 'y' (sticky) added
+        let new_flags = if flags.contains('y') {
+            flags.clone()
+        } else {
+            format!("{}y", flags)
+        };
+
+        // Create a splitter regexp (spec says use SpeciesConstructor, we create a new one)
+        let splitter = self.regexp_construct_internal(ctx, rx, &new_flags);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        let mut results: Vec<Value<'gc>> = Vec::new();
+        let lim = match limit {
+            Value::Undefined => 0xFFFFFFFFu32,
+            v => {
+                // ToUint32(limit) — goes through ToPrimitive→ToNumber for objects
+                let prim = self.try_to_primitive(ctx, v, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let n = to_number(&prim);
+                if n.is_nan() || n == 0.0 { 0u32 } else { n as u32 }
+            }
+        };
+
+        if lim == 0 {
+            return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+        }
+
+        if size == 0 {
+            let z = self.regexp_abstract_exec(ctx, &splitter, s);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            if !matches!(z, Value::Null) {
+                return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+            }
+            results.push(Value::from(s));
+            return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+        }
+
+        let mut p: usize = 0; // previous match end
+        let mut q: usize = 0; // current position
+
+        while q < size {
+            // Set splitter.lastIndex = q
+            if let Err(e) = self.assign_named_property(ctx, &splitter, "lastIndex", &Value::Number(q as f64), None) {
+                self.set_pending_throw_from_error(&e);
+            }
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            let z = self.regexp_abstract_exec(ctx, &splitter, s);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            if matches!(z, Value::Null) {
+                q = if unicode_matching {
+                    self.advance_string_index_unicode(s, q)
+                } else {
+                    q + 1
+                };
+                continue;
+            }
+
+            // Get the actual lastIndex after exec — ToLength coercion
+            let e_val = self.read_named_property(ctx, &splitter, "lastIndex");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let prim = self.try_to_primitive(ctx, &e_val, "number");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let n = to_number(&prim);
+            let e = if n.is_nan() || n <= 0.0 {
+                0usize
+            } else {
+                (n.min(9007199254740991.0) as usize).min(size)
+            };
+
+            if e == p {
+                q = if unicode_matching {
+                    self.advance_string_index_unicode(s, q)
+                } else {
+                    q + 1
+                };
+                continue;
+            }
+
+            // Add the substring before this match
+            results.push(Value::String(s_u16[p..q].to_vec()));
+            if results.len() as u32 >= lim {
+                return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+            }
+
+            // Add capturing groups
+            let n_captures = {
+                let len_val = self.read_named_property(ctx, &z, "length");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                // ToLength coercion for length
+                let prim = self.try_to_primitive(ctx, &len_val, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let n = to_number(&prim);
+                let len = if n.is_nan() || n <= 0.0 {
+                    0i64
+                } else {
+                    n.min(9007199254740991.0) as i64
+                };
+                if len > 1 { (len - 1) as usize } else { 0 }
+            };
+
+            for i in 1..=n_captures {
+                let cap = self.read_named_property(ctx, &z, &i.to_string());
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                results.push(cap);
+                if results.len() as u32 >= lim {
+                    return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                }
+            }
+
+            p = e;
+            q = p;
+        }
+
+        // Add the tail
+        results.push(Value::String(s_u16[p..size].to_vec()));
+        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+    }
+
+    // ── Spec-compliant @@matchAll (ES2024 §22.2.6.9) ───────────────
+
+    fn regexp_symbol_match_all(&mut self, ctx: &GcContext<'gc>, rx: &Value<'gc>, s: &str) -> Value<'gc> {
+        // ES2024 §22.2.6.9 RegExp.prototype[@@matchAll]
+
+        // 1. Let flags be ? ToString(? Get(rx, "flags")).
+        let flags_val = self.read_named_property(ctx, rx, "flags");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return Value::Undefined;
+            }
+        };
+
+        let global = flags.contains('g');
+        let full_unicode = flags.contains('u') || flags.contains('v');
+
+        // Create a copy of the regexp for iteration
+        let matcher = self.regexp_construct_internal(ctx, rx, &flags);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // Set matcher.lastIndex = ? ToLength(? Get(rx, "lastIndex"))
+        let last_index_val = self.read_named_property(ctx, rx, "lastIndex");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        // ToLength coercion
+        let prim = self.try_to_primitive(ctx, &last_index_val, "number");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        let n = to_number(&prim);
+        let last_index_len = if n.is_nan() || n <= 0.0 {
+            0.0
+        } else {
+            n.min(9007199254740991.0).floor()
+        };
+        if let Err(e) = self.assign_named_property(ctx, &matcher, "lastIndex", &Value::Number(last_index_len), None) {
+            self.set_pending_throw_from_error(&e);
+        }
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // Build a RegExpStringIterator object
+        let iter_obj = new_gc_cell_ptr(ctx, IndexMap::new());
+        {
+            let mut b = iter_obj.borrow_mut(ctx);
+            b.insert("__type__".to_string(), Value::from("RegExpStringIterator"));
+            b.insert("__iter_regexp__".to_string(), matcher);
+            b.insert("__iter_string__".to_string(), Value::from(s));
+            b.insert("__iter_global__".to_string(), Value::Boolean(global));
+            b.insert("__iter_unicode__".to_string(), Value::Boolean(full_unicode));
+            b.insert("__iter_done__".to_string(), Value::Boolean(false));
+        }
+
+        // Set prototype
+        if let Some(Value::VmObject(regexp_str_iter_proto)) = self.globals.get("RegExpStringIteratorPrototype") {
+            iter_obj
+                .borrow_mut(ctx)
+                .insert("__proto__".to_string(), Value::VmObject(*regexp_str_iter_proto));
+        }
+
+        Value::VmObject(iter_obj)
+    }
+
+    /// Create a new RegExp from an existing RegExp-like object, copying its
+    /// pattern/flags.  Used by @@split and @@matchAll to create a "splitter" /
+    /// "matcher" copy.
+    fn regexp_construct_internal(&mut self, ctx: &GcContext<'gc>, source_rx: &Value<'gc>, new_flags: &str) -> Value<'gc> {
+        // Get the source pattern from the existing regexp
+        let source_val = self.read_named_property(ctx, source_rx, "source");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        let source_str = self.vm_to_string(ctx, &source_val);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // Construct a new RegExp directly via the builtin constructor
+        let source_arg = Value::from(&source_str);
+        let flags_arg = Value::from(new_flags);
+        self.regexp_call_builtin(ctx, &[source_arg, flags_arg])
+    }
+
+    /// Helper: Read a named property given a &str key (avoids converting to index).
+    fn read_named_property_str(&mut self, obj: &Value<'gc>, key: &str) -> Value<'gc> {
+        // Simple wrapper — we can't call read_named_property without ctx in some
+        // contexts, but value_to_string can fetch from VmObject directly.
+        match obj {
+            Value::VmObject(o) => o.borrow().get(key).cloned().unwrap_or(Value::Undefined),
+            Value::VmArray(a) => a.borrow().props.get(key).cloned().unwrap_or(Value::Undefined),
+            _ => Value::Undefined,
+        }
+    }
+
+    /// AdvanceStringIndex (ES2024 §22.2.5.2.3)
+    fn advance_string_index_unicode(&self, s: &str, index: usize) -> usize {
+        let u16s: Vec<u16> = s.encode_utf16().collect();
+        if index + 1 >= u16s.len() {
+            return index + 1;
+        }
+        let first = u16s[index];
+        // If it's a leading surrogate, advance by 2
+        if (0xD800..=0xDBFF).contains(&first) {
+            let second = u16s[index + 1];
+            if (0xDC00..=0xDFFF).contains(&second) {
+                return index + 2;
+            }
+        }
+        index + 1
     }
 
     // ── Internal helpers ──────────────────────────────────────────────

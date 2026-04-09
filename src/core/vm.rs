@@ -23944,7 +23944,10 @@ impl<'gc> VM<'gc> {
                             }
                         };
 
-                    let key = key_val;
+                    let key = match key_val {
+                        Value::Number(n) if n == 0.0 && n.is_sign_negative() => Value::Number(0.0),
+                        other => other,
+                    };
                     if let Some((_, values)) = groups.iter_mut().find(|(existing_key, _)| self.values_same(existing_key, &key)) {
                         values.push(value);
                     } else {

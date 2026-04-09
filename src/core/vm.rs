@@ -3848,9 +3848,10 @@ impl<'gc> VM<'gc> {
                     return self.is_constructor_value(&target);
                 }
                 if b.contains_key("__native_id__") || b.contains_key("__fn_body__") {
-                    // Async functions and async generators are not constructors
+                    // Async functions, async generators, and generators are not constructors
                     if matches!(b.get("__async_dynamic_function__"), Some(Value::Boolean(true)))
                         || matches!(b.get("__async_dynamic_generator_function__"), Some(Value::Boolean(true)))
+                        || matches!(b.get("__dynamic_generator_function__"), Some(Value::Boolean(true)))
                     {
                         return false;
                     }
@@ -12206,6 +12207,10 @@ impl<'gc> VM<'gc> {
             || name.starts_with("global.")
             || name.starts_with("typedarray.")
             || name.starts_with("dataview.")
+            || name.starts_with("map.")
+            || name.starts_with("set.")
+            || name.starts_with("species.")
+            || name.starts_with("sharedArrayBuffer.")
         {
             return self.call_host_fn(ctx, name, receiver, args);
         }
@@ -13970,7 +13975,12 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                     drop(borrow);
-                    Ok(self.call_named_host_function_with_this(ctx, &host_name, Some(receiver), &[]))
+                    let result = self.call_named_host_function_with_this(ctx, &host_name, Some(receiver), &[]);
+                    if self.pending_throw.is_some() {
+                        // Host function set pending_throw — propagate as Err
+                        return Value::Undefined;
+                    }
+                    Ok(result)
                 } else {
                     Err(crate::raise_type_error!("Value is not a function"))
                 }
@@ -17305,7 +17315,7 @@ impl<'gc> VM<'gc> {
         gen_fn_proto.insert("prototype".to_string(), self.generator_prototype.clone());
         gen_fn_proto.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-        gen_fn_proto.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        gen_fn_proto.insert("__configurable_prototype__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("@@sym:4".to_string(), Value::from("GeneratorFunction"));
         gen_fn_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
@@ -17341,6 +17351,12 @@ impl<'gc> VM<'gc> {
             proto_obj
                 .borrow_mut(ctx)
                 .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+            proto_obj
+                .borrow_mut(ctx)
+                .insert("__readonly_constructor__".to_string(), Value::Boolean(true));
+            proto_obj
+                .borrow_mut(ctx)
+                .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
         }
 
         // Set %GeneratorPrototype%.constructor = %GeneratorFunction.prototype%
@@ -29933,41 +29949,19 @@ impl<'gc> VM<'gc> {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'"));
                 return Value::Undefined;
             }
-            match &receiver {
-                Value::VmNativeFunction(fn_id) => {
-                    self.this_stack.push(this_arg.clone());
-                    let result = self.call_method_builtin(ctx, *fn_id, &this_arg, &call_args);
-                    self.this_stack.pop();
-                    return result;
+            let result = self.vm_call_function_value(ctx, receiver, &this_arg, &call_args);
+            return match result {
+                Ok(v) => {
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    v
                 }
-                Value::Function(name) => {
-                    self.this_stack.push(this_arg);
-                    let call_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-                    let result = self.call_named_host_function_with_this(ctx, name, Some(&call_this), &call_args);
-                    self.this_stack.pop();
-                    return result;
+                Err(e) => {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                    Value::Undefined
                 }
-                Value::VmFunction(..) | Value::VmClosure(..) => {
-                    return match self.vm_call_function_value(ctx, receiver, &this_arg, &call_args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                            Value::Undefined
-                        }
-                    };
-                }
-                Value::VmObject(_map) => {
-                    // Handle proxy, bound, host_fn, native_id, fn_body via shared path
-                    return match self.vm_call_function_value(ctx, receiver, &this_arg, &call_args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                            Value::Undefined
-                        }
-                    };
-                }
-                _ => return Value::Undefined,
-            }
+            };
         }
 
         // Function.prototype.call(thisArg, ...args)
@@ -29989,41 +29983,19 @@ impl<'gc> VM<'gc> {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Class constructor cannot be invoked without 'new'"));
                 return Value::Undefined;
             }
-            match &receiver {
-                Value::VmNativeFunction(fn_id) => {
-                    self.this_stack.push(this_arg.clone());
-                    let result = self.call_method_builtin(ctx, *fn_id, &this_arg, &call_args);
-                    self.this_stack.pop();
-                    return result;
+            let result = self.vm_call_function_value(ctx, receiver, &this_arg, &call_args);
+            return match result {
+                Ok(v) => {
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    v
                 }
-                Value::Function(name) => {
-                    self.this_stack.push(this_arg);
-                    let call_this = self.this_stack.last().cloned().unwrap_or(Value::Undefined);
-                    let result = self.call_named_host_function_with_this(ctx, name, Some(&call_this), &call_args);
-                    self.this_stack.pop();
-                    return result;
+                Err(e) => {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                    Value::Undefined
                 }
-                Value::VmFunction(..) | Value::VmClosure(..) => {
-                    return match self.vm_call_function_value(ctx, receiver, &this_arg, &call_args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                            Value::Undefined
-                        }
-                    };
-                }
-                Value::VmObject(_map) => {
-                    // Handle proxy, bound, host_fn, native_id, fn_body via shared path
-                    return match self.vm_call_function_value(ctx, receiver, &this_arg, &call_args) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                            Value::Undefined
-                        }
-                    };
-                }
-                _ => return Value::Undefined,
-            }
+            };
         }
 
         // Function.prototype.bind(thisArg, ...args)
@@ -35578,12 +35550,13 @@ impl<'gc> VM<'gc> {
         // so the return propagates to the enclosing finally handler.
         while self.generator_return_pending.is_some() {
             if let Some(frame) = self.try_stack.last() {
-                if !frame.for_finally {
-                    self.try_stack.pop();
-                    continue;
+                if frame.for_finally {
+                    break;
                 }
+                self.try_stack.pop();
+            } else {
+                break;
             }
-            break;
         }
         if let Some(try_frame) = self.try_stack.pop() {
             let dropped_this_bindings = self

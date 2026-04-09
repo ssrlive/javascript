@@ -3988,6 +3988,10 @@ impl<'gc> VM<'gc> {
                         self.regexp_home_proto_temp = regexp_home;
                         let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
                         self.stack.push(getter_result);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
+                        }
                     } else {
                         self.stack.push(Value::Undefined);
                     }
@@ -3996,6 +4000,10 @@ impl<'gc> VM<'gc> {
                     drop(borrow);
                     let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
                     self.stack.push(getter_result);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                        return Ok(OpcodeAction::Continue);
+                    }
                 } else if borrow.contains_key(&getter_key) || borrow.contains_key(&format!("__set_{}", key)) {
                     // Accessor property exists but getter is undefined
                     drop(borrow);
@@ -4025,6 +4033,10 @@ impl<'gc> VM<'gc> {
                                 drop(borrow);
                                 let got = self.invoke_getter_with_receiver(ctx, &g, &obj);
                                 self.stack.push(got);
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(ctx, &thrown)?;
+                                    return Ok(OpcodeAction::Continue);
+                                }
                             }
                             Value::Property { value: Some(inner), .. } => {
                                 drop(borrow);

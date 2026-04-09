@@ -594,22 +594,36 @@ impl<'gc> VM<'gc> {
 
     /// Handle `RegExp(pattern, flags)` called without `new`.
     pub(super) fn regexp_call_builtin(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
-        // Per spec: if pattern is RegExp and flags is undefined, return pattern if pattern.constructor === RegExp
-        if let Some(pat @ Value::VmObject(pat_obj)) = args.first()
-            && pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
-            && matches!(args.get(1), None | Some(Value::Undefined))
-        {
-            let ctor = self.read_named_property(ctx, pat, "constructor");
-            if self.pending_throw.is_some() {
+        let pattern = args.first().cloned().unwrap_or(Value::Undefined);
+        let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+        // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
+        let pattern_is_regexp = match self.is_regexp_check(ctx, &pattern) {
+            Ok(b) => b,
+            Err(thrown) => {
+                self.pending_throw = Some(thrown);
                 return Value::Undefined;
             }
+        };
+
+        // Step 2: Called as function — if patternIsRegExp and flags undefined,
+        //         check pattern.constructor === RegExp → return pattern.
+        if pattern_is_regexp && matches!(flags_arg, Value::Undefined) {
+            let ctor = match self.host_fn_read_property(ctx, &pattern, "constructor") {
+                Ok(v) => v,
+                Err(thrown) => {
+                    self.pending_throw = Some(thrown);
+                    return Value::Undefined;
+                }
+            };
             let regexp_ctor = self.globals.get("RegExp").cloned().unwrap_or(Value::Undefined);
             if self.values_same(&ctor, &regexp_ctor) {
-                return pat.clone();
+                return pattern;
             }
         }
-        // Otherwise create a new RegExp
-        let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, args);
+
+        // Steps 3-5: Resolve pattern and flags
+        let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, &pattern, &flags_arg, pattern_is_regexp);
         if self.pending_throw.is_some() {
             return Value::Undefined;
         }
@@ -617,11 +631,10 @@ impl<'gc> VM<'gc> {
             self.throw_syntax_error(ctx, &err_msg);
             return Value::Undefined;
         }
-        // Validate pattern by attempting compilation
         let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
         if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
-            let pattern = crate::unicode::utf16_to_utf8(&pattern_u16);
-            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
+            let pat_str = crate::unicode::utf16_to_utf8(&pattern_u16);
+            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pat_str, e));
             return Value::Undefined;
         }
         let mut map = IndexMap::new();
@@ -648,7 +661,19 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Option<Value<'gc>> {
         if let Value::VmObject(obj) = receiver {
-            let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, args);
+            let pattern = args.first().cloned().unwrap_or(Value::Undefined);
+            let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+            // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
+            let pattern_is_regexp = match self.is_regexp_check(ctx, &pattern) {
+                Ok(b) => b,
+                Err(thrown) => {
+                    self.pending_throw = Some(thrown);
+                    return Some(Value::Undefined);
+                }
+            };
+
+            let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, &pattern, &flags_arg, pattern_is_regexp);
             if self.pending_throw.is_some() {
                 return Some(Value::Undefined);
             }
@@ -656,11 +681,10 @@ impl<'gc> VM<'gc> {
                 self.throw_syntax_error(ctx, &err_msg);
                 return Some(Value::Undefined);
             }
-            // Validate pattern by attempting compilation
             let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
             if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
-                let pattern = crate::unicode::utf16_to_utf8(&pattern_u16);
-                self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pattern, e));
+                let pat_str = crate::unicode::utf16_to_utf8(&pattern_u16);
+                self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pat_str, e));
                 return Some(Value::Undefined);
             }
             let mut borrow = obj.borrow_mut(ctx);
@@ -1716,9 +1740,20 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Read a property from within a host function, hiding try_stack to prevent
+    /// handle_throw from corrupting VM state when getters throw.
+    fn host_fn_read_property(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, key: &str) -> Result<Value<'gc>, Value<'gc>> {
+        let saved = std::mem::take(&mut self.try_stack);
+        let val = self.read_named_property(ctx, obj, key);
+        self.try_stack = saved;
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        Ok(val)
+    }
+
     /// IsRegExp(argument) — ES2024 §7.2.8
-    #[allow(dead_code)]
-    fn is_regexp_check(&mut self, ctx: &GcContext<'gc>, argument: &Value<'gc>) -> Result<bool, Value<'gc>> {
+    pub(super) fn is_regexp_check(&mut self, ctx: &GcContext<'gc>, argument: &Value<'gc>) -> Result<bool, Value<'gc>> {
         // Step 1: If Type(argument) is not Object, return false.
         if !matches!(
             argument,
@@ -1728,7 +1763,9 @@ impl<'gc> VM<'gc> {
             return Ok(false);
         }
         // Step 2: Let matcher be ? Get(argument, @@match).
+        let saved = std::mem::take(&mut self.try_stack);
         let matcher = self.read_named_property(ctx, argument, "@@sym:7");
+        self.try_stack = saved;
         if let Some(thrown) = self.pending_throw.take() {
             return Err(thrown);
         }
@@ -1807,40 +1844,84 @@ impl<'gc> VM<'gc> {
     }
 
     /// Extract (pattern, flags) from constructor arguments, handling RegExp-as-source.
-    fn regexp_extract_pattern_flags(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> (Vec<u16>, String) {
-        match args.first() {
-            Some(Value::VmObject(pat_obj)) if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => {
-                let p = match pat_obj.borrow().get("__regex_pattern__") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
-                    None => Vec::new(),
-                };
-                let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
-                    pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
-                } else {
-                    self.vm_to_string(ctx, args.get(1).unwrap())
-                };
-                (p, f)
+    /// Extract pattern (UTF-16) and flags from constructor arguments.
+    /// ES2024 §22.2.4.1 steps 3-5: handles actual RegExp, regexp-like, and plain values.
+    pub(super) fn regexp_extract_pattern_flags(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        pattern: &Value<'gc>,
+        flags_arg: &Value<'gc>,
+        pattern_is_regexp: bool,
+    ) -> (Vec<u16>, String) {
+        // Step 3: If pattern has [[RegExpMatcher]] internal slot (actual RegExp)
+        if let Value::VmObject(pat_obj) = pattern
+            && pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
+        {
+            let p = match pat_obj.borrow().get("__regex_pattern__") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+                None => Vec::new(),
+            };
+            let f = if matches!(flags_arg, Value::Undefined) {
+                pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
+            } else {
+                self.vm_to_string(ctx, flags_arg)
+            };
+            return (p, f);
+        }
+
+        // Step 4: If patternIsRegExp (regexp-like object, not actual RegExp)
+        if pattern_is_regexp {
+            let p_val = match self.host_fn_read_property(ctx, pattern, "source") {
+                Ok(v) => v,
+                Err(thrown) => {
+                    self.pending_throw = Some(thrown);
+                    return (Vec::new(), String::new());
+                }
+            };
+            let p = match &p_val {
+                Value::String(s) => s.clone(),
+                Value::Undefined => crate::unicode::utf8_to_utf16("undefined"),
+                v => {
+                    let s = self.vm_to_string(ctx, v);
+                    crate::unicode::utf8_to_utf16(&s)
+                }
+            };
+            if self.pending_throw.is_some() {
+                return (Vec::new(), String::new());
             }
-            _ => {
-                let p = match args.first() {
-                    None | Some(Value::Undefined) => Vec::new(),
-                    Some(Value::String(s)) => s.clone(),
-                    Some(v) => {
-                        let s = self.vm_to_string(ctx, v);
-                        crate::unicode::utf8_to_utf16(&s)
+            let f = if matches!(flags_arg, Value::Undefined) {
+                let f_val = match self.host_fn_read_property(ctx, pattern, "flags") {
+                    Ok(v) => v,
+                    Err(thrown) => {
+                        self.pending_throw = Some(thrown);
+                        return (Vec::new(), String::new());
                     }
                 };
-                if self.pending_throw.is_some() {
-                    return (p, String::new());
-                }
-                let f = match args.get(1) {
-                    None | Some(Value::Undefined) => String::new(),
-                    Some(v) => self.vm_to_string(ctx, v),
-                };
-                (p, f)
-            }
+                self.vm_to_string(ctx, &f_val)
+            } else {
+                self.vm_to_string(ctx, flags_arg)
+            };
+            return (p, f);
         }
+
+        // Step 5: Plain value
+        let p = match pattern {
+            Value::Undefined => Vec::new(),
+            Value::String(s) => s.clone(),
+            v => {
+                let s = self.vm_to_string(ctx, v);
+                crate::unicode::utf8_to_utf16(&s)
+            }
+        };
+        if self.pending_throw.is_some() {
+            return (p, String::new());
+        }
+        let f = match flags_arg {
+            Value::Undefined => String::new(),
+            v => self.vm_to_string(ctx, v),
+        };
+        (p, f)
     }
 
     /// Validate RegExp flags per spec: only d,g,i,m,s,u,v,y allowed; no duplicates; u+v not together

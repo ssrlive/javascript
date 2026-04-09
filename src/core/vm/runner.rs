@@ -7789,47 +7789,18 @@ impl<'gc> VM<'gc> {
                         self.stack.push(out);
                     }
                     BUILTIN_CTOR_REGEXP => {
-                        // new RegExp(pattern, flags)
-                        let (pattern_u16, flags) = match args.first() {
-                            Some(Value::VmObject(pat_obj))
-                                if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") =>
-                            {
-                                let p = Self::regexp_get_pattern_u16(pat_obj);
-                                let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
-                                    pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
-                                } else {
-                                    self.vm_to_string(ctx, args.get(1).unwrap())
-                                };
-                                (p, f)
-                            }
-                            _ => {
-                                let p = match args.first() {
-                                    None | Some(Value::Undefined) => Vec::new(),
-                                    Some(Value::String(s)) => s.clone(),
-                                    Some(v) => {
-                                        let s = self.vm_to_string(ctx, v);
-                                        crate::unicode::utf8_to_utf16(&s)
-                                    }
-                                };
-                                if self.pending_throw.is_some() {
-                                    if let Some(thrown) = self.pending_throw.take() {
-                                        self.handle_throw(ctx, &thrown)?;
-                                    }
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                                let f = match args.get(1) {
-                                    None | Some(Value::Undefined) => String::new(),
-                                    Some(v) => self.vm_to_string(ctx, v),
-                                };
-                                if self.pending_throw.is_some() {
-                                    if let Some(thrown) = self.pending_throw.take() {
-                                        self.handle_throw(ctx, &thrown)?;
-                                    }
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                                (p, f)
+                        // new RegExp(pattern, flags) — ES2024 §22.2.4.1
+                        let pattern_val = args.first().cloned().unwrap_or(Value::Undefined);
+                        let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                        // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
+                        let pattern_is_regexp = match self.is_regexp_check(ctx, &pattern_val) {
+                            Ok(b) => b,
+                            Err(thrown) => {
+                                self.handle_throw(ctx, &thrown)?;
+                                return Ok(OpcodeAction::Continue);
                             }
                         };
+                        let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, &pattern_val, &flags_arg, pattern_is_regexp);
                         if self.pending_throw.is_some() {
                             if let Some(thrown) = self.pending_throw.take() {
                                 self.handle_throw(ctx, &thrown)?;
@@ -8056,46 +8027,18 @@ impl<'gc> VM<'gc> {
                         }
 
                         if id == BUILTIN_CTOR_REGEXP {
-                            let (pattern_u16, flags) = match args.first() {
-                                Some(Value::VmObject(pat_obj))
-                                    if pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") =>
-                                {
-                                    let p = Self::regexp_get_pattern_u16(pat_obj);
-                                    let f = if matches!(args.get(1), None | Some(Value::Undefined)) {
-                                        pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default()
-                                    } else {
-                                        self.vm_to_string(ctx, args.get(1).unwrap())
-                                    };
-                                    (p, f)
-                                }
-                                _ => {
-                                    let p = match args.first() {
-                                        None | Some(Value::Undefined) => Vec::new(),
-                                        Some(Value::String(s)) => s.clone(),
-                                        Some(v) => {
-                                            let s = self.vm_to_string(ctx, v);
-                                            crate::unicode::utf8_to_utf16(&s)
-                                        }
-                                    };
-                                    if self.pending_throw.is_some() {
-                                        if let Some(thrown) = self.pending_throw.take() {
-                                            self.handle_throw(ctx, &thrown)?;
-                                        }
-                                        return Ok(OpcodeAction::Continue);
-                                    }
-                                    let f = match args.get(1) {
-                                        None | Some(Value::Undefined) => String::new(),
-                                        Some(v) => self.vm_to_string(ctx, v),
-                                    };
-                                    if self.pending_throw.is_some() {
-                                        if let Some(thrown) = self.pending_throw.take() {
-                                            self.handle_throw(ctx, &thrown)?;
-                                        }
-                                        return Ok(OpcodeAction::Continue);
-                                    }
-                                    (p, f)
+                            // new RegExp(pattern, flags) — ES2024 §22.2.4.1
+                            let pattern_val = args.first().cloned().unwrap_or(Value::Undefined);
+                            let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                            // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
+                            let pattern_is_regexp = match self.is_regexp_check(ctx, &pattern_val) {
+                                Ok(b) => b,
+                                Err(thrown) => {
+                                    self.handle_throw(ctx, &thrown)?;
+                                    return Ok(OpcodeAction::Continue);
                                 }
                             };
+                            let (pattern_u16, flags) = self.regexp_extract_pattern_flags(ctx, &pattern_val, &flags_arg, pattern_is_regexp);
                             if self.pending_throw.is_some() {
                                 if let Some(thrown) = self.pending_throw.take() {
                                     self.handle_throw(ctx, &thrown)?;

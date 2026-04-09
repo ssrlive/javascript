@@ -33305,61 +33305,10 @@ impl<'gc> VM<'gc> {
             return Ok(Some(result));
         }
 
-        let fallback = match &target {
-            Value::VmObject(map) => {
-                let b = map.borrow();
-                if b.contains_key(key) || b.contains_key(&format!("__get_{}", key)) || b.contains_key(&format!("__set_{}", key)) {
-                    true
-                } else {
-                    // Handle String wrapper objects with implicit length/index
-                    let type_name = b.get("__type__").map(|v| value_to_string(v)).unwrap_or_default();
-                    if type_name == "String" {
-                        if key == "length" {
-                            true
-                        } else if let Some(Value::String(s)) = b.get("__value__") {
-                            if let Ok(idx) = key.parse::<usize>() {
-                                idx < s.len()
-                            } else {
-                                let proto = b.get("__proto__").cloned();
-                                drop(b);
-                                self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                            }
-                        } else {
-                            let proto = b.get("__proto__").cloned();
-                            drop(b);
-                            self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        }
-                    } else {
-                        let proto = b.get("__proto__").cloned();
-                        drop(b);
-                        self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                    }
-                }
-            }
-            Value::VmArray(arr) => {
-                if let Ok(idx) = key.parse::<usize>() {
-                    let borrow = arr.borrow();
-                    if idx >= 0xFFFF_FFFF {
-                        borrow.props.contains_key(key)
-                            || borrow.props.contains_key(&format!("__get_{}", key))
-                            || borrow.props.contains_key(&format!("__set_{}", key))
-                    } else {
-                        let logical_len = self.vm_array_logical_length_u64(&borrow) as usize;
-                        idx < logical_len
-                            && ((!borrow.props.contains_key(&format!("__deleted_{}", idx)) && idx < borrow.elements.len())
-                                || borrow.props.contains_key(key)
-                                || borrow.props.contains_key(&format!("__get_{}", key))
-                                || borrow.props.contains_key(&format!("__set_{}", key)))
-                    }
-                } else if key == "length" {
-                    true
-                } else {
-                    arr.borrow().props.contains_key(key)
-                }
-            }
-            _ => false,
-        };
-        Ok(Some(fallback))
+        // Delegate to has_property_in_chain which correctly handles
+        // own properties, accessor patterns (__get_/__set_), __type__-based
+        // prototype resolution, and full prototype chain traversal.
+        Ok(Some(self.has_property_in_chain(ctx, &target, key)))
     }
 
     fn current_execution_is_strict(&self) -> bool {

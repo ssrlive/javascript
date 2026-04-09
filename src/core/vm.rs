@@ -1252,6 +1252,22 @@ impl<'gc> VM<'gc> {
         spec_path.to_path_buf()
     }
 
+    fn push_dynamic_function_call_new_target(&mut self, callee: &Value<'gc>, id: FunctionID) -> bool {
+        if id == BUILTIN_CTOR_FUNCTION {
+            self.new_target_stack.push(callee.clone());
+            true
+        } else if id == BUILTIN_NEW_FUNCTION {
+            if let Some(function_ctor) = self.globals.get("Function").cloned() {
+                self.new_target_stack.push(function_ctor);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
     pub fn new(chunk: Chunk<'gc>, ctx: &GcContext<'gc>) -> Self {
         let global_this = new_gc_cell_ptr(ctx, IndexMap::new());
         let mut vm = Self {
@@ -17652,9 +17668,21 @@ impl<'gc> VM<'gc> {
                             _ => None,
                         })
                         .unwrap_or_default();
+                    let is_dynamic_generator = matches!(borrow.get("__dynamic_generator_function__"), Some(Value::Boolean(true)));
+                    let is_async_dynamic_fn = matches!(borrow.get("__async_dynamic_function__"), Some(Value::Boolean(true)));
+                    let is_async_dynamic_gen = matches!(borrow.get("__async_dynamic_generator_function__"), Some(Value::Boolean(true)));
                     let realm_id = match borrow.get("__realm_id__") {
                         Some(Value::Number(n)) => Some(*n as usize),
                         _ => None,
+                    };
+                    let callable_expr = if is_async_dynamic_gen {
+                        format!("async function*({}){{{}}}", params_src, body)
+                    } else if is_async_dynamic_fn {
+                        format!("async function({}){{{}}}", params_src, body)
+                    } else if is_dynamic_generator {
+                        format!("function*({}){{{}}}", params_src, body)
+                    } else {
+                        format!("function({}){{{}}}", params_src, body)
                     };
                     drop(borrow);
 
@@ -17664,7 +17692,43 @@ impl<'gc> VM<'gc> {
                         && let Some(mut child) = self.child_realms[rid].take()
                     {
                         self.sync_runtime_to_child(&mut child);
-                        let callable_expr = format!("function({}){{{}}}", params_src, body);
+
+                        // For generators, eval only the function expression in
+                        // the child realm then call it separately so the
+                        // generator's bytecode survives the eval scope.
+                        if is_dynamic_generator || is_async_dynamic_gen {
+                            let saved_placeholders =
+                                child.install_temporary_bindings(ctx, child.dynamic_function_placeholder_bindings(ctx));
+                            let fn_eval_code = format!("({})", callable_expr);
+                            let saved_direct_eval = child.direct_eval;
+                            child.direct_eval = false;
+                            let gen_fn = child.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&fn_eval_code)]);
+                            child.direct_eval = saved_direct_eval;
+                            let thrown = child.pending_throw.take();
+                            child.restore_temporary_bindings(ctx, saved_placeholders);
+                            if let Some(thrown) = thrown {
+                                self.sync_runtime_from_child(&child);
+                                self.child_realms[rid] = Some(child);
+                                self.pending_throw = Some(thrown);
+                                let thrown_val = self.pending_throw.take().unwrap();
+                                return Err(self.vm_error_to_js_error(ctx, &thrown_val));
+                            }
+                            let result = child.vm_call_function_value(ctx, &gen_fn, this_arg, args);
+                            match result {
+                                Ok(val) => {
+                                    let val = self.register_cross_realm_fn(ctx, &mut child, val, rid);
+                                    self.sync_runtime_from_child(&child);
+                                    self.child_realms[rid] = Some(child);
+                                    return Ok(val);
+                                }
+                                Err(e) => {
+                                    self.sync_runtime_from_child(&child);
+                                    self.child_realms[rid] = Some(child);
+                                    return Err(e);
+                                }
+                            }
+                        }
+
                         let args_array = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(args.to_vec())));
                         child.globals.insert("__repl_call_args__".to_string(), args_array.clone());
                         child.globals.insert("__repl_call_this__".to_string(), this_arg.clone());
@@ -17701,7 +17765,22 @@ impl<'gc> VM<'gc> {
                         return Ok(result);
                     }
 
-                    let callable_expr = format!("function({}){{{}}}", params_src, body);
+                    // For generators, eval only the function expression then call
+                    // it separately so the generator's bytecode outlives the eval.
+                    if is_dynamic_generator || is_async_dynamic_gen {
+                        let saved_placeholders = self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
+                        let fn_eval_code = format!("({})", callable_expr);
+                        let saved_direct_eval = self.direct_eval;
+                        self.direct_eval = false;
+                        let gen_fn = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&fn_eval_code)]);
+                        self.direct_eval = saved_direct_eval;
+                        self.restore_temporary_bindings(ctx, saved_placeholders);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            return Err(self.vm_error_to_js_error(ctx, &thrown));
+                        }
+                        return self.vm_call_function_value(ctx, &gen_fn, this_arg, args);
+                    }
+
                     let saved_args = self.globals.get("__repl_call_args__").cloned();
                     let saved_this = self.globals.get("__repl_call_this__").cloned();
                     let args_array = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(args.to_vec())));

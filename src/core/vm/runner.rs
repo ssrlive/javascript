@@ -893,7 +893,11 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
                 } else {
+                    let pushed_new_target = self.push_dynamic_function_call_new_target(&callee, id);
                     let result = self.call_builtin(ctx, id, &args);
+                    if pushed_new_target {
+                        self.new_target_stack.pop();
+                    }
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
                         self.handle_throw(ctx, &thrown)?;
@@ -1062,11 +1066,15 @@ impl<'gc> VM<'gc> {
                         && let Some(mut child) = self.child_realms[rid].take()
                     {
                         self.sync_runtime_to_child(&mut child);
+                        let pushed_new_target = child.push_dynamic_function_call_new_target(&ctor_for_realm, id);
                         let out = if let Some(recv) = method_receiver.as_ref() {
                             child.call_method_builtin(ctx, id, recv, &args_collected)
                         } else {
                             child.call_builtin(ctx, id, &args_collected)
                         };
+                        if pushed_new_target {
+                            child.new_target_stack.pop();
+                        }
                         if let Some(thrown) = child.pending_throw.take() {
                             self.pending_throw = Some(thrown);
                         }
@@ -1074,10 +1082,17 @@ impl<'gc> VM<'gc> {
                         self.sync_runtime_from_child(&child);
                         self.child_realms[rid] = Some(child);
                         out
-                    } else if let Some(recv) = method_receiver.as_ref() {
-                        self.call_method_builtin(ctx, id, recv, &args_collected)
                     } else {
-                        self.call_builtin(ctx, id, &args_collected)
+                        let pushed_new_target = self.push_dynamic_function_call_new_target(&ctor_for_realm, id);
+                        let out = if let Some(recv) = method_receiver.as_ref() {
+                            self.call_method_builtin(ctx, id, recv, &args_collected)
+                        } else {
+                            self.call_builtin(ctx, id, &args_collected)
+                        };
+                        if pushed_new_target {
+                            self.new_target_stack.pop();
+                        }
+                        out
                     };
                     if is_async_ctor
                         && let Some(async_proto) = self.globals.get("__async_function_prototype").cloned()
@@ -1173,14 +1188,12 @@ impl<'gc> VM<'gc> {
                     let is_dynamic_strict = body_trimmed.starts_with("\"use strict\"") || body_trimmed.starts_with("'use strict'");
                     let this_val = if is_method {
                         self.stack.pop().unwrap_or(Value::Undefined)
-                    } else if realm_id.is_some() {
-                        Value::Undefined
-                    } else if is_dynamic_strict {
+                    } else if realm_id.is_some() || is_dynamic_strict {
                         Value::Undefined
                     } else {
                         Value::VmObject(self.global_this)
                     };
-                    if realm_id.is_some() && !is_async_dynamic_gen {
+                    if realm_id.is_some() && !is_async_dynamic_gen || is_dynamic_generator {
                         match self.vm_call_function_value(ctx, &callee, &this_val, &args_collected) {
                             Ok(result) => {
                                 self.stack.push(result);
@@ -3057,7 +3070,11 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
                 } else {
+                    let pushed_new_target = self.push_dynamic_function_call_new_target(&callee, id);
                     let result = self.call_builtin(ctx, id, &args);
+                    if pushed_new_target {
+                        self.new_target_stack.pop();
+                    }
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
                         self.handle_throw(ctx, &thrown)?;
@@ -3088,11 +3105,15 @@ impl<'gc> VM<'gc> {
                             && let Some(mut child) = self.child_realms[rid].take()
                         {
                             self.sync_runtime_to_child(&mut child);
+                            let pushed_new_target = child.push_dynamic_function_call_new_target(&callee, id);
                             let out = if let Some(recv) = method_receiver.as_ref() {
                                 child.call_method_builtin(ctx, id, recv, &args_collected)
                             } else {
                                 child.call_builtin(ctx, id, &args_collected)
                             };
+                            if pushed_new_target {
+                                child.new_target_stack.pop();
+                            }
                             if let Some(thrown) = child.pending_throw.take() {
                                 self.pending_throw = Some(thrown);
                             }
@@ -3100,17 +3121,17 @@ impl<'gc> VM<'gc> {
                             self.sync_runtime_from_child(&child);
                             self.child_realms[rid] = Some(child);
                             out
-                        } else if let Some(recv) = method_receiver.as_ref() {
-                            if id == BUILTIN_CTOR_FUNCTION {
-                                self.new_target_stack.push(callee.clone());
-                            }
-                            let out = self.call_method_builtin(ctx, id, recv, &args_collected);
-                            if id == BUILTIN_CTOR_FUNCTION {
+                        } else {
+                            let pushed_new_target = self.push_dynamic_function_call_new_target(&callee, id);
+                            let out = if let Some(recv) = method_receiver.as_ref() {
+                                self.call_method_builtin(ctx, id, recv, &args_collected)
+                            } else {
+                                self.call_builtin(ctx, id, &args_collected)
+                            };
+                            if pushed_new_target {
                                 self.new_target_stack.pop();
                             }
                             out
-                        } else {
-                            self.call_builtin(ctx, id, &args_collected)
                         };
                         self.stack.push(result);
                         if let Some(thrown) = self.pending_throw.take() {

@@ -185,6 +185,53 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_call_inside_constructor_keeps_function_prototype() {
+        let script = r#"
+            function Outer() {
+                return Function("return 1;");
+            }
+            let f = new Outer();
+            typeof f.apply === "function" &&
+            typeof f.call === "function" &&
+            f instanceof Function &&
+            f() === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_new_function_inside_constructor_keeps_function_prototype() {
+        let script = r#"
+            function Outer() {
+                return new Function("return 1;");
+            }
+            let f = new Outer();
+            typeof f.apply === "function" &&
+            typeof f.call === "function" &&
+            f instanceof Function &&
+            f() === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_generator_function_call_uses_generator_constructor_semantics() {
+        let script = r#"
+            let GeneratorFunction = Object.getPrototypeOf(function*() {}).constructor;
+            let g = GeneratorFunction("yield 1;");
+            let iter = g();
+            Object.getPrototypeOf(g) === GeneratorFunction.prototype &&
+            typeof g.prototype === "object" &&
+            iter.next().value === 1 &&
+            iter.next().done === true
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_function_apply_reads_array_like_arguments() {
         let script = r#"
             (function() {

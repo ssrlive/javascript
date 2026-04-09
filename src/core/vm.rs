@@ -21405,6 +21405,10 @@ impl<'gc> VM<'gc> {
                             // UNLESS the eval code itself has "use strict".
                             let strict_scoped = if self.direct_eval { is_strict } else { eval_code_explicit_strict };
                             if strict_scoped && (!self.globals.contains_key(k) || chunk.declared_globals.contains(k)) {
+                                // The eval VM may have already written this key to
+                                // the shared global_this during DefineGlobal execution.
+                                // Remove it so it doesn't leak to the outer scope.
+                                self.global_this.borrow_mut(ctx).shift_remove(k);
                                 continue;
                             }
                             // For direct eval, skip variables that are locals in caller frames;

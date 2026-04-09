@@ -135,47 +135,9 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    #[allow(dead_code)]
     fn record_function_source_text(&mut self, func_ip: usize, source_text: String) {
         self.chunk.fn_source_texts.insert(func_ip, source_text);
-    }
-
-    fn maybe_record_simple_object_method_source(&mut self, key: &Expr, val: &Expr) {
-        let Some(func_ip) = self.peek_func_ip(val) else {
-            return;
-        };
-        let Some(source_text) = Self::simple_object_method_source(key, val) else {
-            return;
-        };
-        self.record_function_source_text(func_ip, source_text);
-    }
-
-    fn simple_object_method_source(key: &Expr, val: &Expr) -> Option<String> {
-        let key_name = match key {
-            Expr::StringLit(s) => crate::unicode::utf16_to_utf8(s),
-            _ => return None,
-        };
-        if !Self::is_simple_identifier_name(&key_name) {
-            return None;
-        }
-
-        match val {
-            Expr::Function(name, params, body)
-                if name.as_deref().unwrap_or_default().is_empty() && params.is_empty() && body.is_empty() =>
-            {
-                Some(format!("{key_name}(){{}}"))
-            }
-            _ => None,
-        }
-    }
-
-    fn is_simple_identifier_name(name: &str) -> bool {
-        let mut chars = name.chars();
-        match chars.next() {
-            None => return false,
-            Some(c) if !c.is_ascii_alphabetic() && c != '_' && c != '$' => return false,
-            _ => {}
-        }
-        chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     }
 
     /// Register exports from a loaded external module so the compiler can resolve imports.
@@ -4947,9 +4909,6 @@ impl<'gc> Compiler<'gc> {
 
                     if !*has_colon && let Some(ip) = self.peek_func_ip(val) {
                         self.chunk.method_function_ips.insert(ip);
-                        if !*is_computed {
-                            self.maybe_record_simple_object_method_source(key, val);
-                        }
                     }
 
                     match val {

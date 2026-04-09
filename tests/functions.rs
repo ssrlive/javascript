@@ -129,7 +129,7 @@ mod function_tests {
     fn test_simple_object_method_to_string_drives_computed_property_keys() {
         let script = r#"
             let method = ({ a(){} }).a;
-            typeof ({ [method](){ } })["a(){}"] === "function"
+            typeof ({ [method](){ } })["function () { [ native code ] }"] === "function"
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");

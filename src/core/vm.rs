@@ -30100,6 +30100,20 @@ impl<'gc> VM<'gc> {
             {
                 return Value::from(src);
             }
+            // Include the function name when it's an explicitly-declared name
+            // (not an inferred method name) and is a valid IdentifierName.
+            // Method shorthand names are excluded: their toString affects
+            // computed property key semantics, and private names (#f) don't
+            // match the NativeFunction grammar.
+            let fn_name = match receiver {
+                Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) if !self.chunk.method_function_ips.contains(ip) => {
+                    self.chunk.fn_names.get(ip).cloned().unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            if !fn_name.is_empty() && !fn_name.contains('#') && !fn_name.starts_with('\x00') && !fn_name.contains(' ') {
+                return Value::from(&format!("function {fn_name}() {{ [ native code ] }}"));
+            }
             return Value::from("function () { [ native code ] }");
         }
 

@@ -29768,18 +29768,16 @@ impl<'gc> VM<'gc> {
 
         // Function.prototype.apply(thisArg, argsArray)
         if id == BUILTIN_FN_APPLY {
+            if !self.is_value_callable(receiver) {
+                self.throw_type_error(ctx, "Function.prototype.apply called on non-callable receiver");
+                return Value::Undefined;
+            }
             let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
-            let call_args: Vec<Value<'gc>> = if let Some(Value::VmArray(arr)) = args.get(1) {
-                // Sync resizable TypedArray before reading elements
-                self.maybe_sync_resizable_ta(ctx, arr);
-                let b = arr.borrow();
-                if matches!(b.props.get("__out_of_bounds__"), Some(Value::Boolean(true))) {
-                    Vec::new()
-                } else {
-                    b.iter().cloned().collect()
+            let call_args = match self.function_apply_arg_list(ctx, args.get(1)) {
+                Some(call_args) => call_args,
+                None => {
+                    return Value::Undefined;
                 }
-            } else {
-                Vec::new()
             };
             // Class constructors cannot be invoked without new, even via .apply()
             let ctor_ip = match &receiver {
@@ -29831,6 +29829,10 @@ impl<'gc> VM<'gc> {
 
         // Function.prototype.call(thisArg, ...args)
         if id == BUILTIN_FN_CALL {
+            if !self.is_value_callable(receiver) {
+                self.throw_type_error(ctx, "Function.prototype.call called on non-callable receiver");
+                return Value::Undefined;
+            }
             let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
             let call_args: Vec<Value<'gc>> = args.iter().skip(1).cloned().collect();
             // Class constructors cannot be invoked without new, even via .call()
@@ -29883,6 +29885,10 @@ impl<'gc> VM<'gc> {
 
         // Function.prototype.bind(thisArg, ...args)
         if id == BUILTIN_FN_BIND {
+            if !self.is_value_callable(receiver) {
+                self.throw_type_error(ctx, "Function.prototype.bind called on non-callable receiver");
+                return Value::Undefined;
+            }
             let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
             let bound_args: Vec<Value<'gc>> = args.iter().skip(1).cloned().collect();
             let is_callable = self.is_callable_value(receiver);
@@ -30253,6 +30259,52 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => self.chunk.fn_source_texts.get(ip).map(String::as_str),
             _ => None,
         }
+    }
+
+    fn function_apply_arg_list(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        arg_array: Option<&Value<'gc>>,
+    ) -> Option<Vec<Value<'gc>>> {
+        let Some(arg_array) = arg_array else {
+            return Some(Vec::new());
+        };
+        if matches!(arg_array, Value::Undefined | Value::Null) {
+            return Some(Vec::new());
+        }
+        if matches!(
+            arg_array,
+            Value::Number(_) | Value::Boolean(_) | Value::String(_)
+        ) || arg_array.is_symbol_value()
+        {
+            self.throw_type_error(ctx, "CreateListFromArrayLike called on non-object");
+            return None;
+        }
+        if let Value::VmArray(arr) = arg_array {
+            self.maybe_sync_resizable_ta(ctx, arr);
+            let b = arr.borrow();
+            let list = if matches!(b.props.get("__out_of_bounds__"), Some(Value::Boolean(true))) {
+                Vec::new()
+            } else {
+                b.iter().cloned().collect()
+            };
+            return Some(list);
+        }
+
+        let len_val = self.read_named_property_with_receiver(ctx, arg_array, "length", arg_array);
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let len = to_number(&len_val) as usize;
+        let mut list = Vec::with_capacity(len);
+        for i in 0..len {
+            let elem = self.read_named_property_with_receiver(ctx, arg_array, &i.to_string(), arg_array);
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            list.push(elem);
+        }
+        Some(list)
     }
 
     fn call_internal_callback_with_isolated_try_stack<F>(&mut self, callback: F) -> Result<Value<'gc>, JSError>

@@ -185,6 +185,55 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_apply_reads_array_like_arguments() {
+        let script = r#"
+            (function() {
+                function f(a, b, c) {
+                    return a + b + c;
+                }
+                return f.apply(null, arguments) === "abc";
+            })("a", "b", "c")
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_apply_rejects_primitive_argarray() {
+        let script = r#"
+            try {
+                (function() {}).apply(null, true);
+                false
+            } catch (e) {
+                e instanceof TypeError
+            }
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_call_and_bind_require_callable_receiver() {
+        let script = r#"
+            let callThrows = false;
+            let bindThrows = false;
+            try {
+                Function.prototype.call.call(undefined, {});
+            } catch (e) {
+                callThrows = e instanceof TypeError;
+            }
+            try {
+                Function.prototype.bind.call(undefined, {});
+            } catch (e) {
+                bindThrows = e instanceof TypeError;
+            }
+            callThrows && bindThrows
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

@@ -836,13 +836,12 @@ impl<'gc> VM<'gc> {
             Value::Number(n) => *n == 0.0 && !n.is_sign_negative(),
             _ => false,
         };
-        if !is_zero {
-            if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
-                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-            }
-            if self.pending_throw.is_some() {
-                return Value::Undefined;
-            }
+        if !is_zero
+            && let Err(thrown) =
+                self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0))
+        {
+            self.pending_throw = Some(thrown);
+            return Value::Undefined;
         }
 
         // 3. Let result be ? RegExpExec(rx, S).
@@ -859,13 +858,12 @@ impl<'gc> VM<'gc> {
 
         // 5. If SameValue(currentLastIndex, previousLastIndex) is false, then
         //    Perform ? Set(rx, "lastIndex", previousLastIndex, true).
-        if !self.values_same(&current_last_index, &previous_last_index) {
-            if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &previous_last_index, None) {
-                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-            }
-            if self.pending_throw.is_some() {
-                return Value::Undefined;
-            }
+        if !self.values_same(&current_last_index, &previous_last_index)
+            && let Err(thrown) =
+                self.host_fn_set_property(ctx, rx, "lastIndex", &previous_last_index)
+        {
+            self.pending_throw = Some(thrown);
+            return Value::Undefined;
         }
 
         // 6. If result is null, return -1𝔽.
@@ -909,10 +907,8 @@ impl<'gc> VM<'gc> {
         let full_unicode = flags.contains('u') || flags.contains('v');
 
         // a. Perform ? Set(rx, "lastIndex", +0𝔽, true).
-        if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
-            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-        }
-        if self.pending_throw.is_some() {
+        if let Err(thrown) = self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0)) {
+            self.pending_throw = Some(thrown);
             return Value::Undefined;
         }
 
@@ -967,10 +963,8 @@ impl<'gc> VM<'gc> {
                 } else {
                     this_index + 1
                 };
-                if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64), None) {
-                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                }
-                if self.pending_throw.is_some() {
+                if let Err(thrown) = self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64)) {
+                    self.pending_throw = Some(thrown);
                     return Value::Undefined;
                 }
             }
@@ -1014,13 +1008,12 @@ impl<'gc> VM<'gc> {
             None
         };
 
-        if global {
-            if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
-                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-            }
-            if self.pending_throw.is_some() {
-                return Value::Undefined;
-            }
+        if global
+            && let Err(thrown) =
+                self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(0.0))
+        {
+            self.pending_throw = Some(thrown);
+            return Value::Undefined;
         }
 
         // Collect results
@@ -1069,10 +1062,8 @@ impl<'gc> VM<'gc> {
                 } else {
                     this_index + 1
                 };
-                if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64), None) {
-                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                }
-                if self.pending_throw.is_some() {
+                if let Err(thrown) = self.host_fn_set_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64)) {
+                    self.pending_throw = Some(thrown);
                     return Value::Undefined;
                 }
             }
@@ -1390,10 +1381,8 @@ impl<'gc> VM<'gc> {
 
         while q < size {
             // Set splitter.lastIndex = q
-            if let Err(e) = self.assign_named_property(ctx, &splitter, "lastIndex", &Value::Number(q as f64), None) {
-                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-            }
-            if self.pending_throw.is_some() {
+            if let Err(thrown) = self.host_fn_set_property(ctx, &splitter, "lastIndex", &Value::Number(q as f64)) {
+                self.pending_throw = Some(thrown);
                 return Value::Undefined;
             }
 
@@ -1540,10 +1529,8 @@ impl<'gc> VM<'gc> {
         } else {
             n.min(9007199254740991.0).floor()
         };
-        if let Err(e) = self.assign_named_property(ctx, &matcher, "lastIndex", &Value::Number(last_index_len), None) {
-            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-        }
-        if self.pending_throw.is_some() {
+        if let Err(thrown) = self.host_fn_set_property(ctx, &matcher, "lastIndex", &Value::Number(last_index_len)) {
+            self.pending_throw = Some(thrown);
             return Value::Undefined;
         }
 
@@ -1635,10 +1622,8 @@ impl<'gc> VM<'gc> {
                 } else {
                     this_index + 1
                 };
-                if let Err(e) = self.assign_named_property(ctx, &regexp, "lastIndex", &Value::Number(next_index as f64), None) {
-                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                }
-                if self.pending_throw.is_some() {
+                if let Err(thrown) = self.host_fn_set_property(ctx, &regexp, "lastIndex", &Value::Number(next_index as f64)) {
+                    self.pending_throw = Some(thrown);
                     return Value::Undefined;
                 }
             }
@@ -1712,6 +1697,94 @@ impl<'gc> VM<'gc> {
             Value::VmArray(a) => a.borrow().props.get(key).cloned().unwrap_or(Value::Undefined),
             _ => Value::Undefined,
         }
+    }
+
+    /// Set a property from within a host function, ensuring errors return as
+    /// `Err(thrown_value)` instead of being consumed by `handle_throw`.
+    ///
+    /// When `assign_named_property` is called inside a host function and the
+    /// property is readonly, `handle_throw` may find a try-catch from the
+    /// *caller's* JS code and silently consume the error, corrupting VM state.
+    /// This helper temporarily hides `try_stack` so errors always propagate
+    /// as `Err`, which the host function can convert to `pending_throw`.
+    fn host_fn_set_property(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, key: &str, val: &Value<'gc>) -> Result<(), Value<'gc>> {
+        let saved = std::mem::take(&mut self.try_stack);
+        let result = self.assign_named_property(ctx, obj, key, val, None);
+        self.try_stack = saved;
+        match result {
+            Ok(_) => {
+                if let Some(thrown) = self.pending_throw.take() {
+                    return Err(thrown);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(thrown) = self.take_preserved_thrown_value_for_error(&e) {
+                    Err(thrown)
+                } else {
+                    Err(self.vm_value_from_error(ctx, &e))
+                }
+            }
+        }
+    }
+
+    /// IsRegExp(argument) — ES2024 §7.2.8
+    #[allow(dead_code)]
+    fn is_regexp_check(&mut self, ctx: &GcContext<'gc>, argument: &Value<'gc>) -> Result<bool, Value<'gc>> {
+        // Step 1: If Type(argument) is not Object, return false.
+        if !matches!(
+            argument,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+        ) || argument.is_symbol_value()
+        {
+            return Ok(false);
+        }
+        // Step 2: Let matcher be ? Get(argument, @@match).
+        let matcher = self.read_named_property(ctx, argument, "@@sym:7");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        // Step 3: If matcher is not undefined, return ToBoolean(matcher).
+        if !matches!(matcher, Value::Undefined) {
+            return Ok(matcher.to_truthy());
+        }
+        // Step 4: If argument has a [[RegExpMatcher]] internal slot, return true.
+        if let Value::VmObject(map) = argument
+            && map
+                .borrow()
+                .get("__type__")
+                .map(value_to_string)
+                .as_deref()
+                == Some("RegExp")
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// ToLength/ToNumber with proper Symbol rejection for host functions.
+    /// Returns `Err(thrown_value)` if the value cannot be coerced to a number.
+    #[allow(dead_code)]
+    fn host_fn_to_length(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Result<f64, Value<'gc>> {
+        if val.is_symbol_value() {
+            let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
+            return Err(err);
+        }
+        let prim = self.try_to_primitive(ctx, val, "number");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if prim.is_symbol_value() {
+            let err = self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number");
+            return Err(err);
+        }
+        let n = to_number(&prim);
+        let result = if n.is_nan() || n <= 0.0 {
+            0.0
+        } else {
+            n.min(9007199254740991.0).floor()
+        };
+        Ok(result)
     }
 
     /// AdvanceStringIndex (ES2024 §22.2.5.2.3)

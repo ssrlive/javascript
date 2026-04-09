@@ -21115,6 +21115,11 @@ impl<'gc> VM<'gc> {
                     // host functions (getters, setters, closures) at original IPs
                     let (eval_code_offset, _) = eval_vm.merge_eval_chunk(&chunk);
                     eval_vm.ip = eval_code_offset;
+                    // Ensure eval VM knows about eval-scoped lexical declarations
+                    // so DefineGlobal/SetGlobal don't leak let/const/class to globalThis.
+                    for name in &chunk.lexical_declared_globals {
+                        eval_vm.chunk.lexical_declared_globals.insert(name.clone());
+                    }
                     // Copy caller's globals into eval VM
                     if self.direct_eval {
                         // Direct eval: copy all globals (caller's scope)

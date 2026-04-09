@@ -21152,11 +21152,27 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_NEW_FUNCTION | BUILTIN_CTOR_FUNCTION => {
                 // new Function(body): return a callable wrapper with __fn_body__
-                let body = args.last().map(value_to_string).unwrap_or_default();
+                let body = if let Some(body_arg) = args.last() {
+                    match self.vm_to_string_like_spec(ctx, body_arg) {
+                        Ok(body) => body,
+                        Err(err) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                            return Value::Undefined;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
                 let mut params: Vec<String> = Vec::new();
                 if args.len() > 1 {
                     for p in args.iter().take(args.len() - 1) {
-                        let raw = value_to_string(p);
+                        let raw = match self.vm_to_string_like_spec(ctx, p) {
+                            Ok(raw) => raw,
+                            Err(err) => {
+                                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                                return Value::Undefined;
+                            }
+                        };
                         for seg in raw.split(',') {
                             let s = seg.trim();
                             if !s.is_empty() {
@@ -21179,9 +21195,23 @@ impl<'gc> VM<'gc> {
                 let is_async_gen_ctor = ctor_name.contains("AsyncGeneratorFunction");
                 let is_async_ctor = ctor_name.contains("AsyncFunction") && !is_async_gen_ctor;
                 let is_generator_ctor = ctor_name.contains("GeneratorFunction") && !ctor_name.contains("AsyncGeneratorFunction");
+                let params_src = params.join(",");
+                let validation_source = if is_async_gen_ctor {
+                    format!("(async function*({}){{{}}})", params_src, body)
+                } else if is_async_ctor {
+                    format!("(async function({}){{{}}})", params_src, body)
+                } else if is_generator_ctor {
+                    format!("(function*({}){{{}}})", params_src, body)
+                } else {
+                    format!("(function({}){{{}}})", params_src, body)
+                };
+                if let Err(err) = self.run_vm_snippet_local(ctx, &validation_source) {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                    return Value::Undefined;
+                }
                 let mut map = IndexMap::new();
                 map.insert("__fn_body__".to_string(), Value::from(&body));
-                map.insert("__fn_params__".to_string(), Value::from(&params.join(",")));
+                map.insert("__fn_params__".to_string(), Value::from(&params_src));
                 map.insert("length".to_string(), Value::Number(params.len() as f64));
                 map.insert("name".to_string(), Value::from("anonymous"));
                 map.insert("__readonly_length__".to_string(), Value::Boolean(true));

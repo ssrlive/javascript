@@ -136,6 +136,55 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_constructor_coerces_body_via_tostring() {
+        let script = r#"
+            let f = new Function({ toString() { return "return 1;"; } });
+            f() === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_constructor_coerces_params_via_tostring() {
+        let script = r#"
+            let param = { toString() { return "a1"; } };
+            let f = new Function(param, "return a1;");
+            f(42) === 42
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_constructor_preserves_tostring_throw_value() {
+        let script = r#"
+            try {
+                new Function({ toString() { throw 7; } });
+                false
+            } catch (e) {
+                e === 7
+            }
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_constructor_rejects_invalid_body_after_tostring() {
+        let script = r#"
+            try {
+                new Function({});
+                false
+            } catch (e) {
+                e instanceof SyntaxError
+            }
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

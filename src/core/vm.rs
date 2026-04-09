@@ -14889,6 +14889,9 @@ impl<'gc> VM<'gc> {
         for (ip, &(uv_idx, class_id)) in &eval_chunk.fn_brand_upvalue {
             self.chunk.fn_brand_upvalue.insert(ip + code_offset, (uv_idx, class_id));
         }
+        for (ip, source_text) in &eval_chunk.fn_source_texts {
+            self.chunk.fn_source_texts.insert(ip + code_offset, source_text.clone());
+        }
         for ip in &eval_chunk.named_fn_self_ips {
             self.chunk.named_fn_self_ips.insert(ip + code_offset);
         }
@@ -30212,6 +30215,13 @@ impl<'gc> VM<'gc> {
         Value::Undefined
     }
 
+    fn function_source_text(&self, receiver: &Value<'gc>) -> Option<&str> {
+        match receiver {
+            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => self.chunk.fn_source_texts.get(ip).map(String::as_str),
+            _ => None,
+        }
+    }
+
     fn call_internal_callback_with_isolated_try_stack<F>(&mut self, callback: F) -> Result<Value<'gc>, JSError>
     where
         F: FnOnce(&mut Self) -> Result<Value<'gc>, JSError>,
@@ -30492,6 +30502,9 @@ impl<'gc> VM<'gc> {
                 // [Symbol.iterator] keep their symbolic identity.
                 if let Some(symbol_key) = self.symbol_key_string(index) {
                     return Ok(symbol_key);
+                }
+                if let Some(source_text) = self.function_source_text(index) {
+                    return Ok(source_text.to_string());
                 }
 
                 let prim = match index {

@@ -286,6 +286,9 @@ pub struct Chunk<'gc> {
     /// function was compiled. Used for dynamic import base-path resolution and
     /// to restore the correct module environment when cross-module functions run.
     pub fn_source_paths: std::collections::HashMap<usize, String>,
+    /// Exact source text for function forms we can reconstruct faithfully
+    /// enough for Function.prototype.toString / ToPropertyKey coercion.
+    pub fn_source_texts: std::collections::HashMap<usize, String>,
     /// Global names declared via `var`/`function`/`class` at the top level of this chunk.
     /// Used by strict-mode eval to avoid leaking declarations back to the caller.
     pub declared_globals: std::collections::HashSet<String>,
@@ -465,6 +468,9 @@ impl<'gc> Chunk<'gc> {
         }
         for (ip, path) in dep.fn_source_paths {
             self.fn_source_paths.insert(ip + ip_offset, path);
+        }
+        for (ip, source_text) in dep.fn_source_texts {
+            self.fn_source_texts.insert(ip + ip_offset, source_text);
         }
         for ip in dep.named_fn_self_ips {
             self.named_fn_self_ips.insert(ip + ip_offset);

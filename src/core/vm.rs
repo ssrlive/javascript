@@ -33451,6 +33451,33 @@ impl<'gc> VM<'gc> {
         })
     }
 
+    /// Spec: GetFunctionRealm(obj)
+    /// Walks through proxy / bound-function chains; throws TypeError if a
+    /// revoked proxy is encountered.  On success returns Ok(()).
+    fn check_get_function_realm(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>) -> Result<(), JSError> {
+        match obj {
+            Value::VmObject(map) => {
+                let borrow = map.borrow();
+                if borrow.contains_key("__proxy_target__") {
+                    let revoked = matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true)));
+                    if revoked {
+                        drop(borrow);
+                        return Err(self.proxy_type_error(ctx, "Cannot perform 'getPrototypeOf' on a revoked proxy"));
+                    }
+                    let target = borrow.get("__proxy_target__").cloned().unwrap_or(Value::Undefined);
+                    drop(borrow);
+                    return self.check_get_function_realm(ctx, &target);
+                }
+                if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
+                    drop(borrow);
+                    return self.check_get_function_realm(ctx, &bound_target);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn construct_value(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -34395,11 +34422,15 @@ impl<'gc> VM<'gc> {
                 | Value::VmNativeFunction(_)
         ) && !proto.is_symbol_value();
 
-        Ok(if is_object_prototype {
-            Some(proto)
-        } else {
-            self.default_intrinsic_prototype_for_constructor(ctx, constructor, intrinsic_ctor_name)
-        })
+        if is_object_prototype {
+            return Ok(Some(proto));
+        }
+
+        // Spec: GetFunctionRealm(constructor) — throw TypeError if constructor
+        // is a revoked proxy (or chains through revoked proxies / bound fns).
+        self.check_get_function_realm(ctx, constructor)?;
+
+        Ok(self.default_intrinsic_prototype_for_constructor(ctx, constructor, intrinsic_ctor_name))
     }
 
     fn ordinary_object_from_constructor(&mut self, ctx: &GcContext<'gc>, new_target: &Value<'gc>) -> Value<'gc> {

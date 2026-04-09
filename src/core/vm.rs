@@ -8052,7 +8052,12 @@ impl<'gc> VM<'gc> {
                                     let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                                     drop(borrow);
                                     self.call_host_fn(ctx, &host_name, Some(&iterable), &[])
+                                } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__") {
+                                    let id = *native_id as usize;
+                                    drop(borrow);
+                                    self.call_method_builtin(ctx, id, &iterable, &[])
                                 } else {
+                                    drop(borrow);
                                     let mut err_map = IndexMap::new();
                                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                     err_map.insert("message".to_string(), Value::from("iterator missing"));
@@ -8070,7 +8075,10 @@ impl<'gc> VM<'gc> {
                                 let next_callable = matches!(
                                     &next_candidate,
                                     Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                                ) || matches!(&next_candidate, Value::VmObject(obj) if obj.borrow().contains_key("__host_fn__"));
+                                ) || matches!(&next_candidate, Value::VmObject(obj) if {
+                                    let b = obj.borrow();
+                                    b.contains_key("__host_fn__") || b.contains_key("__native_id__")
+                                });
                                 if next_callable {
                                     iterable.clone()
                                 } else {
@@ -8160,10 +8168,16 @@ impl<'gc> VM<'gc> {
                                 }
                                 Value::VmNativeFunction(id) => self.call_method_builtin(ctx, *id, &iter_obj, &[]),
                                 Value::VmObject(map) => {
-                                    if let Some(Value::String(host_name_u16)) = map.borrow().get("__host_fn__").cloned() {
+                                    let borrow = map.borrow();
+                                    if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__").cloned() {
+                                        drop(borrow);
                                         let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
                                         self.call_host_fn(ctx, &host_name, Some(&iter_obj), &[])
+                                    } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__").cloned() {
+                                        drop(borrow);
+                                        self.call_method_builtin(ctx, native_id as usize, &iter_obj, &[])
                                     } else {
+                                        drop(borrow);
                                         let mut err_map = IndexMap::new();
                                         err_map.insert("__type__".to_string(), Value::from("TypeError"));
                                         err_map.insert("message".to_string(), Value::from("iterator.next is not callable"));
@@ -8266,10 +8280,16 @@ impl<'gc> VM<'gc> {
                                     }
                                     Value::VmNativeFunction(id) => Ok(self.call_method_builtin(ctx, *id, &iter_obj, &[])),
                                     Value::VmObject(map) => {
-                                        if let Some(Value::String(host_name_u16)) = map.borrow().get("__host_fn__").cloned() {
+                                        let borrow = map.borrow();
+                                        if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__").cloned() {
+                                            drop(borrow);
                                             let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
                                             Ok(self.call_host_fn(ctx, &host_name, Some(&iter_obj), &[]))
+                                        } else if let Some(Value::Number(native_id)) = borrow.get("__native_id__").cloned() {
+                                            drop(borrow);
+                                            Ok(self.call_method_builtin(ctx, native_id as usize, &iter_obj, &[]))
                                         } else {
+                                            drop(borrow);
                                             Err(crate::raise_type_error!("iterator.return is not callable"))
                                         }
                                     }

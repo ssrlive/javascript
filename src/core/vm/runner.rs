@@ -1612,7 +1612,7 @@ impl<'gc> VM<'gc> {
                     }
                     gt.insert(name_str, val);
                     gt.insert(nc_key, Value::Boolean(true));
-                } else if !is_lexical_binding {
+                } else if !is_lexical_binding && !self.eval_fn_scope {
                     self.global_this.borrow_mut(ctx).insert(name_str, val);
                 }
             }
@@ -1656,10 +1656,12 @@ impl<'gc> VM<'gc> {
                     && self.chunk.declared_globals.contains(&name_str)
                     && !self.chunk.lexical_declared_globals.contains(&name_str);
                 self.globals.insert(name_str.clone(), val.clone());
-                let mut gt = self.global_this.borrow_mut(ctx);
-                gt.insert(name_str.clone(), val);
-                if is_var_binding {
-                    gt.insert(format!("__nonconfigurable_{}__", name_str), Value::Boolean(true));
+                if !self.eval_fn_scope {
+                    let mut gt = self.global_this.borrow_mut(ctx);
+                    gt.insert(name_str.clone(), val);
+                    if is_var_binding {
+                        gt.insert(format!("__nonconfigurable_{}__", name_str), Value::Boolean(true));
+                    }
                 }
             }
         } else {
@@ -2089,7 +2091,7 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             }
             self.globals.insert(name_str.clone(), val.clone());
-            if !self.chunk.lexical_declared_globals.contains(&name_str) {
+            if !self.chunk.lexical_declared_globals.contains(&name_str) && !self.eval_fn_scope {
                 self.global_this.borrow_mut(ctx).insert(name_str, val);
             }
         }

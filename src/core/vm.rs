@@ -969,6 +969,9 @@ pub struct VM<'gc> {
     force_strict: bool,
     // Home object for eval VM — enables super.property resolution in direct eval
     eval_home_object: Option<Value<'gc>>,
+    // When true, DefineGlobal suppresses writes to globalThis for eval var declarations.
+    // Set for direct eval inside a function so vars stay in the function scope.
+    eval_fn_scope: bool,
     // Runtime brand counter for unique class brands per class evaluation
     runtime_brand_counter: usize,
     // Per-closure fn_props for class constructors evaluated multiple times (factory pattern).
@@ -1328,6 +1331,7 @@ impl<'gc> VM<'gc> {
             in_typed_array_method: false,
             force_strict: false,
             eval_home_object: None,
+            eval_fn_scope: false,
             runtime_brand_counter: 0,
             closure_fn_props: HashMap::new(),
             top_level_cells: HashMap::new(),
@@ -21111,6 +21115,11 @@ impl<'gc> VM<'gc> {
                     eval_vm.restricted_thrower_intrinsic = self.restricted_thrower_intrinsic.clone();
                     // Propagate strict mode to eval VM
                     eval_vm.force_strict = is_strict;
+                    // Direct eval inside a function: var declarations should stay in
+                    // the function scope, not leak to globalThis.
+                    if self.direct_eval && !self.frames.is_empty() {
+                        eval_vm.eval_fn_scope = true;
+                    }
                     // Merge eval code into eval VM's chunk so it has access to
                     // host functions (getters, setters, closures) at original IPs
                     let (eval_code_offset, _) = eval_vm.merge_eval_chunk(&chunk);
@@ -21466,13 +21475,16 @@ impl<'gc> VM<'gc> {
                             }
                             let adjusted = self.adjust_value_ips(ctx, v, code_offset, &eval_fn_ips);
                             self.globals.insert(k.clone(), adjusted.clone());
+                            // For direct eval inside a function, var declarations stay in
+                            // the function scope and should not leak to globalThis.
+                            let in_fn_scope = self.direct_eval && !self.frames.is_empty();
                             // CreateGlobalFunctionBinding semantics (§8.1.1.4.18)
                             // For eval function declarations, update property descriptors:
                             // if existing property is configurable, set writable + enumerable
-                            if chunk.fn_declared_globals.contains(k) {
+                            if chunk.fn_declared_globals.contains(k) && !in_fn_scope {
                                 let mut gt = self.global_this.borrow_mut(ctx);
                                 gt.insert(k.clone(), adjusted);
-                            } else {
+                            } else if !in_fn_scope {
                                 // Normal variable: just mirror onto globalThis
                                 self.global_this.borrow_mut(ctx).insert(k.clone(), adjusted);
                             }

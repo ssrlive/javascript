@@ -239,6 +239,45 @@ mod function_tests {
     }
 
     #[test]
+    fn test_cross_realm_function_call_uses_callee_realm_this_and_wrappers() {
+        let script = r#"
+            let other = __createRealm__().global;
+            let func = new other.Function('return this;');
+            let obj = {};
+            func() === other &&
+            func.call(undefined) === other &&
+            func.call(null) === other &&
+            func.call(true).constructor === other.Boolean &&
+            func.call(true) instanceof other.Boolean &&
+            func.call(1).constructor === other.Number &&
+            func.call(1) instanceof other.Number &&
+            func.call('').constructor === other.String &&
+            func.call('') instanceof other.String &&
+            func.call(obj) === obj
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_dynamic_function_reflect_construct_splits_constructor_and_new_target_realms() {
+        let script = r#"
+            let realmA = __createRealm__().global;
+            realmA.calls = 0;
+            let realmB = __createRealm__().global;
+            let newTarget = new realmB.Function();
+            newTarget.prototype = null;
+            let fn = Reflect.construct(realmA.Function, ['calls += 1;'], newTarget);
+            Object.getPrototypeOf(fn) === realmB.Function.prototype &&
+            Object.getPrototypeOf(fn.prototype) === realmA.Object.prototype &&
+            new fn() instanceof realmA.Object &&
+            realmA.calls === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_function_call_and_bind_require_callable_receiver() {
         let script = r#"
             let callThrows = false;

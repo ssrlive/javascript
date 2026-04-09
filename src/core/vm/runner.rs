@@ -1173,6 +1173,8 @@ impl<'gc> VM<'gc> {
                     let is_dynamic_strict = body_trimmed.starts_with("\"use strict\"") || body_trimmed.starts_with("'use strict'");
                     let this_val = if is_method {
                         self.stack.pop().unwrap_or(Value::Undefined)
+                    } else if realm_id.is_some() {
+                        Value::Undefined
                     } else if is_dynamic_strict {
                         Value::Undefined
                     } else {
@@ -1339,8 +1341,7 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_args__".to_string(), args_array);
                             gt.insert("__repl_call_this__".to_string(), this_val.clone());
                         }
-                        let saved_placeholders =
-                            self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
+                        let saved_placeholders = self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
 
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                         let result = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
@@ -1393,8 +1394,7 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_args__".to_string(), args_array);
                             gt.insert("__repl_call_this__".to_string(), this_val.clone());
                         }
-                        let saved_placeholders =
-                            self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
+                        let saved_placeholders = self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
 
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                         let result = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
@@ -4232,8 +4232,7 @@ impl<'gc> VM<'gc> {
                                         if let Some(Value::String(host_name_u16)) = host_name_val {
                                             let host_name = crate::unicode::utf16_to_utf8(&host_name_u16);
                                             self.regexp_home_proto_temp = regexp_home;
-                                            let getter_result =
-                                                self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
+                                            let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
                                             self.stack.push(getter_result);
                                         } else {
                                             self.stack.push(Value::Undefined);
@@ -7945,7 +7944,37 @@ impl<'gc> VM<'gc> {
                 if let Value::VmObject(ref map) = callee {
                     let function_id = get_function_id(*map);
                     let borrow = map.borrow();
-                    if borrow.contains_key("__proxy_target__") || borrow.contains_key("__bound_target__") {
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
+                    let is_object_ctor = borrow.contains_key("__proxy_target__")
+                        || borrow.contains_key("__bound_target__")
+                        || borrow.contains_key("__host_fn__")
+                        || borrow.contains_key("__fn_body__")
+                        || function_id.is_some();
+                    if realm_id.is_some() && is_object_ctor {
+                        drop(borrow);
+                        let args: Vec<Value<'gc>> = (0..arg_count)
+                            .map(|_| self.stack.pop().expect("VM Stack underflow"))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        self.stack.pop(); // pop constructor
+                        match self.construct_value(ctx, &callee, &args, Some(&callee)) {
+                            Ok(result) => self.stack.push(result),
+                            Err(err) => {
+                                if let Some(thrown) = self.pending_throw.take() {
+                                    self.handle_throw(ctx, &thrown)?;
+                                } else {
+                                    let thrown = self.vm_value_from_error(ctx, &err);
+                                    self.handle_throw(ctx, &thrown)?;
+                                }
+                                return Ok(OpcodeAction::Continue);
+                            }
+                        }
+                    } else if borrow.contains_key("__proxy_target__") || borrow.contains_key("__bound_target__") {
                         drop(borrow);
                         let args: Vec<Value<'gc>> = (0..arg_count)
                             .map(|_| self.stack.pop().expect("VM Stack underflow"))

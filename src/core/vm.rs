@@ -1064,8 +1064,7 @@ impl<'gc> VM<'gc> {
 impl<'gc> VM<'gc> {
     fn restricted_thrower_intrinsic(&mut self, ctx: &GcContext<'gc>) -> Value<'gc> {
         if matches!(self.restricted_thrower_intrinsic, Value::Undefined) {
-            self.restricted_thrower_intrinsic =
-                Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+            self.restricted_thrower_intrinsic = Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
         }
         self.restricted_thrower_intrinsic.clone()
     }
@@ -14032,11 +14031,21 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    let borrow = map.borrow();
+                    let mut borrow = map.borrow();
                     let realm_id = match borrow.get("__realm_id__") {
                         Some(Value::Number(n)) => Some(*n as usize),
                         _ => None,
                     };
+                    if depth == 1
+                        && self.values_same(obj, receiver)
+                        && let Some(rid) = realm_id
+                    {
+                        drop(borrow);
+                        if let Some(result) = self.read_cross_realm_named_property(ctx, obj, key, rid) {
+                            return result;
+                        }
+                        borrow = map.borrow();
+                    }
                     if key == "__proto__" {
                         if let Some(val) = borrow.get(OWN_DUNDER_PROTO_DATA_KEY).cloned() {
                             match val {
@@ -16217,10 +16226,8 @@ impl<'gc> VM<'gc> {
         let mut wrap_for_valid_iterator_proto = IndexMap::new();
         wrap_for_valid_iterator_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
         let wrap_for_valid_iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, wrap_for_valid_iterator_proto));
-        self.globals.insert(
-            "__WrapForValidIteratorPrototype__".to_string(),
-            wrap_for_valid_iterator_proto_val,
-        );
+        self.globals
+            .insert("__WrapForValidIteratorPrototype__".to_string(), wrap_for_valid_iterator_proto_val);
 
         let iterator_ctor = Self::make_host_fn_with_name_len(ctx, "iterator.constructor", "Iterator", 0.0, false);
         if let Value::VmObject(iterator_ctor_obj) = &iterator_ctor {
@@ -17666,8 +17673,7 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_args__".to_string(), args_array);
                             gt.insert("__repl_call_this__".to_string(), this_arg.clone());
                         }
-                        let saved_placeholders =
-                            child.install_temporary_bindings(ctx, child.dynamic_function_placeholder_bindings(ctx));
+                        let saved_placeholders = child.install_temporary_bindings(ctx, child.dynamic_function_placeholder_bindings(ctx));
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                         let saved_direct_eval = child.direct_eval;
                         child.direct_eval = false;
@@ -17706,8 +17712,7 @@ impl<'gc> VM<'gc> {
                         gt.insert("__repl_call_args__".to_string(), args_array);
                         gt.insert("__repl_call_this__".to_string(), this_arg.clone());
                     }
-                    let saved_placeholders =
-                        self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
+                    let saved_placeholders = self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
 
                     let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                     // Function constructor creates sloppy-mode code per spec,
@@ -20757,6 +20762,9 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     let mut eval_vm: VM<'gc> = VM::new(self.chunk.clone(), ctx);
+                    // Indirect eval must still use the caller realm's actual global this
+                    // value for sloppy this-binding, not the fresh VM::new() global object.
+                    eval_vm.global_this = self.global_this;
                     // Ensure unique brands across eval VMs
                     eval_vm.runtime_brand_counter = self.runtime_brand_counter;
                     eval_vm.restricted_thrower_intrinsic = self.restricted_thrower_intrinsic.clone();
@@ -20943,9 +20951,8 @@ impl<'gc> VM<'gc> {
                             eval_vm.new_target_stack = self.new_target_stack.clone();
                         }
                     } else {
-                        // Indirect eval: `this` is globalThis
-                        let global_this = self.globals.get("globalThis").cloned().unwrap_or(Value::Undefined);
-                        eval_vm.this_stack.push(global_this);
+                        // Indirect eval: `this` is the realm's actual global this value.
+                        eval_vm.this_stack.push(Value::VmObject(self.global_this));
                     }
 
                     // §19.2.1.3 EvalDeclarationInstantiation step 5:
@@ -21219,7 +21226,10 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 let current_new_target = self.new_target_stack.last().cloned();
-                let dynamic_origin_global = current_new_target.as_ref().and_then(|nt| self.constructor_origin_global(ctx, nt));
+                // CreateDynamicFunction uses the constructor realm for body scope and the
+                // created "prototype" object's parent, while F.[[Prototype]] still comes
+                // from newTarget via GetPrototypeFromConstructor below.
+                let dynamic_origin_global = Some(Value::VmObject(self.global_this));
                 // Use dynamic_function_kind_override when available (set by construct_value
                 // for Reflect.construct(AsyncFunction, args, newTarget) scenarios).
                 let ctor_name = if let Some(ref kind) = self.dynamic_function_kind_override {
@@ -30101,10 +30111,7 @@ impl<'gc> VM<'gc> {
             ("PluralRules", "intl.pluralRules"),
             ("RelativeTimeFormat", "intl.relativeTimeFormat"),
         ] {
-            intl.insert(
-                name.to_string(),
-                Self::make_host_fn_with_name_len(ctx, host_name, name, 0.0, false),
-            );
+            intl.insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, host_name, name, 0.0, false));
             intl.insert(format!("__nonenumerable_{}__", name), Value::Boolean(true));
         }
         intl.insert("Segmenter".to_string(), segmenter_ctor);
@@ -30152,11 +30159,7 @@ impl<'gc> VM<'gc> {
         saved
     }
 
-    fn restore_temporary_bindings(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        saved: Vec<(String, Option<Value<'gc>>, Option<Value<'gc>>)>,
-    ) {
+    fn restore_temporary_bindings(&mut self, ctx: &GcContext<'gc>, saved: Vec<(String, Option<Value<'gc>>, Option<Value<'gc>>)>) {
         let mut gt = self.global_this.borrow_mut(ctx);
         for (name, prev_global, prev_global_this) in saved {
             match prev_global {
@@ -30357,22 +30360,14 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn function_apply_arg_list(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        arg_array: Option<&Value<'gc>>,
-    ) -> Option<Vec<Value<'gc>>> {
+    fn function_apply_arg_list(&mut self, ctx: &GcContext<'gc>, arg_array: Option<&Value<'gc>>) -> Option<Vec<Value<'gc>>> {
         let Some(arg_array) = arg_array else {
             return Some(Vec::new());
         };
         if matches!(arg_array, Value::Undefined | Value::Null) {
             return Some(Vec::new());
         }
-        if matches!(
-            arg_array,
-            Value::Number(_) | Value::Boolean(_) | Value::String(_)
-        ) || arg_array.is_symbol_value()
-        {
+        if matches!(arg_array, Value::Number(_) | Value::Boolean(_) | Value::String(_)) || arg_array.is_symbol_value() {
             self.throw_type_error(ctx, "CreateListFromArrayLike called on non-object");
             return None;
         }
@@ -33082,6 +33077,40 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmObject(map) => {
+                let (realm_id, needs_child_construct) = {
+                    let borrow = map.borrow();
+                    let realm_id = match borrow.get("__realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
+                    let needs_child_construct = borrow.contains_key("__proxy_target__")
+                        || borrow.contains_key("__bound_target__")
+                        || borrow.contains_key("__host_fn__")
+                        || borrow.contains_key("__native_id__")
+                        || borrow.contains_key("__fn_body__");
+                    (realm_id, needs_child_construct)
+                };
+                if let Some(realm_id) = realm_id
+                    && needs_child_construct
+                    && realm_id < self.child_realms.len()
+                    && let Some(mut child) = self.child_realms[realm_id].take()
+                {
+                    self.sync_runtime_to_child(&mut child);
+                    let local_target = child.localize_cross_realm_callable(target, realm_id);
+                    let local_new_target = new_target.map(|nt| child.localize_cross_realm_callable(nt, realm_id));
+                    let result = match child.construct_value(ctx, &local_target, args, local_new_target.as_ref()) {
+                        Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
+                        Err(err) => {
+                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[realm_id] = Some(child);
+                            return Err(js_err);
+                        }
+                    };
+                    self.sync_runtime_from_child(&child);
+                    self.child_realms[realm_id] = Some(child);
+                    return Ok(result);
+                }
                 if map.borrow().contains_key("__proxy_target__") {
                     let (proxy_target, handler, revoked) = {
                         let borrow = map.borrow();
@@ -34058,6 +34087,34 @@ impl<'gc> VM<'gc> {
         if child.runtime_brand_counter > self.runtime_brand_counter {
             self.runtime_brand_counter = child.runtime_brand_counter;
         }
+    }
+
+    fn read_cross_realm_named_property(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        obj: &Value<'gc>,
+        key: &str,
+        realm_id: usize,
+    ) -> Option<Value<'gc>> {
+        if realm_id >= self.child_realms.len() {
+            return None;
+        }
+        let mut child = self.child_realms.get_mut(realm_id).and_then(Option::take)?;
+        self.sync_runtime_to_child(&mut child);
+        let result = child.read_named_property(ctx, obj, key);
+        if let Some(thrown) = child.pending_throw.take() {
+            self.sync_runtime_from_child(&child);
+            self.child_realms[realm_id] = Some(child);
+            self.pending_throw = Some(thrown);
+            return Some(Value::Undefined);
+        }
+        let remapped = match result {
+            Value::VmNativeFunction(id) => Value::VmObject(self.get_cross_realm_native_fn_props(ctx, &mut child, id, realm_id)),
+            other => self.register_cross_realm_fn(ctx, &mut child, other, realm_id),
+        };
+        self.sync_runtime_from_child(&child);
+        self.child_realms[realm_id] = Some(child);
+        Some(remapped)
     }
 
     fn register_cross_realm_fn(&mut self, ctx: &GcContext<'gc>, child: &mut VM<'gc>, value: Value<'gc>, realm_id: usize) -> Value<'gc> {

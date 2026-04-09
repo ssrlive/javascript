@@ -383,6 +383,31 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_stringify_uses_property_order_snapshot() {
+        let script = r#"
+            const obj = { p1: "p1", p2: "p2", p3: "p3" };
+            Object.defineProperty(obj, "add", {
+              enumerable: true,
+              get() {
+                obj.extra = "extra";
+                return "add";
+              }
+            });
+            obj.p4 = "p4";
+            obj[2] = "2";
+            obj[0] = "0";
+            obj[1] = "1";
+            delete obj.p1;
+            delete obj.p3;
+            obj.p1 = "p1";
+            JSON.stringify(obj)
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let inner: String = serde_json::from_str(&result).unwrap();
+        assert_eq!(inner, r#"{"0":"0","1":"1","2":"2","p2":"p2","add":"add","p4":"p4","p1":"p1"}"#);
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr.push(2); arr.length";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

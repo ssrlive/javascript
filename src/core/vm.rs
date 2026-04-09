@@ -20229,7 +20229,13 @@ impl<'gc> VM<'gc> {
                     Some(gap) => gap,
                     None => return Value::Undefined,
                 };
-                let s = args.first().map(|v| self.json_stringify_with_gap(v, &gap, "")).unwrap_or_default();
+                let s = args
+                    .first()
+                    .map(|v| self.json_stringify_with_gap(ctx, v, &gap, ""))
+                    .unwrap_or_default();
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 Value::from(&s)
             }
             BUILTIN_JSON_PARSE => {
@@ -34307,7 +34313,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// JSON.stringify helper
-    fn json_stringify(&self, val: &Value<'gc>) -> String {
+    fn json_stringify(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
         match val {
             Value::Number(n) => {
                 if n.is_nan() || n.is_infinite() {
@@ -34333,9 +34339,9 @@ impl<'gc> VM<'gc> {
                     let idx_key = i.to_string();
                     let deleted_key = format!("__deleted_{}", i);
                     let part = if let Some(v) = borrow.props.get(&idx_key) {
-                        self.json_stringify(v)
+                        self.json_stringify(ctx, v)
                     } else if i < borrow.elements.len() && !borrow.props.contains_key(&deleted_key) {
-                        self.json_stringify(&borrow.elements[i])
+                        self.json_stringify(ctx, &borrow.elements[i])
                     } else {
                         "null".to_string()
                     };
@@ -34343,22 +34349,32 @@ impl<'gc> VM<'gc> {
                 }
                 format!("[{}]", parts.join(","))
             }
-            Value::VmObject(map) => {
-                let m = map.borrow();
-                let parts: Vec<String> = m
-                    .iter()
-                    .filter(|(k, _)| !k.starts_with("__") && !k.starts_with("@@sym:"))
-                    .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), self.json_stringify(v)))
-                    .collect();
+            Value::VmObject(_) => {
+                let keys = self.collect_enumerable_own_keys(ctx, val);
+                if self.pending_throw.is_some() {
+                    return String::new();
+                }
+                let mut parts = Vec::new();
+                for key in keys {
+                    let value = self.read_named_property(ctx, val, &key);
+                    if self.pending_throw.is_some() {
+                        return String::new();
+                    }
+                    parts.push(format!(
+                        "{}:{}",
+                        self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(&key)),
+                        self.json_stringify(ctx, &value)
+                    ));
+                }
                 format!("{{{}}}", parts.join(","))
             }
             _ => "null".to_string(),
         }
     }
 
-    fn json_stringify_with_gap(&self, val: &Value<'gc>, gap: &str, indent: &str) -> String {
+    fn json_stringify_with_gap(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, gap: &str, indent: &str) -> String {
         if gap.is_empty() {
-            return self.json_stringify(val);
+            return self.json_stringify(ctx, val);
         }
 
         match val {
@@ -34378,9 +34394,9 @@ impl<'gc> VM<'gc> {
                     let idx_key = i.to_string();
                     let deleted_key = format!("__deleted_{}", i);
                     let part = if let Some(v) = borrow.props.get(&idx_key) {
-                        self.json_stringify_with_gap(v, gap, &next_indent)
+                        self.json_stringify_with_gap(ctx, v, gap, &next_indent)
                     } else if i < borrow.elements.len() && !borrow.props.contains_key(&deleted_key) {
-                        self.json_stringify_with_gap(&borrow.elements[i], gap, &next_indent)
+                        self.json_stringify_with_gap(ctx, &borrow.elements[i], gap, &next_indent)
                     } else {
                         "null".to_string()
                     };
@@ -34388,26 +34404,30 @@ impl<'gc> VM<'gc> {
                 }
                 format!("[\n{}\n{}]", parts.join(",\n"), indent)
             }
-            Value::VmObject(map) => {
-                let m = map.borrow();
+            Value::VmObject(_) => {
+                let keys = self.collect_enumerable_own_keys(ctx, val);
+                if self.pending_throw.is_some() {
+                    return String::new();
+                }
                 let next_indent = format!("{indent}{gap}");
-                let parts: Vec<String> = m
-                    .iter()
-                    .filter(|(k, _)| !k.starts_with("__") && !k.starts_with("@@sym:"))
-                    .map(|(k, v)| {
-                        format!(
-                            "{next_indent}{}: {}",
-                            self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(k)),
-                            self.json_stringify_with_gap(v, gap, &next_indent)
-                        )
-                    })
-                    .collect();
+                let mut parts = Vec::new();
+                for key in keys {
+                    let value = self.read_named_property(ctx, val, &key);
+                    if self.pending_throw.is_some() {
+                        return String::new();
+                    }
+                    parts.push(format!(
+                        "{next_indent}{}: {}",
+                        self.json_stringify_string_units(&crate::unicode::utf8_to_utf16(&key)),
+                        self.json_stringify_with_gap(ctx, &value, gap, &next_indent)
+                    ));
+                }
                 if parts.is_empty() {
                     return "{}".to_string();
                 }
                 format!("{{\n{}\n{}}}", parts.join(",\n"), indent)
             }
-            _ => self.json_stringify(val),
+            _ => self.json_stringify(ctx, val),
         }
     }
 

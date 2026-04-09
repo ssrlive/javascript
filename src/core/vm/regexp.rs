@@ -553,6 +553,29 @@ impl<'gc> VM<'gc> {
         Self::insert_species_getter(&mut regexp_ctor, ctx);
         let regexp_ctor_val = Self::finalize_ctor_with_prototype(ctx, regexp_ctor, regexp_proto_obj);
         self.globals.insert("RegExp".to_string(), regexp_ctor_val);
+
+        // Create %RegExpStringIteratorPrototype%
+        // Prototype chain: RegExpStringIteratorPrototype → %IteratorPrototype% → Object.prototype
+        let mut iter_proto = IndexMap::new();
+        // Set __proto__ to %IteratorPrototype%
+        if let Some(iter_proto_val) = self.globals.get("__IteratorPrototype__").cloned() {
+            iter_proto.insert("__proto__".to_string(), iter_proto_val);
+        } else if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+        {
+            iter_proto.insert("__proto__".to_string(), obj_proto);
+        }
+        // next method
+        iter_proto.insert("next".to_string(), Self::make_native_fn(ctx, BUILTIN_ITERATOR_NEXT, "next", 0.0));
+        // Symbol.toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
+        iter_proto.insert("@@sym:4".to_string(), Value::from("RegExp String Iterator"));
+        iter_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        iter_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        iter_proto.insert("__configurable_@@sym:4__".to_string(), Value::Boolean(true));
+        // Mark next as non-enumerable, writable, configurable
+        iter_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        let iter_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iter_proto));
+        self.globals.insert("RegExpStringIteratorPrototype".to_string(), iter_proto_val);
     }
 
     /// Set `__regexp_home_proto__` on each getter function in the given prototype
@@ -973,6 +996,20 @@ impl<'gc> VM<'gc> {
         let full_unicode = flags.contains('u') || flags.contains('v');
         let functional_replace = self.is_value_callable(replace_value);
 
+        // Step 7: If functionalReplace is false, let replaceValue be ? ToString(replaceValue).
+        let replace_str_owned: Option<String> = if !functional_replace {
+            let rv_str = match self.vm_to_string_like_spec(ctx, replace_value) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.set_pending_throw_from_error(&e);
+                    return Value::Undefined;
+                }
+            };
+            Some(rv_str)
+        } else {
+            None
+        };
+
         if global {
             if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
                 self.set_pending_throw_from_error(&e);
@@ -1139,11 +1176,8 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
             } else {
-                let replace_str = self.vm_to_string(ctx, replace_value);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                replacement = self.get_substitution(&matched, s, position, &captures, &named_captures, &replace_str);
+                let replace_str = replace_str_owned.as_ref().unwrap();
+                replacement = self.get_substitution(&matched, s, position, &captures, &named_captures, replace_str);
             }
 
             if position >= next_source_position {
@@ -1288,8 +1322,23 @@ impl<'gc> VM<'gc> {
             format!("{}y", flags)
         };
 
-        // Create a splitter regexp (spec says use SpeciesConstructor, we create a new one)
-        let splitter = self.regexp_construct_internal(ctx, rx, &new_flags);
+        // Step 5: Let C be ? SpeciesConstructor(rx, %RegExp%).
+        let regexp_ctor = self.globals.get("RegExp").cloned().unwrap_or(Value::Undefined);
+        let c = self.species_constructor(ctx, rx, &regexp_ctor);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // Step 6: Let splitter be ? Construct(C, « rx, newFlags »).
+        let rx_arg = rx.clone();
+        let flags_arg = Value::from(&*new_flags);
+        let splitter = match self.construct_value(ctx, &c, &[rx_arg, flags_arg], None) {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return Value::Undefined;
+            }
+        };
         if self.pending_throw.is_some() {
             return Value::Undefined;
         }
@@ -1298,13 +1347,21 @@ impl<'gc> VM<'gc> {
         let lim = match limit {
             Value::Undefined => 0xFFFFFFFFu32,
             v => {
-                // ToUint32(limit) — goes through ToPrimitive→ToNumber for objects
+                // ToUint32(limit): ToPrimitive→ToNumber, then modulo 2^32
                 let prim = self.try_to_primitive(ctx, v, "number");
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
                 let n = to_number(&prim);
-                if n.is_nan() || n == 0.0 { 0u32 } else { n as u32 }
+                if n.is_nan() || n.is_infinite() || n == 0.0 {
+                    0u32
+                } else {
+                    // ToUint32: sign(n)*floor(abs(n)) modulo 2^32
+                    let int_val = n.signum() * n.abs().floor();
+                    let modulo = int_val % 4294967296.0;
+                    let result = if modulo < 0.0 { modulo + 4294967296.0 } else { modulo };
+                    result as u32
+                }
             }
         };
 
@@ -1442,8 +1499,23 @@ impl<'gc> VM<'gc> {
         let global = flags.contains('g');
         let full_unicode = flags.contains('u') || flags.contains('v');
 
-        // Create a copy of the regexp for iteration
-        let matcher = self.regexp_construct_internal(ctx, rx, &flags);
+        // Step 3: Let C be ? SpeciesConstructor(rx, %RegExp%).
+        let regexp_ctor = self.globals.get("RegExp").cloned().unwrap_or(Value::Undefined);
+        let c = self.species_constructor(ctx, rx, &regexp_ctor);
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+
+        // Step 4: Let matcher be ? Construct(C, « rx, flags »).
+        let rx_arg = rx.clone();
+        let flags_arg = Value::from(&*flags);
+        let matcher = match self.construct_value(ctx, &c, &[rx_arg, flags_arg], None) {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return Value::Undefined;
+            }
+        };
         if self.pending_throw.is_some() {
             return Value::Undefined;
         }
@@ -1484,33 +1556,147 @@ impl<'gc> VM<'gc> {
         }
 
         // Set prototype
-        if let Some(Value::VmObject(regexp_str_iter_proto)) = self.globals.get("RegExpStringIteratorPrototype") {
-            iter_obj
-                .borrow_mut(ctx)
-                .insert("__proto__".to_string(), Value::VmObject(*regexp_str_iter_proto));
+        if let Some(proto) = self.globals.get("RegExpStringIteratorPrototype").cloned() {
+            iter_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
         }
 
         Value::VmObject(iter_obj)
     }
 
-    /// Create a new RegExp from an existing RegExp-like object, copying its
-    /// pattern/flags.  Used by @@split and @@matchAll to create a "splitter" /
-    /// "matcher" copy.
-    fn regexp_construct_internal(&mut self, ctx: &GcContext<'gc>, source_rx: &Value<'gc>, new_flags: &str) -> Value<'gc> {
-        // Get the source pattern from the existing regexp
-        let source_val = self.read_named_property(ctx, source_rx, "source");
+    /// %RegExpStringIteratorPrototype%.next() — ES2024 §22.2.9.1
+    pub(super) fn regexp_string_iterator_next(&mut self, ctx: &GcContext<'gc>, obj: &VmObjectHandle<'gc>) -> Value<'gc> {
+        // Read internal slots
+        let (done, global, full_unicode, regexp, string_val) = {
+            let borrow = obj.borrow();
+            let done = matches!(borrow.get("__iter_done__"), Some(Value::Boolean(true)));
+            let global = matches!(borrow.get("__iter_global__"), Some(Value::Boolean(true)));
+            let full_unicode = matches!(borrow.get("__iter_unicode__"), Some(Value::Boolean(true)));
+            let regexp = borrow.get("__iter_regexp__").cloned().unwrap_or(Value::Undefined);
+            let string_val = borrow.get("__iter_string__").cloned().unwrap_or(Value::Undefined);
+            (done, global, full_unicode, regexp, string_val)
+        };
+
+        // Step 4: If done is true, return CreateIterResultObject(undefined, true)
+        if done {
+            return self.create_iter_result(ctx, Value::Undefined, true);
+        }
+
+        // Step 9: Let match be ? RegExpExec(R, S)
+        let s = self.vm_to_string(ctx, &string_val);
         if self.pending_throw.is_some() {
             return Value::Undefined;
         }
-        let source_str = self.vm_to_string(ctx, &source_val);
+        let match_val = self.regexp_abstract_exec(ctx, &regexp, &s);
         if self.pending_throw.is_some() {
             return Value::Undefined;
         }
 
-        // Construct a new RegExp directly via the builtin constructor
-        let source_arg = Value::from(&source_str);
-        let flags_arg = Value::from(new_flags);
-        self.regexp_call_builtin(ctx, &[source_arg, flags_arg])
+        // Step 10: If match is null
+        if matches!(match_val, Value::Null) {
+            obj.borrow_mut(ctx).insert("__iter_done__".to_string(), Value::Boolean(true));
+            return self.create_iter_result(ctx, Value::Undefined, true);
+        }
+
+        // Step 11: Else
+        if global {
+            // Step 11a: global mode
+            // i. Let matchStr be ? ToString(? Get(match, "0"))
+            let match_str_val = self.read_named_property(ctx, &match_val, "0");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            let match_str = self.vm_to_string(ctx, &match_str_val);
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+
+            // ii. If matchStr is the empty String, advance lastIndex
+            if match_str.is_empty() {
+                let this_index_val = self.read_named_property(ctx, &regexp, "lastIndex");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let prim = self.try_to_primitive(ctx, &this_index_val, "number");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let n = to_number(&prim);
+                let this_index = if n.is_nan() || n <= 0.0 {
+                    0usize
+                } else {
+                    n.min(9007199254740991.0) as usize
+                };
+                let next_index = if full_unicode {
+                    self.advance_string_index_unicode(&s, this_index)
+                } else {
+                    this_index + 1
+                };
+                if let Err(e) = self.assign_named_property(ctx, &regexp, "lastIndex", &Value::Number(next_index as f64), None) {
+                    self.set_pending_throw_from_error(&e);
+                }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+            // iii. Return CreateIterResultObject(match, false)
+            self.create_iter_result(ctx, match_val, false)
+        } else {
+            // Step 11b: non-global mode
+            // i. Set O.[[Done]] to true
+            obj.borrow_mut(ctx).insert("__iter_done__".to_string(), Value::Boolean(true));
+            // ii. Return CreateIterResultObject(match, false)
+            self.create_iter_result(ctx, match_val, false)
+        }
+    }
+
+    /// CreateIterResultObject helper
+    fn create_iter_result(&mut self, ctx: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Value<'gc> {
+        let mut result = IndexMap::new();
+        result.insert("value".to_string(), value);
+        result.insert("done".to_string(), Value::Boolean(done));
+        Value::VmObject(new_gc_cell_ptr(ctx, result))
+    }
+
+    /// Create a new RegExp from an existing RegExp-like object, copying its
+    /// pattern/flags.  Used by @@split and @@matchAll to create a "splitter" /
+    /// "matcher" copy.
+    /// SpeciesConstructor(O, defaultConstructor) — ES2024 §7.3.20
+    /// Returns the species constructor or the default constructor.
+    /// Used by @@split and @@matchAll to create the splitter/matcher copy.
+    fn species_constructor(&mut self, ctx: &GcContext<'gc>, o: &Value<'gc>, default_ctor: &Value<'gc>) -> Value<'gc> {
+        // 1. Let C be ? Get(O, "constructor").
+        let c = self.read_named_property(ctx, o, "constructor");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        // 2. If C is undefined, return defaultConstructor.
+        if matches!(c, Value::Undefined) {
+            return default_ctor.clone();
+        }
+        // 3. If Type(C) is not Object, throw a TypeError.
+        if !matches!(
+            c,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) {
+            self.throw_type_error(ctx, "Species constructor is not an Object");
+            return Value::Undefined;
+        }
+        // 4. Let S be ? Get(C, @@species).
+        let s = self.read_named_property(ctx, &c, "@@sym:5");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        // 5. If S is undefined or null, return defaultConstructor.
+        if matches!(s, Value::Undefined | Value::Null) {
+            return default_ctor.clone();
+        }
+        // 6. If IsConstructor(S), return S.
+        if self.is_value_callable(&s) {
+            return s;
+        }
+        // 7. Throw a TypeError exception.
+        self.throw_type_error(ctx, "Species constructor is not a constructor");
+        Value::Undefined
     }
 
     /// Helper: Read a named property given a &str key (avoids converting to index).

@@ -29452,6 +29452,14 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
 
+        // RegExpStringIterator next()
+        if let Value::VmObject(obj) = receiver
+            && id == BUILTIN_ITERATOR_NEXT
+            && obj.borrow().contains_key("__iter_regexp__")
+        {
+            return self.regexp_string_iterator_next(ctx, obj);
+        }
+
         // Iterator next() on VmObject with __iter_target__ (live) or __items__ (snapshot)
         if let Value::VmObject(obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT

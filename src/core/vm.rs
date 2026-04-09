@@ -12595,6 +12595,10 @@ impl<'gc> VM<'gc> {
 
         let mut props = IndexMap::new();
         props.insert("__native_id__".to_string(), Value::Number(id as f64));
+        // Preserve constructor/non-constructor semantics from VmNativeFunction
+        if !self.is_constructor_value(&Value::VmNativeFunction(id)) {
+            props.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        }
         Self::insert_property_with_attributes(
             &mut props,
             "length",

@@ -400,6 +400,7 @@ impl<'gc> VM<'gc> {
                     borrow.insert("__date_ms__".to_string(), Value::Number(ms));
                     return Some(receiver.clone());
                 }
+                return Some(self.call_builtin(ctx, id, args));
             }
             _ => {}
         }

@@ -257,6 +257,22 @@ mod function_tests {
     }
 
     #[test]
+    fn test_bound_native_constructor_targets_call_like_functions() {
+        let script = r#"
+            Number.bind(null)(42) === 42 &&
+            String.bind(null)("hello") === "hello" &&
+            Boolean.bind(null)(true) === true &&
+            Object.bind(null)(42) == 42 &&
+            Array.bind(null)(3).length === 3 &&
+            typeof Date.bind(null)(0, 0, 0) === "string" &&
+            typeof Function.prototype.call.call(Date, null, 0, 0, 0) === "string" &&
+            typeof Function.prototype.apply.call(Date, null, [0, 0, 0]) === "string"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

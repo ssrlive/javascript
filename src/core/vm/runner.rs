@@ -990,70 +990,13 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
 
-                    let result = match bound_target {
-                        Value::VmFunction(ip, _) => {
-                            if self.chunk.async_function_ips.contains(&ip) && !self.chunk.generator_function_ips.contains(&ip) {
-                                self.this_stack.push(bound_this.clone());
-                                let saved_try_stack = std::mem::take(&mut self.try_stack);
-                                let call_result = self.call_vm_function_result(ctx, ip, &final_args, None, &[]);
-                                self.try_stack = saved_try_stack;
-                                self.this_stack.pop();
-                                match call_result {
-                                    Ok(value) => self.call_builtin(ctx, BUILTIN_PROMISE_RESOLVE, std::slice::from_ref(&value)),
-                                    Err(err) => {
-                                        let reject_val = self.vm_value_from_error(ctx, &err);
-                                        self.call_host_fn(ctx, "promise.reject", None, std::slice::from_ref(&reject_val))
-                                    }
-                                }
-                            } else {
-                                self.this_stack.push(bound_this.clone());
-                                let call_result = self.call_vm_function_result(ctx, ip, &final_args, None, &[]);
-                                self.this_stack.pop();
-                                match call_result {
-                                    Ok(r) => r,
-                                    Err(err) => {
-                                        let thrown = self.vm_value_from_error(ctx, &err);
-                                        self.handle_throw(ctx, &thrown)?;
-                                        return Ok(OpcodeAction::Continue);
-                                    }
-                                }
-                            }
+                    let result = match self.vm_call_function_value(ctx, &bound_target, &bound_this, &final_args) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            let thrown = self.vm_value_from_error(ctx, &err);
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
                         }
-                        Value::VmClosure(ip, _, ups) => {
-                            if self.chunk.async_function_ips.contains(&ip) && !self.chunk.generator_function_ips.contains(&ip) {
-                                self.this_stack.push(bound_this.clone());
-                                let saved_try_stack = std::mem::take(&mut self.try_stack);
-                                let call_result = self.call_vm_function_result(ctx, ip, &final_args, None, &ups);
-                                self.try_stack = saved_try_stack;
-                                self.this_stack.pop();
-                                match call_result {
-                                    Ok(value) => self.call_builtin(ctx, BUILTIN_PROMISE_RESOLVE, std::slice::from_ref(&value)),
-                                    Err(err) => {
-                                        let reject_val = self.vm_value_from_error(ctx, &err);
-                                        self.call_host_fn(ctx, "promise.reject", None, std::slice::from_ref(&reject_val))
-                                    }
-                                }
-                            } else {
-                                self.this_stack.push(bound_this.clone());
-                                let call_result = self.call_vm_function_result(ctx, ip, &final_args, None, &ups);
-                                self.this_stack.pop();
-                                match call_result {
-                                    Ok(r) => r,
-                                    Err(err) => {
-                                        let thrown = self.vm_value_from_error(ctx, &err);
-                                        self.handle_throw(ctx, &thrown)?;
-                                        return Ok(OpcodeAction::Continue);
-                                    }
-                                }
-                            }
-                        }
-                        Value::VmNativeFunction(id) => {
-                            self.this_stack.push(bound_this.clone());
-                            let r = self.call_method_builtin(ctx, id, &bound_this, &final_args);
-                            self.this_stack.pop();
-                            r
-                        }
-                        _ => Value::Undefined,
                     };
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {

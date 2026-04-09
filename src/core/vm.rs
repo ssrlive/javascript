@@ -837,6 +837,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.new_target_stack.trace(cc);
         self.fn_props.trace(cc);
         self.native_fn_props.trace(cc);
+        self.cross_realm_native_fn_props.trace(cc);
         self.fn_home_objects.trace(cc);
         self.global_this.trace(cc);
         self.symbol_registry.trace(cc);
@@ -904,6 +905,8 @@ pub struct VM<'gc> {
     fn_realm: HashMap<usize, usize>,
     // Property storage for VmNativeFunction values, keyed by builtin id
     native_fn_props: HashMap<FunctionID, VmObjectHandle<'gc>>,
+    // Parent-side wrappers for child-realm native functions, keyed by (realm_id, builtin id).
+    cross_realm_native_fn_props: HashMap<(usize, FunctionID), VmObjectHandle<'gc>>,
     // Method home objects keyed by function IP, used to resolve `super` correctly.
     fn_home_objects: HashMap<usize, Value<'gc>>,
     // Global this object — top-level `this` refers to this; SetProperty on it writes to globals
@@ -1268,6 +1271,7 @@ impl<'gc> VM<'gc> {
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
             native_fn_props: HashMap::new(),
+            cross_realm_native_fn_props: HashMap::new(),
             fn_home_objects: HashMap::new(),
             global_this,
             symbol_counter: 0,
@@ -12545,6 +12549,25 @@ impl<'gc> VM<'gc> {
 
         let props_rc = new_gc_cell_ptr(ctx, props);
         self.native_fn_props.insert(id, props_rc);
+        props_rc
+    }
+
+    fn get_cross_realm_native_fn_props(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        child: &mut VM<'gc>,
+        id: FunctionID,
+        realm_id: usize,
+    ) -> VmObjectHandle<'gc> {
+        if let Some(existing) = self.cross_realm_native_fn_props.get(&(realm_id, id)) {
+            return *existing;
+        }
+
+        let mut props = child.get_native_fn_props(ctx, id).borrow().clone();
+        props.insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
+        props.insert("__origin_global__".to_string(), Value::VmObject(child.global_this));
+        let props_rc = new_gc_cell_ptr(ctx, props);
+        self.cross_realm_native_fn_props.insert((realm_id, id), props_rc);
         props_rc
     }
 
@@ -24164,26 +24187,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             BUILTIN_CTOR_FUNCTION => {
-                let mut out = self.call_builtin(ctx, id, args);
-                if let Value::VmObject(recv_obj) = receiver
-                    && let Value::VmObject(out_obj) = &mut out
-                {
-                    let recv_borrow = recv_obj.borrow();
-                    let recv_proto = recv_borrow.get("__proto__").cloned();
-                    let recv_realm_id = recv_borrow.get("__realm_id__").cloned();
-                    drop(recv_borrow);
-                    let mut out_borrow = out_obj.borrow_mut(ctx);
-                    if let Some(proto) = recv_proto {
-                        out_borrow.insert("__proto__".to_string(), proto);
-                    }
-                    if let Some(realm_id) = recv_realm_id {
-                        out_borrow.insert("__realm_id__".to_string(), realm_id);
-                    }
-                    if let Some(origin_global) = self.constructor_origin_global(ctx, receiver) {
-                        out_borrow.insert("__origin_global".to_string(), origin_global);
-                    }
-                }
-                return out;
+                return self.call_builtin(ctx, id, args);
             }
             BUILTIN_CTOR_NUMBER => {
                 if let Value::VmObject(obj) = receiver {
@@ -34119,6 +34123,15 @@ impl<'gc> VM<'gc> {
                     .props
                     .insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
                 Value::VmArray(arr)
+            }
+            Value::VmNativeFunction(id) => {
+                if let Some(mut child) = self.child_realms.get_mut(realm_id).and_then(Option::take) {
+                    let props = self.get_cross_realm_native_fn_props(ctx, &mut child, id, realm_id);
+                    self.child_realms[realm_id] = Some(child);
+                    Value::VmObject(props)
+                } else {
+                    Value::VmNativeFunction(id)
+                }
             }
             _ => value,
         }

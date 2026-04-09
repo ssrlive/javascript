@@ -213,6 +213,32 @@ mod function_tests {
     }
 
     #[test]
+    fn test_cross_realm_function_apply_uses_foreign_type_errors() {
+        let script = r#"
+            let other = __createRealm__().global;
+            let otherApply = other.Function.prototype.apply;
+            let otherFn = other.Function();
+            let protoOk = otherFn.__proto__ === other.Function.prototype;
+            let callWorks = otherApply.call(otherFn, null, []) === undefined;
+            let thisNotCallable = false;
+            let badArgArray = false;
+            try {
+                otherApply.call(undefined, {}, []);
+            } catch (e) {
+                thisNotCallable = e.constructor === other.TypeError && e.constructor !== TypeError;
+            }
+            try {
+                otherFn.apply(null, true);
+            } catch (e) {
+                badArgArray = e.constructor === other.TypeError && e.constructor !== TypeError;
+            }
+            otherApply !== Function.prototype.apply && protoOk && callWorks && thisNotCallable && badArgArray
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_function_call_and_bind_require_callable_receiver() {
         let script = r#"
             let callThrows = false;

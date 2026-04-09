@@ -3929,6 +3929,12 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let borrow = map.borrow();
+                if matches!(borrow.get("__realm_id__"), Some(Value::Number(_))) {
+                    drop(borrow);
+                    let result = self.read_named_property(ctx, &obj, &key);
+                    self.stack.push(result);
+                    return Ok(OpcodeAction::Continue);
+                }
                 // Check for getter first
                 let getter_key = format!("__get_{}", key);
                 if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = borrow.get(&getter_key) {
@@ -4484,9 +4490,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         let proto = lookup("__proto__");
                         match key.as_str() {
-                            "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                            "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                            "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                            "call" | "apply" | "bind" => self.read_named_property(ctx, &obj, &key),
                             "caller" | "arguments" => {
                                 // %ThrowTypeError% accessor on Function.prototype
                                 let err = self.make_type_error_object(
@@ -6333,177 +6337,7 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         let method = match &obj {
-            Value::VmObject(map) => {
-                let borrow = map.borrow();
-                let getter_key = format!("__get_{}", key);
-                if let Some(getter_fn) = borrow.get(&getter_key).cloned() {
-                    drop(borrow);
-                    self.invoke_getter_with_receiver(ctx, &getter_fn, &obj)
-                } else if let Some(v) = borrow.get(&key).cloned() {
-                    match v {
-                        Value::Property { getter: Some(g), .. } => {
-                            drop(borrow);
-                            self.invoke_getter_with_receiver(ctx, &g, &obj)
-                        }
-                        other => other,
-                    }
-                } else {
-                    let is_callable_obj = borrow.contains_key("__host_fn__")
-                        || borrow.contains_key("__bound_target__")
-                        || borrow.contains_key("__fn_body__")
-                        || borrow.contains_key("__native_id__");
-                    if is_callable_obj {
-                        match key.as_str() {
-                            "call" => {
-                                drop(borrow);
-                                self.stack.push(Value::VmNativeFunction(BUILTIN_FN_CALL));
-                                return Ok(OpcodeAction::Continue);
-                            }
-                            "apply" => {
-                                drop(borrow);
-                                self.stack.push(Value::VmNativeFunction(BUILTIN_FN_APPLY));
-                                return Ok(OpcodeAction::Continue);
-                            }
-                            "bind" => {
-                                drop(borrow);
-                                self.stack.push(Value::VmNativeFunction(BUILTIN_FN_BIND));
-                                return Ok(OpcodeAction::Continue);
-                            }
-                            _ => {}
-                        }
-                    }
-                    // Check WeakRef
-                    let is_weakref = borrow.contains_key("__weakref__");
-                    // Check typed wrapper methods first
-                    let type_name = borrow.get("__type__").map(|v| value_to_string(v));
-                    let mut proto = borrow.get("__proto__").cloned();
-                    drop(borrow);
-                    if proto.is_none()
-                        && let Some(type_name) = type_name.as_deref()
-                        && let Some(Value::VmObject(ctor)) = self.globals.get(type_name)
-                        && let Some(type_proto) = ctor.borrow().get("prototype").cloned()
-                    {
-                        proto = Some(type_proto);
-                    }
-                    if matches!(type_name.as_deref(), Some("Boolean"))
-                        && let Some(Value::VmObject(boolean_ctor)) = self.globals.get("Boolean")
-                        && let Some(bool_proto) = boolean_ctor.borrow().get("prototype").cloned()
-                    {
-                        proto = Some(bool_proto);
-                    }
-                    if matches!(type_name.as_deref(), Some("String"))
-                        && let Some(Value::VmObject(string_ctor)) = self.globals.get("String")
-                        && let Some(string_proto) = string_ctor.borrow().get("prototype").cloned()
-                    {
-                        proto = Some(string_proto);
-                    }
-                    if is_weakref && key == "deref" {
-                        Value::VmNativeFunction(BUILTIN_WEAKREF_DEREF)
-                    } else {
-                        let typed_result = match type_name.as_deref() {
-                            Some("Number") => match key.as_str() {
-                                "toFixed" | "toExponential" | "toPrecision" | "toString" | "toLocaleString" | "valueOf" | "constructor" => {
-                                    if let Some(Value::VmObject(num_ctor)) = self.globals.get("Number")
-                                        && let Some(Value::VmObject(num_proto)) = num_ctor.borrow().get("prototype").cloned()
-                                    {
-                                        num_proto.borrow().get(&key).cloned()
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            },
-                            Some("BigInt") => {
-                                // Check if BigInt.prototype has a getter override
-                                if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
-                                    && let Some(Value::VmObject(bi_proto)) = bi_ctor.borrow().get("prototype").cloned()
-                                {
-                                    let getter_key = format!("__get_{}", key);
-                                    let bp = bi_proto.borrow();
-                                    if bp.contains_key(&getter_key) || bp.contains_key(&key) {
-                                        drop(bp);
-                                        let val = self.read_named_property(ctx, &Value::VmObject(bi_proto), &key);
-                                        Some(val)
-                                    } else {
-                                        match key.as_str() {
-                                            "toString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING)),
-                                            "toLocaleString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING)),
-                                            "valueOf" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF)),
-                                            "constructor" => bp.get(&key).cloned(),
-                                            _ => None,
-                                        }
-                                    }
-                                } else {
-                                    match key.as_str() {
-                                        "toString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING)),
-                                        "toLocaleString" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING)),
-                                        "valueOf" => Some(Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF)),
-                                        _ => None,
-                                    }
-                                }
-                            }
-                            Some("String") => match key.as_str() {
-                                "toString" | "valueOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_VALUEOF)),
-                                "constructor" => self.globals.get("String").cloned(),
-                                "length" => {
-                                    let b = map.borrow();
-                                    match b.get("__value__") {
-                                        Some(Value::String(sv)) => Some(Value::Number(sv.len() as f64)),
-                                        _ => Some(Value::Number(0.0)),
-                                    }
-                                }
-                                "split" => Some(Value::VmNativeFunction(BUILTIN_STRING_SPLIT)),
-                                "indexOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_INDEXOF)),
-                                "slice" => Some(Value::VmNativeFunction(BUILTIN_STRING_SLICE)),
-                                "toUpperCase" => Some(Value::VmNativeFunction(BUILTIN_STRING_TOUPPERCASE)),
-                                "toLowerCase" => Some(Value::VmNativeFunction(BUILTIN_STRING_TOLOWERCASE)),
-                                "trim" => Some(Value::VmNativeFunction(BUILTIN_STRING_TRIM)),
-                                "charAt" => Some(Value::VmNativeFunction(BUILTIN_STRING_CHARAT)),
-                                "includes" => Some(Value::VmNativeFunction(BUILTIN_STRING_INCLUDES)),
-                                "replace" => Some(Value::VmNativeFunction(BUILTIN_STRING_REPLACE)),
-                                "replaceAll" => Some(Value::VmNativeFunction(BUILTIN_STRING_REPLACEALL)),
-                                "match" => Some(Value::VmNativeFunction(BUILTIN_STRING_MATCH)),
-                                "search" => Some(Value::VmNativeFunction(BUILTIN_STRING_SEARCH)),
-                                "startsWith" => Some(Value::VmNativeFunction(BUILTIN_STRING_STARTSWITH)),
-                                "endsWith" => Some(Value::VmNativeFunction(BUILTIN_STRING_ENDSWITH)),
-                                "substring" => Some(Value::VmNativeFunction(BUILTIN_STRING_SUBSTRING)),
-                                "padStart" => Some(Value::VmNativeFunction(BUILTIN_STRING_PADSTART)),
-                                "padEnd" => Some(Value::VmNativeFunction(BUILTIN_STRING_PADEND)),
-                                "repeat" => Some(Value::VmNativeFunction(BUILTIN_STRING_REPEAT)),
-                                "charCodeAt" => Some(Value::VmNativeFunction(BUILTIN_STRING_CHARCODEAT)),
-                                "trimStart" => Some(Value::VmNativeFunction(BUILTIN_STRING_TRIMSTART)),
-                                "trimEnd" => Some(Value::VmNativeFunction(BUILTIN_STRING_TRIMEND)),
-                                "lastIndexOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_LASTINDEXOF)),
-                                _ => None,
-                            },
-                            Some("Boolean") => {
-                                let effective_proto = proto.clone().or_else(|| {
-                                    if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
-                                        obj_global.borrow().get("prototype").cloned()
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if self.lookup_proto_chain(effective_proto.as_ref(), &key).is_none() {
-                                    match key.as_str() {
-                                        "toString" => Some(Self::make_host_fn(ctx, "boolean.toString")),
-                                        "valueOf" => Some(Self::make_host_fn(ctx, "boolean.valueOf")),
-                                        _ => None,
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            Some("RegExp") => match key.as_str() {
-                                "toString" => Some(Self::make_bound_host_fn(ctx, "regexp.toString", &obj)),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        typed_result.unwrap_or_else(|| self.read_named_property_with_receiver(ctx, &obj, &key, &obj))
-                    }
-                }
-            }
+            Value::VmObject(_) => self.read_named_property(ctx, &obj, &key),
             Value::VmArray(arr) => {
                 let borrow = arr.borrow();
                 let is_generator = matches!(borrow.props.get("__generator__"), Some(Value::Boolean(true)));
@@ -6624,9 +6458,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     let proto = lookup("__proto__");
                     match key.as_str() {
-                        "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                        "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                        "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
+                        "call" | "apply" | "bind" => self.read_named_property(ctx, &obj, &key),
                         _ => self.lookup_proto_chain(proto.as_ref(), &key).unwrap_or(Value::Undefined),
                     }
                 }

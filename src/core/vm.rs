@@ -3230,7 +3230,9 @@ impl<'gc> VM<'gc> {
         map.insert("__host_fn__".to_string(), Value::from(name));
         Self::insert_property_with_attributes(&mut map, "length", &Value::Number(length), false, false, true);
         Self::insert_property_with_attributes(&mut map, "name", &Value::from(display_name), false, false, true);
-        if !constructible {
+        if constructible {
+            map.insert("__constructible__".to_string(), Value::Boolean(true));
+        } else {
             map.insert("__non_constructor__".to_string(), Value::Boolean(true));
         }
         Value::VmObject(new_gc_cell_ptr(ctx, map))
@@ -7613,7 +7615,94 @@ impl<'gc> VM<'gc> {
             "global.encodeURI" | "global.encodeURIComponent" | "global.decodeURI" | "global.decodeURIComponent" => {
                 self.uri_handle_host_fn(ctx, name, args)
             }
+            "global.escape" | "global.unescape" => args.first().cloned().unwrap_or(Value::Undefined),
             "iterator.self" => receiver.unwrap_or(&Value::Undefined).clone(),
+            "iterator.from" => {
+                let source = args.first().cloned().unwrap_or(Value::Undefined);
+                let iter_fn = self.read_named_property(ctx, &source, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if self.is_value_callable(&iter_fn) {
+                    let iterator = match self.vm_call_function_value(ctx, &iter_fn, &source, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    if matches!(
+                        iterator,
+                        Value::VmObject(_)
+                            | Value::VmArray(_)
+                            | Value::VmFunction(..)
+                            | Value::VmClosure(..)
+                            | Value::VmNativeFunction(_)
+                            | Value::Function(_)
+                    ) {
+                        let next_fn = self.read_named_property(ctx, &iterator, "next");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if !self.is_value_callable(&next_fn) {
+                            let mut obj = IndexMap::new();
+                            obj.insert("__wrapped_iterator__".to_string(), iterator);
+                            if let Some(proto) = self.globals.get("__WrapForValidIteratorPrototype__").cloned() {
+                                obj.insert("__proto__".to_string(), proto);
+                            }
+                            return Value::VmObject(new_gc_cell_ptr(ctx, obj));
+                        }
+                    }
+                }
+                let values = self.call_host_fn(ctx, "global.__forOfValues", None, std::slice::from_ref(&source));
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if let Value::VmArray(arr) = values {
+                    self.make_iterator_helper(ctx, arr, 0)
+                } else {
+                    self.throw_type_error(ctx, "Iterator.from requires an iterable");
+                    Value::Undefined
+                }
+            }
+            "iterator.drop" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                let count_num = args.first().map(to_number).unwrap_or(0.0);
+                let count = if !count_num.is_finite() || count_num <= 0.0 {
+                    0
+                } else {
+                    count_num.trunc().min(usize::MAX as f64) as usize
+                };
+
+                if let Value::VmObject(obj) = &recv {
+                    let (items, base_index) = {
+                        let borrow = obj.borrow();
+                        let items = match borrow.get("__items__") {
+                            Some(Value::VmArray(arr)) => Some(*arr),
+                            _ => None,
+                        };
+                        let base_index = match borrow.get("__index__") {
+                            Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as usize,
+                            _ => 0,
+                        };
+                        (items, base_index)
+                    };
+                    if let Some(items) = items {
+                        return self.make_iterator_helper(ctx, items, base_index.saturating_add(count));
+                    }
+                }
+
+                let values = self.call_host_fn(ctx, "global.__forOfValues", None, std::slice::from_ref(&recv));
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if let Value::VmArray(arr) = values {
+                    self.make_iterator_helper(ctx, arr, count)
+                } else {
+                    self.throw_type_error(ctx, "Iterator.prototype.drop called on incompatible receiver");
+                    Value::Undefined
+                }
+            }
             "global.__getIterator" => {
                 let iterable = args.first().cloned().unwrap_or(Value::Undefined);
                 // Try [Symbol.iterator]() first
@@ -10869,6 +10958,28 @@ impl<'gc> VM<'gc> {
                 let recv = receiver.unwrap_or(&Value::Undefined);
                 self.call_method_builtin(ctx, BUILTIN_ITERATOR_NEXT, recv, args)
             }
+            "intl.segmenter.segment" => {
+                let mut obj = IndexMap::new();
+                if let Some(Value::VmObject(segmenter)) = receiver {
+                    let borrow = segmenter.borrow();
+                    if let Some(proto) = borrow.get("__segments_proto__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
+                        obj.insert("__segment_iter_proto__".to_string(), proto);
+                    }
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+            }
+            "intl.segments.iterator" => {
+                let mut obj = IndexMap::new();
+                if let Some(Value::VmObject(segments)) = receiver
+                    && let Some(proto) = segments.borrow().get("__segment_iter_proto__").cloned()
+                {
+                    obj.insert("__proto__".to_string(), proto);
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+            }
             "string.symbolIterator" => {
                 let source = match receiver {
                     Some(Value::String(s)) => Some(s.clone()),
@@ -12040,6 +12151,7 @@ impl<'gc> VM<'gc> {
             || name.starts_with("array.")
             || name.starts_with("arrayBuffer.")
             || name.starts_with("atomics.")
+            || name.starts_with("iterator.")
             || name.starts_with("string.")
             || name.starts_with("object.")
             || name.starts_with("symbol.")
@@ -14723,132 +14835,11 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        // Append eval code, adjusting constant indices and jump targets
-        let ec = &eval_chunk.code;
-        let mut pc = 0;
-        while pc < ec.len() {
-            let op_byte = ec[pc];
-            self.chunk.code.push(op_byte);
-            pc += 1;
-            match Opcode::try_from(op_byte) {
-                // Opcodes with u16 constant index
-                Ok(
-                    Opcode::Constant
-                    | Opcode::DefineGlobal
-                    | Opcode::DefineGlobalSoft
-                    | Opcode::DefineGlobalConst
-                    | Opcode::GetGlobal
-                    | Opcode::SetGlobal
-                    | Opcode::GetProperty
-                    | Opcode::SetProperty
-                    | Opcode::GetMethod
-                    | Opcode::SetSuperProperty
-                    | Opcode::SetSuperPropertyComputed
-                    | Opcode::GetSuperProperty
-                    | Opcode::TypeOfGlobal
-                    | Opcode::DeleteGlobal
-                    | Opcode::DeleteProperty
-                    | Opcode::InitProperty
-                    | Opcode::FreezeTemplate,
-                ) => {
-                    if pc + 1 < ec.len() {
-                        let idx = ec[pc] as u16 | ((ec[pc + 1] as u16) << 8);
-                        let new_idx = idx + const_offset as u16;
-                        self.chunk.code.push((new_idx & 0xff) as u8);
-                        self.chunk.code.push(((new_idx >> 8) & 0xff) as u8);
-                        pc += 2;
-                    }
-                }
-                // Opcodes with u32 absolute jump target
-                Ok(Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue) => {
-                    if pc + 3 < ec.len() {
-                        let target = ec[pc] as u32 | ((ec[pc + 1] as u32) << 8) | ((ec[pc + 2] as u32) << 16) | ((ec[pc + 3] as u32) << 24);
-                        let new_target = target + code_offset as u32;
-                        self.chunk.code.push((new_target & 0xff) as u8);
-                        self.chunk.code.push(((new_target >> 8) & 0xff) as u8);
-                        self.chunk.code.push(((new_target >> 16) & 0xff) as u8);
-                        self.chunk.code.push(((new_target >> 24) & 0xff) as u8);
-                        pc += 4;
-                    }
-                }
-                Ok(Opcode::SetupTry) => {
-                    if pc + 5 < ec.len() {
-                        let target = ec[pc] as u32 | ((ec[pc + 1] as u32) << 8) | ((ec[pc + 2] as u32) << 16) | ((ec[pc + 3] as u32) << 24);
-                        let new_target = target + code_offset as u32;
-                        self.chunk.code.push((new_target & 0xff) as u8);
-                        self.chunk.code.push(((new_target >> 8) & 0xff) as u8);
-                        self.chunk.code.push(((new_target >> 16) & 0xff) as u8);
-                        self.chunk.code.push(((new_target >> 24) & 0xff) as u8);
-
-                        let binding_idx = ec[pc + 4] as u16 | ((ec[pc + 5] as u16) << 8);
-                        let new_binding_idx = if binding_idx == 0xffff {
-                            binding_idx
-                        } else {
-                            binding_idx + const_offset as u16
-                        };
-                        self.chunk.code.push((new_binding_idx & 0xff) as u8);
-                        self.chunk.code.push(((new_binding_idx >> 8) & 0xff) as u8);
-                        pc += 6;
-                    }
-                }
-                // Call: 1 byte (possibly extended with u16)
-                Ok(Opcode::Call) => {
-                    if pc < ec.len() {
-                        let raw = ec[pc];
-                        self.chunk.code.push(raw);
-                        pc += 1;
-                        if (raw & 0x3f) == 0x3f && pc + 1 < ec.len() {
-                            self.chunk.code.push(ec[pc]);
-                            self.chunk.code.push(ec[pc + 1]);
-                            pc += 2;
-                        }
-                    }
-                }
-                // MakeClosure: u16 const_idx, u8 count, count * 2 bytes
-                Ok(Opcode::MakeClosure) => {
-                    if pc + 2 < ec.len() {
-                        let idx = ec[pc] as u16 | ((ec[pc + 1] as u16) << 8);
-                        let new_idx = idx + const_offset as u16;
-                        self.chunk.code.push((new_idx & 0xff) as u8);
-                        self.chunk.code.push(((new_idx >> 8) & 0xff) as u8);
-                        pc += 2;
-                        let count = ec[pc] as usize;
-                        self.chunk.code.push(ec[pc]);
-                        pc += 1;
-                        for _ in 0..count * 2 {
-                            if pc < ec.len() {
-                                self.chunk.code.push(ec[pc]);
-                                pc += 1;
-                            }
-                        }
-                    }
-                }
-                // 1-byte operand opcodes
-                Ok(
-                    Opcode::GetLocal
-                    | Opcode::SetLocal
-                    | Opcode::NewArray
-                    | Opcode::NewObject
-                    | Opcode::GetUpvalue
-                    | Opcode::SetUpvalue
-                    | Opcode::CollectRest
-                    | Opcode::GetArguments
-                    | Opcode::NewCall
-                    | Opcode::BoxLocal
-                    | Opcode::ReboxLocal
-                    | Opcode::ClearLocalCells
-                    | Opcode::CallSpread
-                    | Opcode::ThrowIfNotConstructor,
-                ) => {
-                    if pc < ec.len() {
-                        self.chunk.code.push(ec[pc]);
-                        pc += 1;
-                    }
-                }
-                // 0-operand opcodes (and unknown)
-                _ => {}
-            }
-        }
+        // Append eval code using the same operand-adjustment logic as chunk merges,
+        // so new opcodes cannot silently drift out of sync here.
+        let mut adjusted_code = eval_chunk.code.clone();
+        crate::core::opcode::Chunk::adjust_bytecode_offsets(&mut adjusted_code, code_offset, const_offset);
+        self.chunk.code.extend_from_slice(&adjusted_code);
 
         // Merge metadata with adjusted IPs
         for (ip, name) in &eval_chunk.fn_names {
@@ -16161,6 +16152,56 @@ impl<'gc> VM<'gc> {
         let iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_proto));
         self.globals.insert("__IteratorPrototype__".to_string(), iterator_proto_val.clone());
 
+        let mut iterator_helper_proto = IndexMap::new();
+        iterator_helper_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
+        iterator_helper_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
+        );
+        iterator_helper_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        iterator_helper_proto.insert(
+            "drop".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.drop", "drop", 1.0, false),
+        );
+        iterator_helper_proto.insert("__nonenumerable_drop__".to_string(), Value::Boolean(true));
+        iterator_helper_proto.insert("@@sym:4".to_string(), Value::from("Iterator Helper"));
+        iterator_helper_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        iterator_helper_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
+        let iterator_helper_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_helper_proto));
+        self.globals
+            .insert("__IteratorHelperPrototype__".to_string(), iterator_helper_proto_val.clone());
+
+        let mut wrap_for_valid_iterator_proto = IndexMap::new();
+        wrap_for_valid_iterator_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
+        let wrap_for_valid_iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, wrap_for_valid_iterator_proto));
+        self.globals.insert(
+            "__WrapForValidIteratorPrototype__".to_string(),
+            wrap_for_valid_iterator_proto_val,
+        );
+
+        let iterator_ctor = Self::make_host_fn_with_name_len(ctx, "iterator.constructor", "Iterator", 0.0, false);
+        if let Value::VmObject(iterator_ctor_obj) = &iterator_ctor {
+            let mut ctor = iterator_ctor_obj.borrow_mut(ctx);
+            ctor.insert(
+                "from".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "iterator.from", "from", 1.0, false),
+            );
+            ctor.insert("__nonenumerable_from__".to_string(), Value::Boolean(true));
+            ctor.insert("prototype".to_string(), iterator_proto_val.clone());
+            ctor.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            ctor.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            ctor.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        }
+        if let Value::VmObject(helper_proto_obj) = &iterator_helper_proto_val {
+            helper_proto_obj
+                .borrow_mut(ctx)
+                .insert("constructor".to_string(), iterator_ctor.clone());
+            helper_proto_obj
+                .borrow_mut(ctx)
+                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        }
+        self.globals.insert("Iterator".to_string(), iterator_ctor);
+
         let mut array_iter_proto = IndexMap::new();
         array_iter_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
         array_iter_proto.insert(
@@ -16450,6 +16491,7 @@ impl<'gc> VM<'gc> {
                 "eval",
                 "Object",
                 "Function",
+                "Iterator",
                 "Array",
                 "String",
                 "Number",
@@ -16761,7 +16803,8 @@ impl<'gc> VM<'gc> {
         fn_proto.insert("apply".to_string(), Value::VmNativeFunction(BUILTIN_FN_APPLY));
         fn_proto.insert("bind".to_string(), Value::VmNativeFunction(BUILTIN_FN_BIND));
         fn_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_FN_TOSTRING));
-        let restricted_thrower = Value::Function("Function.prototype.restrictedThrow".to_string());
+        let restricted_thrower =
+            Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
         fn_proto.insert(
             "arguments".to_string(),
             Value::Property {
@@ -17120,8 +17163,12 @@ impl<'gc> VM<'gc> {
             to_string_tag_key.to_string(),
             Value::Property {
                 value: None,
-                getter: Some(Box::new(Value::Function(
-                    "AbstractModuleSource.prototype.@@toStringTag".to_string(),
+                getter: Some(Box::new(Self::make_host_fn_with_name_len(
+                    ctx,
+                    "AbstractModuleSource.prototype.@@toStringTag",
+                    "get [Symbol.toStringTag]",
+                    0.0,
+                    false,
                 ))),
                 setter: None,
             },
@@ -17581,12 +17628,15 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_args__".to_string(), args_array);
                             gt.insert("__repl_call_this__".to_string(), this_arg.clone());
                         }
+                        let saved_placeholders =
+                            child.install_temporary_bindings(ctx, child.dynamic_function_placeholder_bindings(ctx));
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                         let saved_direct_eval = child.direct_eval;
                         child.direct_eval = false;
                         let result = child.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
                         child.direct_eval = saved_direct_eval;
                         let thrown = child.pending_throw.take();
+                        child.restore_temporary_bindings(ctx, saved_placeholders);
                         child.globals.shift_remove("__repl_call_args__");
                         child.globals.shift_remove("__repl_call_this__");
                         {
@@ -17618,6 +17668,8 @@ impl<'gc> VM<'gc> {
                         gt.insert("__repl_call_args__".to_string(), args_array);
                         gt.insert("__repl_call_this__".to_string(), this_arg.clone());
                     }
+                    let saved_placeholders =
+                        self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
 
                     let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                     // Function constructor creates sloppy-mode code per spec,
@@ -17626,6 +17678,7 @@ impl<'gc> VM<'gc> {
                     self.direct_eval = false;
                     let result = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
                     self.direct_eval = saved_direct_eval;
+                    self.restore_temporary_bindings(ctx, saved_placeholders);
 
                     match saved_args {
                         Some(v) => {
@@ -20765,6 +20818,20 @@ impl<'gc> VM<'gc> {
                         // so internal `__top_block_alias_N__` names aren't visible.
                         for alias in self.chunk.block_alias_to_original.keys() {
                             _ = eval_vm.globals.shift_remove(alias);
+                        }
+                    }
+                    if !self.direct_eval
+                        && let Some(Value::VmObject(gt)) = eval_vm.globals.get("globalThis").cloned()
+                    {
+                        let public_globals: Vec<(String, Value<'gc>)> = eval_vm
+                            .globals
+                            .iter()
+                            .filter(|(k, v)| *k != "globalThis" && !k.starts_with("__") && !matches!(v, Value::Uninitialized))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let mut gt_borrow = gt.borrow_mut(ctx);
+                        for (k, v) in public_globals {
+                            gt_borrow.insert(k, v);
                         }
                     }
                     eval_vm.script_path = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone());
@@ -29832,6 +29899,147 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, obj))
     }
 
+    fn make_iterator_helper(&self, ctx: &GcContext<'gc>, items: VmArrayHandle<'gc>, index: usize) -> Value<'gc> {
+        let mut obj = IndexMap::new();
+        obj.insert("__items__".to_string(), Value::VmArray(items));
+        obj.insert("__index__".to_string(), Value::Number(index as f64));
+        if let Some(proto) = self.globals.get("__IteratorHelperPrototype__").cloned() {
+            obj.insert("__proto__".to_string(), proto);
+        }
+        Value::VmObject(new_gc_cell_ptr(ctx, obj))
+    }
+
+    fn make_dynamic_intl_placeholder(&self, ctx: &GcContext<'gc>) -> Value<'gc> {
+        let mut segment_iterator_proto = IndexMap::new();
+        segment_iterator_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
+        );
+        segment_iterator_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        let segment_iterator_proto = Value::VmObject(new_gc_cell_ptr(ctx, segment_iterator_proto));
+
+        let mut segments_proto = IndexMap::new();
+        segments_proto.insert(
+            "@@sym:1".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "intl.segments.iterator", "[Symbol.iterator]", 0.0, false),
+        );
+        segments_proto.insert("__nonenumerable_@@sym:1__".to_string(), Value::Boolean(true));
+        let segments_proto = Value::VmObject(new_gc_cell_ptr(ctx, segments_proto));
+
+        let mut segmenter_proto = IndexMap::new();
+        segmenter_proto.insert(
+            "segment".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "intl.segmenter.segment", "segment", 1.0, false),
+        );
+        segmenter_proto.insert("__nonenumerable_segment__".to_string(), Value::Boolean(true));
+        let segmenter_proto = Value::VmObject(new_gc_cell_ptr(ctx, segmenter_proto));
+
+        let segmenter_ctor = Self::make_host_fn_with_name_len(ctx, "intl.segmenter.ctor", "Segmenter", 0.0, true);
+        if let Value::VmObject(ctor_obj) = &segmenter_ctor {
+            let mut ctor = ctor_obj.borrow_mut(ctx);
+            ctor.insert("prototype".to_string(), segmenter_proto.clone());
+            ctor.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
+            ctor.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
+            ctor.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+            ctor.insert("__segments_proto__".to_string(), segments_proto.clone());
+            ctor.insert("__segment_iter_proto__".to_string(), segment_iterator_proto.clone());
+        }
+        if let Value::VmObject(proto_obj) = &segmenter_proto {
+            proto_obj.borrow_mut(ctx).insert("constructor".to_string(), segmenter_ctor.clone());
+            proto_obj
+                .borrow_mut(ctx)
+                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+        }
+
+        let mut intl = IndexMap::new();
+        for (name, host_name) in [
+            ("Collator", "intl.collator"),
+            ("DateTimeFormat", "intl.dateTimeFormat"),
+            ("DisplayNames", "intl.displayNames"),
+            ("DurationFormat", "intl.durationFormat"),
+            ("ListFormat", "intl.listFormat"),
+            ("Locale", "intl.locale"),
+            ("NumberFormat", "intl.numberFormat"),
+            ("PluralRules", "intl.pluralRules"),
+            ("RelativeTimeFormat", "intl.relativeTimeFormat"),
+        ] {
+            intl.insert(
+                name.to_string(),
+                Self::make_host_fn_with_name_len(ctx, host_name, name, 0.0, false),
+            );
+            intl.insert(format!("__nonenumerable_{}__", name), Value::Boolean(true));
+        }
+        intl.insert("Segmenter".to_string(), segmenter_ctor);
+        intl.insert("__nonenumerable_Segmenter__".to_string(), Value::Boolean(true));
+        Value::VmObject(new_gc_cell_ptr(ctx, intl))
+    }
+
+    fn dynamic_function_placeholder_bindings(&self, ctx: &GcContext<'gc>) -> Vec<(String, Value<'gc>)> {
+        let mut bindings = Vec::new();
+        if !self.globals.contains_key("escape") {
+            bindings.push((
+                "escape".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "global.escape", "escape", 1.0, false),
+            ));
+        }
+        if !self.globals.contains_key("unescape") {
+            bindings.push((
+                "unescape".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "global.unescape", "unescape", 1.0, false),
+            ));
+        }
+        if !self.globals.contains_key("Intl") {
+            bindings.push(("Intl".to_string(), self.make_dynamic_intl_placeholder(ctx)));
+        }
+        if !self.globals.contains_key("Temporal") {
+            bindings.push(("Temporal".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, IndexMap::new()))));
+        }
+        bindings
+    }
+
+    fn install_temporary_bindings(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        bindings: Vec<(String, Value<'gc>)>,
+    ) -> Vec<(String, Option<Value<'gc>>, Option<Value<'gc>>)> {
+        let mut saved = Vec::with_capacity(bindings.len());
+        let mut gt = self.global_this.borrow_mut(ctx);
+        for (name, value) in bindings {
+            let prev_global = self.globals.get(&name).cloned();
+            let prev_global_this = gt.get(&name).cloned();
+            self.globals.insert(name.clone(), value.clone());
+            gt.insert(name.clone(), value);
+            saved.push((name, prev_global, prev_global_this));
+        }
+        saved
+    }
+
+    fn restore_temporary_bindings(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        saved: Vec<(String, Option<Value<'gc>>, Option<Value<'gc>>)>,
+    ) {
+        let mut gt = self.global_this.borrow_mut(ctx);
+        for (name, prev_global, prev_global_this) in saved {
+            match prev_global {
+                Some(value) => {
+                    self.globals.insert(name.clone(), value);
+                }
+                None => {
+                    self.globals.shift_remove(&name);
+                }
+            }
+            match prev_global_this {
+                Some(value) => {
+                    gt.insert(name, value);
+                }
+                None => {
+                    gt.shift_remove(&name);
+                }
+            }
+        }
+    }
+
     /// Create a live Map iterator that reads entries from the Map on each .next() call.
     /// `kind` is "key", "value", or "entry".
     fn make_map_iterator(&self, ctx: &GcContext<'gc>, map_val: Value<'gc>, kind: &str) -> Value<'gc> {
@@ -30500,7 +30708,10 @@ impl<'gc> VM<'gc> {
             } else if let Some(rest) = raw_key.strip_prefix("__set_") {
                 if rest.starts_with("@@sym:") { None } else { Some(rest) }
             } else if raw_key.starts_with("__")
-                && (raw_key.ends_with("__") || raw_key.starts_with("__brand_") || raw_key.starts_with("__deleted_"))
+                && (raw_key == "__origin_global"
+                    || raw_key.ends_with("__")
+                    || raw_key.starts_with("__brand_")
+                    || raw_key.starts_with("__deleted_"))
             {
                 None
             } else if raw_key.starts_with("__") {
@@ -32738,6 +32949,26 @@ impl<'gc> VM<'gc> {
                                 let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
                                 if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(ctx, args, new_target)
+                                } else if host_name == "intl.segmenter.ctor" {
+                                    let (proto, segments_proto, segment_iter_proto) = {
+                                        let borrow = map.borrow();
+                                        (
+                                            borrow.get("prototype").cloned(),
+                                            borrow.get("__segments_proto__").cloned(),
+                                            borrow.get("__segment_iter_proto__").cloned(),
+                                        )
+                                    };
+                                    let mut obj = IndexMap::new();
+                                    if let Some(proto) = proto {
+                                        obj.insert("__proto__".to_string(), proto);
+                                    }
+                                    if let Some(proto) = segments_proto {
+                                        obj.insert("__segments_proto__".to_string(), proto);
+                                    }
+                                    if let Some(proto) = segment_iter_proto {
+                                        obj.insert("__segment_iter_proto__".to_string(), proto);
+                                    }
+                                    Ok(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
                                 } else {
                                     let err = self.make_type_error_object(ctx, "Target is not a constructor");
                                     Err(self.vm_error_to_js_error(ctx, &err))

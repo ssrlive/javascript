@@ -81,6 +81,51 @@ mod function_tests {
     }
 
     #[test]
+    fn test_eval_strict_arguments_callee_descriptor() {
+        let script = r#"
+            let d = eval('(function(){ "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee"); })()');
+            d !== undefined &&
+            typeof d.get === "function" &&
+            d.enumerable === false &&
+            d.configurable === false
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_new_function_strict_arguments_callee_getter() {
+        let script = r#"
+            let f = new Function('return (function(){ "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee").get; })()');
+            typeof f() === "function"
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_strict_arguments_thrower_is_reflectable_function_object() {
+        let script = r#"
+            let thrower = (function(){ "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee").get; })();
+            let descs = Object.getOwnPropertyDescriptors(thrower);
+            descs.length.value === 0 &&
+            descs.length.writable === false &&
+            descs.name.value === ""
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_function_constructor_does_not_expose_origin_global_slot() {
+        let script = r#"
+            !Object.getOwnPropertyNames(Function).includes("__origin_global")
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

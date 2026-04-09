@@ -174,3 +174,21 @@ fn iterator_prototype_symbol_iterator_has_standard_metadata() {
     let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(res, "true");
 }
+
+#[test]
+fn iterator_global_exposes_helper_intrinsic_without_full_helpers_probe() {
+    let script = r#"
+        let iter = Iterator.from([1, 2, 3]);
+        let dropped = iter.drop(1);
+        let step = dropped.next();
+        typeof Iterator === "function" &&
+        typeof Iterator.from === "function" &&
+        typeof iter.map === "undefined" &&
+        Object.getPrototypeOf(dropped) === Object.getPrototypeOf(iter) &&
+        step.value === 2 &&
+        step.done === false
+    "#;
+
+    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "true");
+}

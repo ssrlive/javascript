@@ -1396,9 +1396,12 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_args__".to_string(), args_array);
                             gt.insert("__repl_call_this__".to_string(), this_val.clone());
                         }
+                        let saved_placeholders =
+                            self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
 
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                         let result = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
+                        self.restore_temporary_bindings(ctx, saved_placeholders);
 
                         match saved_args {
                             Some(v) => {
@@ -1447,9 +1450,12 @@ impl<'gc> VM<'gc> {
                             gt.insert("__repl_call_args__".to_string(), args_array);
                             gt.insert("__repl_call_this__".to_string(), this_val.clone());
                         }
+                        let saved_placeholders =
+                            self.install_temporary_bindings(ctx, self.dynamic_function_placeholder_bindings(ctx));
 
                         let eval_code = format!("({}).apply(__repl_call_this__, __repl_call_args__)", callable_expr);
                         let result = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(&eval_code)]);
+                        self.restore_temporary_bindings(ctx, saved_placeholders);
 
                         match saved_args {
                             Some(v) => {
@@ -1999,7 +2005,8 @@ impl<'gc> VM<'gc> {
         map.insert("__type__".to_string(), Value::from("Arguments"));
         if let Some(&is_strict) = self.chunk.fn_strictness.get(&func_ip) {
             if is_strict {
-                let thrower = Value::Function("Function.prototype.restrictedThrow".to_string());
+                let thrower =
+                    Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
                 let prop = Value::Property {
                     value: None,
                     getter: Some(Box::new(thrower.clone())),
@@ -2014,7 +2021,7 @@ impl<'gc> VM<'gc> {
                 map.insert("__nonenumerable_callee__".to_string(), Value::Boolean(true));
             }
         } else {
-            let thrower = Value::Function("Function.prototype.restrictedThrow".to_string());
+            let thrower = Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
             let prop = Value::Property {
                 value: None,
                 getter: Some(Box::new(thrower.clone())),

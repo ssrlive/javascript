@@ -498,7 +498,7 @@ impl<'gc> Chunk<'gc> {
     /// - MakeClosure: u16 const + u8 count + count×2 bytes
     /// - Call: u8 flags, conditionally +u16 (arg count, no adjustment)
     /// - ThrowIfNotConstructor: u8 stack depth, no adjustment
-    fn adjust_bytecode_offsets(code: &mut [u8], ip_offset: usize, const_offset: usize) {
+    pub(crate) fn adjust_bytecode_offsets(code: &mut [u8], ip_offset: usize, const_offset: usize) {
         let len = code.len();
         let mut i = 0;
         while i < len {

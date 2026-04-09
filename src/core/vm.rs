@@ -29912,20 +29912,55 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                let bound_length = match target_length {
-                    Value::Number(n) if n.is_infinite() => {
-                        if n.is_sign_negative() {
-                            0.0
-                        } else {
-                            f64::INFINITY
+                let target_has_own_length = match receiver {
+                    Value::VmNativeFunction(_) | Value::Function(_) => true,
+                    Value::VmFunction(ip, arity) => {
+                        let props = self.get_fn_props(ctx, *ip, *arity);
+                        let borrow = props.borrow();
+                        borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
+                    }
+                    Value::VmClosure(ip, arity, _) => {
+                        let shared = self.get_fn_props(ctx, *ip, *arity);
+                        let overlay = self.get_closure_overlay(receiver);
+                        overlay.is_some_and(|props| {
+                            let borrow = props.borrow();
+                            borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
+                        }) || {
+                            let borrow = shared.borrow();
+                            borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
                         }
                     }
-                    Value::Number(n) => {
-                        let target_len = if n.is_nan() { 0.0 } else { n.trunc() };
-                        let normalized = if target_len == 0.0 { 0.0 } else { target_len };
-                        (normalized - bound_args.len() as f64).max(0.0)
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
                     }
-                    _ => 0.0,
+                    Value::VmArray(arr) => {
+                        let borrow = arr.borrow();
+                        borrow.props.contains_key("length")
+                            || borrow.props.contains_key("__get_length")
+                            || borrow.props.contains_key("__set_length")
+                    }
+                    _ => false,
+                };
+
+                let bound_length = if !target_has_own_length {
+                    0.0
+                } else {
+                    match target_length {
+                        Value::Number(n) if n.is_infinite() => {
+                            if n.is_sign_negative() {
+                                0.0
+                            } else {
+                                f64::INFINITY
+                            }
+                        }
+                        Value::Number(n) => {
+                            let target_len = if n.is_nan() { 0.0 } else { n.trunc() };
+                            let normalized = if target_len == 0.0 { 0.0 } else { target_len };
+                            (normalized - bound_args.len() as f64).max(0.0)
+                        }
+                        _ => 0.0,
+                    }
                 };
 
                 let mut m = IndexMap::new();

@@ -325,6 +325,18 @@ mod function_tests {
     }
 
     #[test]
+    fn test_bind_length_ignores_inherited_length() {
+        let script = r#"
+            function bar() {}
+            Object.setPrototypeOf(bar, { length: 42 });
+            delete bar.length;
+            Function.prototype.bind.call(bar, null, 1).length === 0
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

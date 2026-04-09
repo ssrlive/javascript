@@ -12224,6 +12224,7 @@ impl<'gc> VM<'gc> {
             || name.starts_with("set.")
             || name.starts_with("species.")
             || name.starts_with("sharedArrayBuffer.")
+            || name.starts_with("async.")
         {
             return self.call_host_fn(ctx, name, receiver, args);
         }

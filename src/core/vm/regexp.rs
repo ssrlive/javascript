@@ -331,7 +331,7 @@ impl<'gc> VM<'gc> {
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
                         | Value::VmNativeFunction(_)),
-                    ) => v.clone(),
+                    ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.match] requires that 'this' be an Object");
                         return Value::Undefined;
@@ -341,7 +341,7 @@ impl<'gc> VM<'gc> {
                 let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
                     Ok(s) => s,
                     Err(e) => {
-                        self.set_pending_throw_from_error(&e);
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
                 };
@@ -355,7 +355,7 @@ impl<'gc> VM<'gc> {
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
                         | Value::VmNativeFunction(_)),
-                    ) => v.clone(),
+                    ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.matchAll] requires that 'this' be an Object");
                         return Value::Undefined;
@@ -365,7 +365,7 @@ impl<'gc> VM<'gc> {
                 let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
                     Ok(s) => s,
                     Err(e) => {
-                        self.set_pending_throw_from_error(&e);
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
                 };
@@ -379,7 +379,7 @@ impl<'gc> VM<'gc> {
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
                         | Value::VmNativeFunction(_)),
-                    ) => v.clone(),
+                    ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.replace] requires that 'this' be an Object");
                         return Value::Undefined;
@@ -389,7 +389,7 @@ impl<'gc> VM<'gc> {
                 let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
                     Ok(s) => s,
                     Err(e) => {
-                        self.set_pending_throw_from_error(&e);
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
                 };
@@ -404,7 +404,7 @@ impl<'gc> VM<'gc> {
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
                         | Value::VmNativeFunction(_)),
-                    ) => v.clone(),
+                    ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.search] requires that 'this' be an Object");
                         return Value::Undefined;
@@ -414,7 +414,7 @@ impl<'gc> VM<'gc> {
                 let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
                     Ok(s) => s,
                     Err(e) => {
-                        self.set_pending_throw_from_error(&e);
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
                 };
@@ -428,7 +428,7 @@ impl<'gc> VM<'gc> {
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
                         | Value::VmNativeFunction(_)),
-                    ) => v.clone(),
+                    ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.split] requires that 'this' be an Object");
                         return Value::Undefined;
@@ -438,7 +438,7 @@ impl<'gc> VM<'gc> {
                 let s_str = match self.vm_to_string_like_spec(ctx, &s_val) {
                     Ok(s) => s,
                     Err(e) => {
-                        self.set_pending_throw_from_error(&e);
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
                 };
@@ -791,7 +791,7 @@ impl<'gc> VM<'gc> {
             let result = match self.vm_call_function_value(ctx, &exec_val, rx, &[s_val]) {
                 Ok(v) => v,
                 Err(e) => {
-                    self.set_pending_throw_from_error(&e);
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                     return Value::Null;
                 }
             };
@@ -799,14 +799,18 @@ impl<'gc> VM<'gc> {
                 return Value::Null;
             }
             // a. If result is not an Object and result is not null, throw a TypeError.
-            match &result {
-                Value::Null => return Value::Null,
-                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) => return result,
-                _ => {
-                    self.throw_type_error(ctx, "RegExp exec method returned something other than an Object or null");
-                    return Value::Null;
-                }
+            // Note: Symbols are stored as VmObject with __vm_symbol__ but are primitives per spec.
+            let is_object = match &result {
+                Value::Null => true,
+                Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
+                Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
+                _ => false,
+            };
+            if is_object {
+                return result;
             }
+            self.throw_type_error(ctx, "RegExp exec method returned something other than an Object or null");
+            return Value::Null;
         }
         // 3. If R does not have a [[RegExpMatcher]] internal slot, throw a TypeError.
         match rx {
@@ -834,7 +838,7 @@ impl<'gc> VM<'gc> {
         };
         if !is_zero {
             if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
             }
             if self.pending_throw.is_some() {
                 return Value::Undefined;
@@ -857,7 +861,7 @@ impl<'gc> VM<'gc> {
         //    Perform ? Set(rx, "lastIndex", previousLastIndex, true).
         if !self.values_same(&current_last_index, &previous_last_index) {
             if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &previous_last_index, None) {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
             }
             if self.pending_throw.is_some() {
                 return Value::Undefined;
@@ -888,7 +892,7 @@ impl<'gc> VM<'gc> {
         let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
             Ok(s) => s,
             Err(e) => {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 return Value::Undefined;
             }
         };
@@ -906,7 +910,7 @@ impl<'gc> VM<'gc> {
 
         // a. Perform ? Set(rx, "lastIndex", +0𝔽, true).
         if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
-            self.set_pending_throw_from_error(&e);
+            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
         }
         if self.pending_throw.is_some() {
             return Value::Undefined;
@@ -964,7 +968,7 @@ impl<'gc> VM<'gc> {
                     this_index + 1
                 };
                 if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64), None) {
-                    self.set_pending_throw_from_error(&e);
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 }
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
@@ -987,7 +991,7 @@ impl<'gc> VM<'gc> {
         let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
             Ok(s) => s,
             Err(e) => {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 return Value::Undefined;
             }
         };
@@ -1001,7 +1005,7 @@ impl<'gc> VM<'gc> {
             let rv_str = match self.vm_to_string_like_spec(ctx, replace_value) {
                 Ok(s) => s,
                 Err(e) => {
-                    self.set_pending_throw_from_error(&e);
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                     return Value::Undefined;
                 }
             };
@@ -1012,7 +1016,7 @@ impl<'gc> VM<'gc> {
 
         if global {
             if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(0.0), None) {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
             }
             if self.pending_throw.is_some() {
                 return Value::Undefined;
@@ -1066,7 +1070,7 @@ impl<'gc> VM<'gc> {
                     this_index + 1
                 };
                 if let Err(e) = self.assign_named_property(ctx, rx, "lastIndex", &Value::Number(next_index as f64), None) {
-                    self.set_pending_throw_from_error(&e);
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 }
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
@@ -1164,7 +1168,7 @@ impl<'gc> VM<'gc> {
                 let replace_result = match self.vm_call_function_value(ctx, replace_value, &Value::Undefined, &call_args) {
                     Ok(v) => v,
                     Err(e) => {
-                        self.set_pending_throw_from_error(&e);
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
                 };
@@ -1308,7 +1312,7 @@ impl<'gc> VM<'gc> {
         let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
             Ok(s) => s,
             Err(e) => {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 return Value::Undefined;
             }
         };
@@ -1335,7 +1339,7 @@ impl<'gc> VM<'gc> {
         let splitter = match self.construct_value(ctx, &c, &[rx_arg, flags_arg], None) {
             Ok(v) => v,
             Err(e) => {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 return Value::Undefined;
             }
         };
@@ -1387,7 +1391,7 @@ impl<'gc> VM<'gc> {
         while q < size {
             // Set splitter.lastIndex = q
             if let Err(e) = self.assign_named_property(ctx, &splitter, "lastIndex", &Value::Number(q as f64), None) {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
             }
             if self.pending_throw.is_some() {
                 return Value::Undefined;
@@ -1491,7 +1495,7 @@ impl<'gc> VM<'gc> {
         let flags = match self.vm_to_string_like_spec(ctx, &flags_val) {
             Ok(s) => s,
             Err(e) => {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 return Value::Undefined;
             }
         };
@@ -1512,7 +1516,7 @@ impl<'gc> VM<'gc> {
         let matcher = match self.construct_value(ctx, &c, &[rx_arg, flags_arg], None) {
             Ok(v) => v,
             Err(e) => {
-                self.set_pending_throw_from_error(&e);
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 return Value::Undefined;
             }
         };
@@ -1537,7 +1541,7 @@ impl<'gc> VM<'gc> {
             n.min(9007199254740991.0).floor()
         };
         if let Err(e) = self.assign_named_property(ctx, &matcher, "lastIndex", &Value::Number(last_index_len), None) {
-            self.set_pending_throw_from_error(&e);
+            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
         }
         if self.pending_throw.is_some() {
             return Value::Undefined;
@@ -1632,7 +1636,7 @@ impl<'gc> VM<'gc> {
                     this_index + 1
                 };
                 if let Err(e) = self.assign_named_property(ctx, &regexp, "lastIndex", &Value::Number(next_index as f64), None) {
-                    self.set_pending_throw_from_error(&e);
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                 }
                 if self.pending_throw.is_some() {
                     return Value::Undefined;

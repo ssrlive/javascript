@@ -267,6 +267,12 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
                     if tname_str == "RegExp" {
                         return "[object RegExp]".to_string();
                     }
+                    if tname_str == "WeakMap" || tname_str == "Map" {
+                        return format!("[object {}]", tname_str);
+                    }
+                    if tname_str == "WeakSet" || tname_str == "Set" {
+                        return format!("[object {}]", tname_str);
+                    }
                     if tname_str.ends_with("Error") {
                         let msg = borrowed
                             .get("message")
@@ -340,6 +346,12 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                 && utf16_to_utf8(t) == "RegExp"
             {
                 return "[object RegExp]".to_string();
+            }
+            if let Some(Value::String(t)) = borrow.get("__type__") {
+                let tname = utf16_to_utf8(t);
+                if tname == "WeakMap" || tname == "Map" || tname == "WeakSet" || tname == "Set" {
+                    return format!("[object {}]", tname);
+                }
             }
             if let Some(Value::String(t)) = borrow.get("__type__")
                 && utf16_to_utf8(t) == "Promise"

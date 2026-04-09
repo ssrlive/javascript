@@ -170,14 +170,12 @@ impl<'gc> Compiler<'gc> {
 
     fn is_simple_identifier_name(name: &str) -> bool {
         let mut chars = name.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        let first_ok = first == '_' || first == '$' || first.is_ascii_alphabetic();
-        if !first_ok {
-            return false;
+        match chars.next() {
+            None => return false,
+            Some(c) if !c.is_ascii_alphabetic() && c != '_' && c != '$' => return false,
+            _ => {}
         }
-        chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     }
 
     /// Register exports from a loaded external module so the compiler can resolve imports.

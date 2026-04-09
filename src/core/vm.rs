@@ -19049,6 +19049,182 @@ impl<'gc> VM<'gc> {
 
                 self.map_constructor_consume_iterable(ctx, &map_value, &adder_base, &iterable)
             }
+            BUILTIN_CTOR_WEAKMAP => {
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    self.throw_type_error(ctx, "WeakMap constructor requires 'new'");
+                    return Value::Undefined;
+                };
+
+                let proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, &new_target, "WeakMap") {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
+
+                let map_handle = new_gc_cell_ptr(
+                    ctx,
+                    VmMapData {
+                        entries: Vec::new(),
+                        is_weak: true,
+                    },
+                );
+                let mut map_obj = IndexMap::new();
+                map_obj.insert("__map_data__".to_string(), Value::VmMap(map_handle));
+                map_obj.insert("__type__".to_string(), Value::from("WeakMap"));
+                if let Some(proto_value) = proto {
+                    map_obj.insert("__proto__".to_string(), proto_value);
+                }
+                let map_value = Value::VmObject(new_gc_cell_ptr(ctx, map_obj));
+
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    return map_value;
+                }
+
+                let adder = self.read_named_property(ctx, &map_value, "set");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&adder) {
+                    self.throw_type_error(ctx, "WeakMap.prototype.set is not callable");
+                    return Value::Undefined;
+                }
+
+                let iterator_method = self.read_named_property(ctx, &iterable, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(iterator_method, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Value is not iterable");
+                    return Value::Undefined;
+                }
+                let iterator = match self.vm_call_function_value(ctx, &iterator_method, &iterable, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                loop {
+                    let next = self.read_named_property(ctx, &iterator, "next");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let step = match self.vm_call_function_value(ctx, &next, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    let done = self.read_named_property(ctx, &step, "done");
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+                    let item = self.read_named_property(ctx, &step, "value");
+                    if !matches!(item, Value::VmObject(_) | Value::VmArray(_)) {
+                        self.throw_type_error(ctx, "Iterator value is not an object");
+                        return Value::Undefined;
+                    }
+                    let k = self.read_named_property(ctx, &item, "0");
+                    let v = self.read_named_property(ctx, &item, "1");
+                    if let Err(err) = self.vm_call_function_value(ctx, &adder, &map_value, &[k, v]) {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                }
+                map_value
+            }
+            BUILTIN_CTOR_WEAKSET => {
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    self.throw_type_error(ctx, "WeakSet constructor requires 'new'");
+                    return Value::Undefined;
+                };
+
+                let proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, &new_target, "WeakSet") {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+
+                let set_handle = new_gc_cell_ptr(
+                    ctx,
+                    VmSetData {
+                        values: Vec::new(),
+                        is_weak: true,
+                    },
+                );
+                let mut set_obj = IndexMap::new();
+                set_obj.insert("__set_data__".to_string(), Value::VmSet(set_handle));
+                set_obj.insert("__type__".to_string(), Value::from("WeakSet"));
+                if let Some(proto_value) = proto {
+                    set_obj.insert("__proto__".to_string(), proto_value);
+                }
+                let set_value = Value::VmObject(new_gc_cell_ptr(ctx, set_obj));
+
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    return set_value;
+                }
+
+                let adder = self.read_named_property(ctx, &set_value, "add");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&adder) {
+                    self.throw_type_error(ctx, "WeakSet.prototype.add is not callable");
+                    return Value::Undefined;
+                }
+
+                let iterator_method = self.read_named_property(ctx, &iterable, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(iterator_method, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Value is not iterable");
+                    return Value::Undefined;
+                }
+                let iterator = match self.vm_call_function_value(ctx, &iterator_method, &iterable, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                loop {
+                    let next = self.read_named_property(ctx, &iterator, "next");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let step = match self.vm_call_function_value(ctx, &next, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    let done = self.read_named_property(ctx, &step, "done");
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+                    let item = self.read_named_property(ctx, &step, "value");
+                    if let Err(err) = self.vm_call_function_value(ctx, &adder, &set_value, &[item]) {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                }
+                set_value
+            }
             BUILTIN_PROMISE_ALL => {
                 let mut settled_values: Vec<Value<'gc>> = Vec::new();
                 let mut rejection: Option<Value<'gc>> = None;
@@ -34290,6 +34466,12 @@ impl<'gc> VM<'gc> {
         let offset = Self::realm_ip_offset(realm_id);
         match value {
             Value::VmFunction(ip, arity) => {
+                // If the IP is beyond the child's bytecode, this function
+                // was compiled in the parent (or another realm) and merely
+                // stored on a child-realm object. Return it as-is.
+                if ip >= child.chunk.code.len() {
+                    return value;
+                }
                 let remapped = ip + offset;
                 let handle = child.get_fn_props(ctx, ip, arity);
                 self.fn_props.insert(remapped, handle);
@@ -34297,6 +34479,9 @@ impl<'gc> VM<'gc> {
                 Value::VmFunction(remapped, arity)
             }
             Value::VmClosure(ip, arity, upvals) => {
+                if ip >= child.chunk.code.len() {
+                    return value;
+                }
                 let remapped = ip + offset;
                 let handle = child.get_fn_props(ctx, ip, arity);
                 self.fn_props.insert(remapped, handle);

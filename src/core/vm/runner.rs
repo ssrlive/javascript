@@ -7736,25 +7736,11 @@ impl<'gc> VM<'gc> {
                         self.new_target_stack.pop();
                         self.stack.push(out);
                     }
-                    BUILTIN_CTOR_WEAKMAP => {
-                        // WeakMap: implemented as regular Map (no GC)
-                        self.stack.push(Value::VmMap(new_gc_cell_ptr(
-                            ctx,
-                            VmMapData {
-                                entries: Vec::new(),
-                                is_weak: true,
-                            },
-                        )));
-                    }
-                    BUILTIN_CTOR_WEAKSET => {
-                        // WeakSet: implemented as regular Set (no GC)
-                        self.stack.push(Value::VmSet(new_gc_cell_ptr(
-                            ctx,
-                            VmSetData {
-                                values: Vec::new(),
-                                is_weak: true,
-                            },
-                        )));
+                    BUILTIN_CTOR_WEAKMAP | BUILTIN_CTOR_WEAKSET => {
+                        self.new_target_stack.push(Value::VmNativeFunction(id));
+                        let out = self.call_builtin(ctx, id, &args);
+                        self.new_target_stack.pop();
+                        self.stack.push(out);
                     }
                     BUILTIN_CTOR_WEAKREF => {
                         // WeakRef: target must be an object or unregistered symbol

@@ -993,10 +993,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
         *index += 1;
     }
     let then_stmt = parse_statement_item(t, index)?;
-    let then_block = match *then_stmt.kind {
-        StatementKind::Block(stmts) => stmts,
-        _ => vec![then_stmt],
-    };
+    let then_block = vec![then_stmt];
     while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
         *index += 1;
     }
@@ -1006,10 +1003,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
             *index += 1;
         }
         let else_stmt = parse_statement_item(t, index)?;
-        match *else_stmt.kind {
-            StatementKind::Block(stmts) => Some(stmts),
-            _ => Some(vec![else_stmt]),
-        }
+        Some(vec![else_stmt])
     } else {
         None
     };
@@ -1059,11 +1053,7 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         *index += 1;
         vec![]
     } else {
-        let body = parse_statement_item(t, index)?;
-        match *body.kind {
-            StatementKind::Block(stmts) => stmts,
-            _ => vec![body],
-        }
+        vec![parse_statement_item(t, index)?]
     };
     Ok(Statement {
         kind: Box::new(StatementKind::While(condition, body_stmts)),
@@ -1090,10 +1080,7 @@ fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
             *index,
             t.get(*index)
         );
-        match *body.kind {
-            StatementKind::Block(stmts) => stmts,
-            _ => vec![body],
-        }
+        vec![body]
     };
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;

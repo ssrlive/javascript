@@ -77,6 +77,13 @@ mod control_flow_tests {
     }
 
     #[test]
+    fn test_while_loop_reinitializes_block_scoped_bindings() {
+        let script = r#"const s = "a b"; let i = 0; let out = ""; while (i < s.length) { const c = s[i]; if (c === " ") { i = i + 1; continue; } out = out + c; i = i + 1; } out"#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"ab\"");
+    }
+
+    #[test]
     fn test_do_while_loop() {
         let script = "let sum = 0; let i = 1; do { sum = sum + i; i = i + 1; } while (i <= 5); sum";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
@@ -88,6 +95,40 @@ mod control_flow_tests {
         let script = "let count = 0; let i = 5; do { count = count + 1; i = i + 1; } while (i < 5); count";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "1");
+    }
+
+    #[test]
+    fn test_do_while_loop_reinitializes_block_scoped_bindings() {
+        let script = r#"const s = "ab "; let i = 0; let out = ""; do { let c = s[i]; if (c === " ") { i = i + 1; continue; } out = out + c; i = i + 1; } while (i < s.length); out"#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"ab\"");
+    }
+
+    #[test]
+    fn test_if_block_scope_inside_while_continue() {
+        let script = r#"
+            const validate = function(source) {
+              let pos = 0;
+              const eatWhitespace = () => {
+                while (pos < source.length) {
+                  const c = source[pos];
+                  if (c === "/") {
+                    if (source[pos + 1] === "*") {
+                      const end = pos + 2;
+                      pos = end;
+                      continue;
+                    }
+                  }
+                  break;
+                }
+              };
+              eatWhitespace();
+              return pos;
+            };
+            validate("function")
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "0");
     }
 
     #[test]

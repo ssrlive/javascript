@@ -1468,6 +1468,10 @@ impl<'gc> Compiler<'gc> {
                 let ctx = self.make_loop_context(loop_start);
                 self.loop_stack.push(ctx);
 
+                let body_saved = self.locals.len();
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.body_saved_locals = Some(body_saved);
+                }
                 for s in body {
                     self.compile_statement(s, false)?;
                 }
@@ -1505,6 +1509,10 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(cond)?;
                 let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
 
+                let body_saved = self.locals.len();
+                if let Some(ctx) = self.loop_stack.last_mut() {
+                    ctx.body_saved_locals = Some(body_saved);
+                }
                 for s in body {
                     self.compile_statement(s, false)?;
                 }

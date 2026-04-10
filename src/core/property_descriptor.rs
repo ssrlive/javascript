@@ -68,10 +68,7 @@ pub enum PropKind<'gc> {
     Data(Value<'gc>),
 
     /// Accessor property with optional getter / setter.
-    Accessor {
-        get: Option<Value<'gc>>,
-        set: Option<Value<'gc>>,
-    },
+    Accessor { get: Option<Value<'gc>>, set: Option<Value<'gc>> },
 }
 
 // SAFETY: delegates tracing to the contained Value(s).
@@ -146,11 +143,7 @@ impl<'gc> PropDesc<'gc> {
     }
 
     /// Accessor property with explicit attributes.
-    pub fn accessor(
-        get: Option<Value<'gc>>,
-        set: Option<Value<'gc>>,
-        attrs: PropAttrs,
-    ) -> Self {
+    pub fn accessor(get: Option<Value<'gc>>, set: Option<Value<'gc>>, attrs: PropAttrs) -> Self {
         Self {
             kind: PropKind::Accessor { get, set },
             attrs,
@@ -238,6 +231,138 @@ impl<'gc> PropDesc<'gc> {
     }
 }
 
+// ── JS-visible descriptor conversion ───────────────────────────────
+
+impl<'gc> PropDesc<'gc> {
+    /// Build the `IndexMap` that a JS-visible descriptor object would contain.
+    ///
+    /// Data descriptors produce `{ value, writable, enumerable, configurable }`.
+    /// Accessor descriptors produce `{ get, set, enumerable, configurable }`.
+    pub fn to_descriptor_map(&self) -> indexmap::IndexMap<String, Value<'gc>> {
+        let mut map = indexmap::IndexMap::new();
+        match &self.kind {
+            PropKind::Data(v) => {
+                map.insert("value".to_string(), v.clone());
+                map.insert("writable".to_string(), Value::Boolean(self.attrs.contains(PropAttrs::WRITABLE)));
+            }
+            PropKind::Accessor { get, set } => {
+                map.insert("get".to_string(), get.clone().unwrap_or(Value::Undefined));
+                map.insert("set".to_string(), set.clone().unwrap_or(Value::Undefined));
+            }
+        }
+        map.insert("enumerable".to_string(), Value::Boolean(self.attrs.contains(PropAttrs::ENUMERABLE)));
+        map.insert(
+            "configurable".to_string(),
+            Value::Boolean(self.attrs.contains(PropAttrs::CONFIGURABLE)),
+        );
+        map
+    }
+
+    /// Create a `PropDesc` from a JS descriptor `IndexMap`
+    /// (the output of `extract_property_descriptor`).
+    ///
+    /// Missing boolean fields default to `false` (per spec §6.2.6.1
+    /// "CompletePropertyDescriptor"). Missing `value` defaults to `Undefined`.
+    pub fn from_descriptor_map(map: &indexmap::IndexMap<String, Value<'gc>>) -> Self {
+        let has_get = map.contains_key("get");
+        let has_set = map.contains_key("set");
+        let is_accessor = has_get || has_set;
+
+        let kind = if is_accessor {
+            PropKind::Accessor {
+                get: map.get("get").cloned(),
+                set: map.get("set").cloned(),
+            }
+        } else {
+            PropKind::Data(map.get("value").cloned().unwrap_or(Value::Undefined))
+        };
+
+        let writable = matches!(map.get("writable"), Some(Value::Boolean(true)));
+        let enumerable = matches!(map.get("enumerable"), Some(Value::Boolean(true)));
+        let configurable = matches!(map.get("configurable"), Some(Value::Boolean(true)));
+
+        let mut attrs = PropAttrs::empty();
+        if writable {
+            attrs |= PropAttrs::WRITABLE;
+        }
+        if enumerable {
+            attrs |= PropAttrs::ENUMERABLE;
+        }
+        if configurable {
+            attrs |= PropAttrs::CONFIGURABLE;
+        }
+
+        Self { kind, attrs }
+    }
+
+    /// Write this descriptor into a legacy hidden-key `IndexMap`.
+    ///
+    /// This is the inverse of `desc_from_legacy_map`: it sets the data or
+    /// accessor value under `key`, plus the appropriate `__readonly_*__`,
+    /// `__nonenumerable_*__`, `__nonconfigurable_*__`, `__get_*`, `__set_*`
+    /// shadow entries.
+    ///
+    /// **Existing hidden keys for `key` are NOT cleared first** — callers
+    /// should remove stale entries before calling this if needed.
+    pub fn write_to_legacy_map(&self, map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+        let getter_key = format!("{}{}", GETTER_PREFIX, key);
+        let setter_key = format!("{}{}", SETTER_PREFIX, key);
+        let ro_key = format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX);
+        let ne_key = format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX);
+        let nc_key = format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX);
+
+        match &self.kind {
+            PropKind::Data(v) => {
+                map.insert(key.to_string(), v.clone());
+                // Remove any stale accessor keys
+                map.shift_remove(&getter_key);
+                map.shift_remove(&setter_key);
+            }
+            PropKind::Accessor { get, set } => {
+                // Remove stale data key
+                map.shift_remove(key);
+                if let Some(g) = get {
+                    map.insert(getter_key.clone(), g.clone());
+                } else {
+                    map.shift_remove(&getter_key);
+                }
+                if let Some(s) = set {
+                    map.insert(setter_key.clone(), s.clone());
+                } else {
+                    map.shift_remove(&setter_key);
+                }
+            }
+        }
+
+        // Attribute flags — only insert the marker when the attribute is OFF.
+        if !self.attrs.contains(PropAttrs::WRITABLE) {
+            map.insert(ro_key, Value::Boolean(true));
+        } else {
+            map.shift_remove(&ro_key);
+        }
+        if !self.attrs.contains(PropAttrs::ENUMERABLE) {
+            map.insert(ne_key, Value::Boolean(true));
+        } else {
+            map.shift_remove(&ne_key);
+        }
+        if !self.attrs.contains(PropAttrs::CONFIGURABLE) {
+            map.insert(nc_key, Value::Boolean(true));
+        } else {
+            map.shift_remove(&nc_key);
+        }
+    }
+
+    /// Remove all legacy hidden keys for `key` from the map.
+    pub fn remove_legacy_keys(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+        map.shift_remove(key);
+        map.shift_remove(&format!("{}{}", GETTER_PREFIX, key));
+        map.shift_remove(&format!("{}{}", SETTER_PREFIX, key));
+        map.shift_remove(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX));
+        map.shift_remove(&format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX));
+        map.shift_remove(&format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX));
+    }
+}
+
 // ── Legacy conversion helpers ──────────────────────────────────────
 
 /// Prefix constants matching the legacy hidden-key encoding.
@@ -250,6 +375,24 @@ pub const READONLY_SUFFIX: &str = "__";
 pub const NONENUMERABLE_SUFFIX: &str = "__";
 pub const NONCONFIGURABLE_SUFFIX: &str = "__";
 
+/// Read just the attribute flags for `key` from a legacy hidden-key map.
+///
+/// This is a lightweight alternative to `desc_from_legacy_map` when you
+/// only need the W/E/C bits and not the value or accessor functions.
+pub fn attrs_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
+    let mut attrs = PropAttrs::empty();
+    if !map.contains_key(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX)) {
+        attrs |= PropAttrs::WRITABLE;
+    }
+    if !map.contains_key(&format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX)) {
+        attrs |= PropAttrs::ENUMERABLE;
+    }
+    if !map.contains_key(&format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX)) {
+        attrs |= PropAttrs::CONFIGURABLE;
+    }
+    attrs
+}
+
 /// Build a `PropDesc` by reading legacy hidden keys from an object map.
 ///
 /// `key` is the user-visible property name.  The function looks up the
@@ -258,10 +401,7 @@ pub const NONCONFIGURABLE_SUFFIX: &str = "__";
 /// in `map` and produces the equivalent descriptor.
 ///
 /// Returns `None` if `key` is not present (neither as data nor accessor).
-pub fn desc_from_legacy_map<'gc>(
-    map: &indexmap::IndexMap<String, Value<'gc>>,
-    key: &str,
-) -> Option<PropDesc<'gc>> {
+pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<PropDesc<'gc>> {
     let getter_key = format!("{}{}", GETTER_PREFIX, key);
     let setter_key = format!("{}{}", SETTER_PREFIX, key);
     let has_data = map.contains_key(key);

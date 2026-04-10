@@ -1,4 +1,5 @@
 use crate::core::opcode::{Chunk, Opcode};
+use crate::core::property_descriptor::{PropAttrs, PropDesc, PropKind, attrs_from_legacy_map, desc_from_legacy_map};
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
@@ -3763,10 +3764,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn property_attributes(map: &IndexMap<String, Value<'gc>>, key: &str) -> (bool, bool, bool) {
+        let a = attrs_from_legacy_map(map, key);
         (
-            !map.contains_key(&format!("__readonly_{}__", key)),
-            !map.contains_key(&format!("__nonenumerable_{}__", key)),
-            !map.contains_key(&format!("__nonconfigurable_{}__", key)),
+            a.contains(PropAttrs::WRITABLE),
+            a.contains(PropAttrs::ENUMERABLE),
+            a.contains(PropAttrs::CONFIGURABLE),
         )
     }
 
@@ -3809,6 +3811,31 @@ impl<'gc> VM<'gc> {
         desc.insert("enumerable".to_string(), Value::Boolean(enumerable));
         desc.insert("configurable".to_string(), Value::Boolean(configurable));
         self.wrap_descriptor_object(ctx, desc)
+    }
+
+    /// Create a JS-visible descriptor object from a `PropDesc`.
+    ///
+    /// This is the unified replacement for `make_data_descriptor_object` and
+    /// `make_accessor_descriptor_object`. During the dual-track migration,
+    /// callers that already have a `PropDesc` should prefer this.
+    fn make_descriptor_object_from_desc(&self, ctx: &GcContext<'gc>, prop_desc: &PropDesc<'gc>) -> Value<'gc> {
+        self.wrap_descriptor_object(ctx, prop_desc.to_descriptor_map())
+    }
+
+    /// Read the current own property descriptor for `key` from a VmObject's
+    /// legacy hidden-key storage.
+    ///
+    /// Returns `None` if the property does not exist on the object itself.
+    fn get_own_prop_desc_from_object(&self, obj: &VmObjectHandle<'gc>, key: &str) -> Option<PropDesc<'gc>> {
+        let borrow = obj.borrow();
+        desc_from_legacy_map(&borrow, key)
+    }
+
+    /// Read the current own property descriptor for `key` from a VmArray's
+    /// named property storage (props map).
+    fn get_own_prop_desc_from_array(&self, arr: &VmArrayHandle<'gc>, key: &str) -> Option<PropDesc<'gc>> {
+        let borrow = arr.borrow();
+        desc_from_legacy_map(&borrow.props, key)
     }
 
     fn is_constructor_value(&self, v: &Value<'gc>) -> bool {
@@ -23567,13 +23594,8 @@ impl<'gc> VM<'gc> {
                         if borrow.contains_key("__module_namespace__") {
                             if Self::namespace_is_symbol_like_key(obj, &key) {
                                 // Symbol properties use ordinary [[GetOwnProperty]]
-                                if let Some(val) = borrow.get(&key) {
-                                    let writable = !matches!(borrow.get(&format!("__readonly_{}__", key)), Some(Value::Boolean(true)));
-                                    let enumerable =
-                                        !matches!(borrow.get(&format!("__nonenumerable_{}__", key)), Some(Value::Boolean(true)));
-                                    let configurable =
-                                        !matches!(borrow.get(&format!("__nonconfigurable_{}__", key)), Some(Value::Boolean(true)));
-                                    return self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable);
+                                if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
+                                    return self.make_descriptor_object_from_desc(ctx, &desc);
                                 }
                                 return Value::Undefined;
                             }

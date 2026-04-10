@@ -8845,7 +8845,6 @@ impl<'gc> VM<'gc> {
                             };
                         }
                         let b = map.borrow();
-                        let ne_key = make_nonenumerable_key(&key);
                         let is_own = if key == "__proto__" {
                             b.contains_key(OWN_DUNDER_PROTO_DATA_KEY) || has_getter(&*b, "__proto__") || has_setter(&*b, "__proto__")
                         } else if key == "__type__" {
@@ -8853,7 +8852,7 @@ impl<'gc> VM<'gc> {
                         } else {
                             b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
                         };
-                        Value::Boolean(is_own && !b.contains_key(&ne_key))
+                        Value::Boolean(is_own && !has_nonenumerable_mark(&*b, &key))
                     }
                     Some(Value::VmArray(arr)) => {
                         let b = arr.borrow();
@@ -8861,21 +8860,18 @@ impl<'gc> VM<'gc> {
                             let has_element = i < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", i));
                             let has_accessor = has_getter(&b.props, &key) || has_setter(&b.props, &key);
                             if has_element || has_accessor {
-                                let ne_key = make_nonenumerable_key(&key);
-                                return Value::Boolean(!b.props.contains_key(&ne_key));
+                                return Value::Boolean(!has_nonenumerable_mark(&b.props, &key));
                             }
                         }
-                        let ne_key = make_nonenumerable_key(&key);
                         let is_own = b.props.contains_key(&key) || has_getter(&b.props, &key) || has_setter(&b.props, &key);
-                        Value::Boolean(is_own && !b.props.contains_key(&ne_key))
+                        Value::Boolean(is_own && !has_nonenumerable_mark(&b.props, &key))
                     }
                     Some(Value::VmFunction(..) | Value::VmClosure(..)) => {
                         let recv_val = receiver.unwrap().clone();
                         let props = self.get_fn_props_for_value(ctx, &recv_val).unwrap();
                         let b = props.borrow();
-                        let ne_key = make_nonenumerable_key(&key);
                         let is_own = b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key);
-                        Value::Boolean(is_own && !b.contains_key(&ne_key))
+                        Value::Boolean(is_own && !has_nonenumerable_mark(&*b, &key))
                     }
                     _ => Value::Boolean(false),
                 }
@@ -10458,12 +10454,10 @@ impl<'gc> VM<'gc> {
                     };
                     let mut borrow = obj.borrow_mut(ctx);
                     for k in &keys {
-                        let nc_key = make_nonconfigurable_key(&k);
-                        borrow.insert(nc_key, Value::Boolean(true));
+                        mark_nonconfigurable(&mut *borrow, &k);
                     }
                     for k in &symbol_keys {
-                        let nc_key = make_nonconfigurable_key(&k);
-                        borrow.insert(nc_key, Value::Boolean(true));
+                        mark_nonconfigurable(&mut *borrow, &k);
                     }
                     borrow.insert("__non_extensible__".to_string(), Value::Boolean(true));
                     drop(borrow);
@@ -10602,10 +10596,7 @@ impl<'gc> VM<'gc> {
                             keys.push(name.to_string());
                         }
                     }
-                    let all_nonconfig = keys.iter().all(|k| {
-                        let nc_key = make_nonconfigurable_key(&k);
-                        matches!(b.get(&nc_key), Some(Value::Boolean(true)))
-                    });
+                    let all_nonconfig = keys.iter().all(|k| has_nonconfigurable_mark(&*b, &k));
                     Value::Boolean(all_nonconfig)
                 } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &arg {
                     let props = self.get_fn_props(ctx, *ip, *arity);
@@ -10615,10 +10606,7 @@ impl<'gc> VM<'gc> {
                         return Value::Boolean(false);
                     }
                     let keys = self.collect_object_map_keys(&b, false);
-                    let all_nonconfig = keys.iter().all(|k| {
-                        let nc_key = make_nonconfigurable_key(&k);
-                        matches!(b.get(&nc_key), Some(Value::Boolean(true)))
-                    });
+                    let all_nonconfig = keys.iter().all(|k| has_nonconfigurable_mark(&*b, &k));
                     Value::Boolean(all_nonconfig)
                 } else if let Value::VmArray(arr) = &arg {
                     let b = arr.borrow();
@@ -10628,8 +10616,7 @@ impl<'gc> VM<'gc> {
                     }
                     for (i, v) in b.elements.iter().enumerate() {
                         if !matches!(v, Value::Undefined) && !b.props.contains_key(&format!("__deleted_{}", i)) {
-                            let nc_key = make_nonconfigurable_key(&i.to_string());
-                            if !matches!(b.props.get(&nc_key), Some(Value::Boolean(true))) {
+                            if !has_nonconfigurable_mark(&b.props, &i.to_string()) {
                                 return Value::Boolean(false);
                             }
                         }
@@ -10638,8 +10625,7 @@ impl<'gc> VM<'gc> {
                         if k.starts_with("__") {
                             continue;
                         }
-                        let nc_key = make_nonconfigurable_key(&k);
-                        if !matches!(b.props.get(&nc_key), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&b.props, k) {
                             return Value::Boolean(false);
                         }
                     }
@@ -10725,14 +10711,12 @@ impl<'gc> VM<'gc> {
                         if k.starts_with("__") || k.starts_with("@@sym:") {
                             continue;
                         }
-                        let nc_key = make_nonconfigurable_key(&k);
-                        if !matches!(b.get(&nc_key), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&*b, &k) {
                             return Value::Boolean(false);
                         }
                         let is_accessor = matches!(v, Value::Property { .. }) || has_getter(&*b, &k) || has_setter(&*b, &k);
                         if !is_accessor {
-                            let ro_key = make_readonly_key(&k);
-                            if !matches!(b.get(&ro_key), Some(Value::Boolean(true))) {
+                            if !has_readonly_mark(&*b, &k) {
                                 return Value::Boolean(false);
                             }
                         }
@@ -12826,7 +12810,7 @@ impl<'gc> VM<'gc> {
                 borrow.contains_key(key) || has_getter(&*borrow, &key) || has_setter(&*borrow, &key)
             };
             let readonly_key = make_readonly_key(&key);
-            let mut is_readonly = matches!(borrow.get(&readonly_key), Some(Value::Boolean(true)));
+            let mut is_readonly = has_readonly_mark(&*borrow, &key);
             // String wrappers have readonly character indices
             if !is_readonly
                 && let Some(Value::String(type_str)) = borrow.get("__type__")
@@ -13650,9 +13634,7 @@ impl<'gc> VM<'gc> {
                 return Ok(val.clone());
             }
             // Check for readonly
-            let readonly_key = make_readonly_key(&key);
-            let is_readonly = overlay.is_some_and(|o| matches!(o.borrow().get(&readonly_key), Some(Value::Boolean(true))))
-                || matches!(props.borrow().get(&readonly_key), Some(Value::Boolean(true)));
+            let is_readonly = overlay.is_some_and(|o| has_readonly_mark(&*o.borrow(), &key)) || has_readonly_mark(&*props.borrow(), &key);
             if is_readonly {
                 let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}'", key));
                 self.handle_throw(ctx, &err)?;
@@ -13733,8 +13715,7 @@ impl<'gc> VM<'gc> {
                                 return Ok(val.clone());
                             }
                             // Check for readonly property
-                            let readonly_key = make_readonly_key(&key);
-                            if matches!(borrow.get(&readonly_key), Some(Value::Boolean(true))) {
+                            if has_readonly_mark(&*borrow, &key) {
                                 drop(borrow);
                                 if self.current_execution_is_strict() {
                                     let err = self
@@ -15323,7 +15304,7 @@ impl<'gc> VM<'gc> {
             let ne = Value::Boolean(true);
             let keys_to_mark: Vec<String> = math_map.keys().filter(|k| !k.starts_with("__")).cloned().collect();
             for k in keys_to_mark {
-                math_map.insert(make_nonenumerable_key(&k), ne.clone());
+                mark_nonenumerable(&mut math_map, &k);
             }
         }
         self.globals
@@ -22346,10 +22327,7 @@ impl<'gc> VM<'gc> {
                                     let mut keys: Vec<String> = b
                                         .keys()
                                         .filter(|k| !k.starts_with("__"))
-                                        .filter(|k| {
-                                            let ne_key = make_nonenumerable_key(&k);
-                                            !b.contains_key(&ne_key)
-                                        })
+                                        .filter(|k| !has_nonenumerable_mark(&*b, k))
                                         .cloned()
                                         .collect();
                                     for k in b.keys() {
@@ -22361,8 +22339,7 @@ impl<'gc> VM<'gc> {
                                         if let Some(ak) = accessor_key
                                             && !keys.contains(&ak)
                                         {
-                                            let ne_key = make_nonenumerable_key(&ak);
-                                            if !b.contains_key(&ne_key) {
+                                            if !has_nonenumerable_mark(&*b, &ak) {
                                                 keys.push(ak);
                                             }
                                         }
@@ -32697,11 +32674,7 @@ impl<'gc> VM<'gc> {
 
     fn is_property_enumerable_on_target(&self, target: &Value<'gc>, key: &str) -> bool {
         match target {
-            Value::VmObject(map) => {
-                let b = map.borrow();
-                let ne_key = make_nonenumerable_key(&key);
-                !b.contains_key(&ne_key)
-            }
+            Value::VmObject(map) => !has_nonenumerable_mark(&*map.borrow(), key),
             _ => true,
         }
     }

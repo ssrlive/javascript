@@ -1,10 +1,10 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
     GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
-    desc_from_legacy_map, get_getter, has_getter, has_nonenumerable_mark, has_readonly_mark, has_setter, make_getter_key,
-    make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key, mark_nonconfigurable, mark_nonenumerable,
-    mark_readonly, remove_getter, remove_setter, set_getter, set_setter, unmark_nonconfigurable, unmark_nonenumerable, unmark_readonly,
-    write_attrs_to_legacy_map,
+    desc_from_legacy_map, get_getter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter,
+    make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key, mark_nonconfigurable,
+    mark_nonenumerable, mark_readonly, remove_getter, remove_setter, set_getter, set_setter, unmark_nonconfigurable, unmark_nonenumerable,
+    unmark_readonly, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -10689,7 +10689,7 @@ impl<'gc> VM<'gc> {
                     let all_nonconfig = b
                         .keys()
                         .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
-                        .all(|k| matches!(b.get(&make_nonconfigurable_key(&k)), Some(Value::Boolean(true))));
+                        .all(|k| has_nonconfigurable_mark(&b, &k));
                     Value::Boolean(all_nonconfig)
                 } else {
                     Value::Boolean(true)
@@ -10781,7 +10781,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     for key in accessor_keys {
-                        if !matches!(b.get(&make_nonconfigurable_key(&key)), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&b, &key) {
                             return Value::Boolean(false);
                         }
                     }
@@ -10796,7 +10796,7 @@ impl<'gc> VM<'gc> {
                         if matches!(v, Value::Undefined) || b.props.contains_key(&format!("__deleted_{}", i)) {
                             continue;
                         }
-                        if !matches!(b.props.get(&make_nonconfigurable_key(&i.to_string())), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&b.props, &i.to_string()) {
                             return Value::Boolean(false);
                         }
                         if !has_readonly_mark(&b.props, &i.to_string()) {
@@ -10807,7 +10807,7 @@ impl<'gc> VM<'gc> {
                         if k.starts_with("__") {
                             continue;
                         }
-                        if !matches!(b.props.get(&make_nonconfigurable_key(&k)), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&b.props, &k) {
                             return Value::Boolean(false);
                         }
                         let has_accessor = has_getter(&b.props, &k) || has_setter(&b.props, &k);
@@ -10824,7 +10824,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     for key in accessor_keys {
-                        if !matches!(b.props.get(&make_nonconfigurable_key(&key)), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&b.props, &key) {
                             return Value::Boolean(false);
                         }
                     }
@@ -10840,7 +10840,7 @@ impl<'gc> VM<'gc> {
                         if k.starts_with("__") || k.starts_with("@@sym:") {
                             continue;
                         }
-                        if !matches!(b.get(&make_nonconfigurable_key(&k)), Some(Value::Boolean(true))) {
+                        if !has_nonconfigurable_mark(&b, &k) {
                             return Value::Boolean(false);
                         }
                         if !has_readonly_mark(&b, &k) {

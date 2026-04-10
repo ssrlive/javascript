@@ -1,5 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::property_descriptor::{PropAttrs, PropDesc, PropKind, attrs_from_legacy_map, desc_from_legacy_map};
+use crate::core::property_descriptor::{
+    PropAttrs, PropDesc, PropKind, attrs_from_legacy_map, desc_from_legacy_map, write_attrs_to_legacy_map,
+};
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
@@ -3334,27 +3336,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn set_property_attributes(map: &mut IndexMap<String, Value<'gc>>, key: &str, writable: bool, enumerable: bool, configurable: bool) {
-        let readonly_key = format!("__readonly_{}__", key);
-        let nonenumerable_key = format!("__nonenumerable_{}__", key);
-        let nonconfigurable_key = format!("__nonconfigurable_{}__", key);
-
+        let mut attrs = PropAttrs::empty();
         if writable {
-            map.shift_remove(&readonly_key);
-        } else {
-            map.insert(readonly_key, Value::Boolean(true));
+            attrs |= PropAttrs::WRITABLE;
         }
-
         if enumerable {
-            map.shift_remove(&nonenumerable_key);
-        } else {
-            map.insert(nonenumerable_key, Value::Boolean(true));
+            attrs |= PropAttrs::ENUMERABLE;
         }
-
         if configurable {
-            map.shift_remove(&nonconfigurable_key);
-        } else {
-            map.insert(nonconfigurable_key, Value::Boolean(true));
+            attrs |= PropAttrs::CONFIGURABLE;
         }
+        write_attrs_to_legacy_map(map, key, attrs);
     }
 
     fn insert_property_with_attributes(

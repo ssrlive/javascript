@@ -460,3 +460,30 @@ pub fn is_hidden_key(key: &str) -> bool {
         || key.starts_with("__get_")
         || key.starts_with("__set_")
 }
+
+/// Write attribute flags for `key` into a legacy hidden-key map.
+///
+/// This is the inverse of `attrs_from_legacy_map`.  For each attribute
+/// that is *off*, the corresponding marker key is inserted; for each
+/// attribute that is *on*, any existing marker is removed.
+pub fn write_attrs_to_legacy_map<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, attrs: PropAttrs) {
+    let ro_key = format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX);
+    let ne_key = format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX);
+    let nc_key = format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX);
+
+    if attrs.contains(PropAttrs::WRITABLE) {
+        map.shift_remove(&ro_key);
+    } else {
+        map.insert(ro_key, Value::Boolean(true));
+    }
+    if attrs.contains(PropAttrs::ENUMERABLE) {
+        map.shift_remove(&ne_key);
+    } else {
+        map.insert(ne_key, Value::Boolean(true));
+    }
+    if attrs.contains(PropAttrs::CONFIGURABLE) {
+        map.shift_remove(&nc_key);
+    } else {
+        map.insert(nc_key, Value::Boolean(true));
+    }
+}

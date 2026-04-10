@@ -437,7 +437,15 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
             set: map.get(&setter_key).cloned(),
         }
     } else {
-        PropKind::Data(map.get(key).cloned().unwrap_or(Value::Undefined))
+        // Check for legacy Value::Property variant in the value slot
+        match map.get(key) {
+            Some(Value::Property { getter, setter, .. }) => PropKind::Accessor {
+                get: getter.as_ref().map(|g| (**g).clone()),
+                set: setter.as_ref().map(|s| (**s).clone()),
+            },
+            Some(v) => PropKind::Data(v.clone()),
+            None => PropKind::Data(Value::Undefined),
+        }
     };
 
     Some(PropDesc { kind, attrs })

@@ -23626,63 +23626,22 @@ impl<'gc> VM<'gc> {
                                 return self.make_data_descriptor_object(ctx, &Value::String(vec![str_u16[idx]]), false, true, false);
                             }
                         }
-                        let (writable, enumerable, configurable) = Self::property_attributes(&borrow, &key);
                         if key == "__proto__" {
+                            // __proto__ data is stored under OWN_DUNDER_PROTO_DATA_KEY
                             if let Some(val) = borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
-                                return self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable);
+                                let a = attrs_from_legacy_map(&borrow, &key);
+                                return self.make_descriptor_object_from_desc(ctx, &PropDesc::data(val.clone(), a));
                             }
-                            if let Some(Value::Property { getter, setter, .. }) = borrow.get("__proto__") {
-                                return self.make_accessor_descriptor_object(
-                                    ctx,
-                                    getter.as_deref(),
-                                    setter.as_deref(),
-                                    enumerable,
-                                    configurable,
-                                );
-                            }
-                            let getter_key = "__get___proto__".to_string();
-                            let setter_key = "__set___proto__".to_string();
-                            let has_getter = borrow.contains_key(&getter_key);
-                            let has_setter = borrow.contains_key(&setter_key);
-                            if has_getter || has_setter {
-                                return self.make_accessor_descriptor_object(
-                                    ctx,
-                                    borrow.get(&getter_key),
-                                    borrow.get(&setter_key),
-                                    enumerable,
-                                    configurable,
-                                );
+                            // Fall back to accessor lookup (Value::Property or __get_/__set_)
+                            if let Some(desc) = desc_from_legacy_map(&borrow, "__proto__") {
+                                return self.make_descriptor_object_from_desc(ctx, &desc);
                             }
                             return Value::Undefined;
                         }
-                        if let Some(val) = borrow.get(&key) {
-                            match val {
-                                Value::Property { getter, setter, .. } => self.make_accessor_descriptor_object(
-                                    ctx,
-                                    getter.as_deref(),
-                                    setter.as_deref(),
-                                    enumerable,
-                                    configurable,
-                                ),
-                                _ => self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable),
-                            }
+                        if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
+                            self.make_descriptor_object_from_desc(ctx, &desc)
                         } else {
-                            // Check for getter/setter accessor
-                            let getter_key = format!("__get_{}", key);
-                            let setter_key = format!("__set_{}", key);
-                            let has_getter = borrow.contains_key(&getter_key);
-                            let has_setter = borrow.contains_key(&setter_key);
-                            if has_getter || has_setter {
-                                self.make_accessor_descriptor_object(
-                                    ctx,
-                                    borrow.get(&getter_key),
-                                    borrow.get(&setter_key),
-                                    enumerable,
-                                    configurable,
-                                )
-                            } else {
-                                Value::Undefined
-                            }
+                            Value::Undefined
                         }
                     }
                     Some(Value::VmArray(arr)) => {
@@ -23697,8 +23656,6 @@ impl<'gc> VM<'gc> {
                             let writable = !matches!(borrow.props.get("__readonly_length__"), Some(Value::Boolean(true)));
                             self.make_data_descriptor_object(ctx, &len.into(), writable, false, false)
                         } else {
-                            let (writable, enumerable, configurable) = Self::property_attributes(&borrow.props, &key);
-
                             // For TypedArrays, use canonical_numeric_index_string to decide
                             // whether the key is an element index or an ordinary property.
                             if is_ta {
@@ -23720,49 +23677,22 @@ impl<'gc> VM<'gc> {
                                     }
                                 } else {
                                     // Not a canonical numeric index — treat as ordinary property
-                                    if let Some(val) = borrow.props.get(&key) {
-                                        self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable)
+                                    if let Some(desc) = desc_from_legacy_map(&borrow.props, &key) {
+                                        self.make_descriptor_object_from_desc(ctx, &desc)
                                     } else {
-                                        let getter_key = format!("__get_{}", key);
-                                        let setter_key = format!("__set_{}", key);
-                                        let has_getter = borrow.props.contains_key(&getter_key);
-                                        let has_setter = borrow.props.contains_key(&setter_key);
-                                        if has_getter || has_setter {
-                                            self.make_accessor_descriptor_object(
-                                                ctx,
-                                                borrow.props.get(&getter_key),
-                                                borrow.props.get(&setter_key),
-                                                enumerable,
-                                                configurable,
-                                            )
-                                        } else {
-                                            Value::Undefined
-                                        }
+                                        Value::Undefined
                                     }
                                 }
                             } else if let Ok(idx) = key.parse::<usize>()
                                 && idx < borrow.elements.len()
                                 && !borrow.props.contains_key(&format!("__deleted_{}", idx))
                             {
-                                self.make_data_descriptor_object(ctx, &borrow.elements[idx], writable, enumerable, configurable)
-                            } else if let Some(val) = borrow.props.get(&key) {
-                                self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable)
+                                let a = attrs_from_legacy_map(&borrow.props, &key);
+                                self.make_descriptor_object_from_desc(ctx, &PropDesc::data(borrow.elements[idx].clone(), a))
+                            } else if let Some(desc) = desc_from_legacy_map(&borrow.props, &key) {
+                                self.make_descriptor_object_from_desc(ctx, &desc)
                             } else {
-                                let getter_key = format!("__get_{}", key);
-                                let setter_key = format!("__set_{}", key);
-                                let has_getter = borrow.props.contains_key(&getter_key);
-                                let has_setter = borrow.props.contains_key(&setter_key);
-                                if has_getter || has_setter {
-                                    self.make_accessor_descriptor_object(
-                                        ctx,
-                                        borrow.props.get(&getter_key),
-                                        borrow.props.get(&setter_key),
-                                        enumerable,
-                                        configurable,
-                                    )
-                                } else {
-                                    Value::Undefined
-                                }
+                                Value::Undefined
                             }
                         }
                     }
@@ -23770,49 +23700,19 @@ impl<'gc> VM<'gc> {
                         let Some(fn_props) = self.merged_fn_props_for_value(ctx, val) else {
                             return Value::Undefined;
                         };
-                        let (writable, enumerable, configurable) = Self::property_attributes(&fn_props, &key);
-                        if let Some(val) = fn_props.get(&key) {
-                            self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable)
+                        if let Some(desc) = desc_from_legacy_map(&fn_props, &key) {
+                            self.make_descriptor_object_from_desc(ctx, &desc)
                         } else {
-                            let getter_key = format!("__get_{}", key);
-                            let setter_key = format!("__set_{}", key);
-                            let has_getter = fn_props.contains_key(&getter_key);
-                            let has_setter = fn_props.contains_key(&setter_key);
-                            if has_getter || has_setter {
-                                self.make_accessor_descriptor_object(
-                                    ctx,
-                                    fn_props.get(&getter_key),
-                                    fn_props.get(&setter_key),
-                                    enumerable,
-                                    configurable,
-                                )
-                            } else {
-                                Value::Undefined
-                            }
+                            Value::Undefined
                         }
                     }
                     Some(Value::VmNativeFunction(id)) => {
                         let props = self.get_native_fn_props(ctx, *id);
                         let borrow = props.borrow();
-                        let (writable, enumerable, configurable) = Self::property_attributes(&borrow, &key);
-                        if let Some(val) = borrow.get(&key) {
-                            self.make_data_descriptor_object(ctx, val, writable, enumerable, configurable)
+                        if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
+                            self.make_descriptor_object_from_desc(ctx, &desc)
                         } else {
-                            let getter_key = format!("__get_{}", key);
-                            let setter_key = format!("__set_{}", key);
-                            let has_getter = borrow.contains_key(&getter_key);
-                            let has_setter = borrow.contains_key(&setter_key);
-                            if has_getter || has_setter {
-                                self.make_accessor_descriptor_object(
-                                    ctx,
-                                    borrow.get(&getter_key),
-                                    borrow.get(&setter_key),
-                                    enumerable,
-                                    configurable,
-                                )
-                            } else {
-                                Value::Undefined
-                            }
+                            Value::Undefined
                         }
                     }
                     _ => Value::Undefined,

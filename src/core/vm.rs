@@ -2,9 +2,9 @@ use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
     GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
     desc_from_legacy_map, get_getter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter,
-    lookup_getter, lookup_setter, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
-    mark_nonconfigurable, mark_nonenumerable, mark_readonly, read_attrs_from_legacy_map, remove_getter, remove_property_completely,
-    remove_setter, set_getter, set_setter, unmark_nonconfigurable, unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
+    lookup_getter, lookup_setter, make_getter_key, make_readonly_key, make_setter_key, mark_nonconfigurable, mark_nonenumerable,
+    mark_readonly, read_attrs_from_legacy_map, remove_getter, remove_property_completely, remove_setter, set_getter, set_setter,
+    unmark_nonconfigurable, unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -13624,10 +13624,9 @@ impl<'gc> VM<'gc> {
             // For VmClosure with overlay, check overlay for setter/getter first
             let overlay = self.get_closure_overlay(obj);
             // Check for setter accessor
-            let setter_key = make_setter_key(&key);
             let setter_fn = overlay
-                .and_then(|o| o.borrow().get(&setter_key).cloned())
-                .or_else(|| props.borrow().get(&setter_key).cloned());
+                .and_then(|o| lookup_setter(&*o.borrow(), &key).cloned())
+                .or_else(|| lookup_setter(&*props.borrow(), &key).cloned());
             if let Some(sf) = setter_fn {
                 let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
                 return Ok(val.clone());
@@ -13644,7 +13643,7 @@ impl<'gc> VM<'gc> {
                 let b = props.borrow();
                 let is_frozen = matches!(b.get("__frozen__"), Some(Value::Boolean(true)));
                 let is_non_ext = matches!(b.get("__non_extensible__"), Some(Value::Boolean(true)));
-                let key_exists = b.contains_key(key) || has_getter(&*b, &key) || b.contains_key(&setter_key);
+                let key_exists = b.contains_key(key) || has_getter(&*b, &key) || has_setter(&*b, &key);
                 if is_frozen || (is_non_ext && !key_exists) {
                     drop(b);
                     if self.current_execution_is_strict() {
@@ -13698,9 +13697,8 @@ impl<'gc> VM<'gc> {
                         }
                         // Check for setter accessor on this chain link
                         if let Value::VmObject(m) = cv {
-                            let setter_key = make_setter_key(&key);
                             let borrow = m.borrow();
-                            if let Some(sf) = borrow.get(&setter_key).cloned() {
+                            if let Some(sf) = lookup_setter(&*borrow, &key).cloned() {
                                 drop(borrow);
                                 let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
                                 return Ok(val.clone());
@@ -14212,8 +14210,7 @@ impl<'gc> VM<'gc> {
                         return self.invoke_getter_with_receiver(ctx, &getter_fn, receiver);
                     }
                     // Setter-only accessor: if __set_<key> exists but no getter/data, return undefined
-                    let setter_key = make_setter_key(&key);
-                    if borrow.contains_key(&setter_key) {
+                    if has_setter(&*borrow, &key) {
                         return Value::Undefined;
                     }
                     if depth == 1 {
@@ -14331,14 +14328,13 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                             Some("BigInt") => {
-                                let getter_key = make_getter_key(&key);
                                 if let Some(proto) = borrow.get("__proto__").cloned() {
                                     let has_override = matches!(
                                         &proto,
                                         Value::VmObject(proto_obj)
                                             if {
                                                 let bp = proto_obj.borrow();
-                                                bp.contains_key(&getter_key) || bp.contains_key(key)
+                                                super::property_descriptor::has_getter(&*bp, &key) || bp.contains_key(key)
                                             }
                                     );
                                     if has_override {
@@ -14423,8 +14419,7 @@ impl<'gc> VM<'gc> {
                     if let Some(val) = borrow.get(key).cloned() {
                         // Setter-only accessor: if __set_{key} exists without __get_{key},
                         // this is an accessor property and reads return undefined
-                        let setter_key = make_setter_key(&key);
-                        if borrow.contains_key(&setter_key) && !borrow.contains_key(&getter_key) {
+                        if has_setter(&*borrow, &key) && !borrow.contains_key(&getter_key) {
                             return Value::Undefined;
                         }
                         if key == "prototype"
@@ -14557,8 +14552,7 @@ impl<'gc> VM<'gc> {
                             val
                         };
                     }
-                    let setter_key = make_setter_key(&key);
-                    if borrow.props.contains_key(&setter_key) {
+                    if has_setter(&borrow.props, &key) {
                         return Value::Undefined;
                     }
                     let mut next = borrow.props.get("__proto__").cloned();
@@ -15290,7 +15284,6 @@ impl<'gc> VM<'gc> {
         }
         // All Math properties are non-enumerable per spec
         {
-            let ne = Value::Boolean(true);
             let keys_to_mark: Vec<String> = math_map.keys().filter(|k| !k.starts_with("__")).cloned().collect();
             for k in keys_to_mark {
                 mark_nonenumerable(&mut math_map, &k);

@@ -1,6 +1,6 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
-    PropAttrs, PropDesc, PropKind, attrs_from_legacy_map, desc_from_legacy_map, write_attrs_to_legacy_map,
+    PropAttrs, PropDesc, attrs_from_legacy_map, desc_from_legacy_map, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -3755,6 +3755,7 @@ impl<'gc> VM<'gc> {
         ctor_val
     }
 
+    #[allow(dead_code)]
     fn property_attributes(map: &IndexMap<String, Value<'gc>>, key: &str) -> (bool, bool, bool) {
         let a = attrs_from_legacy_map(map, key);
         (
@@ -3789,6 +3790,7 @@ impl<'gc> VM<'gc> {
         self.wrap_descriptor_object(ctx, desc)
     }
 
+    #[allow(dead_code)]
     fn make_accessor_descriptor_object(
         &self,
         ctx: &GcContext<'gc>,
@@ -3818,6 +3820,7 @@ impl<'gc> VM<'gc> {
     /// legacy hidden-key storage.
     ///
     /// Returns `None` if the property does not exist on the object itself.
+    #[allow(dead_code)]
     fn get_own_prop_desc_from_object(&self, obj: &VmObjectHandle<'gc>, key: &str) -> Option<PropDesc<'gc>> {
         let borrow = obj.borrow();
         desc_from_legacy_map(&borrow, key)
@@ -3825,6 +3828,7 @@ impl<'gc> VM<'gc> {
 
     /// Read the current own property descriptor for `key` from a VmArray's
     /// named property storage (props map).
+    #[allow(dead_code)]
     fn get_own_prop_desc_from_array(&self, arr: &VmArrayHandle<'gc>, key: &str) -> Option<PropDesc<'gc>> {
         let borrow = arr.borrow();
         desc_from_legacy_map(&borrow.props, key)

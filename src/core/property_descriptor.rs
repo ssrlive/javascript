@@ -10,8 +10,10 @@
 //! Conversion helpers bridge between legacy hidden-key maps and the new
 //! model so both representations can coexist during the dual-track phase.
 
+#![allow(dead_code)]
+
 use crate::core::value::Value;
-use crate::core::{Collect, GcPtr, GcTrace};
+use crate::core::{Collect, GcTrace};
 use bitflags::bitflags;
 
 // ── Attribute flags ────────────────────────────────────────────────

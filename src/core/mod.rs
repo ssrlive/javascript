@@ -19,7 +19,8 @@ mod value;
 pub use value::*;
 
 pub mod property_descriptor;
-pub use property_descriptor::{PropAttrs, PropDesc, PropKind};
+#[allow(unused_imports)]
+pub use property_descriptor::{PropAttrs, PropDesc};
 
 mod statement;
 pub use statement::*;

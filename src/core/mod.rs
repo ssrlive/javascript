@@ -18,6 +18,9 @@ mod gc;
 mod value;
 pub use value::*;
 
+pub mod property_descriptor;
+pub use property_descriptor::{PropAttrs, PropDesc, PropKind};
+
 mod statement;
 pub use statement::*;
 

@@ -1,5 +1,5 @@
 use crate::core::{Collect, GcPtr, GcTrace};
-use crate::core::{FunctionID, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
+use crate::core::{FunctionID, PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
@@ -66,13 +66,15 @@ pub enum Value<'gc> {
     VmMap(VmMapHandle<'gc>),
     VmSet(VmSetHandle<'gc>),
     /// Internal property representation stored in an object's `properties` map.
-    /// Contains either a concrete `value` or accessor `getter`/`setter` functions.
+    /// Contains either a concrete `value` or accessor `getter`/`setter` functions,
+    /// plus attribute flags (`writable`, `enumerable`, `configurable`).
     /// Note: a `Value::Property` is not the same as a JS descriptor object
     /// (which is a descriptor object containing keys like `value`, `writable`, etc.).
     Property {
         value: Option<GcPtr<'gc, Value<'gc>>>,
         getter: Option<Box<Value<'gc>>>,
         setter: Option<Box<Value<'gc>>>,
+        attrs: PropAttrs,
     },
 }
 
@@ -158,7 +160,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             Value::VmObject(handle) => handle.trace(cc),
             Value::VmMap(handle) => handle.trace(cc),
             Value::VmSet(handle) => handle.trace(cc),
-            Value::Property { value, getter, setter } => {
+            Value::Property { value, getter, setter, .. } => {
                 if let Some(v) = value {
                     v.trace(cc);
                 }

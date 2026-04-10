@@ -1944,6 +1944,7 @@ impl<'gc> VM<'gc> {
                     value: None,
                     getter: Some(Box::new(thrower.clone())),
                     setter: Some(Box::new(thrower)),
+                    attrs: PropAttrs::empty(),
                 };
                 map.insert("callee".to_string(), prop);
                 write_attrs_to_legacy_map(&mut map, "callee", PropAttrs::WRITABLE);
@@ -1958,6 +1959,7 @@ impl<'gc> VM<'gc> {
                 value: None,
                 getter: Some(Box::new(thrower.clone())),
                 setter: Some(Box::new(thrower)),
+                attrs: PropAttrs::empty(),
             };
             map.insert("callee".to_string(), prop);
             write_attrs_to_legacy_map(&mut map, "callee", PropAttrs::WRITABLE);

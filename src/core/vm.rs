@@ -16858,6 +16858,7 @@ impl<'gc> VM<'gc> {
                 value: None,
                 getter: Some(Box::new(restricted_thrower.clone())),
                 setter: Some(Box::new(restricted_thrower.clone())),
+                attrs: PropAttrs::CONFIGURABLE,
             },
         );
         fn_proto.insert(
@@ -16866,6 +16867,7 @@ impl<'gc> VM<'gc> {
                 value: None,
                 getter: Some(Box::new(restricted_thrower.clone())),
                 setter: Some(Box::new(restricted_thrower)),
+                attrs: PropAttrs::CONFIGURABLE,
             },
         );
         mark_nonenumerable(&mut fn_proto, "call");
@@ -17206,6 +17208,7 @@ impl<'gc> VM<'gc> {
                     false,
                 ))),
                 setter: None,
+                attrs: PropAttrs::CONFIGURABLE,
             },
         );
         mark_nonenumerable(&mut abs_mod_src_proto, &to_string_tag_key);

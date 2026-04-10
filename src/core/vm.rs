@@ -3,8 +3,8 @@ use crate::core::property_descriptor::{
     GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
     desc_from_legacy_map, get_getter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter,
     lookup_getter, lookup_setter, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
-    mark_nonconfigurable, mark_nonenumerable, mark_readonly, read_attrs_from_legacy_map, remove_getter, remove_setter, set_getter,
-    set_setter, unmark_nonconfigurable, unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
+    mark_nonconfigurable, mark_nonenumerable, mark_readonly, read_attrs_from_legacy_map, remove_getter, remove_property_completely,
+    remove_setter, set_getter, set_setter, unmark_nonconfigurable, unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -9277,8 +9277,7 @@ impl<'gc> VM<'gc> {
                                 }
                                 // Symbol keys: allow deletion (but non-configurable symbols like toStringTag return false)
                                 if Self::namespace_is_symbol_like_key(map, &key) {
-                                    let nc_key = make_nonconfigurable_key(&key);
-                                    if map.borrow().contains_key(&nc_key) {
+                                    if has_nonconfigurable_mark(&*map.borrow(), &key) {
                                         return Value::Boolean(false);
                                     }
                                     return Value::Boolean(true);
@@ -9296,43 +9295,22 @@ impl<'gc> VM<'gc> {
                                 // Non-exported string keys
                                 return Value::Boolean(true);
                             }
-                            let nc_key = make_nonconfigurable_key(&key);
-                            let is_nc = map.borrow().contains_key(&nc_key) || self.is_string_wrapper_nonconfigurable_key(map, &key);
+                            let is_nc =
+                                has_nonconfigurable_mark(&*map.borrow(), &key) || self.is_string_wrapper_nonconfigurable_key(map, &key);
                             if is_nc {
                                 Value::Boolean(false)
                             } else {
-                                let getter_key = make_getter_key(&key);
-                                let setter_key = make_setter_key(&key);
-                                let ne_key = make_nonenumerable_key(&key);
-                                let ro_key = make_readonly_key(&key);
-                                let mut b = map.borrow_mut(ctx);
-                                b.shift_remove(&key);
-                                b.shift_remove(&getter_key);
-                                b.shift_remove(&setter_key);
-                                b.shift_remove(&nc_key);
-                                b.shift_remove(&ne_key);
-                                b.shift_remove(&ro_key);
+                                remove_property_completely(&mut *map.borrow_mut(ctx), &key);
                                 Value::Boolean(true)
                             }
                         }
                         Value::VmArray(arr) => {
-                            let nc_key = make_nonconfigurable_key(&key);
-                            if arr.borrow().props.contains_key(&nc_key) {
+                            if has_nonconfigurable_mark(&arr.borrow().props, &key) {
                                 Value::Boolean(false)
                             } else {
-                                let getter_key = make_getter_key(&key);
-                                let setter_key = make_setter_key(&key);
-                                let ne_key = make_nonenumerable_key(&key);
-                                let ro_key = make_readonly_key(&key);
-                                let del_key = format!("__deleted_{}", key);
                                 let mut b = arr.borrow_mut(ctx);
-                                b.props.shift_remove(&key);
-                                b.props.shift_remove(&getter_key);
-                                b.props.shift_remove(&setter_key);
-                                b.props.shift_remove(&nc_key);
-                                b.props.shift_remove(&ne_key);
-                                b.props.shift_remove(&ro_key);
-                                b.props.shift_remove(&del_key);
+                                remove_property_completely(&mut b.props, &key);
+                                b.props.shift_remove(&format!("__deleted_{}", key));
                                 Value::Boolean(true)
                             }
                         }
@@ -21514,13 +21492,10 @@ impl<'gc> VM<'gc> {
                     // CreateGlobalFunctionBinding (§8.1.1.4.18): after writeback,
                     // update property descriptors for eval function declarations.
                     for fn_name in &chunk.fn_declared_globals {
-                        let nc_key = make_nonconfigurable_key(&fn_name);
-                        let ro_key = make_readonly_key(&fn_name);
-                        let ne_key = make_nonenumerable_key(&fn_name);
                         let mut gt = self.global_this.borrow_mut(ctx);
-                        if !gt.contains_key(&nc_key) {
-                            gt.shift_remove(&ro_key);
-                            gt.shift_remove(&ne_key);
+                        if !has_nonconfigurable_mark(&*gt, &fn_name) {
+                            unmark_readonly(&mut *gt, &fn_name);
+                            unmark_nonenumerable(&mut *gt, &fn_name);
                         }
                     }
                     // For direct eval, write back modified local variables to caller's stack
@@ -32175,7 +32150,6 @@ impl<'gc> VM<'gc> {
 
                 for i in candidates.into_iter().rev() {
                     let idx_key = i.to_string();
-                    let nc_key = make_nonconfigurable_key(&idx_key);
                     let own_exists = (i as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", i))
                         || b.props.contains_key(&idx_key)
                         || has_getter(&b.props, &idx_key)
@@ -32183,7 +32157,7 @@ impl<'gc> VM<'gc> {
                     if !own_exists {
                         continue;
                     }
-                    if b.props.contains_key(&nc_key) {
+                    if has_nonconfigurable_mark(&b.props, &idx_key) {
                         self.set_array_length_u64(&mut b, i + 1);
                         if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
                             mark_readonly(&mut b.props, "length");
@@ -32196,12 +32170,7 @@ impl<'gc> VM<'gc> {
                         b.elements[i as usize] = Value::Undefined;
                         b.props.insert(format!("__deleted_{}", i), Value::Boolean(true));
                     }
-                    b.props.shift_remove(&idx_key);
-                    remove_getter(&mut b.props, &idx_key);
-                    remove_setter(&mut b.props, &idx_key);
-                    unmark_readonly(&mut b.props, &idx_key);
-                    unmark_nonenumerable(&mut b.props, &idx_key);
-                    unmark_nonconfigurable(&mut b.props, &idx_key);
+                    remove_property_completely(&mut b.props, &idx_key);
                 }
             }
 
@@ -33112,62 +33081,29 @@ impl<'gc> VM<'gc> {
 
         let deleted = match &target {
             Value::VmObject(map) => {
-                let nc_key = make_nonconfigurable_key(&key);
-                let is_nc = map.borrow().contains_key(&nc_key) || self.is_string_wrapper_nonconfigurable_key(map, key);
+                let is_nc = has_nonconfigurable_mark(&*map.borrow(), key) || self.is_string_wrapper_nonconfigurable_key(map, key);
                 if is_nc {
                     false
                 } else {
-                    let getter_key = make_getter_key(&key);
-                    let setter_key = make_setter_key(&key);
-                    let ne_key = make_nonenumerable_key(&key);
-                    let ro_key = make_readonly_key(&key);
-                    let mut b = map.borrow_mut(ctx);
-                    b.shift_remove(key);
-                    b.shift_remove(&getter_key);
-                    b.shift_remove(&setter_key);
-                    b.shift_remove(&nc_key);
-                    b.shift_remove(&ne_key);
-                    b.shift_remove(&ro_key);
+                    remove_property_completely(&mut *map.borrow_mut(ctx), key);
                     true
                 }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 let props = self.get_fn_props(ctx, *ip, *arity);
-                let nc_key = make_nonconfigurable_key(&key);
-                if props.borrow().contains_key(&nc_key) {
+                if has_nonconfigurable_mark(&*props.borrow(), key) {
                     false
                 } else {
-                    let getter_key = make_getter_key(&key);
-                    let setter_key = make_setter_key(&key);
-                    let ne_key = make_nonenumerable_key(&key);
-                    let ro_key = make_readonly_key(&key);
-                    let mut b = props.borrow_mut(ctx);
-                    b.shift_remove(key);
-                    b.shift_remove(&getter_key);
-                    b.shift_remove(&setter_key);
-                    b.shift_remove(&nc_key);
-                    b.shift_remove(&ne_key);
-                    b.shift_remove(&ro_key);
+                    remove_property_completely(&mut *props.borrow_mut(ctx), key);
                     true
                 }
             }
             Value::VmNativeFunction(id) => {
                 let props = self.get_native_fn_props(ctx, *id);
-                let nc_key = make_nonconfigurable_key(&key);
-                if props.borrow().contains_key(&nc_key) {
+                if has_nonconfigurable_mark(&*props.borrow(), key) {
                     false
                 } else {
-                    let getter_key = make_getter_key(&key);
-                    let setter_key = make_setter_key(&key);
-                    let ne_key = make_nonenumerable_key(&key);
-                    let ro_key = make_readonly_key(&key);
-                    let mut b = props.borrow_mut(ctx);
-                    b.shift_remove(key);
-                    b.shift_remove(&getter_key);
-                    b.shift_remove(&setter_key);
-                    b.shift_remove(&nc_key);
-                    b.shift_remove(&ne_key);
-                    b.shift_remove(&ro_key);
+                    remove_property_completely(&mut *props.borrow_mut(ctx), key);
                     true
                 }
             }
@@ -33176,8 +33112,7 @@ impl<'gc> VM<'gc> {
                 if key == "length" {
                     false
                 } else {
-                    let nc_key = make_nonconfigurable_key(&key);
-                    if arr.borrow().props.contains_key(&nc_key) {
+                    if has_nonconfigurable_mark(&arr.borrow().props, key) {
                         false
                     } else {
                         let mut b = arr.borrow_mut(ctx);
@@ -33187,12 +33122,7 @@ impl<'gc> VM<'gc> {
                             b.elements[idx] = Value::Undefined;
                             b.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
                         }
-                        b.props.shift_remove(key);
-                        remove_getter(&mut b.props, &key);
-                        remove_setter(&mut b.props, &key);
-                        b.props.shift_remove(&nc_key);
-                        unmark_nonenumerable(&mut b.props, &key);
-                        unmark_readonly(&mut b.props, &key);
+                        remove_property_completely(&mut b.props, key);
                         true
                     }
                 }
@@ -35265,22 +35195,11 @@ impl<'gc> VM<'gc> {
                     }
                     return Ok(());
                 }
-                let nc_key = make_nonconfigurable_key(&key);
-                if map.borrow().contains_key(&nc_key) {
+                if has_nonconfigurable_mark(&*map.borrow(), key) {
                     self.throw_type_error(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
                     return Err(Value::Undefined);
                 }
-                let getter_key = make_getter_key(&key);
-                let setter_key = make_setter_key(&key);
-                let ne_key = make_nonenumerable_key(&key);
-                let ro_key = make_readonly_key(&key);
-                let mut b = map.borrow_mut(ctx);
-                b.shift_remove(key);
-                b.shift_remove(&getter_key);
-                b.shift_remove(&setter_key);
-                b.shift_remove(&nc_key);
-                b.shift_remove(&ne_key);
-                b.shift_remove(&ro_key);
+                remove_property_completely(&mut *map.borrow_mut(ctx), key);
                 if Gc::ptr_eq(*map, self.global_this) {
                     self.globals.shift_remove(key);
                 }
@@ -35294,8 +35213,7 @@ impl<'gc> VM<'gc> {
                 self.delete_property_or_throw(ctx, &Value::VmObject(props), key)?;
             }
             Value::VmArray(arr) => {
-                let nc_key = make_nonconfigurable_key(&key);
-                if arr.borrow().props.contains_key(&nc_key) {
+                if has_nonconfigurable_mark(&arr.borrow().props, key) {
                     self.throw_type_error(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
                     return Err(Value::Undefined);
                 }
@@ -35306,12 +35224,7 @@ impl<'gc> VM<'gc> {
                     b.elements[idx] = Value::Undefined;
                     b.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
                 }
-                b.props.shift_remove(key);
-                remove_getter(&mut b.props, &key);
-                remove_setter(&mut b.props, &key);
-                b.props.shift_remove(&nc_key);
-                unmark_nonenumerable(&mut b.props, &key);
-                unmark_readonly(&mut b.props, &key);
+                remove_property_completely(&mut b.props, key);
             }
             _ => {}
         }

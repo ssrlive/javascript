@@ -558,24 +558,36 @@ pub fn has_nonconfigurable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>
 /// Get the getter function for `key`, if any.
 #[inline]
 pub fn get_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    if let Some(Value::Property { getter: Some(g), .. }) = map.get(key) {
+        return Some(g.as_ref());
+    }
     map.get(&format!("{}{}", GETTER_PREFIX, key))
 }
 
 /// Get the setter function for `key`, if any.
 #[inline]
 pub fn get_setter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    if let Some(Value::Property { setter: Some(s), .. }) = map.get(key) {
+        return Some(s.as_ref());
+    }
     map.get(&format!("{}{}", SETTER_PREFIX, key))
 }
 
 /// Returns `true` if `key` has a getter.
 #[inline]
 pub fn has_getter<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    if let Some(Value::Property { getter: Some(_), .. }) = map.get(key) {
+        return true;
+    }
     map.contains_key(&format!("{}{}", GETTER_PREFIX, key))
 }
 
 /// Returns `true` if `key` has a setter.
 #[inline]
 pub fn has_setter<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    if let Some(Value::Property { setter: Some(_), .. }) = map.get(key) {
+        return true;
+    }
     map.contains_key(&format!("{}{}", SETTER_PREFIX, key))
 }
 
@@ -606,12 +618,18 @@ pub fn remove_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key:
 /// Look up the getter value for `key`, returning a reference if present.
 #[inline]
 pub fn lookup_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    if let Some(Value::Property { getter: Some(g), .. }) = map.get(key) {
+        return Some(g.as_ref());
+    }
     map.get(&format!("{}{}", GETTER_PREFIX, key))
 }
 
 /// Look up the setter value for `key`, returning a reference if present.
 #[inline]
 pub fn lookup_setter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    if let Some(Value::Property { setter: Some(s), .. }) = map.get(key) {
+        return Some(s.as_ref());
+    }
     map.get(&format!("{}{}", SETTER_PREFIX, key))
 }
 

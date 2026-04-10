@@ -31666,9 +31666,6 @@ impl<'gc> VM<'gc> {
         let data_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key };
         let getter_key = make_getter_key(&key);
         let setter_key = make_setter_key(&key);
-        let readonly_key = make_readonly_key(&key);
-        let nonconfigurable_key = make_nonconfigurable_key(&key);
-        let nonenumerable_key = make_nonenumerable_key(&key);
 
         let (
             current_exists,
@@ -31712,12 +31709,12 @@ impl<'gc> VM<'gc> {
             let current_enumerable = if let Some((enumerable, _, _)) = &implicit_string_data {
                 *enumerable
             } else {
-                !borrow.contains_key(&nonenumerable_key)
+                !has_nonenumerable_mark(&*borrow, key)
             };
             let current_writable = if implicit_string_data.is_some() {
                 false
             } else {
-                !borrow.contains_key(&readonly_key)
+                !has_readonly_mark(&*borrow, key)
             };
             let current_get = borrow.get(&getter_key).cloned().unwrap_or(Value::Undefined);
             let current_set = borrow.get(&setter_key).cloned().unwrap_or(Value::Undefined);
@@ -31729,7 +31726,7 @@ impl<'gc> VM<'gc> {
             let current_configurable = if let Some((_, configurable, _)) = &implicit_string_data {
                 *configurable
             } else {
-                !borrow.contains_key(&nonconfigurable_key)
+                !has_nonconfigurable_mark(&*borrow, key)
             };
             (
                 current_exists,
@@ -31817,9 +31814,9 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(&getter_key);
                 borrow.shift_remove(&setter_key);
             }
-            borrow.shift_remove(&readonly_key);
-            borrow.shift_remove(&nonconfigurable_key);
-            borrow.shift_remove(&nonenumerable_key);
+            unmark_readonly(&mut borrow, key);
+            unmark_nonconfigurable(&mut borrow, key);
+            unmark_nonenumerable(&mut borrow, key);
 
             if is_accessor {
                 // Converting a property to an accessor must not leave stale data values behind.
@@ -32185,15 +32182,12 @@ impl<'gc> VM<'gc> {
 
                 let getter_key = make_getter_key(&key);
                 let setter_key = make_setter_key(&key);
-                let nonenumerable_key = make_nonenumerable_key(&key);
-                let nonconfigurable_key = make_nonconfigurable_key(&key);
-                let readonly_key = make_readonly_key(&key);
                 let current_is_accessor = b.props.contains_key(&getter_key) || b.props.contains_key(&setter_key);
                 let current_has_getter = b.props.contains_key(&getter_key);
                 let current_has_setter = b.props.contains_key(&setter_key);
-                let current_enumerable = !b.props.contains_key(&nonenumerable_key);
-                let current_configurable = !b.props.contains_key(&nonconfigurable_key);
-                let current_writable = !b.props.contains_key(&readonly_key);
+                let current_enumerable = !has_nonenumerable_mark(&b.props, key);
+                let current_configurable = !has_nonconfigurable_mark(&b.props, key);
+                let current_writable = !has_readonly_mark(&b.props, key);
                 let current_get = b.props.get(&getter_key).cloned().unwrap_or(Value::Undefined);
                 let current_set = b.props.get(&setter_key).cloned().unwrap_or(Value::Undefined);
                 let current_value = if (idx_u64 as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx_u64)) {
@@ -32203,7 +32197,7 @@ impl<'gc> VM<'gc> {
                 };
 
                 // Preserve non-configurable invariant (minimal checks used by current tests)
-                if b.props.contains_key(&nonconfigurable_key) && matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
+                if has_nonconfigurable_mark(&b.props, key) && matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
                     self.throw_type_error(ctx, "Cannot redefine non-configurable property");
                     return false;
                 }
@@ -32257,9 +32251,9 @@ impl<'gc> VM<'gc> {
                     b.props.shift_remove(&getter_key);
                     b.props.shift_remove(&setter_key);
                 }
-                b.props.shift_remove(&nonenumerable_key);
-                b.props.shift_remove(&nonconfigurable_key);
-                b.props.shift_remove(&readonly_key);
+                unmark_nonenumerable(&mut b.props, key);
+                unmark_nonconfigurable(&mut b.props, key);
+                unmark_readonly(&mut b.props, key);
 
                 if is_accessor {
                     let mut wrote_accessor_slot = false;
@@ -32331,10 +32325,10 @@ impl<'gc> VM<'gc> {
                     _ => false,
                 };
                 if !enumerable {
-                    b.props.insert(nonenumerable_key, Value::Boolean(true));
+                    mark_nonenumerable(&mut b.props, key);
                 }
                 if !configurable {
-                    b.props.insert(nonconfigurable_key, Value::Boolean(true));
+                    mark_nonconfigurable(&mut b.props, key);
                 }
                 if !is_accessor {
                     let writable = match desc.get("writable") {
@@ -32343,7 +32337,7 @@ impl<'gc> VM<'gc> {
                         _ => false,
                     };
                     if !writable {
-                        b.props.insert(readonly_key, Value::Boolean(true));
+                        mark_readonly(&mut b.props, key);
                     }
                 }
 
@@ -32363,15 +32357,12 @@ impl<'gc> VM<'gc> {
 
         let getter_key = make_getter_key(&key);
         let setter_key = make_setter_key(&key);
-        let nonenumerable_key = make_nonenumerable_key(&key);
-        let nonconfigurable_key = make_nonconfigurable_key(&key);
-        let readonly_key = make_readonly_key(&key);
         let current_is_accessor = b.props.contains_key(&getter_key) || b.props.contains_key(&setter_key);
         let current_has_getter = b.props.contains_key(&getter_key);
         let current_has_setter = b.props.contains_key(&setter_key);
-        let current_enumerable = !b.props.contains_key(&nonenumerable_key);
-        let current_configurable = !b.props.contains_key(&nonconfigurable_key);
-        let current_writable = !b.props.contains_key(&readonly_key);
+        let current_enumerable = !has_nonenumerable_mark(&b.props, key);
+        let current_configurable = !has_nonconfigurable_mark(&b.props, key);
+        let current_writable = !has_readonly_mark(&b.props, key);
         let current_get = b.props.get(&getter_key).cloned().unwrap_or(Value::Undefined);
         let current_set = b.props.get(&setter_key).cloned().unwrap_or(Value::Undefined);
         let current_value = b.props.get(key).cloned().unwrap_or(Value::Undefined);
@@ -32428,9 +32419,9 @@ impl<'gc> VM<'gc> {
             b.props.shift_remove(&getter_key);
             b.props.shift_remove(&setter_key);
         }
-        b.props.shift_remove(&nonenumerable_key);
-        b.props.shift_remove(&nonconfigurable_key);
-        b.props.shift_remove(&readonly_key);
+        unmark_nonenumerable(&mut b.props, key);
+        unmark_nonconfigurable(&mut b.props, key);
+        unmark_readonly(&mut b.props, key);
 
         if is_accessor {
             let mut wrote_accessor_slot = false;
@@ -32479,10 +32470,10 @@ impl<'gc> VM<'gc> {
             _ => false,
         };
         if !enumerable {
-            b.props.insert(nonenumerable_key, Value::Boolean(true));
+            mark_nonenumerable(&mut b.props, key);
         }
         if !configurable {
-            b.props.insert(nonconfigurable_key, Value::Boolean(true));
+            mark_nonconfigurable(&mut b.props, key);
         }
         if !is_accessor {
             let writable = match desc.get("writable") {
@@ -32491,7 +32482,7 @@ impl<'gc> VM<'gc> {
                 _ => false,
             };
             if !writable {
-                b.props.insert(readonly_key, Value::Boolean(true));
+                mark_readonly(&mut b.props, key);
             }
         }
         true

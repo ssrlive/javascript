@@ -8585,9 +8585,7 @@ impl<'gc> VM<'gc> {
                 Self::freeze_vm_array(ctx, &raw_arr);
             }
             // Mark .raw as non-enumerable
-            arr.borrow_mut(ctx)
-                .props
-                .insert(make_nonenumerable_key("raw"), Value::Boolean(true));
+            mark_nonenumerable(&mut arr.borrow_mut(ctx).props, "raw");
             // Freeze the template array itself
             Self::freeze_vm_array(ctx, arr);
             // Cache the template

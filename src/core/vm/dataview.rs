@@ -603,15 +603,11 @@ impl<'gc> VM<'gc> {
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), data_view_ctor.clone());
-            proto_obj
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
         }
         self.globals.insert("DataView".to_string(), data_view_ctor.clone());
         self.global_this.borrow_mut(ctx).insert("DataView".to_string(), data_view_ctor);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("DataView"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "DataView");
     }
 
     /// Handle DataView in `call_builtin` (new DataView(...)).

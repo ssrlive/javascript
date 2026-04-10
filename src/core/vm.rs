@@ -15588,9 +15588,7 @@ impl<'gc> VM<'gc> {
         let reflect_obj = Value::VmObject(new_gc_cell_ptr(ctx, reflect_map));
         self.globals.insert("Reflect".to_string(), reflect_obj.clone());
         self.global_this.borrow_mut(ctx).insert("Reflect".to_string(), reflect_obj);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Reflect"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Reflect");
 
         // Array.isArray and prototype
         let mut array_obj = IndexMap::new();
@@ -15867,17 +15865,13 @@ impl<'gc> VM<'gc> {
             proto_obj
                 .borrow_mut(ctx)
                 .insert("constructor".to_string(), array_buffer_ctor.clone());
-            proto_obj
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
         }
         self.globals.insert("ArrayBuffer".to_string(), array_buffer_ctor.clone());
         self.global_this
             .borrow_mut(ctx)
             .insert("ArrayBuffer".to_string(), array_buffer_ctor);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("ArrayBuffer"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "ArrayBuffer");
 
         self.dataview_init_prototype(ctx);
 
@@ -15926,9 +15920,7 @@ impl<'gc> VM<'gc> {
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), sab_ctor.clone());
-            proto_obj
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
         }
         self.globals.insert("SharedArrayBuffer".to_string(), sab_ctor);
 
@@ -16002,9 +15994,7 @@ impl<'gc> VM<'gc> {
         let atomics_obj = Value::VmObject(new_gc_cell_ptr(ctx, atomics_map));
         self.globals.insert("Atomics".to_string(), atomics_obj.clone());
         self.global_this.borrow_mut(ctx).insert("Atomics".to_string(), atomics_obj);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Atomics"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Atomics");
 
         let mut promise_map = IndexMap::new();
         let mut promise_proto = IndexMap::new();
@@ -16096,9 +16086,7 @@ impl<'gc> VM<'gc> {
         }
         self.globals.insert("Promise".to_string(), promise_ctor_obj.clone());
         self.global_this.borrow_mut(ctx).insert("Promise".to_string(), promise_ctor_obj);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Promise"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Promise");
 
         let mut aggregate_error_proto = IndexMap::new();
         aggregate_error_proto.insert("name".to_string(), Value::from("AggregateError"));
@@ -16134,18 +16122,14 @@ impl<'gc> VM<'gc> {
             proto
                 .borrow_mut(ctx)
                 .insert("constructor".to_string(), aggregate_error_ctor_obj.clone());
-            proto
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *proto.borrow_mut(ctx), "constructor");
         }
 
         self.globals.insert("AggregateError".to_string(), aggregate_error_ctor_obj.clone());
         self.global_this
             .borrow_mut(ctx)
             .insert("AggregateError".to_string(), aggregate_error_ctor_obj);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("AggregateError"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "AggregateError");
 
         self.globals
             .insert("__await__".to_string(), Self::make_host_fn(ctx, "promise.await"));
@@ -16177,9 +16161,7 @@ impl<'gc> VM<'gc> {
         let proxy_ctor = Value::VmObject(new_gc_cell_ptr(ctx, proxy_map));
         self.globals.insert("Proxy".to_string(), proxy_ctor.clone());
         self.global_this.borrow_mut(ctx).insert("Proxy".to_string(), proxy_ctor);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Proxy"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Proxy");
 
         self.initialize_typed_arrays(ctx, array_to_string_fn_for_ta);
         // Object constructor with static methods
@@ -16383,9 +16365,7 @@ impl<'gc> VM<'gc> {
             helper_proto_obj
                 .borrow_mut(ctx)
                 .insert("constructor".to_string(), iterator_ctor.clone());
-            helper_proto_obj
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *helper_proto_obj.borrow_mut(ctx), "constructor");
         }
         self.globals.insert("Iterator".to_string(), iterator_ctor);
 
@@ -16452,9 +16432,7 @@ impl<'gc> VM<'gc> {
             Self::insert_prototype_property(&mut symbol_ctor.borrow_mut(ctx), &Value::VmObject(symbol_proto));
             Self::insert_constructor_backref(ctx, &symbol_proto, &Value::VmObject(*symbol_ctor));
         }
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Object"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Object");
 
         // Constructors created before Object may still need their prototype chains wired.
         if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
@@ -16558,9 +16536,7 @@ impl<'gc> VM<'gc> {
         let number_ctor = Self::finalize_ctor_with_prototype(ctx, number_map, num_proto_obj);
         self.globals.insert("Number".to_string(), number_ctor.clone());
         self.global_this.borrow_mut(ctx).insert("Number".to_string(), number_ctor);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Number"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Number");
 
         // String constructor (as VmObject with __native_id__ for typeof "function")
         let mut string_map = IndexMap::new();
@@ -16612,9 +16588,7 @@ impl<'gc> VM<'gc> {
         let string_ctor = Self::finalize_ctor_with_prototype(ctx, string_map, string_proto_obj);
         self.globals.insert("String".to_string(), string_ctor.clone());
         self.global_this.borrow_mut(ctx).insert("String".to_string(), string_ctor);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("String"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "String");
 
         // Boolean constructor
         {
@@ -16648,15 +16622,11 @@ impl<'gc> VM<'gc> {
             let boolean_ctor = Value::VmObject(new_gc_cell_ptr(ctx, boolean_map));
             if let Value::VmObject(proto_obj) = boolean_proto_obj {
                 proto_obj.borrow_mut(ctx).insert("constructor".to_string(), boolean_ctor.clone());
-                proto_obj
-                    .borrow_mut(ctx)
-                    .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+                mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
             }
             self.globals.insert("Boolean".to_string(), boolean_ctor.clone());
             self.global_this.borrow_mut(ctx).insert("Boolean".to_string(), boolean_ctor);
-            self.global_this
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("Boolean"), Value::Boolean(true));
+            mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Boolean");
         }
 
         // Global constants
@@ -16721,15 +16691,11 @@ impl<'gc> VM<'gc> {
         self.global_this
             .borrow_mut(ctx)
             .insert("Map".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_MAP));
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Map"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Map");
         self.global_this
             .borrow_mut(ctx)
             .insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Set"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Set");
         self.globals
             .insert("WeakMap".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKMAP));
         self.globals
@@ -17045,14 +17011,10 @@ impl<'gc> VM<'gc> {
                 .insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
         }
         fn_proto_obj.borrow_mut(ctx).insert("constructor".to_string(), function_val.clone());
-        fn_proto_obj
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+        mark_nonenumerable(&mut *fn_proto_obj.borrow_mut(ctx), "constructor");
         self.globals.insert("Function".to_string(), function_val.clone());
         self.global_this.borrow_mut(ctx).insert("Function".to_string(), function_val);
-        self.global_this
-            .borrow_mut(ctx)
-            .insert(make_nonenumerable_key("Function"), Value::Boolean(true));
+        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "Function");
 
         // Now that Function exists, set Object.__proto__ = Function.prototype
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object") {
@@ -17121,9 +17083,7 @@ impl<'gc> VM<'gc> {
         for name in ["WeakRef", "FinalizationRegistry"] {
             if let Some(val) = self.globals.get(name).cloned() {
                 self.global_this.borrow_mut(ctx).insert(name.to_string(), val);
-                self.global_this
-                    .borrow_mut(ctx)
-                    .insert(make_nonenumerable_key(name), Value::Boolean(true));
+                mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), name);
             }
         }
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
@@ -17478,12 +17438,8 @@ impl<'gc> VM<'gc> {
 
         if let Value::VmObject(proto_obj) = &gen_fn_proto_val {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_ctor_val.clone());
-            proto_obj
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
-            proto_obj
-                .borrow_mut(ctx)
-                .insert(make_readonly_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
+            mark_readonly(&mut *proto_obj.borrow_mut(ctx), "constructor");
             proto_obj
                 .borrow_mut(ctx)
                 .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
@@ -17492,8 +17448,7 @@ impl<'gc> VM<'gc> {
         // Set %GeneratorPrototype%.constructor = %GeneratorFunction.prototype%
         if let Value::VmObject(gp) = &self.generator_prototype {
             gp.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_proto_val.clone());
-            gp.borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *gp.borrow_mut(ctx), "constructor");
             mark_readonly(&mut *gp.borrow_mut(ctx), "constructor");
             gp.borrow_mut(ctx)
                 .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
@@ -30608,9 +30563,7 @@ impl<'gc> VM<'gc> {
         }
         if let Value::VmObject(proto_obj) = &segmenter_proto {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), segmenter_ctor.clone());
-            proto_obj
-                .borrow_mut(ctx)
-                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
         }
 
         let mut intl = IndexMap::new();

@@ -382,6 +382,10 @@ pub const NONCONFIGURABLE_SUFFIX: &str = "__";
 /// This is a lightweight alternative to `desc_from_legacy_map` when you
 /// only need the W/E/C bits and not the value or accessor functions.
 pub fn attrs_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
+    // Fast path: Value::Property carries inline attrs — use them directly.
+    if let Some(Value::Property { attrs, .. }) = map.get(key) {
+        return *attrs;
+    }
     let mut attrs = PropAttrs::empty();
     if !map.contains_key(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX)) {
         attrs |= PropAttrs::WRITABLE;
@@ -414,6 +418,15 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
         return None;
     }
 
+    // Fast path: Value::Property carries inline attrs — use them directly.
+    if let Some(Value::Property { getter, setter, attrs, .. }) = map.get(key) {
+        let kind = PropKind::Accessor {
+            get: getter.as_ref().map(|g| (**g).clone()),
+            set: setter.as_ref().map(|s| (**s).clone()),
+        };
+        return Some(PropDesc { kind, attrs: *attrs });
+    }
+
     let ro_key = format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX);
     let ne_key = format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX);
     let nc_key = format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX);
@@ -439,12 +452,7 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
             set: map.get(&setter_key).cloned(),
         }
     } else {
-        // Check for legacy Value::Property variant in the value slot
         match map.get(key) {
-            Some(Value::Property { getter, setter, .. }) => PropKind::Accessor {
-                get: getter.as_ref().map(|g| (**g).clone()),
-                set: setter.as_ref().map(|s| (**s).clone()),
-            },
             Some(v) => PropKind::Data(v.clone()),
             None => PropKind::Data(Value::Undefined),
         }
@@ -631,6 +639,10 @@ pub fn make_nonconfigurable_key(key: impl AsRef<str>) -> String {
 /// ENUMERABLE if no nonenumerable mark, CONFIGURABLE if no nonconfigurable mark.
 /// Defaults to all-true (writable + enumerable + configurable) when no marks exist.
 pub fn read_attrs_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
+    // Fast path: Value::Property carries inline attrs.
+    if let Some(Value::Property { attrs, .. }) = map.get(key) {
+        return *attrs;
+    }
     let mut attrs = PropAttrs::all();
     if has_readonly_mark(map, key) {
         attrs.remove(PropAttrs::WRITABLE);

@@ -463,6 +463,159 @@ pub fn is_hidden_key(key: &str) -> bool {
         || key.starts_with("__set_")
 }
 
+// ── Individual flag helpers ─────────────────────────────────────────
+//
+// Thin wrappers over the legacy hidden-key encoding.  Each function
+// touches exactly one marker key so callers don't need to know the
+// `__prefix_key__` format strings.  When the underlying storage
+// migrates to `PropDesc`, only these functions (and the batch helpers
+// above) need to change.
+
+/// Mark `key` as non-enumerable.
+#[inline]
+pub fn mark_nonenumerable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.insert(
+        format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX),
+        Value::Boolean(true),
+    );
+}
+
+/// Remove non-enumerable marker for `key` (making it enumerable).
+#[inline]
+pub fn unmark_nonenumerable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.shift_remove(&format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX));
+}
+
+/// Returns `true` if `key` has a non-enumerable marker.
+#[inline]
+pub fn has_nonenumerable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    map.contains_key(&format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX))
+}
+
+/// Mark `key` as read-only (non-writable).
+#[inline]
+pub fn mark_readonly<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.insert(
+        format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX),
+        Value::Boolean(true),
+    );
+}
+
+/// Remove read-only marker for `key` (making it writable).
+#[inline]
+pub fn unmark_readonly<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.shift_remove(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX));
+}
+
+/// Returns `true` if `key` has a read-only marker.
+#[inline]
+pub fn has_readonly_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    map.contains_key(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX))
+}
+
+/// Mark `key` as non-configurable.
+#[inline]
+pub fn mark_nonconfigurable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.insert(
+        format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX),
+        Value::Boolean(true),
+    );
+}
+
+/// Remove non-configurable marker for `key`.
+#[inline]
+pub fn unmark_nonconfigurable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.shift_remove(&format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX));
+}
+
+/// Returns `true` if `key` has a non-configurable marker.
+#[inline]
+pub fn has_nonconfigurable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    map.contains_key(&format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX))
+}
+
+// ── Accessor helpers ───────────────────────────────────────────────
+
+/// Get the getter function for `key`, if any.
+#[inline]
+pub fn get_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    map.get(&format!("{}{}", GETTER_PREFIX, key))
+}
+
+/// Get the setter function for `key`, if any.
+#[inline]
+pub fn get_setter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    map.get(&format!("{}{}", SETTER_PREFIX, key))
+}
+
+/// Returns `true` if `key` has a getter.
+#[inline]
+pub fn has_getter<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    map.contains_key(&format!("{}{}", GETTER_PREFIX, key))
+}
+
+/// Returns `true` if `key` has a setter.
+#[inline]
+pub fn has_setter<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    map.contains_key(&format!("{}{}", SETTER_PREFIX, key))
+}
+
+/// Set (or replace) the getter for `key`.
+#[inline]
+pub fn set_getter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, val: Value<'gc>) {
+    map.insert(format!("{}{}", GETTER_PREFIX, key), val);
+}
+
+/// Set (or replace) the setter for `key`.
+#[inline]
+pub fn set_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, val: Value<'gc>) {
+    map.insert(format!("{}{}", SETTER_PREFIX, key), val);
+}
+
+/// Remove the getter for `key`.
+#[inline]
+pub fn remove_getter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.shift_remove(&format!("{}{}", GETTER_PREFIX, key));
+}
+
+/// Remove the setter for `key`.
+#[inline]
+pub fn remove_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.shift_remove(&format!("{}{}", SETTER_PREFIX, key));
+}
+
+/// Get the getter key string for `key`.
+#[inline]
+pub fn getter_key(key: &str) -> String {
+    format!("{}{}", GETTER_PREFIX, key)
+}
+
+/// Get the setter key string for `key`.
+#[inline]
+pub fn setter_key(key: &str) -> String {
+    format!("{}{}", SETTER_PREFIX, key)
+}
+
+/// Get the readonly marker key string for `key`.
+#[inline]
+pub fn readonly_key(key: &str) -> String {
+    format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX)
+}
+
+/// Get the nonenumerable marker key string for `key`.
+#[inline]
+pub fn nonenumerable_key(key: &str) -> String {
+    format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX)
+}
+
+/// Get the nonconfigurable marker key string for `key`.
+#[inline]
+pub fn nonconfigurable_key(key: &str) -> String {
+    format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX)
+}
+
+// ── Batch attribute write ──────────────────────────────────────────
+
 /// Write attribute flags for `key` into a legacy hidden-key map.
 ///
 /// This is the inverse of `attrs_from_legacy_map`.  For each attribute

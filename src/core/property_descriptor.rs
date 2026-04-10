@@ -719,6 +719,13 @@ pub fn write_attrs_to_legacy_map<'gc>(map: &mut indexmap::IndexMap<String, Value
 /// entries from a legacy hidden-key map.
 pub fn remove_property_completely<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
     map.shift_remove(key);
+    clear_attr_markers(map, key);
+}
+
+/// Clear attribute markers and accessor hidden-keys for `key` WITHOUT removing
+/// the key itself.  This allows `IndexMap::insert` to update the value in-place
+/// (preserving insertion order) rather than appending at the end.
+pub fn clear_attr_markers<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
     map.shift_remove(&format!("{}{}", GETTER_PREFIX, key));
     map.shift_remove(&format!("{}{}", SETTER_PREFIX, key));
     map.shift_remove(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX));

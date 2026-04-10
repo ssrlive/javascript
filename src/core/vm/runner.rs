@@ -4805,7 +4805,10 @@ impl<'gc> VM<'gc> {
                 }
                 // Write to per-closure overlay when available
                 let mut borrow = target_props.borrow_mut(ctx);
-                remove_property_completely(&mut borrow, &key);
+                // Clear attribute markers but keep the key in place so that
+                // IndexMap::insert updates the value in-place (preserving the
+                // original insertion order for keys like `length` / `name`).
+                clear_attr_markers(&mut borrow, &key);
                 borrow.insert(key, val.clone());
                 if let Value::VmFunction(fn_ip, _) | Value::VmClosure(fn_ip, _, _) = &val {
                     self.fn_home_objects.insert(*fn_ip, obj.clone());

@@ -90,7 +90,7 @@ function cleanupComposedArtifacts(tmpPath){
 }
 
 console.log(`Running Test262 tests (node runner)`);
-console.log(`Composed temporary files are deleted by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=0 to disable.`);
+console.log(`Composed temporary files are deleted by default (KEEP_TMP=${KEEP_TMP}). Use --keep-tmp to explicitly ensure, or set TEST262_KEEP_TMP=1 to enable.`);
 console.log(`Execution jobs: ${JOBS}`);
 
 function runCommandAsync(cmd, args, options = {}) {

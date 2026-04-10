@@ -26,7 +26,7 @@ crossbeam-channel = "0.5.15"
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae", features = [
     "indexmap",
 ] }
-indexmap = "2.13.1"
+indexmap = "2.14.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
@@ -48,11 +48,9 @@ windows-sys = { version = "0.61.2", optional = true, features = [
 ] }
 
 [dev-dependencies]
-clap = { version = "4.6.0", features = ["derive", "cargo"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 ctor = "0.9.1"
 env_logger = { version = "0.11.10" }
-rustyline = "18.0.0"
 
 [[bench]]
 name = "promise_benchmarks"

@@ -985,6 +985,10 @@ pub struct VM<'gc> {
     // Temp slot: dynamic function kind override for BUILTIN_CTOR_FUNCTION
     // Set by construct_value before calling call_builtin when target is AsyncFunction etc.
     dynamic_function_kind_override: Option<String>,
+    // Temp slot: constructor's realm ID for CreateDynamicFunction (realmF in spec).
+    // Set by construct_value before calling BUILTIN_CTOR_FUNCTION so the handler
+    // can use the constructor's realm's intrinsics (e.g. %GeneratorPrototype%).
+    dynamic_function_ctor_realm: Option<usize>,
     // Child VMs for cross-realm support. Each child VM is a fully independent VM
     // with its own builtins, globals, and constructors. Use Option + take() pattern
     // for borrow-checker-safe mutable access.
@@ -1337,6 +1341,7 @@ impl<'gc> VM<'gc> {
             top_level_cells: HashMap::new(),
             regexp_home_proto_temp: None,
             dynamic_function_kind_override: None,
+            dynamic_function_ctor_realm: None,
             child_realms: Vec::new(),
             realm_parent_ptr: None,
             repl_lexical_persist: false,
@@ -17195,6 +17200,10 @@ impl<'gc> VM<'gc> {
             m.insert("__non_constructor__".to_string(), Value::Boolean(true));
             Value::VmObject(new_gc_cell_ptr(ctx, m))
         };
+        // Per spec: %AsyncGeneratorPrototype% [[Prototype]] = %AsyncIteratorPrototype%
+        if let Some(async_iter_proto) = self.globals.get("__AsyncIteratorPrototype__").cloned() {
+            async_gen_proto.insert("__proto__".to_string(), async_iter_proto);
+        }
         async_gen_proto.insert("next".to_string(), make_async_gen_method(BUILTIN_ASYNCGEN_NEXT, "next", 1.0));
         async_gen_proto.insert("throw".to_string(), make_async_gen_method(BUILTIN_ASYNCGEN_THROW, "throw", 1.0));
         async_gen_proto.insert("return".to_string(), make_async_gen_method(BUILTIN_ASYNCGEN_RETURN, "return", 1.0));
@@ -17371,7 +17380,10 @@ impl<'gc> VM<'gc> {
         gen_proto.insert("@@sym:4".to_string(), Value::from("Generator"));
         gen_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
         gen_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-        if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
+        // Per spec: %GeneratorPrototype% [[Prototype]] = %IteratorPrototype%
+        if let Some(iter_proto) = self.globals.get("__IteratorPrototype__").cloned() {
+            gen_proto.insert("__proto__".to_string(), iter_proto);
+        } else if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = object_ctor.borrow().get("prototype").cloned()
         {
             gen_proto.insert("__proto__".to_string(), obj_proto);
@@ -17608,7 +17620,7 @@ impl<'gc> VM<'gc> {
                     let result = match child.vm_call_function_value(ctx, &local_func, this_arg, args) {
                         Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
                         Err(err) => {
-                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err, realm_id);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             return Err(js_err);
@@ -17677,7 +17689,7 @@ impl<'gc> VM<'gc> {
                     let result = match child.vm_call_function_value(ctx, &local_func, this_arg, args) {
                         Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
                         Err(err) => {
-                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err, realm_id);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             return Err(js_err);
@@ -17810,6 +17822,14 @@ impl<'gc> VM<'gc> {
                         Some(Value::Number(n)) => Some(*n as usize),
                         _ => None,
                     };
+                    // Capture the outer dynamic function's .prototype so we can
+                    // forward it to the inner compiled function's fn_props.
+                    // This ensures the generator inherits from the right prototype chain.
+                    let outer_fn_prototype = if is_dynamic_generator || is_async_dynamic_gen {
+                        borrow.get("prototype").cloned()
+                    } else {
+                        None
+                    };
                     let callable_expr = if is_async_dynamic_gen {
                         format!("async function*({}\n){{{}\n}}", params_src, body)
                     } else if is_async_dynamic_fn {
@@ -17847,6 +17867,19 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(thrown);
                                 let thrown_val = self.pending_throw.take().unwrap();
                                 return Err(self.vm_error_to_js_error(ctx, &thrown_val));
+                            }
+                            // Forward the outer dynamic function's .prototype to the
+                            // inner compiled function so create_generator_object uses
+                            // the correct prototype chain (per CreateDynamicFunction step 23a).
+                            if let Some(ref outer_proto) = outer_fn_prototype {
+                                let (ip, arity) = match &gen_fn {
+                                    Value::VmFunction(ip, a) | Value::VmClosure(ip, a, _) => (Some(*ip), Some(*a)),
+                                    _ => (None, None),
+                                };
+                                if let (Some(ip), Some(arity)) = (ip, arity) {
+                                    let props = child.get_fn_props(ctx, ip, arity);
+                                    props.borrow_mut(ctx).insert("prototype".to_string(), outer_proto.clone());
+                                }
                             }
                             let result = child.vm_call_function_value(ctx, &gen_fn, this_arg, args);
                             match result {
@@ -17912,6 +17945,19 @@ impl<'gc> VM<'gc> {
                         self.restore_temporary_bindings(ctx, saved_placeholders);
                         if let Some(thrown) = self.pending_throw.take() {
                             return Err(self.vm_error_to_js_error(ctx, &thrown));
+                        }
+                        // Forward the outer dynamic function's .prototype to the
+                        // inner compiled function so create_generator_object uses
+                        // the correct prototype chain (per CreateDynamicFunction step 23a).
+                        if let Some(outer_proto) = outer_fn_prototype.clone() {
+                            let (ip, arity) = match &gen_fn {
+                                Value::VmFunction(ip, a) | Value::VmClosure(ip, a, _) => (Some(*ip), Some(*a)),
+                                _ => (None, None),
+                            };
+                            if let (Some(ip), Some(arity)) = (ip, arity) {
+                                let props = self.get_fn_props(ctx, ip, arity);
+                                props.borrow_mut(ctx).insert("prototype".to_string(), outer_proto);
+                            }
                         }
                         return self.vm_call_function_value(ctx, &gen_fn, this_arg, args);
                     }
@@ -21814,7 +21860,16 @@ impl<'gc> VM<'gc> {
                 if is_generator_ctor {
                     map.insert("__dynamic_generator_function__".to_string(), Value::Boolean(true));
                     let mut fn_proto = IndexMap::new();
-                    fn_proto.insert("__proto__".to_string(), self.generator_prototype.clone());
+                    // Per spec CreateDynamicFunction step 23a: prototype inherits from
+                    // %Generator.prototype% of the constructor's realm (realmF), not the
+                    // calling realm.
+                    let ctor_gen_proto = self
+                        .dynamic_function_ctor_realm
+                        .and_then(|rid| self.child_realms.get(rid))
+                        .and_then(|opt| opt.as_ref())
+                        .map(|child| child.generator_prototype.clone())
+                        .unwrap_or_else(|| self.generator_prototype.clone());
+                    fn_proto.insert("__proto__".to_string(), ctor_gen_proto);
                     map.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
                     map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
                     map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
@@ -33543,7 +33598,7 @@ impl<'gc> VM<'gc> {
                             let msg = err.message();
                             let is_derived_return = msg.contains("Derived constructors may only return object or undefined");
                             let is_super_not_called = msg.contains("Must call super constructor in derived class");
-                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err, realm_id);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             if is_derived_return {
@@ -33698,7 +33753,7 @@ impl<'gc> VM<'gc> {
                     let result = match child.construct_value(ctx, &local_target, args, local_new_target.as_ref()) {
                         Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
                         Err(err) => {
-                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            let js_err = self.child_error_to_parent_pending(ctx, &mut child, err, realm_id);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             return Err(js_err);
@@ -33979,9 +34034,19 @@ impl<'gc> VM<'gc> {
                                 self.dynamic_function_kind_override = Some("GeneratorFunction".to_string());
                             }
                         }
+                        // Track constructor's realm for CreateDynamicFunction (spec realmF)
+                        let ctor_realm = match target {
+                            Value::VmObject(m) => match m.borrow().get("__realm_id__") {
+                                Some(Value::Number(n)) => Some(*n as usize),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        self.dynamic_function_ctor_realm = ctor_realm;
                     }
                     let out = self.call_builtin(ctx, id, args);
                     self.dynamic_function_kind_override = None;
+                    self.dynamic_function_ctor_realm = None;
                     self.new_target_stack.pop();
                     if let Some(thrown) = self.pending_throw.take() {
                         return Err(self.vm_error_to_js_error(ctx, &thrown));
@@ -34705,53 +34770,21 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn child_error_to_parent_pending(&mut self, ctx: &GcContext<'gc>, child: &mut VM<'gc>, err: JSError) -> JSError {
+    fn child_error_to_parent_pending(&mut self, ctx: &GcContext<'gc>, child: &mut VM<'gc>, err: JSError, realm_id: usize) -> JSError {
         let thrown = child.pending_throw.take().unwrap_or_else(|| child.vm_value_from_error(ctx, &err));
-        // Convert child-realm built-in error objects to parent-realm equivalents
-        // so that `instanceof TypeError` etc. works correctly across realms.
-        let converted = self.convert_cross_realm_error(ctx, &thrown);
-        let js_err = self.vm_error_to_js_error(ctx, &converted);
-        self.pending_throw = Some(converted);
+        // Tag the error with __realm_id__ so cross-realm property access works,
+        // but preserve the child realm's prototype chain so that
+        // `err instanceof childRealm.TypeError` returns true per spec.
+        let tagged = if let Value::VmObject(obj) = &thrown {
+            obj.borrow_mut(ctx)
+                .insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
+            thrown
+        } else {
+            thrown
+        };
+        let js_err = self.vm_error_to_js_error(ctx, &tagged);
+        self.pending_throw = Some(tagged);
         js_err
-    }
-
-    /// If `error_val` is a built-in error type (TypeError, RangeError, etc.) from a
-    /// child realm, re-create it as a parent-realm error with the same message so that
-    /// `instanceof` checks work against the current realm's constructors.
-    fn convert_cross_realm_error(&mut self, ctx: &GcContext<'gc>, error_val: &Value<'gc>) -> Value<'gc> {
-        let Value::VmObject(obj) = error_val else {
-            return error_val.clone();
-        };
-        let borrow = obj.borrow();
-        let err_type = match borrow.get("__type__") {
-            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
-            _ => return error_val.clone(),
-        };
-        // Only convert well-known engine error types
-        if !matches!(
-            err_type.as_str(),
-            "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" | "EvalError" | "URIError" | "Error"
-        ) {
-            return error_val.clone();
-        }
-        let message = match borrow.get("message") {
-            Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
-            _ => String::new(),
-        };
-        drop(borrow);
-        match err_type.as_str() {
-            "TypeError" => self.make_type_error_object(ctx, &message),
-            "RangeError" => self.make_range_error_object(ctx, &message),
-            "ReferenceError" => self.make_reference_error(ctx, &message),
-            "SyntaxError" => self.make_syntax_error_object(ctx, &message),
-            _ => {
-                // EvalError, URIError, Error — create a generic error object
-                let mut m = IndexMap::new();
-                m.insert("__type__".to_string(), Value::from(err_type.as_str()));
-                m.insert("message".to_string(), Value::from(message.as_str()));
-                Value::VmObject(new_gc_cell_ptr(ctx, m))
-            }
-        }
     }
 
     fn sync_runtime_to_child(&self, child: &mut VM<'gc>) {

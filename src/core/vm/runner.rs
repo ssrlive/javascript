@@ -470,7 +470,7 @@ impl<'gc> VM<'gc> {
                     let result = match child.vm_call_function_value(ctx, &local_callee, &receiver, &args_vec) {
                         Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
                         Err(err) => {
-                            let _ = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            let _ = self.child_error_to_parent_pending(ctx, &mut child, err, realm_id);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             if let Some(thrown) = self.pending_throw.take() {
@@ -683,7 +683,7 @@ impl<'gc> VM<'gc> {
                     let result = match child.vm_call_function_value(ctx, &local_callee, &receiver, &args_vec) {
                         Ok(result) => self.register_cross_realm_fn(ctx, &mut child, result, realm_id),
                         Err(err) => {
-                            let _ = self.child_error_to_parent_pending(ctx, &mut child, err);
+                            let _ = self.child_error_to_parent_pending(ctx, &mut child, err, realm_id);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[realm_id] = Some(child);
                             if let Some(thrown) = self.pending_throw.take() {

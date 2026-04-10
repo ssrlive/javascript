@@ -45,6 +45,7 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
             token: t,
             line: 0,
             column: 0,
+            byte_offset: 0,
         })
         .collect();
 
@@ -200,6 +201,7 @@ fn bigint_in_object_and_class_and_destructuring() {
             token: t,
             line: 0,
             column: 0,
+            byte_offset: 0,
         })
         .collect();
     let mut idx = 0usize;

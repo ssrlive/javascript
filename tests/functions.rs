@@ -127,9 +127,11 @@ mod function_tests {
 
     #[test]
     fn test_simple_object_method_to_string_drives_computed_property_keys() {
+        // With source text preservation, method.toString() returns "a(){}" (source text)
         let script = r#"
             let method = ({ a(){} }).a;
-            typeof ({ [method](){ } })["function () { [ native code ] }"] === "function"
+            let key = method.toString();
+            typeof ({ [method](){ } })[key] === "function"
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");

@@ -79,6 +79,8 @@ pub struct Compiler<'gc> {
     /// After compiling an anonymous class expression, holds the constructor's IP
     /// so callers can apply NamedEvaluation (e.g. `let C = class {}`  → name "C").
     last_class_ctor_ip: Option<usize>,
+    /// Original source text for Function.prototype.toString source recovery.
+    source_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,13 +134,16 @@ impl<'gc> Compiler<'gc> {
         self.script_filename = Some(filename);
     }
 
+    pub fn set_source_text(&mut self, source: String) {
+        self.source_text = Some(source);
+    }
+
     fn record_function_source_path(&mut self, func_ip: usize) {
         if let Some(path) = &self.script_filename {
             self.chunk.fn_source_paths.insert(func_ip, path.clone());
         }
     }
 
-    #[allow(dead_code)]
     fn record_function_source_text(&mut self, func_ip: usize, source_text: String) {
         self.chunk.fn_source_texts.insert(func_ip, source_text);
     }
@@ -2814,7 +2819,7 @@ impl<'gc> Compiler<'gc> {
 
                 if *is_gen && *is_async {
                     self.compile_async_generator_function_body(Some(name.as_str()), params, body, false)?;
-                    if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone())) {
+                    if let Some(func_ip) = self.peek_func_ip(&Expr::AsyncGeneratorFunction(None, params.clone(), body.clone(), None)) {
                         self.chunk.fn_names.insert(func_ip, name.clone());
                     }
                     self.emit_fn_decl_binding(name);
@@ -4273,10 +4278,10 @@ impl<'gc> Compiler<'gc> {
                         };
                         // Extract binding name for named declarations (export default function F(){})
                         let binding_name = match expr {
-                            Expr::Function(Some(n), _, _)
-                            | Expr::AsyncFunction(Some(n), _, _)
-                            | Expr::GeneratorFunction(Some(n), _, _)
-                            | Expr::AsyncGeneratorFunction(Some(n), _, _)
+                            Expr::Function(Some(n), _, _, _)
+                            | Expr::AsyncFunction(Some(n), _, _, _)
+                            | Expr::GeneratorFunction(Some(n), _, _, _)
+                            | Expr::AsyncGeneratorFunction(Some(n), _, _, _)
                                 if n != "default" =>
                             {
                                 Some(n.clone())
@@ -4298,17 +4303,17 @@ impl<'gc> Compiler<'gc> {
                         // compile with is_expression=false so the function name is mutable
                         // (it's a declaration binding, not a function expression name binding).
                         match expr {
-                            Expr::Function(Some(n), params, body) if n != "default" => {
+                            Expr::Function(Some(n), params, body, _) if n != "default" => {
                                 self.compile_function_body(Some(n), params, body, false)?;
                             }
-                            Expr::AsyncFunction(Some(n), params, body) if n != "default" => {
+                            Expr::AsyncFunction(Some(n), params, body, _) if n != "default" => {
                                 let func_ip = self.compile_function_body(Some(n), params, body, false)?;
                                 self.chunk.async_function_ips.insert(func_ip);
                             }
-                            Expr::GeneratorFunction(Some(n), params, body) if n != "default" => {
+                            Expr::GeneratorFunction(Some(n), params, body, _) if n != "default" => {
                                 self.compile_generator_function_body(Some(n), params, body, false)?;
                             }
-                            Expr::AsyncGeneratorFunction(Some(n), params, body) if n != "default" => {
+                            Expr::AsyncGeneratorFunction(Some(n), params, body, _) if n != "default" => {
                                 self.compile_async_generator_function_body(Some(n), params, body, false)?;
                             }
                             _ => {
@@ -5459,22 +5464,46 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             // Anonymous function expression: function(params) { body }
-            Expr::Function(name, params, body) => {
-                self.compile_function_body(name.as_deref(), params, body, true)?;
+            Expr::Function(name, params, body, source_span) => {
+                let func_ip = self.compile_function_body(name.as_deref(), params, body, true)?;
+                if let Some((start, end)) = source_span
+                    && let Some(ref source) = self.source_text
+                    && *end <= source.len()
+                {
+                    self.record_function_source_text(func_ip, source[*start..*end].to_string());
+                }
             }
             // Minimal async function expression support in VM path.
             // The body is compiled like a normal function for now.
-            Expr::AsyncFunction(name, params, body) => {
+            Expr::AsyncFunction(name, params, body, source_span) => {
                 let func_ip = self.compile_function_body(name.as_deref(), params, body, true)?;
                 self.chunk.async_function_ips.insert(func_ip);
+                if let Some((start, end)) = source_span
+                    && let Some(ref source) = self.source_text
+                    && *end <= source.len()
+                {
+                    self.record_function_source_text(func_ip, source[*start..*end].to_string());
+                }
             }
-            Expr::GeneratorFunction(name, params, body) => {
-                self.compile_generator_function_body(name.as_deref(), params, body, true)?;
+            Expr::GeneratorFunction(name, params, body, source_span) => {
+                let func_ip = self.compile_generator_function_body(name.as_deref(), params, body, true)?;
+                if let Some((start, end)) = source_span
+                    && let Some(ref source) = self.source_text
+                    && *end <= source.len()
+                {
+                    self.record_function_source_text(func_ip, source[*start..*end].to_string());
+                }
             }
             // Minimal async generator support in VM path.
             // The body is executed eagerly and each yield/yield* appends to an internal array.
-            Expr::AsyncGeneratorFunction(name, params, body) => {
-                self.compile_async_generator_function_body(name.as_deref(), params, body, true)?;
+            Expr::AsyncGeneratorFunction(name, params, body, source_span) => {
+                let func_ip = self.compile_async_generator_function_body(name.as_deref(), params, body, true)?;
+                if let Some((start, end)) = source_span
+                    && let Some(ref source) = self.source_text
+                    && *end <= source.len()
+                {
+                    self.record_function_source_text(func_ip, source[*start..*end].to_string());
+                }
             }
             // VM await lowering uses a dedicated opcode so async functions can
             // suspend and resume on the microtask queue.

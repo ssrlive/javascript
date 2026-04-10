@@ -242,6 +242,7 @@ pub struct TokenData {
     pub token: Token,
     pub line: usize,
     pub column: usize,
+    pub byte_offset: usize,
 }
 
 unsafe impl<'gc> Collect<'gc> for TokenData {
@@ -440,12 +441,23 @@ fn parse_template_literal_chunk(chars: &[char], start: usize, end: usize) -> (Op
 pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr.chars().collect();
+    let byte_offsets: Vec<usize> = {
+        let mut offsets = Vec::with_capacity(chars.len() + 1);
+        let mut offset = 0;
+        for &c in &chars {
+            offsets.push(offset);
+            offset += c.len_utf8();
+        }
+        offsets.push(offset);
+        offsets
+    };
     let mut i = 0;
     let mut line = 1;
     let mut column = 1;
 
     while i < chars.len() {
         let start_col = column;
+        let start_byte = byte_offsets[i];
         match chars[i] {
             // ECMAScript WhiteSpace (excluding LineTerminator):
             // TAB, VT, FF, SP, NBSP, ZWNBSP, Ogham space mark,
@@ -462,6 +474,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::LineTerminator,
                     line,
                     column,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 // If followed by LF, consume it as part of the same terminator
@@ -477,6 +490,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::LineTerminator,
                     line,
                     column,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 line += 1;
@@ -488,6 +502,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Increment,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -496,6 +511,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::AddAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -504,6 +520,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Plus,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -529,6 +546,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Decrement,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -537,6 +555,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::SubAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -545,6 +564,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Minus,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -557,6 +577,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::PowAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -565,6 +586,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Exponent,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -573,6 +595,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::MulAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -581,6 +604,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Multiply,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -614,6 +638,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 token: Token::LineTerminator,
                                 line,
                                 column,
+                                byte_offset: start_byte,
                             });
                             line += 1;
                             column = 1;
@@ -668,6 +693,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 token: Token::DivAssign,
                                 line,
                                 column: start_col,
+                                byte_offset: start_byte,
                             });
                             i += 2;
                             column += 2;
@@ -676,6 +702,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 token: Token::Divide,
                                 line,
                                 column: start_col,
+                                byte_offset: start_byte,
                             });
                             i += 1;
                             column += 1;
@@ -731,6 +758,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::Regex(pattern, flags),
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         });
                         i = j;
                         column = col_j;
@@ -743,6 +771,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::ModAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -751,6 +780,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Mod,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -761,6 +791,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::LParen,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -770,6 +801,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::RParen,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -779,6 +811,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::LBracket,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -788,6 +821,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::RBracket,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -797,6 +831,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::LBrace,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -806,6 +841,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::RBrace,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -815,6 +851,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::Colon,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -825,6 +862,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Spread,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -865,6 +903,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::Number(n),
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         }),
                         Err(_) => return Err(raise_tokenize_error!("Invalid number literal", line, column)),
                     }
@@ -873,6 +912,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Dot,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -885,6 +925,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::NullishAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -893,6 +934,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::NullishCoalescing,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -905,6 +947,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::OptionalChain,
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         });
                         i += 2;
                         column += 2;
@@ -915,6 +958,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::QuestionMark,
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         });
                         i += 1;
                         column += 1;
@@ -924,6 +968,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::QuestionMark,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -935,6 +980,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::StrictNotEqual,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -943,6 +989,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::NotEqual,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -951,6 +998,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LogicalNot,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -963,6 +1011,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::StrictEqual,
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         });
                         i += 3;
                         column += 3;
@@ -971,6 +1020,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::Equal,
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         });
                         i += 2;
                         column += 2;
@@ -980,6 +1030,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Arrow,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -988,6 +1039,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Assign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -1007,6 +1059,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LessEqual,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1016,6 +1069,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LeftShiftAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -1024,6 +1078,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LeftShift,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1032,6 +1087,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LessThan,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -1043,6 +1099,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::GreaterEqual,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1052,6 +1109,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::UnsignedRightShiftAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 4;
                     column += 4;
@@ -1061,6 +1119,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::UnsignedRightShift,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -1070,6 +1129,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::RightShiftAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -1078,6 +1138,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::RightShift,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1086,6 +1147,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::GreaterThan,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -1098,6 +1160,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LogicalAndAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -1106,6 +1169,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LogicalAnd,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1115,6 +1179,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BitAndAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1123,6 +1188,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BitAnd,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -1135,6 +1201,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LogicalOrAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 3;
                     column += 3;
@@ -1143,6 +1210,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::LogicalOr,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1152,6 +1220,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BitOrAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1160,6 +1229,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BitOr,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -1172,6 +1242,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BitXorAssign,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 2;
                     column += 2;
@@ -1180,6 +1251,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BitXor,
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1;
                     column += 1;
@@ -1190,6 +1262,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::BitNot,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -1232,6 +1305,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             token: Token::BigInt(num_str),
                             line,
                             column: start_col,
+                            byte_offset: start_byte,
                         });
                         i += 1;
                         column += 1;
@@ -1251,6 +1325,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 token: Token::Number(f),
                                 line,
                                 column: start_col,
+                                byte_offset: start_byte,
                             });
                         }
                         Err(_) => return Err(raise_tokenize_error!("Invalid BigInt literal", line, column)),
@@ -1282,6 +1357,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::BigInt(num_str),
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     });
                     i += 1; // consume trailing 'n'
                     column += 1;
@@ -1328,6 +1404,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         token: Token::Number(n),
                         line,
                         column: start_col,
+                        byte_offset: start_byte,
                     }),
                     Err(_) => return Err(raise_tokenize_error!("Invalid number literal", line, column)),
                 }
@@ -1341,6 +1418,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::StringLit(str_lit),
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
 
                 for &chars_k in chars[i..start].iter() {
@@ -1364,6 +1442,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::StringLit(str_lit),
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
 
                 for &chars_k in chars[i..start].iter() {
@@ -1476,6 +1555,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::TemplateString(parts),
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1; // skip closing backtick
                 column += 1;
@@ -1642,6 +1722,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
             }
             ',' => {
@@ -1649,6 +1730,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::Comma,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;
@@ -1658,6 +1740,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     token: Token::Semicolon,
                     line,
                     column: start_col,
+                    byte_offset: start_byte,
                 });
                 i += 1;
                 column += 1;

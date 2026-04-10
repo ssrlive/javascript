@@ -194,9 +194,10 @@ pub enum Expr {
     Getter(Box<Expr>),
     Setter(Box<Expr>),
     Array(Vec<Option<Expr>>),
-    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
-    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
-    AsyncGeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
+    /// (name, params, body, source_span) — source_span is (start_byte, end_byte) in source text
+    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>, Option<(usize, usize)>),
+    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>, Option<(usize, usize)>),
+    AsyncGeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>, Option<(usize, usize)>),
     AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
     PostIncrement(Box<Expr>),
     PostDecrement(Box<Expr>),
@@ -207,7 +208,8 @@ pub enum Expr {
     TemplateString(Vec<TemplatePart>),
     Regex(String, String),
     Comma(Box<Expr>, Box<Expr>),
-    Function(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
+    /// (name, params, body, source_span) — source_span is (start_byte, end_byte) in source text
+    Function(Option<String>, Vec<DestructuringElement>, Vec<Statement>, Option<(usize, usize)>),
     Call(Box<Expr>, Vec<Expr>),
     DynamicImport(Box<Expr>, Option<Box<Expr>>),
     ValuePlaceholder,

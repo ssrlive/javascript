@@ -1809,10 +1809,12 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         let mut expr = parse_assignment(t, index)?;
         if should_normalize_default_function_name {
             expr = match expr {
-                Expr::Function(None, params, body) => Expr::Function(Some("default".to_string()), params, body),
-                Expr::GeneratorFunction(None, params, body) => Expr::GeneratorFunction(Some("default".to_string()), params, body),
-                Expr::AsyncFunction(None, params, body) => Expr::AsyncFunction(Some("default".to_string()), params, body),
-                Expr::AsyncGeneratorFunction(None, params, body) => Expr::AsyncGeneratorFunction(Some("default".to_string()), params, body),
+                Expr::Function(None, params, body, st) => Expr::Function(Some("default".to_string()), params, body, st),
+                Expr::GeneratorFunction(None, params, body, st) => Expr::GeneratorFunction(Some("default".to_string()), params, body, st),
+                Expr::AsyncFunction(None, params, body, st) => Expr::AsyncFunction(Some("default".to_string()), params, body, st),
+                Expr::AsyncGeneratorFunction(None, params, body, st) => {
+                    Expr::AsyncGeneratorFunction(Some("default".to_string()), params, body, st)
+                }
                 other => other,
             };
         }
@@ -4153,6 +4155,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         let expr = parse_assignment(tokens, index)?;
                         properties.push((Expr::StringLit(Vec::new()), Expr::Spread(Box::new(expr)), false, false));
                     } else {
+                        let method_start_byte = tokens[*index].byte_offset;
                         log::trace!(
                             "parse_primary: object literal accessor check at idx {} tok={:?} next={:?}",
                             *index,
@@ -4282,14 +4285,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 if is_async_member {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
-                                        Expr::AsyncGeneratorFunction(None, params, body),
+                                        Expr::AsyncGeneratorFunction(
+                                            None,
+                                            params,
+                                            body,
+                                            Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                        ),
                                         false,
                                         false,
                                     ));
                                 } else {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
-                                        Expr::GeneratorFunction(None, params, body),
+                                        Expr::GeneratorFunction(
+                                            None,
+                                            params,
+                                            body,
+                                            Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                        ),
                                         false,
                                         false,
                                     ));
@@ -4297,14 +4310,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             } else if is_async_member {
                                 properties.push((
                                     Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
-                                    Expr::AsyncFunction(None, params, body),
+                                    Expr::AsyncFunction(None, params, body, Some((method_start_byte, tokens[*index - 1].byte_offset + 1))),
                                     false,
                                     false,
                                 ));
                             } else {
                                 properties.push((
                                     Expr::StringLit(crate::unicode::utf8_to_utf16("yield")),
-                                    Expr::Function(None, params, body),
+                                    Expr::Function(None, params, body, Some((method_start_byte, tokens[*index - 1].byte_offset + 1))),
                                     false,
                                     false,
                                 ));
@@ -4343,14 +4356,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                     if is_async_member {
                                         properties.push((
                                             Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                            Expr::AsyncGeneratorFunction(None, params, body),
+                                            Expr::AsyncGeneratorFunction(
+                                                None,
+                                                params,
+                                                body,
+                                                Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                            ),
                                             false,
                                             false,
                                         ));
                                     } else {
                                         properties.push((
                                             Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                            Expr::GeneratorFunction(None, params, body),
+                                            Expr::GeneratorFunction(
+                                                None,
+                                                params,
+                                                body,
+                                                Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                            ),
                                             false,
                                             false,
                                         ));
@@ -4358,14 +4381,19 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 } else if is_async_member {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                        Expr::AsyncFunction(None, params, body),
+                                        Expr::AsyncFunction(
+                                            None,
+                                            params,
+                                            body,
+                                            Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                        ),
                                         false,
                                         false,
                                     ));
                                 } else {
                                     properties.push((
                                         Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                        Expr::Function(None, params, body),
+                                        Expr::Function(None, params, body, Some((method_start_byte, tokens[*index - 1].byte_offset + 1))),
                                         false,
                                         false,
                                     ));
@@ -4422,14 +4450,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                         if is_async_member {
                                             properties.push((
                                                 Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
-                                                Expr::AsyncGeneratorFunction(None, params, body),
+                                                Expr::AsyncGeneratorFunction(
+                                                    None,
+                                                    params,
+                                                    body,
+                                                    Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                                ),
                                                 false,
                                                 false,
                                             ));
                                         } else {
                                             properties.push((
                                                 Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
-                                                Expr::GeneratorFunction(None, params, body),
+                                                Expr::GeneratorFunction(
+                                                    None,
+                                                    params,
+                                                    body,
+                                                    Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                                ),
                                                 false,
                                                 false,
                                             ));
@@ -4437,14 +4475,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                     } else if is_async_member {
                                         properties.push((
                                             Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
-                                            Expr::AsyncFunction(None, params, body),
+                                            Expr::AsyncFunction(
+                                                None,
+                                                params,
+                                                body,
+                                                Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                            ),
                                             false,
                                             false,
                                         ));
                                     } else {
                                         properties.push((
                                             Expr::StringLit(crate::unicode::utf8_to_utf16(&id)),
-                                            Expr::Function(None, params, body),
+                                            Expr::Function(
+                                                None,
+                                                params,
+                                                body,
+                                                Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                            ),
                                             false,
                                             false,
                                         ));
@@ -4513,9 +4561,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1;
                             if is_generator {
-                                properties.push((key_expr, Expr::GeneratorFunction(None, params, body), key_is_computed, false));
+                                properties.push((
+                                    key_expr,
+                                    Expr::GeneratorFunction(
+                                        None,
+                                        params,
+                                        body,
+                                        Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                    ),
+                                    key_is_computed,
+                                    false,
+                                ));
                             } else {
-                                properties.push((key_expr, Expr::Function(None, params, body), key_is_computed, false));
+                                properties.push((
+                                    key_expr,
+                                    Expr::Function(None, params, body, Some((method_start_byte, tokens[*index - 1].byte_offset + 1))),
+                                    key_is_computed,
+                                    false,
+                                ));
                             }
                             while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
                                 *index += 1;
@@ -4553,7 +4616,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             *index += 1;
                             properties.push((
                                 key_expr,
-                                Expr::Getter(Box::new(Expr::Function(None, Vec::new(), body))),
+                                Expr::Getter(Box::new(Expr::Function(
+                                    None,
+                                    Vec::new(),
+                                    body,
+                                    Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                ))),
                                 false,
                                 false,
                             ));
@@ -4575,7 +4643,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
-                            properties.push((key_expr, Expr::Setter(Box::new(Expr::Function(None, params, body))), false, false));
+                            properties.push((
+                                key_expr,
+                                Expr::Setter(Box::new(Expr::Function(
+                                    None,
+                                    params,
+                                    body,
+                                    Some((method_start_byte, tokens[*index - 1].byte_offset + 1)),
+                                ))),
+                                false,
+                                false,
+                            ));
                         } else {
                             if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
                                 *index += 1;
@@ -4665,6 +4743,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
         }
         Token::Function | Token::FunctionStar => {
+            let func_start_byte = token_data.byte_offset;
             let mut is_generator = matches!(current, Token::FunctionStar);
             if !is_generator && *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
                 is_generator = true;
@@ -4735,10 +4814,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index += 1;
                 if is_generator {
                     log::trace!("parse_primary: constructed GeneratorFunction name={:?} params={:?}", name, params);
-                    Expr::GeneratorFunction(name, params, body)
+                    Expr::GeneratorFunction(name, params, body, Some((func_start_byte, tokens[*index - 1].byte_offset + 1)))
                 } else {
                     log::trace!("parse_primary: constructed Function name={:?} params={:?}", name, params);
-                    Expr::Function(name, params, body)
+                    Expr::Function(name, params, body, Some((func_start_byte, tokens[*index - 1].byte_offset + 1)))
                 }
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
                 *index += 1;
@@ -4753,10 +4832,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index += 1;
                 if is_generator {
                     log::trace!("parse_primary: constructed GeneratorFunction name={:?} params=Vec::new()", name);
-                    Expr::GeneratorFunction(name, Vec::new(), body)
+                    Expr::GeneratorFunction(name, Vec::new(), body, Some((func_start_byte, tokens[*index - 1].byte_offset + 1)))
                 } else {
                     log::trace!("parse_primary: constructed Function name={:?} params=Vec::new()", name);
-                    Expr::Function(name, Vec::new(), body)
+                    Expr::Function(name, Vec::new(), body, Some((func_start_byte, tokens[*index - 1].byte_offset + 1)))
                 }
             } else {
                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -4833,10 +4912,20 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     *index += 1;
                     if is_generator {
                         log::trace!("parse_primary: constructed AsyncGeneratorFunction name={name:?} params={params:?}");
-                        Expr::AsyncGeneratorFunction(name, params, body)
+                        Expr::AsyncGeneratorFunction(
+                            name,
+                            params,
+                            body,
+                            Some((tokens[start].byte_offset, tokens[*index - 1].byte_offset + 1)),
+                        )
                     } else {
                         log::trace!("parse_primary: constructed AsyncFunction name={name:?} params={params:?}");
-                        Expr::AsyncFunction(name, params, body)
+                        Expr::AsyncFunction(
+                            name,
+                            params,
+                            body,
+                            Some((tokens[start].byte_offset, tokens[*index - 1].byte_offset + 1)),
+                        )
                     }
                 } else {
                     log::trace!(
@@ -5930,7 +6019,7 @@ mod tests {
                 if let Expr::Property(base, prop) = expr {
                     assert_eq!(prop, "prototype");
                     match &**base {
-                        Expr::AsyncFunction(Some(name), _params, _body) | Expr::Function(Some(name), _params, _body) => {
+                        Expr::AsyncFunction(Some(name), _params, _body, _) | Expr::Function(Some(name), _params, _body, _) => {
                             assert_eq!(name, "foo");
                         }
                         other => {

@@ -768,6 +768,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         };
 
         let mut compiler = Compiler::new();
+        compiler.set_source_text(script_str.to_string());
         if run_as_module && let Some(ref p) = script_path_buf {
             compiler.set_script_filename(p.to_string_lossy().to_string());
         }

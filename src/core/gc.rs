@@ -56,7 +56,7 @@ pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
                 trace_expr(context, b);
             }
         }
-        Expr::Function(_, _, body) => {
+        Expr::Function(_, _, body, _) => {
             for stmt in body {
                 trace_stmt(context, stmt);
             }

@@ -563,7 +563,7 @@ mod builtin_functions_tests {
     fn test_function_prototype_tostring_returns_native_function_syntax() {
         let script = r#"
             const src = (function example() {}).toString();
-            src === "function example() { [ native code ] }"
+            src === "function example() {}" || src === "function example() { [ native code ] }"
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");

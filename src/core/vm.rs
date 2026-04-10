@@ -1,8 +1,10 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
     GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
-    desc_from_legacy_map, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
-    write_attrs_to_legacy_map,
+    desc_from_legacy_map, get_getter, get_setter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark,
+    has_setter, is_hidden_key, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
+    mark_nonconfigurable, mark_nonenumerable, mark_readonly, remove_getter, remove_setter, set_getter, set_setter, unmark_nonconfigurable,
+    unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};

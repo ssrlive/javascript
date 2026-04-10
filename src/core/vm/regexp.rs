@@ -526,24 +526,24 @@ impl<'gc> VM<'gc> {
             "@@sym:11".to_string(),
             Self::make_host_fn_with_name_len(ctx, "regexp.symbolMatchAll", "[Symbol.matchAll]", 1.0, false),
         );
-        regexp_proto.insert(make_nonenumerable_key("source"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("global"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("ignoreCase"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("multiline"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("sticky"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("dotAll"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("unicode"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("hasIndices"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("unicodeSets"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("flags"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("exec"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("test"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("toString"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("@@sym:7"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("@@sym:8"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("@@sym:9"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("@@sym:10"), Value::Boolean(true));
-        regexp_proto.insert(make_nonenumerable_key("@@sym:11"), Value::Boolean(true));
+        mark_nonenumerable(&mut regexp_proto, "source");
+        mark_nonenumerable(&mut regexp_proto, "global");
+        mark_nonenumerable(&mut regexp_proto, "ignoreCase");
+        mark_nonenumerable(&mut regexp_proto, "multiline");
+        mark_nonenumerable(&mut regexp_proto, "sticky");
+        mark_nonenumerable(&mut regexp_proto, "dotAll");
+        mark_nonenumerable(&mut regexp_proto, "unicode");
+        mark_nonenumerable(&mut regexp_proto, "hasIndices");
+        mark_nonenumerable(&mut regexp_proto, "unicodeSets");
+        mark_nonenumerable(&mut regexp_proto, "flags");
+        mark_nonenumerable(&mut regexp_proto, "exec");
+        mark_nonenumerable(&mut regexp_proto, "test");
+        mark_nonenumerable(&mut regexp_proto, "toString");
+        mark_nonenumerable(&mut regexp_proto, "@@sym:7");
+        mark_nonenumerable(&mut regexp_proto, "@@sym:8");
+        mark_nonenumerable(&mut regexp_proto, "@@sym:9");
+        mark_nonenumerable(&mut regexp_proto, "@@sym:10");
+        mark_nonenumerable(&mut regexp_proto, "@@sym:11");
         let regexp_proto_obj = new_gc_cell_ptr(ctx, regexp_proto);
         // Stamp each getter with a back-reference to this prototype so that
         // cross-realm identity checks work (spec: SameValue(R, %RegExpPrototype%)).
@@ -569,11 +569,11 @@ impl<'gc> VM<'gc> {
         iter_proto.insert("next".to_string(), Self::make_native_fn(ctx, BUILTIN_ITERATOR_NEXT, "next", 0.0));
         // Symbol.toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
         iter_proto.insert("@@sym:4".to_string(), Value::from("RegExp String Iterator"));
-        iter_proto.insert(make_nonenumerable_key("@@sym:4"), Value::Boolean(true));
-        iter_proto.insert(make_readonly_key("@@sym:4"), Value::Boolean(true));
+        mark_nonenumerable(&mut iter_proto, "@@sym:4");
+        mark_readonly(&mut iter_proto, "@@sym:4");
         iter_proto.insert("__configurable_@@sym:4__".to_string(), Value::Boolean(true));
         // Mark next as non-enumerable, writable, configurable
-        iter_proto.insert(make_nonenumerable_key("next"), Value::Boolean(true));
+        mark_nonenumerable(&mut iter_proto, "next");
         let iter_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iter_proto));
         self.globals.insert("RegExpStringIteratorPrototype".to_string(), iter_proto_val);
     }
@@ -648,8 +648,8 @@ impl<'gc> VM<'gc> {
         {
             map.insert("__proto__".to_string(), proto);
         }
-        map.insert(make_nonconfigurable_key("lastIndex"), Value::Boolean(true));
-        map.insert(make_nonenumerable_key("lastIndex"), Value::Boolean(true));
+        mark_nonconfigurable(&mut map, "lastIndex");
+        mark_nonenumerable(&mut map, "lastIndex");
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
@@ -693,8 +693,8 @@ impl<'gc> VM<'gc> {
             borrow.insert("__type__".to_string(), Value::from("RegExp"));
             borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
             borrow.insert("lastIndex".to_string(), Value::Number(0.0));
-            borrow.insert(make_nonconfigurable_key("lastIndex"), Value::Boolean(true));
-            borrow.insert(make_nonenumerable_key("lastIndex"), Value::Boolean(true));
+            mark_nonconfigurable(&mut *borrow, "lastIndex");
+            mark_nonenumerable(&mut *borrow, "lastIndex");
             return Some(receiver.clone());
         }
         None
@@ -2141,7 +2141,7 @@ impl<'gc> VM<'gc> {
 
                 // Update lastIndex for global/sticky
                 if is_global || is_sticky {
-                    if matches!(re_obj.borrow().get(&make_readonly_key("lastIndex")), Some(Value::Boolean(true))) {
+                    if has_readonly_mark(&re_obj.borrow(), "lastIndex") {
                         self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
                         return Value::Null;
                     }
@@ -2154,7 +2154,7 @@ impl<'gc> VM<'gc> {
             }
             _ => {
                 if is_global || is_sticky {
-                    if matches!(re_obj.borrow().get(&make_readonly_key("lastIndex")), Some(Value::Boolean(true))) {
+                    if has_readonly_mark(&re_obj.borrow(), "lastIndex") {
                         self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
                         return Value::Null;
                     }

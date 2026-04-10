@@ -553,17 +553,17 @@ impl<'gc> VM<'gc> {
             make_getter_key("buffer"),
             Self::make_host_fn_with_name_len(ctx, "dataview.get_buffer", "get buffer", 0.0, false),
         );
-        dv_proto.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
+        mark_nonenumerable(&mut dv_proto, "buffer");
         dv_proto.insert(
             make_getter_key("byteLength"),
             Self::make_host_fn_with_name_len(ctx, "dataview.get_byteLength", "get byteLength", 0.0, false),
         );
-        dv_proto.insert(make_nonenumerable_key("byteLength"), Value::Boolean(true));
+        mark_nonenumerable(&mut dv_proto, "byteLength");
         dv_proto.insert(
             make_getter_key("byteOffset"),
             Self::make_host_fn_with_name_len(ctx, "dataview.get_byteOffset", "get byteOffset", 0.0, false),
         );
-        dv_proto.insert(make_nonenumerable_key("byteOffset"), Value::Boolean(true));
+        mark_nonenumerable(&mut dv_proto, "byteOffset");
         for &(name, host, len) in &[
             ("getInt8", "dataview.getInt8", 1.0),
             ("getUint8", "dataview.getUint8", 1.0),
@@ -587,7 +587,7 @@ impl<'gc> VM<'gc> {
             ("setBigUint64", "dataview.setBigUint64", 2.0),
         ] {
             dv_proto.insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, host, name, len, false));
-            dv_proto.insert(make_nonenumerable_key(&name), Value::Boolean(true));
+            mark_nonenumerable(&mut dv_proto, &name);
         }
         let dv_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, dv_proto));
         let mut data_view_map = IndexMap::new();
@@ -595,9 +595,9 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(&mut data_view_map, "name", &Value::from("DataView"), false, false, true);
         Self::insert_property_with_attributes(&mut data_view_map, "length", &Value::Number(1.0), false, false, true);
         data_view_map.insert("prototype".to_string(), dv_proto_val);
-        data_view_map.insert(make_readonly_key("prototype"), Value::Boolean(true));
-        data_view_map.insert(make_nonenumerable_key("prototype"), Value::Boolean(true));
-        data_view_map.insert(make_nonconfigurable_key("prototype"), Value::Boolean(true));
+        mark_readonly(&mut data_view_map, "prototype");
+        mark_nonenumerable(&mut data_view_map, "prototype");
+        mark_nonconfigurable(&mut data_view_map, "prototype");
         let data_view_ctor = Value::VmObject(new_gc_cell_ptr(ctx, data_view_map));
         if let Value::VmObject(ctor_obj) = &data_view_ctor
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()

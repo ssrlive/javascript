@@ -10801,9 +10801,14 @@ impl<'gc> Compiler<'gc> {
         // Install static fields and static blocks after the constructor's
         // prototype chain is wired so `super` inside static initializers/blocks
         // observes the parent class.
+        // Save last_class_ctor_ip: the static-member compiler clears it
+        // internally to avoid leaks from nested class expressions, but we
+        // need to preserve the outer anonymous-class ctor IP for the caller.
+        let saved_last_class_ctor_ip = self.last_class_ctor_ip;
         for sm in &cloned_static_members {
             self.compile_class_static_member(name, sm, is_expr)?;
         }
+        self.last_class_ctor_ip = saved_last_class_ctor_ip;
 
         // Pop instance fields stack
         self.current_class_instance_fields.pop();

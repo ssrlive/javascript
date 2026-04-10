@@ -5694,7 +5694,6 @@ impl<'gc> VM<'gc> {
         };
         self.maybe_infer_accessor_function_name_from_key(ctx, "get", &coerced_key, Some(&index), &val);
         let getter_key = make_getter_key(&coerced_key);
-        let nonconfigurable_key = make_nonconfigurable_key(&coerced_key);
         if let Value::VmObject(map) = &obj {
             if coerced_key == "prototype"
                 && map
@@ -5706,7 +5705,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let has_nonconf = map.borrow().contains_key(&nonconfigurable_key);
+            let has_nonconf = has_nonconfigurable_mark(&*map.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5735,8 +5734,8 @@ impl<'gc> VM<'gc> {
             }
             let shared_props = self.get_fn_props(ctx, *ip, *arity);
             let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-            let has_nonconf =
-                target_props.borrow().contains_key(&nonconfigurable_key) || shared_props.borrow().contains_key(&nonconfigurable_key);
+            let has_nonconf = has_nonconfigurable_mark(&*target_props.borrow(), &coerced_key)
+                || has_nonconfigurable_mark(&*shared_props.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5776,7 +5775,6 @@ impl<'gc> VM<'gc> {
         };
         self.maybe_infer_accessor_function_name_from_key(ctx, "set", &coerced_key, Some(&index), &val);
         let setter_key = make_setter_key(&coerced_key);
-        let nonconfigurable_key = make_nonconfigurable_key(&coerced_key);
         if let Value::VmObject(map) = &obj {
             if coerced_key == "prototype"
                 && map
@@ -5788,7 +5786,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let has_nonconf = map.borrow().contains_key(&nonconfigurable_key);
+            let has_nonconf = has_nonconfigurable_mark(&*map.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5816,8 +5814,8 @@ impl<'gc> VM<'gc> {
             }
             let shared_props = self.get_fn_props(ctx, *ip, *arity);
             let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-            let has_nonconf =
-                target_props.borrow().contains_key(&nonconfigurable_key) || shared_props.borrow().contains_key(&nonconfigurable_key);
+            let has_nonconf = has_nonconfigurable_mark(&*target_props.borrow(), &coerced_key)
+                || has_nonconfigurable_mark(&*shared_props.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));

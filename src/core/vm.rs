@@ -32150,23 +32150,26 @@ impl<'gc> VM<'gc> {
                 _ if current_exists => current_configurable,
                 _ => false,
             };
-            if !enumerable {
-                borrow.insert(nonenumerable_key, Value::Boolean(true));
-            }
-            if !configurable {
-                borrow.insert(nonconfigurable_key, Value::Boolean(true));
-            }
-
-            if !is_accessor {
-                let writable = match desc.get("writable") {
+            let writable = if !is_accessor {
+                match desc.get("writable") {
                     Some(Value::Boolean(v)) => *v,
                     _ if current_exists && !current_is_accessor => current_writable,
                     _ => false,
-                };
-                if !writable {
-                    borrow.insert(readonly_key, Value::Boolean(true));
                 }
+            } else {
+                true // accessor properties don't use writable flag; keep marker absent
+            };
+            let mut attrs = PropAttrs::empty();
+            if writable {
+                attrs |= PropAttrs::WRITABLE;
             }
+            if enumerable {
+                attrs |= PropAttrs::ENUMERABLE;
+            }
+            if configurable {
+                attrs |= PropAttrs::CONFIGURABLE;
+            }
+            write_attrs_to_legacy_map(&mut borrow, key, attrs);
         }
         true
     }

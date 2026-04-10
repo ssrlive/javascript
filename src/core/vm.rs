@@ -15181,6 +15181,13 @@ impl<'gc> VM<'gc> {
         None
     }
 
+    /// Check if `key` has an accessor (getter or setter) anywhere in the prototype chain.
+    #[inline]
+    fn has_accessor_in_proto_chain(&self, proto: Option<&Value<'gc>>, key: &str) -> bool {
+        self.lookup_proto_chain(proto, &make_getter_key(key)).is_some()
+            || self.lookup_proto_chain(proto, &make_setter_key(key)).is_some()
+    }
+
     /// Walk the __proto__ chain looking for a property.
     fn lookup_proto_chain(&self, proto: Option<&Value<'gc>>, key: &str) -> Option<Value<'gc>> {
         let mut current = proto.cloned();
@@ -25370,8 +25377,7 @@ impl<'gc> VM<'gc> {
                             let proto = b.props.get("__proto__").cloned();
                             drop(b);
                             self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                                || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                                || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                         }
                     }
                     Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
@@ -25559,8 +25565,7 @@ impl<'gc> VM<'gc> {
                                 let proto = b.props.get("__proto__").cloned();
                                 drop(b);
                                 self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                    || self.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                                    || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                                    || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                             }
                         }
                         Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
@@ -25685,8 +25690,7 @@ impl<'gc> VM<'gc> {
                                 let proto = b.props.get("__proto__").cloned();
                                 drop(b);
                                 self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                    || self.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                                    || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                                    || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                             }
                         }
                         Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
@@ -26055,8 +26059,7 @@ impl<'gc> VM<'gc> {
                             let proto = b.props.get("__proto__").cloned();
                             drop(b);
                             vm.lookup_proto_chain(proto.as_ref(), key).is_some()
-                                || vm.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                                || vm.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                                || vm.has_accessor_in_proto_chain(proto.as_ref(), &key)
                         }
                     }
                     Value::VmObject(_) => match vm.try_proxy_has(ctx, target, key) {
@@ -31643,8 +31646,7 @@ impl<'gc> VM<'gc> {
                     let proto = b.props.get("__proto__").cloned();
                     drop(b);
                     self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        || self.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                        || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                        || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                 }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
@@ -31656,8 +31658,7 @@ impl<'gc> VM<'gc> {
                     let proto = b.get("__proto__").cloned();
                     drop(b);
                     self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        || self.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                        || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                        || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                 }
             }
             _ => false,
@@ -35210,8 +35211,7 @@ impl<'gc> VM<'gc> {
                     }
                     drop(b);
                     self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        || self.lookup_proto_chain(proto.as_ref(), &make_getter_key(&key)).is_some()
-                        || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
+                        || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                 }
             }
             Value::VmObject(_) => match self.try_proxy_has(ctx, target, key) {

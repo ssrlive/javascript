@@ -581,6 +581,18 @@ pub fn remove_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key:
     map.shift_remove(&format!("{}{}", SETTER_PREFIX, key));
 }
 
+/// Look up the getter value for `key`, returning a reference if present.
+#[inline]
+pub fn lookup_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    map.get(&format!("{}{}", GETTER_PREFIX, key))
+}
+
+/// Look up the setter value for `key`, returning a reference if present.
+#[inline]
+pub fn lookup_setter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
+    map.get(&format!("{}{}", SETTER_PREFIX, key))
+}
+
 /// Get the getter key string for `key`.
 #[inline]
 pub fn make_getter_key(key: impl AsRef<str>) -> String {
@@ -613,9 +625,28 @@ pub fn make_nonconfigurable_key(key: impl AsRef<str>) -> String {
 
 // ── Batch attribute write ──────────────────────────────────────────
 
+/// Read the current attribute flags for `key` from a legacy hidden-key map.
+///
+/// Returns `PropAttrs` in positive sense: WRITABLE if no readonly mark,
+/// ENUMERABLE if no nonenumerable mark, CONFIGURABLE if no nonconfigurable mark.
+/// Defaults to all-true (writable + enumerable + configurable) when no marks exist.
+pub fn read_attrs_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
+    let mut attrs = PropAttrs::all();
+    if has_readonly_mark(map, key) {
+        attrs.remove(PropAttrs::WRITABLE);
+    }
+    if has_nonenumerable_mark(map, key) {
+        attrs.remove(PropAttrs::ENUMERABLE);
+    }
+    if has_nonconfigurable_mark(map, key) {
+        attrs.remove(PropAttrs::CONFIGURABLE);
+    }
+    attrs
+}
+
 /// Write attribute flags for `key` into a legacy hidden-key map.
 ///
-/// This is the inverse of `attrs_from_legacy_map`.  For each attribute
+/// This is the inverse of `read_attrs_from_legacy_map`.  For each attribute
 /// that is *off*, the corresponding marker key is inserted; for each
 /// attribute that is *on*, any existing marker is removed.
 pub fn write_attrs_to_legacy_map<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, attrs: PropAttrs) {

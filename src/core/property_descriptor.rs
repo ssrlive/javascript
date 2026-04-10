@@ -670,3 +670,14 @@ pub fn write_attrs_to_legacy_map<'gc>(map: &mut indexmap::IndexMap<String, Value
         map.insert(nc_key, Value::Boolean(true));
     }
 }
+
+/// Remove a property and all of its associated attribute markers and accessor
+/// entries from a legacy hidden-key map.
+pub fn remove_property_completely<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    map.shift_remove(key);
+    map.shift_remove(&format!("{}{}", GETTER_PREFIX, key));
+    map.shift_remove(&format!("{}{}", SETTER_PREFIX, key));
+    map.shift_remove(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX));
+    map.shift_remove(&format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX));
+    map.shift_remove(&format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX));
+}

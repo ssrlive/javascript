@@ -2,9 +2,9 @@ use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
     GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
     desc_from_legacy_map, get_getter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter,
-    make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key, mark_nonconfigurable,
-    mark_nonenumerable, mark_readonly, remove_getter, remove_setter, set_getter, set_setter, unmark_nonconfigurable, unmark_nonenumerable,
-    unmark_readonly, write_attrs_to_legacy_map,
+    lookup_getter, lookup_setter, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
+    mark_nonconfigurable, mark_nonenumerable, mark_readonly, read_attrs_from_legacy_map, remove_getter, remove_setter, set_getter,
+    set_setter, unmark_nonconfigurable, unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -2976,10 +2976,8 @@ impl<'gc> VM<'gc> {
     }
 
     fn global_object_has_own_property(&self, key: &str) -> bool {
-        let getter_key = make_getter_key(&key);
-        let setter_key = make_setter_key(&key);
         let borrow = self.global_this.borrow();
-        borrow.contains_key(key) || borrow.contains_key(&getter_key) || borrow.contains_key(&setter_key)
+        borrow.contains_key(key) || has_getter(&borrow, key) || has_setter(&borrow, key)
     }
 
     fn global_object_is_extensible(&self) -> bool {
@@ -2987,22 +2985,18 @@ impl<'gc> VM<'gc> {
     }
 
     fn global_object_property_flags(&self, key: &str) -> Option<(bool, bool, bool, bool)> {
-        let getter_key = make_getter_key(&key);
-        let setter_key = make_setter_key(&key);
-        let readonly_key = make_readonly_key(&key);
-        let nonconfigurable_key = make_nonconfigurable_key(&key);
-        let nonenumerable_key = make_nonenumerable_key(&key);
         let borrow = self.global_this.borrow();
         let has_data = borrow.contains_key(key);
-        let has_getter = borrow.contains_key(&getter_key);
-        let has_setter = borrow.contains_key(&setter_key);
-        if !has_data && !has_getter && !has_setter {
+        let has_get = has_getter(&borrow, key);
+        let has_set = has_setter(&borrow, key);
+        if !has_data && !has_get && !has_set {
             return None;
         }
-        let is_accessor = has_getter || has_setter;
-        let configurable = !borrow.contains_key(&nonconfigurable_key);
-        let enumerable = !borrow.contains_key(&nonenumerable_key);
-        let writable = has_data && !borrow.contains_key(&readonly_key);
+        let is_accessor = has_get || has_set;
+        let attrs = read_attrs_from_legacy_map(&borrow, key);
+        let configurable = attrs.contains(PropAttrs::CONFIGURABLE);
+        let enumerable = attrs.contains(PropAttrs::ENUMERABLE);
+        let writable = has_data && attrs.contains(PropAttrs::WRITABLE);
         Some((configurable, writable, enumerable, is_accessor))
     }
 
@@ -15184,8 +15178,7 @@ impl<'gc> VM<'gc> {
     /// Check if `key` has an accessor (getter or setter) anywhere in the prototype chain.
     #[inline]
     fn has_accessor_in_proto_chain(&self, proto: Option<&Value<'gc>>, key: &str) -> bool {
-        self.lookup_proto_chain(proto, &make_getter_key(key)).is_some()
-            || self.lookup_proto_chain(proto, &make_setter_key(key)).is_some()
+        self.lookup_proto_chain(proto, &make_getter_key(key)).is_some() || self.lookup_proto_chain(proto, &make_setter_key(key)).is_some()
     }
 
     /// Walk the __proto__ chain looking for a property.
@@ -26058,8 +26051,7 @@ impl<'gc> VM<'gc> {
                         } else {
                             let proto = b.props.get("__proto__").cloned();
                             drop(b);
-                            vm.lookup_proto_chain(proto.as_ref(), key).is_some()
-                                || vm.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                            vm.lookup_proto_chain(proto.as_ref(), key).is_some() || vm.has_accessor_in_proto_chain(proto.as_ref(), &key)
                         }
                     }
                     Value::VmObject(_) => match vm.try_proxy_has(ctx, target, key) {
@@ -31645,8 +31637,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     let proto = b.props.get("__proto__").cloned();
                     drop(b);
-                    self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                    self.lookup_proto_chain(proto.as_ref(), key).is_some() || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                 }
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
@@ -31657,8 +31648,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     let proto = b.get("__proto__").cloned();
                     drop(b);
-                    self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                    self.lookup_proto_chain(proto.as_ref(), key).is_some() || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                 }
             }
             _ => false,
@@ -35210,8 +35200,7 @@ impl<'gc> VM<'gc> {
                         proto = Some(array_proto);
                     }
                     drop(b);
-                    self.lookup_proto_chain(proto.as_ref(), key).is_some()
-                        || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                    self.lookup_proto_chain(proto.as_ref(), key).is_some() || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
                 }
             }
             Value::VmObject(_) => match self.try_proxy_has(ctx, target, key) {

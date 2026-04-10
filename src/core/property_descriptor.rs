@@ -495,10 +495,7 @@ pub fn has_nonenumerable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>,
 /// Mark `key` as read-only (non-writable).
 #[inline]
 pub fn mark_readonly<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
-    map.insert(
-        format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX),
-        Value::Boolean(true),
-    );
+    map.insert(format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX), Value::Boolean(true));
 }
 
 /// Remove read-only marker for `key` (making it writable).
@@ -586,32 +583,32 @@ pub fn remove_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key:
 
 /// Get the getter key string for `key`.
 #[inline]
-pub fn getter_key(key: &str) -> String {
-    format!("{}{}", GETTER_PREFIX, key)
+pub fn make_getter_key(key: impl AsRef<str>) -> String {
+    format!("{}{}", GETTER_PREFIX, key.as_ref())
 }
 
 /// Get the setter key string for `key`.
 #[inline]
-pub fn setter_key(key: &str) -> String {
-    format!("{}{}", SETTER_PREFIX, key)
+pub fn make_setter_key(key: impl AsRef<str>) -> String {
+    format!("{}{}", SETTER_PREFIX, key.as_ref())
 }
 
 /// Get the readonly marker key string for `key`.
 #[inline]
-pub fn readonly_key(key: &str) -> String {
-    format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX)
+pub fn make_readonly_key(key: impl AsRef<str>) -> String {
+    format!("{}{}{}", READONLY_PREFIX, key.as_ref(), READONLY_SUFFIX)
 }
 
 /// Get the nonenumerable marker key string for `key`.
 #[inline]
-pub fn nonenumerable_key(key: &str) -> String {
-    format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX)
+pub fn make_nonenumerable_key(key: impl AsRef<str>) -> String {
+    format!("{}{}{}", NONENUMERABLE_PREFIX, key.as_ref(), NONENUMERABLE_SUFFIX)
 }
 
 /// Get the nonconfigurable marker key string for `key`.
 #[inline]
-pub fn nonconfigurable_key(key: &str) -> String {
-    format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX)
+pub fn make_nonconfigurable_key(key: impl AsRef<str>) -> String {
+    format!("{}{}{}", NONCONFIGURABLE_PREFIX, key.as_ref(), NONCONFIGURABLE_SUFFIX)
 }
 
 // ── Batch attribute write ──────────────────────────────────────────

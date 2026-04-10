@@ -4732,17 +4732,8 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                let getter_key = make_getter_key(&key);
-                let setter_key = make_setter_key(&key);
-                let readonly_key = make_readonly_key(&key);
-                let nonenumerable_key = make_nonenumerable_key(&key);
-                let nonconfigurable_key = make_nonconfigurable_key(&key);
                 let mut borrow = map.borrow_mut(ctx);
-                borrow.shift_remove(&getter_key);
-                borrow.shift_remove(&setter_key);
-                borrow.shift_remove(&readonly_key);
-                borrow.shift_remove(&nonenumerable_key);
-                borrow.shift_remove(&nonconfigurable_key);
+                remove_property_completely(&mut *borrow, &key);
                 if key == "__proto__" {
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
@@ -4791,17 +4782,8 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 // Write to per-closure overlay when available
-                let getter_key = make_getter_key(&key);
-                let setter_key = make_setter_key(&key);
-                let readonly_key = make_readonly_key(&key);
-                let nonenumerable_key = make_nonenumerable_key(&key);
-                let nonconfigurable_key = make_nonconfigurable_key(&key);
                 let mut borrow = target_props.borrow_mut(ctx);
-                borrow.shift_remove(&getter_key);
-                borrow.shift_remove(&setter_key);
-                borrow.shift_remove(&readonly_key);
-                borrow.shift_remove(&nonenumerable_key);
-                borrow.shift_remove(&nonconfigurable_key);
+                remove_property_completely(&mut *borrow, &key);
                 borrow.insert(key, val.clone());
                 if let Value::VmFunction(fn_ip, _) | Value::VmClosure(fn_ip, _, _) = &val {
                     self.fn_home_objects.insert(*fn_ip, obj.clone());
@@ -5652,17 +5634,8 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                let getter_key = make_getter_key(&coerced_key);
-                let setter_key = make_setter_key(&coerced_key);
-                let readonly_key = make_readonly_key(&coerced_key);
-                let nonenumerable_key = make_nonenumerable_key(&coerced_key);
-                let nonconfigurable_key = make_nonconfigurable_key(&coerced_key);
                 let mut borrow = map.borrow_mut(ctx);
-                borrow.shift_remove(&getter_key);
-                borrow.shift_remove(&setter_key);
-                borrow.shift_remove(&readonly_key);
-                borrow.shift_remove(&nonenumerable_key);
-                borrow.shift_remove(&nonconfigurable_key);
+                remove_property_completely(&mut *borrow, &coerced_key);
                 if coerced_key == "__proto__" {
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
@@ -5677,9 +5650,8 @@ impl<'gc> VM<'gc> {
                 };
                 let shared_props = self.get_fn_props(ctx, ip_val, arity_val);
                 let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-                let nonconfigurable_key = make_nonconfigurable_key(&coerced_key);
-                let has_nonconf =
-                    target_props.borrow().contains_key(&nonconfigurable_key) || shared_props.borrow().contains_key(&nonconfigurable_key);
+                let has_nonconf = has_nonconfigurable_mark(&*target_props.borrow(), &coerced_key)
+                    || has_nonconfigurable_mark(&*shared_props.borrow(), &coerced_key);
                 if has_nonconf {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5691,15 +5663,8 @@ impl<'gc> VM<'gc> {
                     self.handle_throw(ctx, &err_obj)?;
                     return Ok(OpcodeAction::Continue);
                 }
-                let getter_key = make_getter_key(&coerced_key);
-                let setter_key = make_setter_key(&coerced_key);
-                let readonly_key = make_readonly_key(&coerced_key);
-                let nonenumerable_key = make_nonenumerable_key(&coerced_key);
                 let mut borrow = target_props.borrow_mut(ctx);
-                borrow.shift_remove(&getter_key);
-                borrow.shift_remove(&setter_key);
-                borrow.shift_remove(&readonly_key);
-                borrow.shift_remove(&nonenumerable_key);
+                remove_property_completely(&mut *borrow, &coerced_key);
                 borrow.insert(coerced_key, val.clone());
             }
             _ => {

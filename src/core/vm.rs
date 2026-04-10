@@ -15752,18 +15752,21 @@ impl<'gc> VM<'gc> {
         // Date constructor with static methods
         self.date_init_prototype(ctx);
         let mut array_buffer_proto = IndexMap::new();
-        array_buffer_proto.insert(
-            make_getter_key("byteLength"),
+        set_getter(
+            &mut array_buffer_proto,
+            "byteLength",
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getByteLength", "get byteLength", 0.0, false),
         );
         mark_nonenumerable(&mut array_buffer_proto, "byteLength");
-        array_buffer_proto.insert(
-            make_getter_key("maxByteLength"),
+        set_getter(
+            &mut array_buffer_proto,
+            "maxByteLength",
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getMaxByteLength", "get maxByteLength", 0.0, false),
         );
         mark_nonenumerable(&mut array_buffer_proto, "maxByteLength");
-        array_buffer_proto.insert(
-            make_getter_key("resizable"),
+        set_getter(
+            &mut array_buffer_proto,
+            "resizable",
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getResizable", "get resizable", 0.0, false),
         );
         mark_nonenumerable(&mut array_buffer_proto, "resizable");
@@ -15820,18 +15823,21 @@ impl<'gc> VM<'gc> {
         sab_proto.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
         sab_proto.insert("@@sym:4".to_string(), Value::from("SharedArrayBuffer"));
         write_attrs_to_legacy_map(&mut sab_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
-        sab_proto.insert(
-            make_getter_key("byteLength"),
+        set_getter(
+            &mut sab_proto,
+            "byteLength",
             Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getByteLength", "get byteLength", 0.0, false),
         );
         mark_nonenumerable(&mut sab_proto, "byteLength");
-        sab_proto.insert(
-            make_getter_key("maxByteLength"),
+        set_getter(
+            &mut sab_proto,
+            "maxByteLength",
             Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getMaxByteLength", "get maxByteLength", 0.0, false),
         );
         mark_nonenumerable(&mut sab_proto, "maxByteLength");
-        sab_proto.insert(
-            make_getter_key("growable"),
+        set_getter(
+            &mut sab_proto,
+            "growable",
             Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getGrowable", "get growable", 0.0, false),
         );
         mark_nonenumerable(&mut sab_proto, "growable");
@@ -16133,12 +16139,14 @@ impl<'gc> VM<'gc> {
             "__lookupSetter__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "object.__lookupSetter__", "__lookupSetter__", 1.0, false),
         );
-        object_proto.borrow_mut(ctx).insert(
-            make_getter_key("__proto__"),
+        set_getter(
+            &mut *object_proto.borrow_mut(ctx),
+            "__proto__",
             Self::make_host_fn_with_name_len(ctx, "object.__proto__.get", "get __proto__", 0.0, false),
         );
-        object_proto.borrow_mut(ctx).insert(
-            make_setter_key("__proto__"),
+        set_setter(
+            &mut *object_proto.borrow_mut(ctx),
+            "__proto__",
             Self::make_host_fn_with_name_len(ctx, "object.__proto__.set", "set __proto__", 1.0, false),
         );
         for key in [
@@ -16694,8 +16702,9 @@ impl<'gc> VM<'gc> {
                     mark_nonenumerable(&mut proto, "has");
                     mark_nonenumerable(&mut proto, "delete");
                     if ctor_id == BUILTIN_CTOR_SET {
-                        proto.insert(
-                            make_getter_key("size"),
+                        set_getter(
+                            &mut proto,
+                            "size",
                             Self::make_host_fn_with_name_len(ctx, "set.getSize", "get size", 0.0, false),
                         );
                         mark_nonenumerable(&mut proto, "size");
@@ -24638,8 +24647,9 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     let mut borrow = obj.borrow_mut(ctx);
-                    borrow.insert(
-                        make_setter_key("data__"),
+                    set_setter(
+                        &mut *borrow,
+                        "data__",
                         Value::VmSet(new_gc_cell_ptr(ctx, VmSetData { values, is_weak: false })),
                     );
                     borrow.insert("__type__".to_string(), Value::from("Set"));
@@ -24666,8 +24676,9 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_WEAKSET => {
                 if let Value::VmObject(obj) = receiver {
                     let mut borrow = obj.borrow_mut(ctx);
-                    borrow.insert(
-                        make_setter_key("data__"),
+                    set_setter(
+                        &mut *borrow,
+                        "data__",
                         Value::VmSet(new_gc_cell_ptr(
                             ctx,
                             VmSetData {

@@ -3934,7 +3934,28 @@ impl<'gc> VM<'gc> {
                     self.stack.push(result);
                     return Ok(OpcodeAction::Continue);
                 }
-                // Check for getter first
+                // Inline Value::Property accessor — handle before legacy __get_<key> path
+                if key != "__proto__" && matches!(borrow.get(&key), Some(Value::Property { .. })) {
+                    let val = borrow.get(&key).cloned().unwrap();
+                    drop(borrow);
+                    match val {
+                        Value::Property { getter: Some(g), .. } => {
+                            let got = self.invoke_getter_with_receiver(ctx, &*g, &obj);
+                            self.stack.push(got);
+                            if let Some(thrown) = self.pending_throw.take() {
+                                self.handle_throw(ctx, &thrown)?;
+                            }
+                        }
+                        Value::Property { value: Some(v), .. } => {
+                            self.stack.push(v.borrow().clone());
+                        }
+                        _ => {
+                            self.stack.push(Value::Undefined);
+                        }
+                    }
+                    return Ok(OpcodeAction::Continue);
+                }
+                // Check for legacy hidden-key getter (__get_<key>)
                 let getter_key = make_getter_key(&key);
                 if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = lookup_getter(&*borrow, &key) {
                     let ip = *ip;

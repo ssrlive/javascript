@@ -456,11 +456,11 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
 /// Returns `true` if `key` is an internal hidden-key marker and should be
 /// skipped during user-visible enumeration.
 pub fn is_hidden_key(key: &str) -> bool {
-    key.starts_with("__readonly_")
-        || key.starts_with("__nonenumerable_")
-        || key.starts_with("__nonconfigurable_")
-        || key.starts_with("__get_")
-        || key.starts_with("__set_")
+    key.starts_with(READONLY_PREFIX)
+        || key.starts_with(NONENUMERABLE_PREFIX)
+        || key.starts_with(NONCONFIGURABLE_PREFIX)
+        || key.starts_with(GETTER_PREFIX)
+        || key.starts_with(SETTER_PREFIX)
 }
 
 // ── Individual flag helpers ─────────────────────────────────────────

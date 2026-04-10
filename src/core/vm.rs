@@ -1,7 +1,8 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
-    GETTER_PREFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map, desc_from_legacy_map, make_getter_key,
-    make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key, write_attrs_to_legacy_map,
+    GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
+    desc_from_legacy_map, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
+    write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -10252,8 +10253,14 @@ impl<'gc> VM<'gc> {
                             let sym_key = k
                                 .strip_prefix("@@sym:")
                                 .map(|id| format!("@@sym:{}", id))
-                                .or_else(|| k.strip_prefix("__get_@@sym:").map(|id| format!("@@sym:{}", id)))
-                                .or_else(|| k.strip_prefix("__set_@@sym:").map(|id| format!("@@sym:{}", id)));
+                                .or_else(|| {
+                                    k.strip_prefix(&format!("{}@@sym:", GETTER_PREFIX))
+                                        .map(|id| format!("@@sym:{}", id))
+                                })
+                                .or_else(|| {
+                                    k.strip_prefix(&format!("{}@@sym:", SETTER_PREFIX))
+                                        .map(|id| format!("@@sym:{}", id))
+                                });
                             if let Some(id_str) = sym_key
                                 && !seen_sym_keys.contains(&id_str)
                                 && let Some(id_num) = id_str.strip_prefix("@@sym:")
@@ -10272,8 +10279,14 @@ impl<'gc> VM<'gc> {
                         let sym_key = k
                             .strip_prefix("@@sym:")
                             .map(|id| format!("@@sym:{}", id))
-                            .or_else(|| k.strip_prefix("__get_@@sym:").map(|id| format!("@@sym:{}", id)))
-                            .or_else(|| k.strip_prefix("__set_@@sym:").map(|id| format!("@@sym:{}", id)));
+                            .or_else(|| {
+                                k.strip_prefix(&format!("{}@@sym:", GETTER_PREFIX))
+                                    .map(|id| format!("@@sym:{}", id))
+                            })
+                            .or_else(|| {
+                                k.strip_prefix(&format!("{}@@sym:", SETTER_PREFIX))
+                                    .map(|id| format!("@@sym:{}", id))
+                            });
                         if let Some(id_str) = sym_key
                             && !seen_sym_keys.contains(&id_str)
                             && let Some(id_num) = id_str.strip_prefix("@@sym:")
@@ -10293,8 +10306,14 @@ impl<'gc> VM<'gc> {
                         let sym_key = k
                             .strip_prefix("@@sym:")
                             .map(|id| format!("@@sym:{}", id))
-                            .or_else(|| k.strip_prefix("__get_@@sym:").map(|id| format!("@@sym:{}", id)))
-                            .or_else(|| k.strip_prefix("__set_@@sym:").map(|id| format!("@@sym:{}", id)));
+                            .or_else(|| {
+                                k.strip_prefix(&format!("{}@@sym:", GETTER_PREFIX))
+                                    .map(|id| format!("@@sym:{}", id))
+                            })
+                            .or_else(|| {
+                                k.strip_prefix(&format!("{}@@sym:", SETTER_PREFIX))
+                                    .map(|id| format!("@@sym:{}", id))
+                            });
                         if let Some(id_str) = sym_key
                             && !seen_sym_keys.contains(&id_str)
                             && let Some(id_num) = id_str.strip_prefix("@@sym:")
@@ -17109,7 +17128,7 @@ impl<'gc> VM<'gc> {
                 self.global_this.borrow_mut(ctx).insert(name.to_string(), val);
                 self.global_this
                     .borrow_mut(ctx)
-                    .insert(format!("__nonenumerable_{name}__"), Value::Boolean(true));
+                    .insert(make_nonenumerable_key(name), Value::Boolean(true));
             }
         }
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
@@ -30789,7 +30808,7 @@ impl<'gc> VM<'gc> {
             // Use read_named_property to properly invoke getters (e.g. Object.defineProperty with get)
             let has_sym = {
                 let borrow = map.borrow();
-                borrow.contains_key("@@sym:3") || borrow.contains_key("__get_@@sym:3")
+                borrow.contains_key("@@sym:3") || borrow.contains_key(&make_getter_key("@@sym:3"))
             };
             if has_sym {
                 let func = self.read_named_property(ctx, val, "@@sym:3");
@@ -30827,7 +30846,7 @@ impl<'gc> VM<'gc> {
         if let Value::VmArray(arr) = val {
             let has_sym = {
                 let borrow = arr.borrow();
-                borrow.props.contains_key("@@sym:3") || borrow.props.contains_key("__get_@@sym:3")
+                borrow.props.contains_key("@@sym:3") || borrow.props.contains_key(&make_getter_key("@@sym:3"))
             };
             if has_sym {
                 let func = self.read_named_property(ctx, val, "@@sym:3");
@@ -32349,7 +32368,10 @@ impl<'gc> VM<'gc> {
                         rest.parse::<u64>().ok()
                     } else if let Some(rest) = prop_key.strip_prefix(SETTER_PREFIX) {
                         rest.parse::<u64>().ok()
-                    } else if let Some(rest) = prop_key.strip_prefix("__nonconfigurable_").and_then(|s| s.strip_suffix("__")) {
+                    } else if let Some(rest) = prop_key
+                        .strip_prefix(NONCONFIGURABLE_PREFIX)
+                        .and_then(|s| s.strip_suffix(NONCONFIGURABLE_SUFFIX))
+                    {
                         rest.parse::<u64>().ok()
                     } else {
                         None

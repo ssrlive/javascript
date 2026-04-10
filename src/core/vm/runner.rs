@@ -1548,21 +1548,16 @@ impl<'gc> VM<'gc> {
                 // Eval-level declarations are configurable (D=true).
                 let is_var_binding = !self.chunk.is_eval_code && self.chunk.declared_globals.contains(&name_str) && !is_lexical_binding;
                 if is_var_binding {
-                    let nc_key = make_nonconfigurable_key(&name_str);
-                    let ro_key = make_readonly_key(&name_str);
-                    let ne_key = make_nonenumerable_key(&name_str);
-                    let getter_key = make_getter_key(&name_str);
-                    let setter_key = make_setter_key(&name_str);
                     let is_function_binding = self.chunk.fn_declared_globals.contains(&name_str);
                     let mut gt = self.global_this.borrow_mut(ctx);
                     if is_function_binding {
-                        gt.shift_remove(&ro_key);
-                        gt.shift_remove(&ne_key);
-                        gt.shift_remove(&getter_key);
-                        gt.shift_remove(&setter_key);
+                        unmark_readonly(&mut *gt, &name_str);
+                        unmark_nonenumerable(&mut *gt, &name_str);
+                        remove_getter(&mut *gt, &name_str);
+                        remove_setter(&mut *gt, &name_str);
                     }
-                    gt.insert(name_str, val);
-                    gt.insert(nc_key, Value::Boolean(true));
+                    gt.insert(name_str.clone(), val);
+                    mark_nonconfigurable(&mut *gt, &name_str);
                 } else if !is_lexical_binding && !self.eval_fn_scope {
                     self.global_this.borrow_mut(ctx).insert(name_str, val);
                 }
@@ -4592,8 +4587,7 @@ impl<'gc> VM<'gc> {
                     let has_own_getter = has_getter(&*b, &key);
                     if has_own_key && !has_own_getter && !has_own_setter {
                         // Check readonly marker for private methods installed per-instance
-                        let ro_key = make_readonly_key(&key);
-                        if matches!(b.get(&ro_key), Some(Value::Boolean(true))) {
+                        if has_readonly_mark(&*b, &key) {
                             PrivateKind::Method
                         } else {
                             PrivateKind::Field
@@ -4613,10 +4607,7 @@ impl<'gc> VM<'gc> {
                     let check_in =
                         |k: &str| -> bool { overlay.is_some_and(|o| o.borrow().contains_key(k)) || props.borrow().contains_key(k) };
                     if check_in(&key) && !check_in(&make_getter_key(&key)) && !check_in(&make_setter_key(&key)) {
-                        let ro_key = make_readonly_key(&key);
-                        if overlay.is_some_and(|o| matches!(o.borrow().get(&ro_key), Some(Value::Boolean(true))))
-                            || matches!(props.borrow().get(&ro_key), Some(Value::Boolean(true)))
-                        {
+                        if overlay.is_some_and(|o| has_readonly_mark(&*o.borrow(), &key)) || has_readonly_mark(&*props.borrow(), &key) {
                             PrivateKind::Method
                         } else {
                             PrivateKind::Field
@@ -5590,13 +5581,12 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                     return Ok(OpcodeAction::Continue);
                 }
-                let ne_key = make_nonenumerable_key(&coerced_key);
                 let mut borrow = map.borrow_mut(ctx);
                 // Remove any prior accessor or property flags for this key
                 remove_getter(&mut *borrow, &coerced_key);
                 remove_setter(&mut *borrow, &coerced_key);
-                borrow.insert(coerced_key, val.clone());
-                borrow.insert(ne_key, Value::Boolean(true));
+                borrow.insert(coerced_key.clone(), val.clone());
+                mark_nonenumerable(&mut *borrow, &coerced_key);
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 // Static computed method named "prototype" is forbidden on class constructors
@@ -5608,12 +5598,11 @@ impl<'gc> VM<'gc> {
                 }
                 let shared_props = self.get_fn_props(ctx, *ip, *arity);
                 let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-                let ne_key = make_nonenumerable_key(&coerced_key);
                 let mut borrow = target_props.borrow_mut(ctx);
                 remove_getter(&mut *borrow, &coerced_key);
                 remove_setter(&mut *borrow, &coerced_key);
-                borrow.insert(coerced_key, val.clone());
-                borrow.insert(ne_key, Value::Boolean(true));
+                borrow.insert(coerced_key.clone(), val.clone());
+                mark_nonenumerable(&mut *borrow, &coerced_key);
             }
             _ => match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
                 Ok(_) => {}
@@ -7412,8 +7401,7 @@ impl<'gc> VM<'gc> {
                     self.handle_throw(ctx, &err)?;
                     self.stack.push(Value::Boolean(false));
                 } else if key.starts_with("@@sym:") {
-                    let nc_key = make_nonconfigurable_key(&key);
-                    if map.borrow().contains_key(&nc_key) {
+                    if has_nonconfigurable_mark(&*map.borrow(), &key) {
                         let err =
                             self.make_type_error_object(ctx, "Cannot delete property 'Symbol(Symbol.toStringTag)' of [object Module]");
                         self.handle_throw(ctx, &err)?;
@@ -8317,8 +8305,7 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &err)?;
                         self.stack.push(Value::Boolean(false));
                     } else if key.starts_with("@@sym:") {
-                        let nc_key = make_nonconfigurable_key(&key);
-                        if map.borrow().contains_key(&nc_key) {
+                        if has_nonconfigurable_mark(&*map.borrow(), &key) {
                             let err =
                                 self.make_type_error_object(ctx, "Cannot delete property 'Symbol(Symbol.toStringTag)' of [object Module]");
                             self.handle_throw(ctx, &err)?;

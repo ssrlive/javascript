@@ -590,7 +590,7 @@ impl<'gc> VM<'gc> {
             ("setBigUint64", "dataview.setBigUint64", 2.0),
         ] {
             dv_proto.insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, host, name, len, false));
-            mark_nonenumerable(&mut dv_proto, &name);
+            mark_nonenumerable(&mut dv_proto, name);
         }
         let dv_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, dv_proto));
         let mut data_view_map = IndexMap::new();
@@ -604,11 +604,11 @@ impl<'gc> VM<'gc> {
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), data_view_ctor.clone());
-            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
+            mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");
         }
         self.globals.insert("DataView".to_string(), data_view_ctor.clone());
         self.global_this.borrow_mut(ctx).insert("DataView".to_string(), data_view_ctor);
-        mark_nonenumerable(&mut *self.global_this.borrow_mut(ctx), "DataView");
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "DataView");
     }
 
     /// Handle DataView in `call_builtin` (new DataView(...)).

@@ -3846,7 +3846,7 @@ impl<'gc> VM<'gc> {
         );
         // Mark getter properties as non-enumerable and configurable
         for key in ["buffer", "byteLength", "byteOffset", "length", "@@sym:4"] {
-            mark_nonenumerable(&mut ta_proto_map, &key);
+            mark_nonenumerable(&mut ta_proto_map, key);
         }
         // Mark all methods as non-enumerable
         for key in [
@@ -3881,7 +3881,7 @@ impl<'gc> VM<'gc> {
             "subarray",
             "with",
         ] {
-            mark_nonenumerable(&mut ta_proto_map, &key);
+            mark_nonenumerable(&mut ta_proto_map, key);
         }
         let ta_proto = Value::VmObject(new_gc_cell_ptr(ctx, ta_proto_map));
 
@@ -3911,7 +3911,7 @@ impl<'gc> VM<'gc> {
         let typed_array_ctor = Value::VmObject(new_gc_cell_ptr(ctx, typed_array_ctor_map));
         if let Value::VmObject(p) = &ta_proto {
             p.borrow_mut(ctx).insert("constructor".to_string(), typed_array_ctor.clone());
-            mark_nonenumerable(&mut *p.borrow_mut(ctx), "constructor");
+            mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
         }
         // Expose %TypedArray% as a global (abstract constructor, not directly constructible)
         self.globals.insert("TypedArray".to_string(), typed_array_ctor.clone());
@@ -3953,7 +3953,7 @@ impl<'gc> VM<'gc> {
             // constructor backref (must point to same GC object)
             if let Value::VmObject(p) = &per_proto_obj {
                 p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
-                mark_nonenumerable(&mut *p.borrow_mut(ctx), "constructor");
+                mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
             }
             self.globals.insert(name.to_string(), ctor_val);
         }

@@ -1139,7 +1139,7 @@ impl<'gc> VM<'gc> {
                             fn_proto.insert("__proto__".to_string(), async_gen_proto);
                         }
                         fn_b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                        write_attrs_to_legacy_map(&mut *fn_b, "prototype", PropAttrs::WRITABLE);
+                        write_attrs_to_legacy_map(&mut fn_b, "prototype", PropAttrs::WRITABLE);
                     }
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
@@ -1551,13 +1551,13 @@ impl<'gc> VM<'gc> {
                     let is_function_binding = self.chunk.fn_declared_globals.contains(&name_str);
                     let mut gt = self.global_this.borrow_mut(ctx);
                     if is_function_binding {
-                        unmark_readonly(&mut *gt, &name_str);
-                        unmark_nonenumerable(&mut *gt, &name_str);
-                        remove_getter(&mut *gt, &name_str);
-                        remove_setter(&mut *gt, &name_str);
+                        unmark_readonly(&mut gt, &name_str);
+                        unmark_nonenumerable(&mut gt, &name_str);
+                        remove_getter(&mut gt, &name_str);
+                        remove_setter(&mut gt, &name_str);
                     }
                     gt.insert(name_str.clone(), val);
-                    mark_nonconfigurable(&mut *gt, &name_str);
+                    mark_nonconfigurable(&mut gt, &name_str);
                 } else if !is_lexical_binding && !self.eval_fn_scope {
                     self.global_this.borrow_mut(ctx).insert(name_str, val);
                 }
@@ -1606,7 +1606,7 @@ impl<'gc> VM<'gc> {
                     let mut gt = self.global_this.borrow_mut(ctx);
                     gt.insert(name_str.clone(), val);
                     if is_var_binding {
-                        mark_nonconfigurable(&mut *gt, &name_str);
+                        mark_nonconfigurable(&mut gt, &name_str);
                     }
                 }
             }
@@ -1873,7 +1873,7 @@ impl<'gc> VM<'gc> {
                 // Fall through to globalThis for properties defined via Object.defineProperty
                 let has_prop = {
                     let gt = self.global_this.borrow();
-                    gt.contains_key(&name_str) || gt.contains_key(&format!("__get_{}__", name_str)) || has_getter(&*gt, &name_str)
+                    gt.contains_key(&name_str) || gt.contains_key(&format!("__get_{}__", name_str)) || has_getter(&gt, &name_str)
                 };
                 if has_prop {
                     let global_obj = Value::VmObject(self.global_this);
@@ -2019,7 +2019,7 @@ impl<'gc> VM<'gc> {
             }
             let readonly_global = {
                 let gt = self.global_this.borrow();
-                has_readonly_mark(&*gt, &name_str)
+                has_readonly_mark(&gt, &name_str)
             };
             if readonly_global {
                 if self.current_execution_is_strict() {
@@ -3613,7 +3613,7 @@ impl<'gc> VM<'gc> {
             if !is_generator {
                 let mut proto_borrow = proto_obj.borrow_mut(ctx);
                 proto_borrow.insert("constructor".to_string(), closure_value.clone());
-                mark_nonenumerable(&mut *proto_borrow, "constructor");
+                mark_nonenumerable(&mut proto_borrow, "constructor");
             }
         }
         self.stack.push(closure_value);
@@ -3713,7 +3713,7 @@ impl<'gc> VM<'gc> {
             // Fall through to globalThis for properties defined via Object.defineProperty
             let has_prop = {
                 let gt = self.global_this.borrow();
-                gt.contains_key(&name) || gt.contains_key(&format!("__get_{}__", name)) || has_getter(&*gt, &name)
+                gt.contains_key(&name) || gt.contains_key(&format!("__get_{}__", name)) || has_getter(&gt, &name)
             };
             if has_prop {
                 let global_obj = Value::VmObject(self.global_this);
@@ -3872,7 +3872,7 @@ impl<'gc> VM<'gc> {
             let has_private = match &obj {
                 Value::VmObject(map) => {
                     let b = map.borrow();
-                    b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
+                    b.contains_key(&key) || has_getter(&b, &key) || has_setter(&b, &key)
                 }
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                     let overlay = self.get_closure_overlay(&obj);
@@ -3938,7 +3938,7 @@ impl<'gc> VM<'gc> {
                     drop(borrow);
                     match val {
                         Value::Property { getter: Some(g), .. } => {
-                            let got = self.invoke_getter_with_receiver(ctx, &*g, &obj);
+                            let got = self.invoke_getter_with_receiver(ctx, &g, &obj);
                             self.stack.push(got);
                             if let Some(thrown) = self.pending_throw.take() {
                                 self.handle_throw(ctx, &thrown)?;
@@ -3955,9 +3955,9 @@ impl<'gc> VM<'gc> {
                 }
                 // Check for legacy hidden-key getter (__get_<key>)
                 let getter_key = make_getter_key(&key);
-                if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = lookup_getter(&*borrow, &key) {
+                if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = lookup_getter(&borrow, &key) {
                     let ip = *ip;
-                    let upvals = if let Some(Value::VmClosure(_, _, ups)) = lookup_getter(&*borrow, &key) {
+                    let upvals = if let Some(Value::VmClosure(_, _, ups)) = lookup_getter(&borrow, &key) {
                         (**ups).clone()
                     } else {
                         Vec::new()
@@ -4000,7 +4000,7 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &thrown)?;
                         return Ok(OpcodeAction::Continue);
                     }
-                } else if borrow.contains_key(&getter_key) || has_setter(&*borrow, &key) {
+                } else if borrow.contains_key(&getter_key) || has_setter(&borrow, &key) {
                     // Accessor property exists but getter is undefined
                     drop(borrow);
                     if key.starts_with(PRIVATE_KEY_PREFIX) {
@@ -4049,7 +4049,7 @@ impl<'gc> VM<'gc> {
                         }
                     } else {
                         // Setter-only accessor: if __set_<key> exists but no __get_<key>, return undefined
-                        if has_setter(&*borrow, &key) {
+                        if has_setter(&borrow, &key) {
                             drop(borrow);
                             if key.starts_with(PRIVATE_KEY_PREFIX) {
                                 let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
@@ -4603,11 +4603,11 @@ impl<'gc> VM<'gc> {
                 Value::VmObject(map) => {
                     let b = map.borrow();
                     let has_own_key = b.contains_key(&key);
-                    let has_own_setter = has_setter(&*b, &key);
-                    let has_own_getter = has_getter(&*b, &key);
+                    let has_own_setter = has_setter(&b, &key);
+                    let has_own_getter = has_getter(&b, &key);
                     if has_own_key && !has_own_getter && !has_own_setter {
                         // Check readonly marker for private methods installed per-instance
-                        if has_readonly_mark(&*b, &key) {
+                        if has_readonly_mark(&b, &key) {
                             PrivateKind::Method
                         } else {
                             PrivateKind::Field
@@ -4627,7 +4627,7 @@ impl<'gc> VM<'gc> {
                     let check_in =
                         |k: &str| -> bool { overlay.is_some_and(|o| o.borrow().contains_key(k)) || props.borrow().contains_key(k) };
                     if check_in(&key) && !check_in(&make_getter_key(&key)) && !check_in(&make_setter_key(&key)) {
-                        if overlay.is_some_and(|o| has_readonly_mark(&*o.borrow(), &key)) || has_readonly_mark(&*props.borrow(), &key) {
+                        if overlay.is_some_and(|o| has_readonly_mark(&o.borrow(), &key)) || has_readonly_mark(&props.borrow(), &key) {
                             PrivateKind::Method
                         } else {
                             PrivateKind::Field
@@ -4753,7 +4753,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let mut borrow = map.borrow_mut(ctx);
-                remove_property_completely(&mut *borrow, &key);
+                remove_property_completely(&mut borrow, &key);
                 if key == "__proto__" {
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
@@ -4803,7 +4803,7 @@ impl<'gc> VM<'gc> {
                 }
                 // Write to per-closure overlay when available
                 let mut borrow = target_props.borrow_mut(ctx);
-                remove_property_completely(&mut *borrow, &key);
+                remove_property_completely(&mut borrow, &key);
                 borrow.insert(key, val.clone());
                 if let Value::VmFunction(fn_ip, _) | Value::VmClosure(fn_ip, _, _) = &val {
                     self.fn_home_objects.insert(*fn_ip, obj.clone());
@@ -5585,10 +5585,10 @@ impl<'gc> VM<'gc> {
                 }
                 let mut borrow = map.borrow_mut(ctx);
                 // Remove any prior accessor or property flags for this key
-                remove_getter(&mut *borrow, &coerced_key);
-                remove_setter(&mut *borrow, &coerced_key);
+                remove_getter(&mut borrow, &coerced_key);
+                remove_setter(&mut borrow, &coerced_key);
                 borrow.insert(coerced_key.clone(), val.clone());
-                mark_nonenumerable(&mut *borrow, &coerced_key);
+                mark_nonenumerable(&mut borrow, &coerced_key);
             }
             Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                 // Static computed method named "prototype" is forbidden on class constructors
@@ -5601,10 +5601,10 @@ impl<'gc> VM<'gc> {
                 let shared_props = self.get_fn_props(ctx, *ip, *arity);
                 let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
                 let mut borrow = target_props.borrow_mut(ctx);
-                remove_getter(&mut *borrow, &coerced_key);
-                remove_setter(&mut *borrow, &coerced_key);
+                remove_getter(&mut borrow, &coerced_key);
+                remove_setter(&mut borrow, &coerced_key);
                 borrow.insert(coerced_key.clone(), val.clone());
-                mark_nonenumerable(&mut *borrow, &coerced_key);
+                mark_nonenumerable(&mut borrow, &coerced_key);
             }
             _ => match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
                 Ok(_) => {}
@@ -5655,7 +5655,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let mut borrow = map.borrow_mut(ctx);
-                remove_property_completely(&mut *borrow, &coerced_key);
+                remove_property_completely(&mut borrow, &coerced_key);
                 if coerced_key == "__proto__" {
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
@@ -5670,8 +5670,8 @@ impl<'gc> VM<'gc> {
                 };
                 let shared_props = self.get_fn_props(ctx, ip_val, arity_val);
                 let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-                let has_nonconf = has_nonconfigurable_mark(&*target_props.borrow(), &coerced_key)
-                    || has_nonconfigurable_mark(&*shared_props.borrow(), &coerced_key);
+                let has_nonconf = has_nonconfigurable_mark(&target_props.borrow(), &coerced_key)
+                    || has_nonconfigurable_mark(&shared_props.borrow(), &coerced_key);
                 if has_nonconf {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5684,7 +5684,7 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let mut borrow = target_props.borrow_mut(ctx);
-                remove_property_completely(&mut *borrow, &coerced_key);
+                remove_property_completely(&mut borrow, &coerced_key);
                 borrow.insert(coerced_key, val.clone());
             }
             _ => {
@@ -5725,7 +5725,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let has_nonconf = has_nonconfigurable_mark(&*map.borrow(), &coerced_key);
+            let has_nonconf = has_nonconfigurable_mark(&map.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5745,7 +5745,7 @@ impl<'gc> VM<'gc> {
             }
             borrow.insert(getter_key, val.clone());
             // Class computed getters are non-enumerable
-            mark_nonenumerable(&mut *borrow, &coerced_key);
+            mark_nonenumerable(&mut borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             if coerced_key == "prototype" {
                 let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
@@ -5754,8 +5754,8 @@ impl<'gc> VM<'gc> {
             }
             let shared_props = self.get_fn_props(ctx, *ip, *arity);
             let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-            let has_nonconf = has_nonconfigurable_mark(&*target_props.borrow(), &coerced_key)
-                || has_nonconfigurable_mark(&*shared_props.borrow(), &coerced_key);
+            let has_nonconf = has_nonconfigurable_mark(&target_props.borrow(), &coerced_key)
+                || has_nonconfigurable_mark(&shared_props.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5770,7 +5770,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(getter_key, val.clone());
-            mark_nonenumerable(&mut *borrow, &coerced_key);
+            mark_nonenumerable(&mut borrow, &coerced_key);
         }
         self.stack.push(val);
         Ok(OpcodeAction::Continue)
@@ -5806,7 +5806,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
             }
-            let has_nonconf = has_nonconfigurable_mark(&*map.borrow(), &coerced_key);
+            let has_nonconf = has_nonconfigurable_mark(&map.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5825,7 +5825,7 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(&coerced_key);
             }
             borrow.insert(setter_key, val.clone());
-            mark_nonenumerable(&mut *borrow, &coerced_key);
+            mark_nonenumerable(&mut borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             if coerced_key == "prototype" {
                 let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
@@ -5834,8 +5834,8 @@ impl<'gc> VM<'gc> {
             }
             let shared_props = self.get_fn_props(ctx, *ip, *arity);
             let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
-            let has_nonconf = has_nonconfigurable_mark(&*target_props.borrow(), &coerced_key)
-                || has_nonconfigurable_mark(&*shared_props.borrow(), &coerced_key);
+            let has_nonconf = has_nonconfigurable_mark(&target_props.borrow(), &coerced_key)
+                || has_nonconfigurable_mark(&shared_props.borrow(), &coerced_key);
             if has_nonconf {
                 let mut err_map = IndexMap::new();
                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -5850,7 +5850,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(setter_key, val.clone());
-            mark_nonenumerable(&mut *borrow, &coerced_key);
+            mark_nonenumerable(&mut borrow, &coerced_key);
         }
         self.stack.push(val);
         Ok(OpcodeAction::Continue)
@@ -6782,7 +6782,7 @@ impl<'gc> VM<'gc> {
             let has = match &obj {
                 Value::VmObject(map) => {
                     let b = map.borrow();
-                    b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
+                    b.contains_key(&key) || has_getter(&b, &key) || has_setter(&b, &key)
                 }
                 Value::VmArray(arr) => {
                     let b = arr.borrow();
@@ -6791,7 +6791,7 @@ impl<'gc> VM<'gc> {
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                     let props = self.get_fn_props(ctx, *ip, *arity);
                     let b = props.borrow();
-                    b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
+                    b.contains_key(&key) || has_getter(&b, &key) || has_setter(&b, &key)
                 }
                 _ => false,
             };
@@ -6839,7 +6839,7 @@ impl<'gc> VM<'gc> {
                     }
                 } else {
                     let b = map.borrow();
-                    if b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key) {
+                    if b.contains_key(&key) || has_getter(&b, &key) || has_setter(&b, &key) {
                         true
                     } else {
                         // Check built-in properties based on __type__
@@ -6987,7 +6987,7 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) => {
                 let props = self.get_fn_props_for_value(ctx, &obj).unwrap();
                 let b = props.borrow();
-                if b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key) {
+                if b.contains_key(&key) || has_getter(&b, &key) || has_setter(&b, &key) {
                     true
                 } else {
                     let proto = b.get("__proto__").cloned();
@@ -7384,7 +7384,7 @@ impl<'gc> VM<'gc> {
                     self.handle_throw(ctx, &err)?;
                     self.stack.push(Value::Boolean(false));
                 } else if key.starts_with("@@sym:") {
-                    if has_nonconfigurable_mark(&*map.borrow(), &key) {
+                    if has_nonconfigurable_mark(&map.borrow(), &key) {
                         let err =
                             self.make_type_error_object(ctx, "Cannot delete property 'Symbol(Symbol.toStringTag)' of [object Module]");
                         self.handle_throw(ctx, &err)?;
@@ -8288,7 +8288,7 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &err)?;
                         self.stack.push(Value::Boolean(false));
                     } else if key.starts_with("@@sym:") {
-                        if has_nonconfigurable_mark(&*map.borrow(), &key) {
+                        if has_nonconfigurable_mark(&map.borrow(), &key) {
                             let err =
                                 self.make_type_error_object(ctx, "Cannot delete property 'Symbol(Symbol.toStringTag)' of [object Module]");
                             self.handle_throw(ctx, &err)?;

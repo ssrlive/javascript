@@ -691,7 +691,7 @@ impl<'gc> VM<'gc> {
             borrow.insert("__type__".to_string(), Value::from("RegExp"));
             borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
             borrow.insert("lastIndex".to_string(), Value::Number(0.0));
-            write_attrs_to_legacy_map(&mut *borrow, "lastIndex", PropAttrs::WRITABLE);
+            write_attrs_to_legacy_map(&mut borrow, "lastIndex", PropAttrs::WRITABLE);
             return Some(receiver.clone());
         }
         None

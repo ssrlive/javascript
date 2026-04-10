@@ -274,7 +274,7 @@ impl<'gc> VM<'gc> {
             ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMILLISECONDS)),
         ] {
             date_proto.insert(key.to_string(), value);
-            mark_nonenumerable(&mut date_proto, &key);
+            mark_nonenumerable(&mut date_proto, key);
         }
         // Date.prototype[Symbol.toPrimitive]
         date_proto.insert(

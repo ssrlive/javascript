@@ -11093,7 +11093,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
         self.chunk.write_u16(true_idx);
-        let ne_key = make_nonenumerable_key(&prop_name);
+        let ne_key = make_nonenumerable_key(prop_name);
         let ne_idx = self.chunk.add_constant(Value::from(&ne_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(ne_idx);
@@ -11106,7 +11106,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
         self.chunk.write_u16(true_idx);
-        let ne_key = make_nonenumerable_key(&prop_name);
+        let ne_key = make_nonenumerable_key(prop_name);
         let ne_idx = self.chunk.add_constant(Value::from(&ne_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(ne_idx);
@@ -11122,7 +11122,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
         self.chunk.write_u16(true_idx);
-        let ro_key = make_readonly_key(&private_name);
+        let ro_key = make_readonly_key(private_name);
         let ro_idx = self.chunk.add_constant(Value::from(&ro_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(ro_idx);
@@ -11190,7 +11190,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.fn_lengths.insert(g_start, 0);
         self.record_brand_upvalue_for_fn(g_start);
 
-        let getter_key = make_getter_key(&gname);
+        let getter_key = make_getter_key(gname);
         let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(gk_idx);
@@ -11222,7 +11222,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.method_function_ips.insert(s_start);
         self.record_brand_upvalue_for_fn(s_start);
 
-        let setter_key = make_setter_key(&sname);
+        let setter_key = make_setter_key(sname);
         let sk_idx = self.chunk.add_constant(Value::from(&setter_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(sk_idx);

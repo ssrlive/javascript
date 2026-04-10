@@ -16874,8 +16874,6 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut fn_proto, "apply");
         mark_nonenumerable(&mut fn_proto, "bind");
         mark_nonenumerable(&mut fn_proto, "toString");
-        mark_nonenumerable(&mut fn_proto, "arguments");
-        mark_nonenumerable(&mut fn_proto, "caller");
         Self::insert_property_with_attributes(&mut fn_proto, "length", &Value::Number(0.0), false, false, true);
         Self::insert_property_with_attributes(&mut fn_proto, "name", &Value::from(""), false, false, true);
         fn_proto.insert("__host_fn__".to_string(), Value::from("function.prototype.callable"));
@@ -17211,7 +17209,6 @@ impl<'gc> VM<'gc> {
                 attrs: PropAttrs::CONFIGURABLE,
             },
         );
-        mark_nonenumerable(&mut abs_mod_src_proto, &to_string_tag_key);
 
         let abs_mod_src_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, abs_mod_src_proto));
         if let Value::VmObject(ctor_obj) = &abs_mod_src_ctor {

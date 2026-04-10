@@ -1947,7 +1947,6 @@ impl<'gc> VM<'gc> {
                     attrs: PropAttrs::empty(),
                 };
                 map.insert("callee".to_string(), prop);
-                write_attrs_to_legacy_map(&mut map, "callee", PropAttrs::WRITABLE);
             } else {
                 let callee_val = if bp > 0 { self.stack[bp - 1].clone() } else { Value::Undefined };
                 map.insert("callee".to_string(), callee_val);
@@ -1962,7 +1961,6 @@ impl<'gc> VM<'gc> {
                 attrs: PropAttrs::empty(),
             };
             map.insert("callee".to_string(), prop);
-            write_attrs_to_legacy_map(&mut map, "callee", PropAttrs::WRITABLE);
         }
         let obj_val = Value::VmObject(new_gc_cell_ptr(ctx, map));
         self.frames[frame_idx].arguments_obj = Some(obj_val.clone());

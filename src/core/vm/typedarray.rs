@@ -2305,7 +2305,7 @@ impl<'gc> VM<'gc> {
         );
         let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
         data.props.insert("buffer".to_string(), buffer_obj.clone());
-        data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+        data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
         data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
         data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
         data.props.insert("__bytes_per_element__".to_string(), Value::Number(bpe as f64));
@@ -3013,7 +3013,7 @@ impl<'gc> VM<'gc> {
             );
             let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
             data.props.insert("buffer".to_string(), buffer_obj.clone());
-            data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+            data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
             data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
             data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
             data.props
@@ -3146,7 +3146,7 @@ impl<'gc> VM<'gc> {
             );
             let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
             data.props.insert("buffer".to_string(), buffer_obj.clone());
-            data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+            data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
             data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
             data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
             data.props
@@ -3321,7 +3321,7 @@ impl<'gc> VM<'gc> {
                 data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
                 data.props.insert("__buffer_type__".to_string(), Value::from(&buffer_type));
                 data.props.insert("buffer".to_string(), Value::VmObject(*buf_obj));
-                data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+                data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
                 data.props.insert("__byte_offset__".to_string(), Value::Number(byte_offset as f64));
                 data.props
                     .insert("__bytes_per_element__".to_string(), Value::Number(bytes_per_element as f64));
@@ -3489,7 +3489,7 @@ impl<'gc> VM<'gc> {
             );
             let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
             data.props.insert("buffer".to_string(), buffer_obj.clone());
-            data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+            data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
             data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
             data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
             data.props
@@ -3624,7 +3624,7 @@ impl<'gc> VM<'gc> {
                 );
                 let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
                 data.props.insert("buffer".to_string(), buffer_obj.clone());
-                data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+                data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
                 data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
                 data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
                 data.props
@@ -3687,7 +3687,7 @@ impl<'gc> VM<'gc> {
         );
         let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
         data.props.insert("buffer".to_string(), buffer_obj.clone());
-        data.props.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+        data.props.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
         data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
         data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
         data.props
@@ -3819,29 +3819,29 @@ impl<'gc> VM<'gc> {
         );
         // TypedArray-specific getters: buffer, byteLength, byteOffset, length
         ta_proto_map.insert(
-            "__get_buffer".to_string(),
+            make_getter_key("buffer"),
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_buffer", "get buffer", 0.0, false),
         );
         ta_proto_map.insert(
-            "__get_byteLength".to_string(),
+            make_getter_key("byteLength"),
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_byteLength", "get byteLength", 0.0, false),
         );
         ta_proto_map.insert(
-            "__get_byteOffset".to_string(),
+            make_getter_key("byteOffset"),
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_byteOffset", "get byteOffset", 0.0, false),
         );
         ta_proto_map.insert(
-            "__get_length".to_string(),
+            make_getter_key("length"),
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_length", "get length", 0.0, false),
         );
         // Symbol.toStringTag getter
         ta_proto_map.insert(
-            "__get_@@sym:4".to_string(),
+            make_getter_key("@@sym:4"),
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_toStringTag", "get [Symbol.toStringTag]", 0.0, false),
         );
         // Mark getter properties as non-enumerable and configurable
         for key in ["buffer", "byteLength", "byteOffset", "length", "@@sym:4"] {
-            ta_proto_map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+            ta_proto_map.insert(make_nonenumerable_key(&key), Value::Boolean(true));
         }
         // Mark all methods as non-enumerable
         for key in [
@@ -3876,22 +3876,22 @@ impl<'gc> VM<'gc> {
             "subarray",
             "with",
         ] {
-            ta_proto_map.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+            ta_proto_map.insert(make_nonenumerable_key(&key), Value::Boolean(true));
         }
         let ta_proto = Value::VmObject(new_gc_cell_ptr(ctx, ta_proto_map));
 
         // %TypedArray% constructor (abstract — cannot be called directly)
         let mut typed_array_ctor_map = IndexMap::new();
         typed_array_ctor_map.insert("name".to_string(), Value::from("TypedArray"));
-        typed_array_ctor_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
-        typed_array_ctor_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_readonly_key("name"), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_nonenumerable_key("name"), Value::Boolean(true));
         typed_array_ctor_map.insert("length".to_string(), Value::Number(0.0));
-        typed_array_ctor_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
-        typed_array_ctor_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_readonly_key("length"), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_nonenumerable_key("length"), Value::Boolean(true));
         typed_array_ctor_map.insert("prototype".to_string(), ta_proto.clone());
-        typed_array_ctor_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
-        typed_array_ctor_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-        typed_array_ctor_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_readonly_key("prototype"), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_nonenumerable_key("prototype"), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_nonconfigurable_key("prototype"), Value::Boolean(true));
         // Mark as constructor (for is_constructor_value)
         typed_array_ctor_map.insert("__native_id__".to_string(), Value::Boolean(true));
         // TypedArray.from() and TypedArray.of() static methods
@@ -3899,19 +3899,19 @@ impl<'gc> VM<'gc> {
             "from".to_string(),
             Self::make_host_fn_with_name_len(ctx, "typedarray.from", "from", 1.0, false),
         );
-        typed_array_ctor_map.insert("__nonenumerable_from__".to_string(), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_nonenumerable_key("from"), Value::Boolean(true));
         typed_array_ctor_map.insert(
             "of".to_string(),
             Self::make_host_fn_with_name_len(ctx, "typedarray.of", "of", 0.0, false),
         );
-        typed_array_ctor_map.insert("__nonenumerable_of__".to_string(), Value::Boolean(true));
+        typed_array_ctor_map.insert(make_nonenumerable_key("of"), Value::Boolean(true));
         Self::insert_species_getter(&mut typed_array_ctor_map, ctx);
         // Set constructor backref on prototype
         let typed_array_ctor = Value::VmObject(new_gc_cell_ptr(ctx, typed_array_ctor_map));
         if let Value::VmObject(p) = &ta_proto {
             p.borrow_mut(ctx).insert("constructor".to_string(), typed_array_ctor.clone());
             p.borrow_mut(ctx)
-                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
         }
         // Expose %TypedArray% as a global (abstract constructor, not directly constructible)
         self.globals.insert("TypedArray".to_string(), typed_array_ctor.clone());
@@ -3934,27 +3934,27 @@ impl<'gc> VM<'gc> {
             let mut ctor_map = IndexMap::new();
             ctor_map.insert("__native_id__".to_string(), Value::Number(ctor_id as f64));
             ctor_map.insert("name".to_string(), Value::from(name));
-            ctor_map.insert("__readonly_name__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_name__".to_string(), Value::Boolean(true));
+            ctor_map.insert(make_readonly_key("name"), Value::Boolean(true));
+            ctor_map.insert(make_nonenumerable_key("name"), Value::Boolean(true));
             ctor_map.insert("length".to_string(), Value::Number(3.0));
-            ctor_map.insert("__readonly_length__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_length__".to_string(), Value::Boolean(true));
+            ctor_map.insert(make_readonly_key("length"), Value::Boolean(true));
+            ctor_map.insert(make_nonenumerable_key("length"), Value::Boolean(true));
             ctor_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
-            ctor_map.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            ctor_map.insert(make_readonly_key("BYTES_PER_ELEMENT"), Value::Boolean(true));
+            ctor_map.insert(make_nonenumerable_key("BYTES_PER_ELEMENT"), Value::Boolean(true));
+            ctor_map.insert(make_nonconfigurable_key("BYTES_PER_ELEMENT"), Value::Boolean(true));
             // Create per-type prototype with __proto__ → %TypedArray%.prototype
             let mut per_proto = IndexMap::new();
             per_proto.insert("__proto__".to_string(), ta_proto.clone());
             per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
-            per_proto.insert("__readonly_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            per_proto.insert("__nonenumerable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
-            per_proto.insert("__nonconfigurable_BYTES_PER_ELEMENT__".to_string(), Value::Boolean(true));
+            per_proto.insert(make_readonly_key("BYTES_PER_ELEMENT"), Value::Boolean(true));
+            per_proto.insert(make_nonenumerable_key("BYTES_PER_ELEMENT"), Value::Boolean(true));
+            per_proto.insert(make_nonconfigurable_key("BYTES_PER_ELEMENT"), Value::Boolean(true));
             let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
             ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
-            ctor_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-            ctor_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+            ctor_map.insert(make_readonly_key("prototype"), Value::Boolean(true));
+            ctor_map.insert(make_nonenumerable_key("prototype"), Value::Boolean(true));
+            ctor_map.insert(make_nonconfigurable_key("prototype"), Value::Boolean(true));
             // XxxArray.__proto__ = %TypedArray%
             ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
             let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
@@ -3962,7 +3962,7 @@ impl<'gc> VM<'gc> {
             if let Value::VmObject(p) = &per_proto_obj {
                 p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
                 p.borrow_mut(ctx)
-                    .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+                    .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
             }
             self.globals.insert(name.to_string(), ctor_val);
         }

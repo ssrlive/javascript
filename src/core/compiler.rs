@@ -1,4 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
+use crate::core::property_descriptor::{
+    make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
+};
 use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
     StatementKind,
@@ -4914,7 +4917,7 @@ impl<'gc> Compiler<'gc> {
                                     let key_name = crate::unicode::utf16_to_utf8(s);
                                     self.chunk.fn_names.entry(ip).or_insert_with(|| format!("get {}", key_name));
                                 }
-                                let prefixed = format!("__get_{}", crate::unicode::utf16_to_utf8(s));
+                                let prefixed = make_getter_key(crate::unicode::utf16_to_utf8(s));
                                 self.compile_expr(val)?;
                                 let idx = self.chunk.add_constant(Value::from(&prefixed));
                                 self.chunk.write_opcode(Opcode::SetProperty);
@@ -4955,7 +4958,7 @@ impl<'gc> Compiler<'gc> {
                                     let key_name = crate::unicode::utf16_to_utf8(s);
                                     self.chunk.fn_names.entry(ip).or_insert_with(|| format!("set {}", key_name));
                                 }
-                                let prefixed = format!("__set_{}", crate::unicode::utf16_to_utf8(s));
+                                let prefixed = make_setter_key(crate::unicode::utf16_to_utf8(s));
                                 self.compile_expr(val)?;
                                 let idx = self.chunk.add_constant(Value::from(&prefixed));
                                 self.chunk.write_opcode(Opcode::SetProperty);
@@ -10149,7 +10152,7 @@ impl<'gc> Compiler<'gc> {
                     let ni = self.chunk.add_constant(Value::String(n16));
                     self.chunk.write_opcode(Opcode::DefineGlobalConst);
                     self.chunk.write_u16(ni);
-                    let getter_key = format!("__get_{}", private_name);
+                    let getter_key = make_getter_key(&private_name);
                     priv_method_locals.push((getter_key, global_name));
                 }
                 ClassMember::PrivateSetter(sname, params, body) => {
@@ -10164,7 +10167,7 @@ impl<'gc> Compiler<'gc> {
                     let ni = self.chunk.add_constant(Value::String(n16));
                     self.chunk.write_opcode(Opcode::DefineGlobalConst);
                     self.chunk.write_u16(ni);
-                    let setter_key = format!("__set_{}", private_name);
+                    let setter_key = make_setter_key(&private_name);
                     priv_method_locals.push((setter_key, global_name));
                 }
                 _ => {}
@@ -10648,7 +10651,7 @@ impl<'gc> Compiler<'gc> {
                 let readonly_flag = self.chunk.add_constant(Value::Boolean(true));
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(readonly_flag);
-                let ro_key = format!("__readonly_{}__", private_name);
+                let ro_key = make_readonly_key(&private_name);
                 let ro_idx = self.chunk.add_constant(Value::from(&ro_key));
                 self.chunk.write_opcode(Opcode::InitProperty);
                 self.chunk.write_u16(ro_idx);
@@ -10686,7 +10689,7 @@ impl<'gc> Compiler<'gc> {
                 let g_idx = self.chunk.add_constant(g_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(g_idx);
-                let getter_key = format!("__get_{}", private_name);
+                let getter_key = make_getter_key(&private_name);
                 let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(gk_idx);
@@ -10730,7 +10733,7 @@ impl<'gc> Compiler<'gc> {
                 let s_idx = self.chunk.add_constant(s_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(s_idx);
-                let setter_key = format!("__set_{}", private_name);
+                let setter_key = make_setter_key(&private_name);
                 let sk_idx = self.chunk.add_constant(Value::from(&setter_key));
                 self.chunk.write_opcode(Opcode::SetProperty);
                 self.chunk.write_u16(sk_idx);
@@ -11092,7 +11095,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
         self.chunk.write_u16(true_idx);
-        let ne_key = format!("__nonenumerable_{}__", prop_name);
+        let ne_key = make_nonenumerable_key(&prop_name);
         let ne_idx = self.chunk.add_constant(Value::from(&ne_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(ne_idx);
@@ -11105,7 +11108,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
         self.chunk.write_u16(true_idx);
-        let ne_key = format!("__nonenumerable_{}__", prop_name);
+        let ne_key = make_nonenumerable_key(&prop_name);
         let ne_idx = self.chunk.add_constant(Value::from(&ne_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(ne_idx);
@@ -11121,7 +11124,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_opcode(Opcode::Constant);
         let true_idx = self.chunk.add_constant(Value::Boolean(true));
         self.chunk.write_u16(true_idx);
-        let ro_key = format!("__readonly_{}__", private_name);
+        let ro_key = make_readonly_key(&private_name);
         let ro_idx = self.chunk.add_constant(Value::from(&ro_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(ro_idx);
@@ -11189,7 +11192,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.fn_lengths.insert(g_start, 0);
         self.record_brand_upvalue_for_fn(g_start);
 
-        let getter_key = format!("__get_{}", gname);
+        let getter_key = make_getter_key(&gname);
         let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(gk_idx);
@@ -11221,7 +11224,7 @@ impl<'gc> Compiler<'gc> {
         self.chunk.method_function_ips.insert(s_start);
         self.record_brand_upvalue_for_fn(s_start);
 
-        let setter_key = format!("__set_{}", sname);
+        let setter_key = make_setter_key(&sname);
         let sk_idx = self.chunk.add_constant(Value::from(&setter_key));
         self.chunk.write_opcode(Opcode::SetProperty);
         self.chunk.write_u16(sk_idx);
@@ -11514,7 +11517,7 @@ impl<'gc> Compiler<'gc> {
             }
             ClassMember::PrivateGetter(gname, ..) => {
                 let private_name = self.resolve_private_key(gname);
-                let getter_key = format!("__get_{}", private_name);
+                let getter_key = make_getter_key(&private_name);
                 self.chunk.write_opcode(Opcode::GetThis);
                 self.emit_read_priv_method_local(&getter_key);
                 let gk_idx = self.chunk.add_constant(Value::from(&getter_key));
@@ -11524,7 +11527,7 @@ impl<'gc> Compiler<'gc> {
             }
             ClassMember::PrivateSetter(sname, ..) => {
                 let private_name = self.resolve_private_key(sname);
-                let setter_key = format!("__set_{}", private_name);
+                let setter_key = make_setter_key(&private_name);
                 self.chunk.write_opcode(Opcode::GetThis);
                 self.emit_read_priv_method_local(&setter_key);
                 let sk_idx = self.chunk.add_constant(Value::from(&setter_key));

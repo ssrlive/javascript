@@ -274,19 +274,19 @@ impl<'gc> VM<'gc> {
             ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMILLISECONDS)),
         ] {
             date_proto.insert(key.to_string(), value);
-            date_proto.insert(format!("__nonenumerable_{}__", key), Value::Boolean(true));
+            date_proto.insert(make_nonenumerable_key(&key), Value::Boolean(true));
         }
         // Date.prototype[Symbol.toPrimitive]
         date_proto.insert(
             "@@sym:3".to_string(),
             Self::make_host_fn_with_name_len(ctx, "date.toPrimitive", "[Symbol.toPrimitive]", 1.0, false),
         );
-        date_proto.insert("__nonenumerable_@@sym:3__".to_string(), Value::Boolean(true));
-        date_proto.insert("__readonly_@@sym:3__".to_string(), Value::Boolean(true));
+        date_proto.insert(make_nonenumerable_key("@@sym:3"), Value::Boolean(true));
+        date_proto.insert(make_readonly_key("@@sym:3"), Value::Boolean(true));
         let date_proto_obj = new_gc_cell_ptr(ctx, date_proto);
-        date_map.insert("__nonenumerable_now__".to_string(), Value::Boolean(true));
-        date_map.insert("__nonenumerable_parse__".to_string(), Value::Boolean(true));
-        date_map.insert("__nonenumerable_UTC__".to_string(), Value::Boolean(true));
+        date_map.insert(make_nonenumerable_key("now"), Value::Boolean(true));
+        date_map.insert(make_nonenumerable_key("parse"), Value::Boolean(true));
+        date_map.insert(make_nonenumerable_key("UTC"), Value::Boolean(true));
         let date_ctor_val = Self::finalize_ctor_with_prototype(ctx, date_map, date_proto_obj);
         self.globals.insert("Date".to_string(), date_ctor_val);
     }

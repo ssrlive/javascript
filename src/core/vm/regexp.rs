@@ -467,43 +467,43 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "regexp.toString", "toString", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_source".to_string(),
+            make_getter_key("source"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_source", "get source", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_global".to_string(),
+            make_getter_key("global"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_global", "get global", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_ignoreCase".to_string(),
+            make_getter_key("ignoreCase"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_ignoreCase", "get ignoreCase", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_multiline".to_string(),
+            make_getter_key("multiline"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_multiline", "get multiline", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_sticky".to_string(),
+            make_getter_key("sticky"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_sticky", "get sticky", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_dotAll".to_string(),
+            make_getter_key("dotAll"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_dotAll", "get dotAll", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_unicode".to_string(),
+            make_getter_key("unicode"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_unicode", "get unicode", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_hasIndices".to_string(),
+            make_getter_key("hasIndices"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_hasIndices", "get hasIndices", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_unicodeSets".to_string(),
+            make_getter_key("unicodeSets"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_unicodeSets", "get unicodeSets", 0.0, false),
         );
         regexp_proto.insert(
-            "__get_flags".to_string(),
+            make_getter_key("flags"),
             Self::make_host_fn_with_name_len(ctx, "regexp.get_flags", "get flags", 0.0, false),
         );
         regexp_proto.insert(
@@ -526,24 +526,24 @@ impl<'gc> VM<'gc> {
             "@@sym:11".to_string(),
             Self::make_host_fn_with_name_len(ctx, "regexp.symbolMatchAll", "[Symbol.matchAll]", 1.0, false),
         );
-        regexp_proto.insert("__nonenumerable_source__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_global__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_ignoreCase__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_multiline__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_sticky__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_dotAll__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_unicode__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_hasIndices__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_unicodeSets__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_flags__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_exec__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_test__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_toString__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_@@sym:7__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_@@sym:8__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_@@sym:9__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_@@sym:10__".to_string(), Value::Boolean(true));
-        regexp_proto.insert("__nonenumerable_@@sym:11__".to_string(), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("source"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("global"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("ignoreCase"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("multiline"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("sticky"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("dotAll"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("unicode"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("hasIndices"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("unicodeSets"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("flags"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("exec"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("test"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("toString"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("@@sym:7"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("@@sym:8"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("@@sym:9"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("@@sym:10"), Value::Boolean(true));
+        regexp_proto.insert(make_nonenumerable_key("@@sym:11"), Value::Boolean(true));
         let regexp_proto_obj = new_gc_cell_ptr(ctx, regexp_proto);
         // Stamp each getter with a back-reference to this prototype so that
         // cross-realm identity checks work (spec: SameValue(R, %RegExpPrototype%)).
@@ -569,11 +569,11 @@ impl<'gc> VM<'gc> {
         iter_proto.insert("next".to_string(), Self::make_native_fn(ctx, BUILTIN_ITERATOR_NEXT, "next", 0.0));
         // Symbol.toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
         iter_proto.insert("@@sym:4".to_string(), Value::from("RegExp String Iterator"));
-        iter_proto.insert("__nonenumerable_@@sym:4__".to_string(), Value::Boolean(true));
-        iter_proto.insert("__readonly_@@sym:4__".to_string(), Value::Boolean(true));
+        iter_proto.insert(make_nonenumerable_key("@@sym:4"), Value::Boolean(true));
+        iter_proto.insert(make_readonly_key("@@sym:4"), Value::Boolean(true));
         iter_proto.insert("__configurable_@@sym:4__".to_string(), Value::Boolean(true));
         // Mark next as non-enumerable, writable, configurable
-        iter_proto.insert("__nonenumerable_next__".to_string(), Value::Boolean(true));
+        iter_proto.insert(make_nonenumerable_key("next"), Value::Boolean(true));
         let iter_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iter_proto));
         self.globals.insert("RegExpStringIteratorPrototype".to_string(), iter_proto_val);
     }
@@ -648,8 +648,8 @@ impl<'gc> VM<'gc> {
         {
             map.insert("__proto__".to_string(), proto);
         }
-        map.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
-        map.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
+        map.insert(make_nonconfigurable_key("lastIndex"), Value::Boolean(true));
+        map.insert(make_nonenumerable_key("lastIndex"), Value::Boolean(true));
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
@@ -693,8 +693,8 @@ impl<'gc> VM<'gc> {
             borrow.insert("__type__".to_string(), Value::from("RegExp"));
             borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
             borrow.insert("lastIndex".to_string(), Value::Number(0.0));
-            borrow.insert("__nonconfigurable_lastIndex__".to_string(), Value::Boolean(true));
-            borrow.insert("__nonenumerable_lastIndex__".to_string(), Value::Boolean(true));
+            borrow.insert(make_nonconfigurable_key("lastIndex"), Value::Boolean(true));
+            borrow.insert(make_nonenumerable_key("lastIndex"), Value::Boolean(true));
             return Some(receiver.clone());
         }
         None

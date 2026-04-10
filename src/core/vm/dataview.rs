@@ -550,20 +550,20 @@ impl<'gc> VM<'gc> {
         let mut dv_proto = IndexMap::new();
         Self::insert_property_with_attributes(&mut dv_proto, "@@sym:4", &Value::from("DataView"), false, false, true);
         dv_proto.insert(
-            "__get_buffer".to_string(),
+            make_getter_key("buffer"),
             Self::make_host_fn_with_name_len(ctx, "dataview.get_buffer", "get buffer", 0.0, false),
         );
-        dv_proto.insert("__nonenumerable_buffer__".to_string(), Value::Boolean(true));
+        dv_proto.insert(make_nonenumerable_key("buffer"), Value::Boolean(true));
         dv_proto.insert(
-            "__get_byteLength".to_string(),
+            make_getter_key("byteLength"),
             Self::make_host_fn_with_name_len(ctx, "dataview.get_byteLength", "get byteLength", 0.0, false),
         );
-        dv_proto.insert("__nonenumerable_byteLength__".to_string(), Value::Boolean(true));
+        dv_proto.insert(make_nonenumerable_key("byteLength"), Value::Boolean(true));
         dv_proto.insert(
-            "__get_byteOffset".to_string(),
+            make_getter_key("byteOffset"),
             Self::make_host_fn_with_name_len(ctx, "dataview.get_byteOffset", "get byteOffset", 0.0, false),
         );
-        dv_proto.insert("__nonenumerable_byteOffset__".to_string(), Value::Boolean(true));
+        dv_proto.insert(make_nonenumerable_key("byteOffset"), Value::Boolean(true));
         for &(name, host, len) in &[
             ("getInt8", "dataview.getInt8", 1.0),
             ("getUint8", "dataview.getUint8", 1.0),
@@ -587,7 +587,7 @@ impl<'gc> VM<'gc> {
             ("setBigUint64", "dataview.setBigUint64", 2.0),
         ] {
             dv_proto.insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, host, name, len, false));
-            dv_proto.insert(format!("__nonenumerable_{}__", name), Value::Boolean(true));
+            dv_proto.insert(make_nonenumerable_key(&name), Value::Boolean(true));
         }
         let dv_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, dv_proto));
         let mut data_view_map = IndexMap::new();
@@ -595,9 +595,9 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(&mut data_view_map, "name", &Value::from("DataView"), false, false, true);
         Self::insert_property_with_attributes(&mut data_view_map, "length", &Value::Number(1.0), false, false, true);
         data_view_map.insert("prototype".to_string(), dv_proto_val);
-        data_view_map.insert("__readonly_prototype__".to_string(), Value::Boolean(true));
-        data_view_map.insert("__nonenumerable_prototype__".to_string(), Value::Boolean(true));
-        data_view_map.insert("__nonconfigurable_prototype__".to_string(), Value::Boolean(true));
+        data_view_map.insert(make_readonly_key("prototype"), Value::Boolean(true));
+        data_view_map.insert(make_nonenumerable_key("prototype"), Value::Boolean(true));
+        data_view_map.insert(make_nonconfigurable_key("prototype"), Value::Boolean(true));
         let data_view_ctor = Value::VmObject(new_gc_cell_ptr(ctx, data_view_map));
         if let Value::VmObject(ctor_obj) = &data_view_ctor
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
@@ -605,13 +605,13 @@ impl<'gc> VM<'gc> {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), data_view_ctor.clone());
             proto_obj
                 .borrow_mut(ctx)
-                .insert("__nonenumerable_constructor__".to_string(), Value::Boolean(true));
+                .insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
         }
         self.globals.insert("DataView".to_string(), data_view_ctor.clone());
         self.global_this.borrow_mut(ctx).insert("DataView".to_string(), data_view_ctor);
         self.global_this
             .borrow_mut(ctx)
-            .insert("__nonenumerable_DataView__".to_string(), Value::Boolean(true));
+            .insert(make_nonenumerable_key("DataView"), Value::Boolean(true));
     }
 
     /// Handle DataView in `call_builtin` (new DataView(...)).

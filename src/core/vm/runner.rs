@@ -8287,16 +8287,11 @@ impl<'gc> VM<'gc> {
                     Ok(k) => k,
                     Err(_) => value_to_string(&idx_val),
                 };
-                let nc_key = format!("__nonconfigurable_{}__", key);
-                if arr.borrow().props.contains_key(&nc_key) {
+                let attrs = attrs_from_legacy_map(&arr.borrow().props, &key);
+                if !attrs.contains(PropAttrs::CONFIGURABLE) {
                     if self.current_execution_is_strict() {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from(&format!("Cannot delete property '{}' of #<Object>", key)),
-                        );
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                        self.handle_throw(ctx, &err)?;
                     }
                     self.stack.push(Value::Boolean(false));
                 } else {
@@ -8307,12 +8302,7 @@ impl<'gc> VM<'gc> {
                         borrow.elements[idx] = Value::Undefined;
                         borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
                     }
-                    borrow.props.shift_remove(&key);
-                    borrow.props.shift_remove(&format!("__get_{}", key));
-                    borrow.props.shift_remove(&format!("__set_{}", key));
-                    borrow.props.shift_remove(&nc_key);
-                    borrow.props.shift_remove(&format!("__nonenumerable_{}__", key));
-                    borrow.props.shift_remove(&format!("__readonly_{}__", key));
+                    PropDesc::remove_legacy_keys(&mut borrow.props, &key);
                     self.stack.push(Value::Boolean(true));
                 }
             }
@@ -8362,35 +8352,21 @@ impl<'gc> VM<'gc> {
                     }
                     return Ok(OpcodeAction::Continue);
                 }
-                let nc_key = format!("__nonconfigurable_{}__", key);
-                if map.borrow().contains_key(&nc_key) {
+                let attrs = attrs_from_legacy_map(&map.borrow(), &key);
+                if !attrs.contains(PropAttrs::CONFIGURABLE) {
                     if self.current_execution_is_strict() {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from(&format!("Cannot delete property '{}' of #<Object>", key)),
-                        );
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                        self.handle_throw(ctx, &err)?;
                         self.stack.push(Value::Boolean(false));
                     } else {
                         self.stack.push(Value::Boolean(false));
                     }
                 } else {
-                    let getter_key = format!("__get_{}", key);
-                    let setter_key = format!("__set_{}", key);
-                    let ne_key = format!("__nonenumerable_{}__", key);
-                    let ro_key = format!("__readonly_{}__", key);
                     let mut b = map.borrow_mut(ctx);
-                    b.shift_remove(&key);
                     if key == "@@sym:4" || key == "Symbol(Symbol.toStringTag)" {
                         b.shift_remove("__toStringTag__");
                     }
-                    b.shift_remove(&getter_key);
-                    b.shift_remove(&setter_key);
-                    b.shift_remove(&nc_key);
-                    b.shift_remove(&ne_key);
-                    b.shift_remove(&ro_key);
+                    PropDesc::remove_legacy_keys(&mut b, &key);
                     self.stack.push(Value::Boolean(true));
                 }
             }
@@ -8400,32 +8376,17 @@ impl<'gc> VM<'gc> {
                     Err(_) => value_to_string(&idx_val),
                 };
                 let props = self.get_fn_props_for_value(ctx, &obj).unwrap();
-                let nc_key = format!("__nonconfigurable_{}__", key);
-                if props.borrow().contains_key(&nc_key) {
+                let attrs = attrs_from_legacy_map(&props.borrow(), &key);
+                if !attrs.contains(PropAttrs::CONFIGURABLE) {
                     if self.current_execution_is_strict() {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from(&format!("Cannot delete property '{}' of #<Object>", key)),
-                        );
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                        self.handle_throw(ctx, &err)?;
                         self.stack.push(Value::Boolean(false));
                     } else {
                         self.stack.push(Value::Boolean(false));
                     }
                 } else {
-                    let getter_key = format!("__get_{}", key);
-                    let setter_key = format!("__set_{}", key);
-                    let ne_key = format!("__nonenumerable_{}__", key);
-                    let ro_key = format!("__readonly_{}__", key);
-                    let mut b = props.borrow_mut(ctx);
-                    b.shift_remove(&key);
-                    b.shift_remove(&getter_key);
-                    b.shift_remove(&setter_key);
-                    b.shift_remove(&nc_key);
-                    b.shift_remove(&ne_key);
-                    b.shift_remove(&ro_key);
+                    PropDesc::remove_legacy_keys(&mut props.borrow_mut(ctx), &key);
                     self.stack.push(Value::Boolean(true));
                 }
             }
@@ -8435,32 +8396,17 @@ impl<'gc> VM<'gc> {
                     Err(_) => value_to_string(&idx_val),
                 };
                 let props = self.get_native_fn_props(ctx, *id);
-                let nc_key = format!("__nonconfigurable_{}__", key);
-                if props.borrow().contains_key(&nc_key) {
+                let attrs = attrs_from_legacy_map(&props.borrow(), &key);
+                if !attrs.contains(PropAttrs::CONFIGURABLE) {
                     if self.current_execution_is_strict() {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from(&format!("Cannot delete property '{}' of #<Object>", key)),
-                        );
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                        self.handle_throw(ctx, &err)?;
                         self.stack.push(Value::Boolean(false));
                     } else {
                         self.stack.push(Value::Boolean(false));
                     }
                 } else {
-                    let getter_key = format!("__get_{}", key);
-                    let setter_key = format!("__set_{}", key);
-                    let ne_key = format!("__nonenumerable_{}__", key);
-                    let ro_key = format!("__readonly_{}__", key);
-                    let mut b = props.borrow_mut(ctx);
-                    b.shift_remove(&key);
-                    b.shift_remove(&getter_key);
-                    b.shift_remove(&setter_key);
-                    b.shift_remove(&nc_key);
-                    b.shift_remove(&ne_key);
-                    b.shift_remove(&ro_key);
+                    PropDesc::remove_legacy_keys(&mut props.borrow_mut(ctx), &key);
                     self.stack.push(Value::Boolean(true));
                 }
             }

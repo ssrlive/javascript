@@ -13229,7 +13229,6 @@ impl<'gc> VM<'gc> {
                         let borrow = arr.borrow();
                         let getter_key = make_getter_key(&key);
                         let setter_key = make_setter_key(&key);
-                        let readonly_key = make_readonly_key(&key);
                         let mut proto_for_lookup = borrow.props.get("__proto__").cloned();
                         if proto_for_lookup.is_none()
                             && let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
@@ -13251,7 +13250,7 @@ impl<'gc> VM<'gc> {
                             || borrow.props.contains_key(key)
                             || borrow.props.contains_key(&getter_key)
                             || borrow.props.contains_key(&setter_key);
-                        let is_readonly = matches!(borrow.props.get(&readonly_key), Some(Value::Boolean(true)));
+                        let is_readonly = has_readonly_mark(&borrow.props, &key);
                         let is_non_ext = matches!(borrow.props.get("__non_extensible__"), Some(Value::Boolean(true)));
                         let has_own_setter = borrow.props.contains_key(&setter_key);
                         (
@@ -13510,7 +13509,6 @@ impl<'gc> VM<'gc> {
                 let borrow = arr.borrow();
                 let getter_key = make_getter_key(&key);
                 let setter_key = make_setter_key(&key);
-                let readonly_key = make_readonly_key(&key);
                 let mut proto_for_lookup = borrow.props.get("__proto__").cloned();
                 if proto_for_lookup.is_none()
                     && let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
@@ -13521,7 +13519,7 @@ impl<'gc> VM<'gc> {
                 let is_non_ext = matches!(borrow.props.get("__non_extensible__"), Some(Value::Boolean(true)));
                 let key_exists =
                     borrow.props.contains_key(key) || borrow.props.contains_key(&getter_key) || borrow.props.contains_key(&setter_key);
-                let is_readonly = matches!(borrow.props.get(&readonly_key), Some(Value::Boolean(true)));
+                let is_readonly = has_readonly_mark(&borrow.props, &key);
                 let has_getter = borrow.props.get(&getter_key).is_some()
                     || proto_for_lookup
                         .as_ref()
@@ -13566,7 +13564,8 @@ impl<'gc> VM<'gc> {
             // If key exists as own data property (not accessor), set directly.
             let own_is_data = key_exists && !has_own_setter && {
                 let borrow = arr.borrow();
-                !borrow.props.contains_key(&make_getter_key(&key)) && !matches!(borrow.props.get(key), Some(Value::Property { .. }))
+                !super::property_descriptor::has_getter(&borrow.props, &key)
+                    && !matches!(borrow.props.get(key), Some(Value::Property { .. }))
             };
             if own_is_data && !is_readonly {
                 let frozen = matches!(arr.borrow().props.get("__frozen__"), Some(Value::Boolean(true)));

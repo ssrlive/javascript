@@ -595,9 +595,7 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(&mut data_view_map, "name", &Value::from("DataView"), false, false, true);
         Self::insert_property_with_attributes(&mut data_view_map, "length", &Value::Number(1.0), false, false, true);
         data_view_map.insert("prototype".to_string(), dv_proto_val);
-        mark_readonly(&mut data_view_map, "prototype");
-        mark_nonenumerable(&mut data_view_map, "prototype");
-        mark_nonconfigurable(&mut data_view_map, "prototype");
+        write_attrs_to_legacy_map(&mut data_view_map, "prototype", PropAttrs::empty());
         let data_view_ctor = Value::VmObject(new_gc_cell_ptr(ctx, data_view_map));
         if let Value::VmObject(ctor_obj) = &data_view_ctor
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()

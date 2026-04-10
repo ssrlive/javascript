@@ -1139,8 +1139,7 @@ impl<'gc> VM<'gc> {
                             fn_proto.insert("__proto__".to_string(), async_gen_proto);
                         }
                         fn_b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                        mark_nonenumerable(&mut *fn_b, "prototype");
-                        mark_nonconfigurable(&mut *fn_b, "prototype");
+                        write_attrs_to_legacy_map(&mut *fn_b, "prototype", PropAttrs::WRITABLE);
                     }
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
@@ -1769,9 +1768,7 @@ impl<'gc> VM<'gc> {
                 ns_map.insert("__proto__".to_string(), Value::Null);
                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
                 ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
-                mark_readonly(&mut ns_map, "@@sym:4");
-                mark_nonenumerable(&mut ns_map, "@@sym:4");
-                mark_nonconfigurable(&mut ns_map, "@@sym:4");
+                write_attrs_to_legacy_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
                 self.module_locals.insert("__self_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
@@ -1842,9 +1839,7 @@ impl<'gc> VM<'gc> {
                 ns_map.insert("__proto__".to_string(), Value::Null);
                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
                 ns_map.insert("@@sym:4".to_string(), Value::from("Deferred Module"));
-                mark_readonly(&mut ns_map, "@@sym:4");
-                mark_nonenumerable(&mut ns_map, "@@sym:4");
-                mark_nonconfigurable(&mut ns_map, "@@sym:4");
+                write_attrs_to_legacy_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
                 self.module_locals.insert("__self_deferred_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
@@ -1956,8 +1951,7 @@ impl<'gc> VM<'gc> {
                     setter: Some(Box::new(thrower)),
                 };
                 map.insert("callee".to_string(), prop);
-                mark_nonconfigurable(&mut map, "callee");
-                mark_nonenumerable(&mut map, "callee");
+                write_attrs_to_legacy_map(&mut map, "callee", PropAttrs::WRITABLE);
             } else {
                 let callee_val = if bp > 0 { self.stack[bp - 1].clone() } else { Value::Undefined };
                 map.insert("callee".to_string(), callee_val);
@@ -1971,8 +1965,7 @@ impl<'gc> VM<'gc> {
                 setter: Some(Box::new(thrower)),
             };
             map.insert("callee".to_string(), prop);
-            mark_nonconfigurable(&mut map, "callee");
-            mark_nonenumerable(&mut map, "callee");
+            write_attrs_to_legacy_map(&mut map, "callee", PropAttrs::WRITABLE);
         }
         let obj_val = Value::VmObject(new_gc_cell_ptr(ctx, map));
         self.frames[frame_idx].arguments_obj = Some(obj_val.clone());
@@ -7779,8 +7772,7 @@ impl<'gc> VM<'gc> {
                         {
                             map.insert("__proto__".to_string(), proto);
                         }
-                        mark_nonconfigurable(&mut map, "lastIndex");
-                        mark_nonenumerable(&mut map, "lastIndex");
+                        write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
                         self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, map)));
                     }
                     BUILTIN_CTOR_DATE => {
@@ -8015,8 +8007,7 @@ impl<'gc> VM<'gc> {
                             if let Some(proto) = ctor_prototype.clone() {
                                 m.insert("__proto__".to_string(), proto);
                             }
-                            mark_nonconfigurable(&mut m, "lastIndex");
-                            mark_nonenumerable(&mut m, "lastIndex");
+                            write_attrs_to_legacy_map(&mut m, "lastIndex", PropAttrs::WRITABLE);
                             self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
                             return Ok(OpcodeAction::Continue);
                         }
@@ -8600,8 +8591,8 @@ impl<'gc> VM<'gc> {
         let mut b = arr.borrow_mut(ctx);
         for i in 0..len {
             let key = i.to_string();
-            mark_nonconfigurable(&mut b.props, &key);
             mark_readonly(&mut b.props, &key);
+            mark_nonconfigurable(&mut b.props, &key);
         }
         let prop_keys: Vec<String> = b.props.keys().filter(|k: &&String| !k.starts_with("__")).cloned().collect();
         for key in prop_keys {

@@ -1199,8 +1199,7 @@ impl<'gc> VM<'gc> {
         {
             map.insert("__proto__".to_string(), proto);
         }
-        mark_nonconfigurable(&mut map, "lastIndex");
-        mark_nonenumerable(&mut map, "lastIndex");
+        write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
         Some(Value::VmObject(new_gc_cell_ptr(ctx, map)))
     }
 
@@ -1409,9 +1408,7 @@ impl<'gc> VM<'gc> {
             "@@sym:4".to_string(),
             Value::from(if deferred { "Deferred Module" } else { "Module" }),
         );
-        mark_readonly(&mut ns_map, "@@sym:4");
-        mark_nonenumerable(&mut ns_map, "@@sym:4");
-        mark_nonconfigurable(&mut ns_map, "@@sym:4");
+        write_attrs_to_legacy_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
         let main_ns = Value::VmObject(crate::core::new_gc_cell_ptr(ctx, ns_map));
         if deferred {
             self.deferred_module_ns_objects.insert(module_key.to_string(), main_ns);
@@ -1860,9 +1857,7 @@ impl<'gc> VM<'gc> {
             "@@sym:4".to_string(),
             Value::from(if deferred { "Deferred Module" } else { "Module" }),
         );
-        mark_readonly(&mut *ns_map, "@@sym:4");
-        mark_nonenumerable(&mut *ns_map, "@@sym:4");
-        mark_nonconfigurable(&mut *ns_map, "@@sym:4");
+        write_attrs_to_legacy_map(&mut *ns_map, "@@sym:4", PropAttrs::empty());
 
         let mut bindings_map = IndexMap::new();
         for (export_name, local_name) in sorted_entries {
@@ -4426,10 +4421,8 @@ impl<'gc> VM<'gc> {
                 eval_map.insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
                 eval_map.insert("name".to_string(), Value::from("eval"));
                 eval_map.insert("length".to_string(), Value::Number(1.0));
-                mark_readonly(&mut eval_map, "name");
-                mark_readonly(&mut eval_map, "length");
-                mark_nonenumerable(&mut eval_map, "name");
-                mark_nonenumerable(&mut eval_map, "length");
+                write_attrs_to_legacy_map(&mut eval_map, "name", PropAttrs::CONFIGURABLE);
+                write_attrs_to_legacy_map(&mut eval_map, "length", PropAttrs::CONFIGURABLE);
                 child_global_this
                     .borrow_mut(ctx)
                     .insert("eval".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, eval_map)));
@@ -12585,8 +12578,7 @@ impl<'gc> VM<'gc> {
         // Insert length before name and prototype (spec order: length, name, prototype)
         let observable_length = self.chunk.fn_lengths.get(&ip).copied().unwrap_or(arity as usize) as f64;
         props.insert("length".to_string(), Value::Number(observable_length));
-        mark_readonly(&mut props, "length");
-        mark_nonenumerable(&mut props, "length");
+        write_attrs_to_legacy_map(&mut props, "length", PropAttrs::CONFIGURABLE);
         if is_method || is_generator {
             props.insert("__non_constructor__".to_string(), Value::Boolean(true));
         }
@@ -12596,8 +12588,7 @@ impl<'gc> VM<'gc> {
         } else {
             props.insert("name".to_string(), Value::String(Vec::new()));
         }
-        mark_readonly(&mut props, "name");
-        mark_nonenumerable(&mut props, "name");
+        write_attrs_to_legacy_map(&mut props, "name", PropAttrs::CONFIGURABLE);
         // prototype property (after length and name)
         if needs_prototype {
             let mut proto = IndexMap::new();
@@ -12621,8 +12612,7 @@ impl<'gc> VM<'gc> {
                 proto.insert("__proto__".to_string(), obj_proto);
             }
             props.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, proto)));
-            mark_nonenumerable(&mut props, "prototype");
-            mark_nonconfigurable(&mut props, "prototype");
+            write_attrs_to_legacy_map(&mut props, "prototype", PropAttrs::WRITABLE);
             if is_class_ctor {
                 mark_readonly(&mut props, "prototype");
             }
@@ -13983,8 +13973,7 @@ impl<'gc> VM<'gc> {
                 let new_name = self.chunk.fn_names.get(&ip).cloned().unwrap_or_default();
                 let mut borrow = props.borrow_mut(ctx);
                 borrow.insert("name".to_string(), Value::from(&new_name));
-                mark_readonly(&mut *borrow, "name");
-                mark_nonenumerable(&mut *borrow, "name");
+                write_attrs_to_legacy_map(&mut *borrow, "name", PropAttrs::CONFIGURABLE);
             }
         }
     }
@@ -14026,8 +14015,7 @@ impl<'gc> VM<'gc> {
             if should_update {
                 let mut borrow = props.borrow_mut(ctx);
                 borrow.insert("name".to_string(), Value::from(&accessor_name));
-                mark_readonly(&mut *borrow, "name");
-                mark_nonenumerable(&mut *borrow, "name");
+                write_attrs_to_legacy_map(&mut *borrow, "name", PropAttrs::CONFIGURABLE);
             }
         }
     }
@@ -15446,9 +15434,7 @@ impl<'gc> VM<'gc> {
             "split",
             "matchAll",
         ] {
-            mark_readonly(&mut sym_obj, &key);
-            mark_nonenumerable(&mut sym_obj, &key);
-            mark_nonconfigurable(&mut sym_obj, &key);
+            write_attrs_to_legacy_map(&mut sym_obj, &key, PropAttrs::empty());
         }
         sym_obj.insert("for".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_FOR));
         sym_obj.insert("keyFor".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_KEYFOR));
@@ -15598,10 +15584,8 @@ impl<'gc> VM<'gc> {
         array_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAY as f64));
         array_obj.insert("name".to_string(), Value::from("Array"));
         array_obj.insert("length".to_string(), Value::Number(1.0));
-        mark_readonly(&mut array_obj, "name");
-        mark_readonly(&mut array_obj, "length");
-        mark_nonenumerable(&mut array_obj, "name");
-        mark_nonenumerable(&mut array_obj, "length");
+        write_attrs_to_legacy_map(&mut array_obj, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut array_obj, "length", PropAttrs::CONFIGURABLE);
         mark_nonenumerable(&mut array_obj, "isArray");
         mark_nonenumerable(&mut array_obj, "of");
         mark_nonenumerable(&mut array_obj, "from");
@@ -15836,18 +15820,15 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut array_buffer_proto, "slice");
         array_buffer_proto.insert("@@sym:4".to_string(), Value::from("ArrayBuffer"));
-        mark_readonly(&mut array_buffer_proto, "@@sym:4");
-        mark_nonenumerable(&mut array_buffer_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut array_buffer_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         let array_buffer_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, array_buffer_proto));
 
         let mut array_buffer_map = IndexMap::new();
         array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAYBUFFER as f64));
         array_buffer_map.insert("name".to_string(), Value::from("ArrayBuffer"));
         array_buffer_map.insert("length".to_string(), Value::Number(1.0));
-        mark_readonly(&mut array_buffer_map, "name");
-        mark_nonenumerable(&mut array_buffer_map, "name");
-        mark_readonly(&mut array_buffer_map, "length");
-        mark_nonenumerable(&mut array_buffer_map, "length");
+        write_attrs_to_legacy_map(&mut array_buffer_map, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut array_buffer_map, "length", PropAttrs::CONFIGURABLE);
         array_buffer_map.insert(
             "isView".to_string(),
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.isView", "isView", 1.0, false),
@@ -15855,9 +15836,7 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut array_buffer_map, "isView");
         Self::insert_species_getter(&mut array_buffer_map, ctx);
         array_buffer_map.insert("prototype".to_string(), array_buffer_proto_val);
-        mark_readonly(&mut array_buffer_map, "prototype");
-        mark_nonenumerable(&mut array_buffer_map, "prototype");
-        mark_nonconfigurable(&mut array_buffer_map, "prototype");
+        write_attrs_to_legacy_map(&mut array_buffer_map, "prototype", PropAttrs::empty());
         let array_buffer_ctor = Value::VmObject(new_gc_cell_ptr(ctx, array_buffer_map));
         if let Value::VmObject(ctor_obj) = &array_buffer_ctor
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
@@ -15878,13 +15857,11 @@ impl<'gc> VM<'gc> {
         let mut shared_array_buffer_map = IndexMap::new();
         shared_array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_SHAREDARRAYBUFFER as f64));
         shared_array_buffer_map.insert("length".to_string(), Value::Number(1.0));
-        mark_nonenumerable(&mut shared_array_buffer_map, "length");
-        mark_readonly(&mut shared_array_buffer_map, "length");
+        write_attrs_to_legacy_map(&mut shared_array_buffer_map, "length", PropAttrs::CONFIGURABLE);
         let mut sab_proto = IndexMap::new();
         sab_proto.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
         sab_proto.insert("@@sym:4".to_string(), Value::from("SharedArrayBuffer"));
-        mark_readonly(&mut sab_proto, "@@sym:4");
-        mark_nonenumerable(&mut sab_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut sab_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         sab_proto.insert(
             make_getter_key("byteLength"),
             Self::make_host_fn_with_name_len(ctx, "sharedArrayBuffer.getByteLength", "get byteLength", 0.0, false),
@@ -15912,9 +15889,7 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut sab_proto, "slice");
         let sab_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, sab_proto));
         shared_array_buffer_map.insert("prototype".to_string(), sab_proto_val);
-        mark_readonly(&mut shared_array_buffer_map, "prototype");
-        mark_nonenumerable(&mut shared_array_buffer_map, "prototype");
-        mark_nonconfigurable(&mut shared_array_buffer_map, "prototype");
+        write_attrs_to_legacy_map(&mut shared_array_buffer_map, "prototype", PropAttrs::empty());
         let sab_ctor = Value::VmObject(new_gc_cell_ptr(ctx, shared_array_buffer_map));
         if let Value::VmObject(ctor_obj) = &sab_ctor
             && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
@@ -15986,8 +15961,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut atomics_map, "notify");
         atomics_map.insert("@@sym:4".to_string(), Value::from("Atomics"));
-        mark_readonly(&mut atomics_map, "@@sym:4");
-        mark_nonenumerable(&mut atomics_map, "@@sym:4");
+        write_attrs_to_legacy_map(&mut atomics_map, "@@sym:4", PropAttrs::CONFIGURABLE);
         let wait_async_fn = Self::make_host_fn_with_name_len(ctx, "atomics.waitAsync", "waitAsync", 4.0, false);
         atomics_map.insert("waitAsync".to_string(), wait_async_fn);
         mark_nonenumerable(&mut atomics_map, "waitAsync");
@@ -16109,13 +16083,9 @@ impl<'gc> VM<'gc> {
             "__proto__".to_string(),
             self.globals.get("Error").cloned().unwrap_or(Value::Undefined),
         );
-        mark_readonly(&mut aggregate_error_ctor, "name");
-        mark_nonenumerable(&mut aggregate_error_ctor, "name");
-        mark_readonly(&mut aggregate_error_ctor, "length");
-        mark_nonenumerable(&mut aggregate_error_ctor, "length");
-        mark_readonly(&mut aggregate_error_ctor, "prototype");
-        mark_nonenumerable(&mut aggregate_error_ctor, "prototype");
-        mark_nonconfigurable(&mut aggregate_error_ctor, "prototype");
+        write_attrs_to_legacy_map(&mut aggregate_error_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut aggregate_error_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut aggregate_error_ctor, "prototype", PropAttrs::empty());
 
         let aggregate_error_ctor_obj = Value::VmObject(new_gc_cell_ptr(ctx, aggregate_error_ctor));
         if let Value::VmObject(proto) = &aggregate_error_proto_obj {
@@ -16336,8 +16306,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut iterator_helper_proto, "drop");
         iterator_helper_proto.insert("@@sym:4".to_string(), Value::from("Iterator Helper"));
-        mark_readonly(&mut iterator_helper_proto, "@@sym:4");
-        mark_nonenumerable(&mut iterator_helper_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut iterator_helper_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         let iterator_helper_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_helper_proto));
         self.globals
             .insert("__IteratorHelperPrototype__".to_string(), iterator_helper_proto_val.clone());
@@ -16357,9 +16326,7 @@ impl<'gc> VM<'gc> {
             );
             mark_nonenumerable(&mut *ctor, "from");
             ctor.insert("prototype".to_string(), iterator_proto_val.clone());
-            mark_readonly(&mut *ctor, "prototype");
-            mark_nonenumerable(&mut *ctor, "prototype");
-            mark_nonconfigurable(&mut *ctor, "prototype");
+            write_attrs_to_legacy_map(&mut *ctor, "prototype", PropAttrs::empty());
         }
         if let Value::VmObject(helper_proto_obj) = &iterator_helper_proto_val {
             helper_proto_obj
@@ -16377,8 +16344,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut array_iter_proto, "next");
         array_iter_proto.insert("@@sym:4".to_string(), Value::from("Array Iterator"));
-        mark_readonly(&mut array_iter_proto, "@@sym:4");
-        mark_nonenumerable(&mut array_iter_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut array_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__ArrayIteratorPrototype__".to_string(),
             Value::VmObject(new_gc_cell_ptr(ctx, array_iter_proto)),
@@ -16392,8 +16358,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut map_iter_proto, "next");
         map_iter_proto.insert("@@sym:4".to_string(), Value::from("Map Iterator"));
-        mark_readonly(&mut map_iter_proto, "@@sym:4");
-        mark_nonenumerable(&mut map_iter_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut map_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__MapIteratorPrototype__".to_string(),
             Value::VmObject(new_gc_cell_ptr(ctx, map_iter_proto)),
@@ -16407,8 +16372,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut set_iter_proto, "next");
         set_iter_proto.insert("@@sym:4".to_string(), Value::from("Set Iterator"));
-        mark_readonly(&mut set_iter_proto, "@@sym:4");
-        mark_nonenumerable(&mut set_iter_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut set_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__SetIteratorPrototype__".to_string(),
             Value::VmObject(new_gc_cell_ptr(ctx, set_iter_proto)),
@@ -16546,9 +16510,7 @@ impl<'gc> VM<'gc> {
         let mut string_proto = IndexMap::new();
         string_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
         string_proto.insert("length".to_string(), Value::Number(0.0));
-        mark_readonly(&mut string_proto, "length");
-        mark_nonenumerable(&mut string_proto, "length");
-        mark_nonconfigurable(&mut string_proto, "length");
+        write_attrs_to_legacy_map(&mut string_proto, "length", PropAttrs::empty());
         for (name, builtin_id) in [
             ("toString", BUILTIN_STRING_VALUEOF),
             ("valueOf", BUILTIN_STRING_VALUEOF),
@@ -16596,10 +16558,8 @@ impl<'gc> VM<'gc> {
             boolean_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_BOOLEAN as f64));
             boolean_map.insert("name".to_string(), Value::from("Boolean"));
             boolean_map.insert("length".to_string(), Value::Number(1.0));
-            mark_readonly(&mut boolean_map, "name");
-            mark_nonenumerable(&mut boolean_map, "name");
-            mark_readonly(&mut boolean_map, "length");
-            mark_nonenumerable(&mut boolean_map, "length");
+            write_attrs_to_legacy_map(&mut boolean_map, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut boolean_map, "length", PropAttrs::CONFIGURABLE);
             let mut boolean_proto = IndexMap::new();
             boolean_proto.insert("__type__".to_string(), Value::from("Boolean"));
             boolean_proto.insert("__value__".to_string(), Value::Boolean(false));
@@ -16616,9 +16576,7 @@ impl<'gc> VM<'gc> {
             boolean_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
             let boolean_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, boolean_proto));
             boolean_map.insert("prototype".to_string(), boolean_proto_obj.clone());
-            mark_readonly(&mut boolean_map, "prototype");
-            mark_nonenumerable(&mut boolean_map, "prototype");
-            mark_nonconfigurable(&mut boolean_map, "prototype");
+            write_attrs_to_legacy_map(&mut boolean_map, "prototype", PropAttrs::empty());
             let boolean_ctor = Value::VmObject(new_gc_cell_ptr(ctx, boolean_map));
             if let Value::VmObject(proto_obj) = boolean_proto_obj {
                 proto_obj.borrow_mut(ctx).insert("constructor".to_string(), boolean_ctor.clone());
@@ -16674,15 +16632,9 @@ impl<'gc> VM<'gc> {
             gt.insert("Infinity".to_string(), Value::Number(f64::INFINITY));
             gt.insert("NaN".to_string(), Value::Number(f64::NAN));
             gt.insert("undefined".to_string(), Value::Undefined);
-            mark_nonenumerable(&mut *gt, "Infinity");
-            mark_nonenumerable(&mut *gt, "NaN");
-            mark_nonenumerable(&mut *gt, "undefined");
-            mark_readonly(&mut *gt, "Infinity");
-            mark_readonly(&mut *gt, "NaN");
-            mark_readonly(&mut *gt, "undefined");
-            mark_nonconfigurable(&mut *gt, "Infinity");
-            mark_nonconfigurable(&mut *gt, "NaN");
-            mark_nonconfigurable(&mut *gt, "undefined");
+            write_attrs_to_legacy_map(&mut *gt, "Infinity", PropAttrs::empty());
+            write_attrs_to_legacy_map(&mut *gt, "NaN", PropAttrs::empty());
+            write_attrs_to_legacy_map(&mut *gt, "undefined", PropAttrs::empty());
         }
 
         // Map / Set constructors
@@ -16710,8 +16662,7 @@ impl<'gc> VM<'gc> {
             let mut proto = IndexMap::new();
             proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
             proto.insert("@@sym:4".to_string(), Value::from(tag_name));
-            mark_readonly(&mut proto, "@@sym:4");
-            mark_nonenumerable(&mut proto, "@@sym:4");
+            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             proto.insert("constructor".to_string(), ctor_value.clone());
             mark_nonenumerable(&mut proto, "constructor");
             match ctor_id {
@@ -16811,9 +16762,7 @@ impl<'gc> VM<'gc> {
             let props = self.get_native_fn_props(ctx, ctor_id);
             let mut b = props.borrow_mut(ctx);
             b.insert("prototype".to_string(), proto_val);
-            mark_readonly(&mut *b, "prototype");
-            mark_nonenumerable(&mut *b, "prototype");
-            mark_nonconfigurable(&mut *b, "prototype");
+            write_attrs_to_legacy_map(&mut *b, "prototype", PropAttrs::empty());
         }
         self.globals
             .insert("WeakRef".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKREF));
@@ -16821,17 +16770,14 @@ impl<'gc> VM<'gc> {
             let mut wr_proto = IndexMap::new();
             wr_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
             wr_proto.insert("@@sym:4".to_string(), Value::from("WeakRef"));
-            mark_readonly(&mut wr_proto, "@@sym:4");
-            mark_nonenumerable(&mut wr_proto, "@@sym:4");
+            write_attrs_to_legacy_map(&mut wr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             wr_proto.insert("deref".to_string(), Value::VmNativeFunction(BUILTIN_WEAKREF_DEREF));
             mark_nonenumerable(&mut wr_proto, "deref");
             let wr_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, wr_proto));
             let props = self.get_native_fn_props(ctx, BUILTIN_CTOR_WEAKREF);
             let mut b = props.borrow_mut(ctx);
             b.insert("prototype".to_string(), wr_proto_val);
-            mark_readonly(&mut *b, "prototype");
-            mark_nonenumerable(&mut *b, "prototype");
-            mark_nonconfigurable(&mut *b, "prototype");
+            write_attrs_to_legacy_map(&mut *b, "prototype", PropAttrs::empty());
         }
         self.globals
             .insert("FinalizationRegistry".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FR));
@@ -16839,8 +16785,7 @@ impl<'gc> VM<'gc> {
             let mut fr_proto = IndexMap::new();
             fr_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
             fr_proto.insert("@@sym:4".to_string(), Value::from("FinalizationRegistry"));
-            mark_readonly(&mut fr_proto, "@@sym:4");
-            mark_nonenumerable(&mut fr_proto, "@@sym:4");
+            write_attrs_to_legacy_map(&mut fr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             fr_proto.insert("constructor".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_FR));
             mark_nonenumerable(&mut fr_proto, "constructor");
             fr_proto.insert("register".to_string(), Value::VmNativeFunction(BUILTIN_FR_REGISTER));
@@ -16851,9 +16796,7 @@ impl<'gc> VM<'gc> {
             let props = self.get_native_fn_props(ctx, BUILTIN_CTOR_FR);
             let mut b = props.borrow_mut(ctx);
             b.insert("prototype".to_string(), fr_proto_val);
-            mark_readonly(&mut *b, "prototype");
-            mark_nonenumerable(&mut *b, "prototype");
-            mark_nonconfigurable(&mut *b, "prototype");
+            write_attrs_to_legacy_map(&mut *b, "prototype", PropAttrs::empty());
         }
         self.bigint_init_prototype(ctx);
         self.regexp_init_prototype(ctx);
@@ -16996,13 +16939,9 @@ impl<'gc> VM<'gc> {
         function_map.insert("length".to_string(), Value::Number(1.0));
         function_map.insert("name".to_string(), Value::from("Function"));
         function_map.insert("prototype".to_string(), fn_proto_val);
-        mark_readonly(&mut function_map, "name");
-        mark_nonenumerable(&mut function_map, "name");
-        mark_readonly(&mut function_map, "length");
-        mark_nonenumerable(&mut function_map, "length");
-        mark_readonly(&mut function_map, "prototype");
-        mark_nonenumerable(&mut function_map, "prototype");
-        mark_nonconfigurable(&mut function_map, "prototype");
+        write_attrs_to_legacy_map(&mut function_map, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut function_map, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut function_map, "prototype", PropAttrs::empty());
         function_map.insert("__origin_global".to_string(), Value::VmObject(self.global_this));
         let function_val = Value::VmObject(new_gc_cell_ptr(ctx, function_map));
         if let Value::VmObject(function_obj) = &function_val {
@@ -17097,10 +17036,8 @@ impl<'gc> VM<'gc> {
         async_fn_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
         async_fn_ctor.insert("length".to_string(), Value::Number(1.0));
         async_fn_ctor.insert("name".to_string(), Value::from("AsyncFunction"));
-        mark_readonly(&mut async_fn_ctor, "name");
-        mark_nonenumerable(&mut async_fn_ctor, "name");
-        mark_readonly(&mut async_fn_ctor, "length");
-        mark_nonenumerable(&mut async_fn_ctor, "length");
+        write_attrs_to_legacy_map(&mut async_fn_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut async_fn_ctor, "length", PropAttrs::CONFIGURABLE);
         async_fn_ctor.insert("__async_function_constructor__".to_string(), Value::Boolean(true));
         if let Some(function_ctor) = self.globals.get("Function").cloned() {
             async_fn_ctor.insert("__proto__".to_string(), function_ctor);
@@ -17110,8 +17047,7 @@ impl<'gc> VM<'gc> {
         async_fn_proto.insert("constructor".to_string(), Value::Undefined);
         mark_nonenumerable(&mut async_fn_proto, "constructor");
         async_fn_proto.insert("@@sym:4".to_string(), Value::from("AsyncFunction"));
-        mark_readonly(&mut async_fn_proto, "@@sym:4");
-        mark_nonenumerable(&mut async_fn_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut async_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         if let Some(Value::VmObject(function_ctor_obj)) = self.globals.get("Function")
             && let Some(fn_proto) = function_ctor_obj.borrow().get("prototype").cloned()
         {
@@ -17123,9 +17059,7 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(ctor_obj) = &async_fn_ctor_val {
             let mut b = ctor_obj.borrow_mut(ctx);
             b.insert("prototype".to_string(), async_fn_proto_val.clone());
-            mark_readonly(&mut *b, "prototype");
-            mark_nonenumerable(&mut *b, "prototype");
-            mark_nonconfigurable(&mut *b, "prototype");
+            write_attrs_to_legacy_map(&mut *b, "prototype", PropAttrs::empty());
         }
         if let Value::VmObject(proto_obj) = &async_fn_proto_val {
             proto_obj
@@ -17188,10 +17122,8 @@ impl<'gc> VM<'gc> {
             m.insert("__native_id__".to_string(), Value::Number(id as f64));
             m.insert("name".to_string(), Value::from(name));
             m.insert("length".to_string(), Value::Number(length));
-            mark_readonly(&mut m, "name");
-            mark_nonenumerable(&mut m, "name");
-            mark_readonly(&mut m, "length");
-            mark_nonenumerable(&mut m, "length");
+            write_attrs_to_legacy_map(&mut m, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut m, "length", PropAttrs::CONFIGURABLE);
             m.insert("__non_constructor__".to_string(), Value::Boolean(true));
             Value::VmObject(new_gc_cell_ptr(ctx, m))
         };
@@ -17207,32 +17139,24 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut async_gen_proto, "return");
         async_gen_proto.insert(async_to_string_tag_key.clone(), Value::from("AsyncGenerator"));
         async_gen_proto.insert("Symbol(Symbol.toStringTag)".to_string(), Value::from("AsyncGenerator"));
-        mark_readonly(&mut async_gen_proto, &async_to_string_tag_key);
-        mark_nonenumerable(&mut async_gen_proto, &async_to_string_tag_key);
-        mark_readonly(&mut async_gen_proto, "Symbol(Symbol.toStringTag)");
-        mark_nonenumerable(&mut async_gen_proto, "Symbol(Symbol.toStringTag)");
+        write_attrs_to_legacy_map(&mut async_gen_proto, &async_to_string_tag_key, PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut async_gen_proto, "Symbol(Symbol.toStringTag)", PropAttrs::CONFIGURABLE);
         let async_gen_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, async_gen_proto));
         self.async_generator_prototype = async_gen_proto_val.clone();
 
         let mut async_gen_fn_proto = IndexMap::new();
         async_gen_fn_proto.insert("prototype".to_string(), async_gen_proto_val.clone());
-        mark_readonly(&mut async_gen_fn_proto, "prototype");
-        mark_nonenumerable(&mut async_gen_fn_proto, "prototype");
+        write_attrs_to_legacy_map(&mut async_gen_fn_proto, "prototype", PropAttrs::CONFIGURABLE);
         async_gen_fn_proto.insert("@@sym:4".to_string(), Value::from("AsyncGeneratorFunction"));
-        mark_readonly(&mut async_gen_fn_proto, "@@sym:4");
-        mark_nonenumerable(&mut async_gen_fn_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut async_gen_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
 
         let mut async_gen_ctor = IndexMap::new();
         async_gen_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
         async_gen_ctor.insert("length".to_string(), Value::Number(1.0));
         async_gen_ctor.insert("name".to_string(), Value::from("AsyncGeneratorFunction"));
-        mark_readonly(&mut async_gen_ctor, "name");
-        mark_nonenumerable(&mut async_gen_ctor, "name");
-        mark_readonly(&mut async_gen_ctor, "length");
-        mark_nonenumerable(&mut async_gen_ctor, "length");
-        mark_readonly(&mut async_gen_ctor, "prototype");
-        mark_nonenumerable(&mut async_gen_ctor, "prototype");
-        mark_nonconfigurable(&mut async_gen_ctor, "prototype");
+        write_attrs_to_legacy_map(&mut async_gen_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut async_gen_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut async_gen_ctor, "prototype", PropAttrs::empty());
         async_gen_ctor.insert("__async_generator_function_constructor__".to_string(), Value::Boolean(true));
 
         if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
@@ -17251,16 +17175,14 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(proto_obj) = &async_gen_fn_proto_val {
             let mut pb = proto_obj.borrow_mut(ctx);
             pb.insert("constructor".to_string(), async_gen_ctor_val.clone());
-            mark_readonly(&mut *pb, "constructor");
-            mark_nonenumerable(&mut *pb, "constructor");
+            write_attrs_to_legacy_map(&mut *pb, "constructor", PropAttrs::CONFIGURABLE);
         }
         if let (Value::VmObject(async_gen_proto_obj), Value::VmObject(async_gen_fn_proto_obj)) =
             (&async_gen_proto_val, &async_gen_fn_proto_val)
         {
             let mut agb = async_gen_proto_obj.borrow_mut(ctx);
             agb.insert("constructor".to_string(), async_gen_fn_proto_val.clone());
-            mark_readonly(&mut *agb, "constructor");
-            mark_nonenumerable(&mut *agb, "constructor");
+            write_attrs_to_legacy_map(&mut *agb, "constructor", PropAttrs::CONFIGURABLE);
 
             agb.insert("__proto__".to_string(), async_iterator_proto_val.clone());
 
@@ -17349,13 +17271,9 @@ impl<'gc> VM<'gc> {
             ctor.insert("length".to_string(), Value::Number(0.0));
             ctor.insert("prototype".to_string(), abs_mod_src_proto_val);
             ctor.insert("__proto__".to_string(), function_proto.clone());
-            mark_readonly(&mut *ctor, "name");
-            mark_nonenumerable(&mut *ctor, "name");
-            mark_readonly(&mut *ctor, "length");
-            mark_nonenumerable(&mut *ctor, "length");
-            mark_readonly(&mut *ctor, "prototype");
-            mark_nonenumerable(&mut *ctor, "prototype");
-            mark_nonconfigurable(&mut *ctor, "prototype");
+            write_attrs_to_legacy_map(&mut *ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut *ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut *ctor, "prototype", PropAttrs::empty());
         }
         self.globals.insert("AbstractModuleSource".to_string(), abs_mod_src_ctor.clone());
         self.globals
@@ -17373,8 +17291,7 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut gen_proto, "return");
         mark_nonenumerable(&mut gen_proto, "throw");
         gen_proto.insert("@@sym:4".to_string(), Value::from("Generator"));
-        mark_readonly(&mut gen_proto, "@@sym:4");
-        mark_nonenumerable(&mut gen_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut gen_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         // Per spec: %GeneratorPrototype% [[Prototype]] = %IteratorPrototype%
         if let Some(iter_proto) = self.globals.get("__IteratorPrototype__").cloned() {
             gen_proto.insert("__proto__".to_string(), iter_proto);
@@ -17403,12 +17320,10 @@ impl<'gc> VM<'gc> {
         // GeneratorFunction.prototype.prototype === %GeneratorPrototype%
         let mut gen_fn_proto = IndexMap::new();
         gen_fn_proto.insert("prototype".to_string(), self.generator_prototype.clone());
-        mark_readonly(&mut gen_fn_proto, "prototype");
-        mark_nonenumerable(&mut gen_fn_proto, "prototype");
+        write_attrs_to_legacy_map(&mut gen_fn_proto, "prototype", PropAttrs::CONFIGURABLE);
         gen_fn_proto.insert("__configurable_prototype__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("@@sym:4".to_string(), Value::from("GeneratorFunction"));
-        mark_readonly(&mut gen_fn_proto, "@@sym:4");
-        mark_nonenumerable(&mut gen_fn_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut gen_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
             && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
         {
@@ -17421,13 +17336,9 @@ impl<'gc> VM<'gc> {
         gen_fn_ctor.insert("length".to_string(), Value::Number(1.0));
         gen_fn_ctor.insert("name".to_string(), Value::from("GeneratorFunction"));
         gen_fn_ctor.insert("prototype".to_string(), gen_fn_proto_val.clone());
-        mark_readonly(&mut gen_fn_ctor, "name");
-        mark_nonenumerable(&mut gen_fn_ctor, "name");
-        mark_readonly(&mut gen_fn_ctor, "length");
-        mark_nonenumerable(&mut gen_fn_ctor, "length");
-        mark_readonly(&mut gen_fn_ctor, "prototype");
-        mark_nonenumerable(&mut gen_fn_ctor, "prototype");
-        mark_nonconfigurable(&mut gen_fn_ctor, "prototype");
+        write_attrs_to_legacy_map(&mut gen_fn_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut gen_fn_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut gen_fn_ctor, "prototype", PropAttrs::empty());
         gen_fn_ctor.insert("__generator_function_constructor__".to_string(), Value::Boolean(true));
         if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
             && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
@@ -17438,8 +17349,7 @@ impl<'gc> VM<'gc> {
 
         if let Value::VmObject(proto_obj) = &gen_fn_proto_val {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_ctor_val.clone());
-            mark_nonenumerable(&mut *proto_obj.borrow_mut(ctx), "constructor");
-            mark_readonly(&mut *proto_obj.borrow_mut(ctx), "constructor");
+            write_attrs_to_legacy_map(&mut *proto_obj.borrow_mut(ctx), "constructor", PropAttrs::CONFIGURABLE);
             proto_obj
                 .borrow_mut(ctx)
                 .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
@@ -17448,8 +17358,7 @@ impl<'gc> VM<'gc> {
         // Set %GeneratorPrototype%.constructor = %GeneratorFunction.prototype%
         if let Value::VmObject(gp) = &self.generator_prototype {
             gp.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_proto_val.clone());
-            mark_nonenumerable(&mut *gp.borrow_mut(ctx), "constructor");
-            mark_readonly(&mut *gp.borrow_mut(ctx), "constructor");
+            write_attrs_to_legacy_map(&mut *gp.borrow_mut(ctx), "constructor", PropAttrs::CONFIGURABLE);
             gp.borrow_mut(ctx)
                 .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
         }
@@ -21789,10 +21698,8 @@ impl<'gc> VM<'gc> {
                 map.insert("__fn_params__".to_string(), Value::from(&params_src));
                 map.insert("length".to_string(), Value::Number(param_count as f64));
                 map.insert("name".to_string(), Value::from("anonymous"));
-                mark_readonly(&mut map, "length");
-                mark_nonenumerable(&mut map, "length");
-                mark_readonly(&mut map, "name");
-                mark_nonenumerable(&mut map, "name");
+                write_attrs_to_legacy_map(&mut map, "length", PropAttrs::CONFIGURABLE);
+                write_attrs_to_legacy_map(&mut map, "name", PropAttrs::CONFIGURABLE);
                 map.insert("__type__".to_string(), Value::from("Function"));
                 if let Some(origin_global) = dynamic_origin_global.clone() {
                     // Also propagate __realm_id__ from the origin global
@@ -21860,8 +21767,7 @@ impl<'gc> VM<'gc> {
                         .unwrap_or_else(|| self.generator_prototype.clone());
                     fn_proto.insert("__proto__".to_string(), ctor_gen_proto);
                     map.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                    mark_nonenumerable(&mut map, "prototype");
-                    mark_nonconfigurable(&mut map, "prototype");
+                    write_attrs_to_legacy_map(&mut map, "prototype", PropAttrs::WRITABLE);
                 }
 
                 let function_obj = new_gc_cell_ptr(ctx, map);
@@ -22691,8 +22597,8 @@ impl<'gc> VM<'gc> {
                             continue;
                         }
                         let key = i.to_string();
-                        mark_nonconfigurable(&mut b.props, &key);
                         mark_readonly(&mut b.props, &key);
+                        mark_nonconfigurable(&mut b.props, &key);
                     }
                     let prop_keys: Vec<String> = b.props.keys().filter(|k| !k.starts_with("__")).cloned().collect();
                     for key in prop_keys {
@@ -22715,8 +22621,8 @@ impl<'gc> VM<'gc> {
                     };
                     let mut b = props.borrow_mut(ctx);
                     for key in keys {
-                        mark_nonconfigurable(&mut *b, &key);
                         mark_readonly(&mut *b, &key);
+                        mark_nonconfigurable(&mut *b, &key);
                     }
                     b.insert("__non_extensible__".to_string(), Value::Boolean(true));
                     b.insert("__frozen__".to_string(), Value::Boolean(true));
@@ -30555,9 +30461,7 @@ impl<'gc> VM<'gc> {
         if let Value::VmObject(ctor_obj) = &segmenter_ctor {
             let mut ctor = ctor_obj.borrow_mut(ctx);
             ctor.insert("prototype".to_string(), segmenter_proto.clone());
-            mark_readonly(&mut *ctor, "prototype");
-            mark_nonenumerable(&mut *ctor, "prototype");
-            mark_nonconfigurable(&mut *ctor, "prototype");
+            write_attrs_to_legacy_map(&mut *ctor, "prototype", PropAttrs::empty());
             ctor.insert("__segments_proto__".to_string(), segments_proto.clone());
             ctor.insert("__segment_iter_proto__".to_string(), segment_iterator_proto.clone());
         }
@@ -34885,8 +34789,7 @@ impl<'gc> VM<'gc> {
         let fn_proto_value = Value::VmObject(new_gc_cell_ptr(ctx, fn_proto));
         let _ = self.mutate_value_props(ctx, value, |props| {
             props.insert("prototype".to_string(), fn_proto_value.clone());
-            mark_nonenumerable(&mut *props, "prototype");
-            mark_nonconfigurable(&mut *props, "prototype");
+            write_attrs_to_legacy_map(&mut *props, "prototype", PropAttrs::WRITABLE);
         });
     }
 

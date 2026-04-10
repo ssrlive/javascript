@@ -3883,15 +3883,11 @@ impl<'gc> VM<'gc> {
         // %TypedArray% constructor (abstract — cannot be called directly)
         let mut typed_array_ctor_map = IndexMap::new();
         typed_array_ctor_map.insert("name".to_string(), Value::from("TypedArray"));
-        mark_readonly(&mut typed_array_ctor_map, "name");
-        mark_nonenumerable(&mut typed_array_ctor_map, "name");
+        write_attrs_to_legacy_map(&mut typed_array_ctor_map, "name", PropAttrs::CONFIGURABLE);
         typed_array_ctor_map.insert("length".to_string(), Value::Number(0.0));
-        mark_readonly(&mut typed_array_ctor_map, "length");
-        mark_nonenumerable(&mut typed_array_ctor_map, "length");
+        write_attrs_to_legacy_map(&mut typed_array_ctor_map, "length", PropAttrs::CONFIGURABLE);
         typed_array_ctor_map.insert("prototype".to_string(), ta_proto.clone());
-        mark_readonly(&mut typed_array_ctor_map, "prototype");
-        mark_nonenumerable(&mut typed_array_ctor_map, "prototype");
-        mark_nonconfigurable(&mut typed_array_ctor_map, "prototype");
+        write_attrs_to_legacy_map(&mut typed_array_ctor_map, "prototype", PropAttrs::empty());
         // Mark as constructor (for is_constructor_value)
         typed_array_ctor_map.insert("__native_id__".to_string(), Value::Boolean(true));
         // TypedArray.from() and TypedArray.of() static methods
@@ -3933,27 +3929,19 @@ impl<'gc> VM<'gc> {
             let mut ctor_map = IndexMap::new();
             ctor_map.insert("__native_id__".to_string(), Value::Number(ctor_id as f64));
             ctor_map.insert("name".to_string(), Value::from(name));
-            mark_readonly(&mut ctor_map, "name");
-            mark_nonenumerable(&mut ctor_map, "name");
+            write_attrs_to_legacy_map(&mut ctor_map, "name", PropAttrs::CONFIGURABLE);
             ctor_map.insert("length".to_string(), Value::Number(3.0));
-            mark_readonly(&mut ctor_map, "length");
-            mark_nonenumerable(&mut ctor_map, "length");
+            write_attrs_to_legacy_map(&mut ctor_map, "length", PropAttrs::CONFIGURABLE);
             ctor_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
-            mark_readonly(&mut ctor_map, "BYTES_PER_ELEMENT");
-            mark_nonenumerable(&mut ctor_map, "BYTES_PER_ELEMENT");
-            mark_nonconfigurable(&mut ctor_map, "BYTES_PER_ELEMENT");
+            write_attrs_to_legacy_map(&mut ctor_map, "BYTES_PER_ELEMENT", PropAttrs::empty());
             // Create per-type prototype with __proto__ → %TypedArray%.prototype
             let mut per_proto = IndexMap::new();
             per_proto.insert("__proto__".to_string(), ta_proto.clone());
             per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
-            mark_readonly(&mut per_proto, "BYTES_PER_ELEMENT");
-            mark_nonenumerable(&mut per_proto, "BYTES_PER_ELEMENT");
-            mark_nonconfigurable(&mut per_proto, "BYTES_PER_ELEMENT");
+            write_attrs_to_legacy_map(&mut per_proto, "BYTES_PER_ELEMENT", PropAttrs::empty());
             let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
             ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
-            mark_readonly(&mut ctor_map, "prototype");
-            mark_nonenumerable(&mut ctor_map, "prototype");
-            mark_nonconfigurable(&mut ctor_map, "prototype");
+            write_attrs_to_legacy_map(&mut ctor_map, "prototype", PropAttrs::empty());
             // XxxArray.__proto__ = %TypedArray%
             ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
             let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));

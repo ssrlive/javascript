@@ -569,8 +569,7 @@ impl<'gc> VM<'gc> {
         iter_proto.insert("next".to_string(), Self::make_native_fn(ctx, BUILTIN_ITERATOR_NEXT, "next", 0.0));
         // Symbol.toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
         iter_proto.insert("@@sym:4".to_string(), Value::from("RegExp String Iterator"));
-        mark_nonenumerable(&mut iter_proto, "@@sym:4");
-        mark_readonly(&mut iter_proto, "@@sym:4");
+        write_attrs_to_legacy_map(&mut iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         iter_proto.insert("__configurable_@@sym:4__".to_string(), Value::Boolean(true));
         // Mark next as non-enumerable, writable, configurable
         mark_nonenumerable(&mut iter_proto, "next");
@@ -648,8 +647,7 @@ impl<'gc> VM<'gc> {
         {
             map.insert("__proto__".to_string(), proto);
         }
-        mark_nonconfigurable(&mut map, "lastIndex");
-        mark_nonenumerable(&mut map, "lastIndex");
+        write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
@@ -693,8 +691,7 @@ impl<'gc> VM<'gc> {
             borrow.insert("__type__".to_string(), Value::from("RegExp"));
             borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
             borrow.insert("lastIndex".to_string(), Value::Number(0.0));
-            mark_nonconfigurable(&mut *borrow, "lastIndex");
-            mark_nonenumerable(&mut *borrow, "lastIndex");
+            write_attrs_to_legacy_map(&mut *borrow, "lastIndex", PropAttrs::WRITABLE);
             return Some(receiver.clone());
         }
         None

@@ -1139,8 +1139,8 @@ impl<'gc> VM<'gc> {
                             fn_proto.insert("__proto__".to_string(), async_gen_proto);
                         }
                         fn_b.insert("prototype".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, fn_proto)));
-                        fn_b.insert(make_nonenumerable_key("prototype"), Value::Boolean(true));
-                        fn_b.insert(make_nonconfigurable_key("prototype"), Value::Boolean(true));
+                        mark_nonenumerable(&mut *fn_b, "prototype");
+                        mark_nonconfigurable(&mut *fn_b, "prototype");
                     }
                     self.stack.push(result);
                     if let Some(thrown) = self.pending_throw.take() {
@@ -1612,7 +1612,7 @@ impl<'gc> VM<'gc> {
                     let mut gt = self.global_this.borrow_mut(ctx);
                     gt.insert(name_str.clone(), val);
                     if is_var_binding {
-                        gt.insert(make_nonconfigurable_key(&name_str), Value::Boolean(true));
+                        mark_nonconfigurable(&mut *gt, &name_str);
                     }
                 }
             }
@@ -1769,9 +1769,9 @@ impl<'gc> VM<'gc> {
                 ns_map.insert("__proto__".to_string(), Value::Null);
                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
                 ns_map.insert("@@sym:4".to_string(), Value::from("Module"));
-                ns_map.insert(make_readonly_key("@@sym:4"), Value::Boolean(true));
-                ns_map.insert(make_nonenumerable_key("@@sym:4"), Value::Boolean(true));
-                ns_map.insert(make_nonconfigurable_key("@@sym:4"), Value::Boolean(true));
+                mark_readonly(&mut ns_map, "@@sym:4");
+                mark_nonenumerable(&mut ns_map, "@@sym:4");
+                mark_nonconfigurable(&mut ns_map, "@@sym:4");
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
                 self.module_locals.insert("__self_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
@@ -1842,9 +1842,9 @@ impl<'gc> VM<'gc> {
                 ns_map.insert("__proto__".to_string(), Value::Null);
                 ns_map.insert("__non_extensible__".to_string(), Value::Boolean(true));
                 ns_map.insert("@@sym:4".to_string(), Value::from("Deferred Module"));
-                ns_map.insert(make_readonly_key("@@sym:4"), Value::Boolean(true));
-                ns_map.insert(make_nonenumerable_key("@@sym:4"), Value::Boolean(true));
-                ns_map.insert(make_nonconfigurable_key("@@sym:4"), Value::Boolean(true));
+                mark_readonly(&mut ns_map, "@@sym:4");
+                mark_nonenumerable(&mut ns_map, "@@sym:4");
+                mark_nonconfigurable(&mut ns_map, "@@sym:4");
                 let ns_obj = Value::VmObject(new_gc_cell_ptr(ctx, ns_map));
                 self.module_locals.insert("__self_deferred_ns_cached__".to_string(), ns_obj.clone());
                 self.module_locals.insert(name_str.clone(), ns_obj.clone());
@@ -1883,9 +1883,7 @@ impl<'gc> VM<'gc> {
                 // Fall through to globalThis for properties defined via Object.defineProperty
                 let has_prop = {
                     let gt = self.global_this.borrow();
-                    gt.contains_key(&name_str)
-                        || gt.contains_key(&format!("__get_{}__", name_str))
-                        || gt.contains_key(&make_getter_key(&name_str))
+                    gt.contains_key(&name_str) || gt.contains_key(&format!("__get_{}__", name_str)) || has_getter(&*gt, &name_str)
                 };
                 if has_prop {
                     let global_obj = Value::VmObject(self.global_this);
@@ -1947,7 +1945,7 @@ impl<'gc> VM<'gc> {
             map.insert(i.to_string(), val);
         }
         map.insert("length".to_string(), Value::Number(arg_count as f64));
-        map.insert(make_nonenumerable_key("length"), Value::Boolean(true));
+        mark_nonenumerable(&mut map, "length");
         map.insert("__type__".to_string(), Value::from("Arguments"));
         if let Some(&is_strict) = self.chunk.fn_strictness.get(&func_ip) {
             if is_strict {
@@ -1958,12 +1956,12 @@ impl<'gc> VM<'gc> {
                     setter: Some(Box::new(thrower)),
                 };
                 map.insert("callee".to_string(), prop);
-                map.insert(make_nonconfigurable_key("callee"), Value::Boolean(true));
-                map.insert(make_nonenumerable_key("callee"), Value::Boolean(true));
+                mark_nonconfigurable(&mut map, "callee");
+                mark_nonenumerable(&mut map, "callee");
             } else {
                 let callee_val = if bp > 0 { self.stack[bp - 1].clone() } else { Value::Undefined };
                 map.insert("callee".to_string(), callee_val);
-                map.insert(make_nonenumerable_key("callee"), Value::Boolean(true));
+                mark_nonenumerable(&mut map, "callee");
             }
         } else {
             let thrower = self.restricted_thrower_intrinsic(ctx);
@@ -1973,8 +1971,8 @@ impl<'gc> VM<'gc> {
                 setter: Some(Box::new(thrower)),
             };
             map.insert("callee".to_string(), prop);
-            map.insert(make_nonconfigurable_key("callee"), Value::Boolean(true));
-            map.insert(make_nonenumerable_key("callee"), Value::Boolean(true));
+            mark_nonconfigurable(&mut map, "callee");
+            mark_nonenumerable(&mut map, "callee");
         }
         let obj_val = Value::VmObject(new_gc_cell_ptr(ctx, map));
         self.frames[frame_idx].arguments_obj = Some(obj_val.clone());
@@ -2033,7 +2031,7 @@ impl<'gc> VM<'gc> {
             }
             let readonly_global = {
                 let gt = self.global_this.borrow();
-                gt.contains_key(&make_readonly_key(&name_str))
+                has_readonly_mark(&*gt, &name_str)
             };
             if readonly_global {
                 if self.current_execution_is_strict() {
@@ -3627,7 +3625,7 @@ impl<'gc> VM<'gc> {
             if !is_generator {
                 let mut proto_borrow = proto_obj.borrow_mut(ctx);
                 proto_borrow.insert("constructor".to_string(), closure_value.clone());
-                proto_borrow.insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+                mark_nonenumerable(&mut *proto_borrow, "constructor");
             }
         }
         self.stack.push(closure_value);
@@ -3727,7 +3725,7 @@ impl<'gc> VM<'gc> {
             // Fall through to globalThis for properties defined via Object.defineProperty
             let has_prop = {
                 let gt = self.global_this.borrow();
-                gt.contains_key(&name) || gt.contains_key(&format!("__get_{}__", name)) || gt.contains_key(&make_getter_key(&name))
+                gt.contains_key(&name) || gt.contains_key(&format!("__get_{}__", name)) || has_getter(&*gt, &name)
             };
             if has_prop {
                 let global_obj = Value::VmObject(self.global_this);
@@ -3886,7 +3884,7 @@ impl<'gc> VM<'gc> {
             let has_private = match &obj {
                 Value::VmObject(map) => {
                     let b = map.borrow();
-                    b.contains_key(&key) || b.contains_key(&make_getter_key(&key)) || b.contains_key(&make_setter_key(&key))
+                    b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
                 }
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                     let overlay = self.get_closure_overlay(&obj);
@@ -3993,7 +3991,7 @@ impl<'gc> VM<'gc> {
                         self.handle_throw(ctx, &thrown)?;
                         return Ok(OpcodeAction::Continue);
                     }
-                } else if borrow.contains_key(&getter_key) || borrow.contains_key(&make_setter_key(&key)) {
+                } else if borrow.contains_key(&getter_key) || has_setter(&*borrow, &key) {
                     // Accessor property exists but getter is undefined
                     drop(borrow);
                     if key.starts_with(PRIVATE_KEY_PREFIX) {
@@ -4597,8 +4595,8 @@ impl<'gc> VM<'gc> {
                 Value::VmObject(map) => {
                     let b = map.borrow();
                     let has_own_key = b.contains_key(&key);
-                    let has_own_setter = b.contains_key(&make_setter_key(&key));
-                    let has_own_getter = b.contains_key(&make_getter_key(&key));
+                    let has_own_setter = has_setter(&*b, &key);
+                    let has_own_getter = has_getter(&*b, &key);
                     if has_own_key && !has_own_getter && !has_own_setter {
                         // Check readonly marker for private methods installed per-instance
                         let ro_key = make_readonly_key(&key);
@@ -5602,8 +5600,8 @@ impl<'gc> VM<'gc> {
                 let ne_key = make_nonenumerable_key(&coerced_key);
                 let mut borrow = map.borrow_mut(ctx);
                 // Remove any prior accessor or property flags for this key
-                borrow.shift_remove(&make_getter_key(&coerced_key));
-                borrow.shift_remove(&make_setter_key(&coerced_key));
+                remove_getter(&mut *borrow, &coerced_key);
+                remove_setter(&mut *borrow, &coerced_key);
                 borrow.insert(coerced_key, val.clone());
                 borrow.insert(ne_key, Value::Boolean(true));
             }
@@ -5619,8 +5617,8 @@ impl<'gc> VM<'gc> {
                 let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
                 let ne_key = make_nonenumerable_key(&coerced_key);
                 let mut borrow = target_props.borrow_mut(ctx);
-                borrow.shift_remove(&make_getter_key(&coerced_key));
-                borrow.shift_remove(&make_setter_key(&coerced_key));
+                remove_getter(&mut *borrow, &coerced_key);
+                remove_setter(&mut *borrow, &coerced_key);
                 borrow.insert(coerced_key, val.clone());
                 borrow.insert(ne_key, Value::Boolean(true));
             }
@@ -5781,7 +5779,7 @@ impl<'gc> VM<'gc> {
             }
             borrow.insert(getter_key, val.clone());
             // Class computed getters are non-enumerable
-            borrow.insert(make_nonenumerable_key(&coerced_key), Value::Boolean(true));
+            mark_nonenumerable(&mut *borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             if coerced_key == "prototype" {
                 let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
@@ -5806,7 +5804,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(getter_key, val.clone());
-            borrow.insert(make_nonenumerable_key(&coerced_key), Value::Boolean(true));
+            mark_nonenumerable(&mut *borrow, &coerced_key);
         }
         self.stack.push(val);
         Ok(OpcodeAction::Continue)
@@ -5862,7 +5860,7 @@ impl<'gc> VM<'gc> {
                 borrow.shift_remove(&coerced_key);
             }
             borrow.insert(setter_key, val.clone());
-            borrow.insert(make_nonenumerable_key(&coerced_key), Value::Boolean(true));
+            mark_nonenumerable(&mut *borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             if coerced_key == "prototype" {
                 let err = self.make_type_error_object(ctx, "Classes may not have a static property named 'prototype'");
@@ -5887,7 +5885,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
             borrow.insert(setter_key, val.clone());
-            borrow.insert(make_nonenumerable_key(&coerced_key), Value::Boolean(true));
+            mark_nonenumerable(&mut *borrow, &coerced_key);
         }
         self.stack.push(val);
         Ok(OpcodeAction::Continue)
@@ -6564,7 +6562,7 @@ impl<'gc> VM<'gc> {
         // Create a new prototype object
         let mut proto = IndexMap::new();
         proto.insert("constructor".to_string(), ctor.clone());
-        proto.insert(make_nonenumerable_key("constructor"), Value::Boolean(true));
+        mark_nonenumerable(&mut proto, "constructor");
         if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
         {
@@ -6819,18 +6817,16 @@ impl<'gc> VM<'gc> {
             let has = match &obj {
                 Value::VmObject(map) => {
                     let b = map.borrow();
-                    b.contains_key(&key) || b.contains_key(&make_getter_key(&key)) || b.contains_key(&make_setter_key(&key))
+                    b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
                 }
                 Value::VmArray(arr) => {
                     let b = arr.borrow();
-                    b.props.contains_key(&key)
-                        || b.props.contains_key(&make_getter_key(&key))
-                        || b.props.contains_key(&make_setter_key(&key))
+                    b.props.contains_key(&key) || has_getter(&b.props, &key) || has_setter(&b.props, &key)
                 }
                 Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
                     let props = self.get_fn_props(ctx, *ip, *arity);
                     let b = props.borrow();
-                    b.contains_key(&key) || b.contains_key(&make_getter_key(&key)) || b.contains_key(&make_setter_key(&key))
+                    b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key)
                 }
                 _ => false,
             };
@@ -6878,7 +6874,7 @@ impl<'gc> VM<'gc> {
                     }
                 } else {
                     let b = map.borrow();
-                    if b.contains_key(&key) || b.contains_key(&make_getter_key(&key)) || b.contains_key(&make_setter_key(&key)) {
+                    if b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key) {
                         true
                     } else {
                         // Check built-in properties based on __type__
@@ -6950,10 +6946,7 @@ impl<'gc> VM<'gc> {
                             && (numeric_index as usize) < borrow.elements.len()
                     } else {
                         let borrow = arr.borrow();
-                        if borrow.props.contains_key(&key)
-                            || borrow.props.contains_key(&make_getter_key(&key))
-                            || borrow.props.contains_key(&make_setter_key(&key))
-                        {
+                        if borrow.props.contains_key(&key) || has_getter(&borrow.props, &key) || has_setter(&borrow.props, &key) {
                             true
                         } else {
                             let proto = borrow.props.get("__proto__").cloned();
@@ -6976,8 +6969,8 @@ impl<'gc> VM<'gc> {
                         let own_present = if idx < logical_len {
                             (!borrow.props.contains_key(&format!("__deleted_{}", idx)) && idx < borrow.elements.len())
                                 || borrow.props.contains_key(&key)
-                                || borrow.props.contains_key(&make_getter_key(&key))
-                                || borrow.props.contains_key(&make_setter_key(&key))
+                                || has_getter(&borrow.props, &key)
+                                || has_setter(&borrow.props, &key)
                         } else {
                             false
                         };
@@ -7003,18 +6996,13 @@ impl<'gc> VM<'gc> {
                                 || self.lookup_proto_chain(proto.as_ref(), &make_setter_key(&key)).is_some()
                         }
                     } else {
-                        borrow.props.contains_key(&key)
-                            || borrow.props.contains_key(&make_getter_key(&key))
-                            || borrow.props.contains_key(&make_setter_key(&key))
+                        borrow.props.contains_key(&key) || has_getter(&borrow.props, &key) || has_setter(&borrow.props, &key)
                     }
                 } else if key == "length" {
                     true
                 } else {
                     let borrow = arr.borrow();
-                    if borrow.props.contains_key(&key)
-                        || borrow.props.contains_key(&make_getter_key(&key))
-                        || borrow.props.contains_key(&make_setter_key(&key))
-                    {
+                    if borrow.props.contains_key(&key) || has_getter(&borrow.props, &key) || has_setter(&borrow.props, &key) {
                         true
                     } else {
                         let proto = borrow.props.get("__proto__").cloned();
@@ -7034,7 +7022,7 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) => {
                 let props = self.get_fn_props_for_value(ctx, &obj).unwrap();
                 let b = props.borrow();
-                if b.contains_key(&key) || b.contains_key(&make_getter_key(&key)) || b.contains_key(&make_setter_key(&key)) {
+                if b.contains_key(&key) || has_getter(&*b, &key) || has_setter(&*b, &key) {
                     true
                 } else {
                     let proto = b.get("__proto__").cloned();
@@ -7791,8 +7779,8 @@ impl<'gc> VM<'gc> {
                         {
                             map.insert("__proto__".to_string(), proto);
                         }
-                        map.insert(make_nonconfigurable_key("lastIndex"), Value::Boolean(true));
-                        map.insert(make_nonenumerable_key("lastIndex"), Value::Boolean(true));
+                        mark_nonconfigurable(&mut map, "lastIndex");
+                        mark_nonenumerable(&mut map, "lastIndex");
                         self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, map)));
                     }
                     BUILTIN_CTOR_DATE => {
@@ -8027,8 +8015,8 @@ impl<'gc> VM<'gc> {
                             if let Some(proto) = ctor_prototype.clone() {
                                 m.insert("__proto__".to_string(), proto);
                             }
-                            m.insert(make_nonconfigurable_key("lastIndex"), Value::Boolean(true));
-                            m.insert(make_nonenumerable_key("lastIndex"), Value::Boolean(true));
+                            mark_nonconfigurable(&mut m, "lastIndex");
+                            mark_nonenumerable(&mut m, "lastIndex");
                             self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
                             return Ok(OpcodeAction::Continue);
                         }
@@ -8614,19 +8602,19 @@ impl<'gc> VM<'gc> {
         let mut b = arr.borrow_mut(ctx);
         for i in 0..len {
             let key = i.to_string();
-            b.props.insert(make_nonconfigurable_key(&key), Value::Boolean(true));
-            b.props.insert(make_readonly_key(&key), Value::Boolean(true));
+            mark_nonconfigurable(&mut b.props, &key);
+            mark_readonly(&mut b.props, &key);
         }
         let prop_keys: Vec<String> = b.props.keys().filter(|k: &&String| !k.starts_with("__")).cloned().collect();
         for key in prop_keys {
-            b.props.insert(make_nonconfigurable_key(&key), Value::Boolean(true));
-            let has_accessor = b.props.contains_key(&make_getter_key(&key)) || b.props.contains_key(&make_setter_key(&key));
+            mark_nonconfigurable(&mut b.props, &key);
+            let has_accessor = has_getter(&b.props, &key) || has_setter(&b.props, &key);
             if !has_accessor {
-                b.props.insert(make_readonly_key(&key), Value::Boolean(true));
+                mark_readonly(&mut b.props, &key);
             }
         }
-        b.props.insert(make_readonly_key("length"), Value::Boolean(true));
-        b.props.insert(make_nonconfigurable_key("length"), Value::Boolean(true));
+        mark_readonly(&mut b.props, "length");
+        mark_nonconfigurable(&mut b.props, "length");
         b.props.insert("__non_extensible__".to_string(), Value::Boolean(true));
         b.props.insert("__frozen__".to_string(), Value::Boolean(true));
     }

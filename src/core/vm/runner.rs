@@ -3934,9 +3934,9 @@ impl<'gc> VM<'gc> {
                 }
                 // Check for getter first
                 let getter_key = make_getter_key(&key);
-                if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = borrow.get(&getter_key) {
+                if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = lookup_getter(&*borrow, &key) {
                     let ip = *ip;
-                    let upvals = if let Some(Value::VmClosure(_, _, ups)) = borrow.get(&getter_key) {
+                    let upvals = if let Some(Value::VmClosure(_, _, ups)) = lookup_getter(&*borrow, &key) {
                         (**ups).clone()
                     } else {
                         Vec::new()
@@ -4028,8 +4028,7 @@ impl<'gc> VM<'gc> {
                         }
                     } else {
                         // Setter-only accessor: if __set_<key> exists but no __get_<key>, return undefined
-                        let setter_key = make_setter_key(&key);
-                        if borrow.contains_key(&setter_key) {
+                        if has_setter(&*borrow, &key) {
                             drop(borrow);
                             if key.starts_with(PRIVATE_KEY_PREFIX) {
                                 let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));

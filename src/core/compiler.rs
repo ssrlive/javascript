@@ -1,7 +1,5 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::property_descriptor::{
-    make_getter_key, make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key,
-};
+use crate::core::property_descriptor::{make_getter_key, make_nonenumerable_key, make_readonly_key, make_setter_key};
 use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
     StatementKind,

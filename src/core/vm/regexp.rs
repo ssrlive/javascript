@@ -582,7 +582,7 @@ impl<'gc> VM<'gc> {
     /// so cross-realm identity checks can find the correct %RegExpPrototype%.
     pub(super) fn stamp_regexp_getters_with_home_proto(ctx: &GcContext<'gc>, proto: VmObjectHandle<'gc>) {
         let proto_val = Value::VmObject(proto);
-        let getter_keys: Vec<String> = proto.borrow().keys().filter(|k| k.starts_with("__get_")).cloned().collect();
+        let getter_keys: Vec<String> = proto.borrow().keys().filter(|k| k.starts_with(GETTER_PREFIX)).cloned().collect();
         for key in getter_keys {
             if let Some(Value::VmObject(getter_obj)) = proto.borrow().get(&key) {
                 getter_obj
@@ -2141,7 +2141,7 @@ impl<'gc> VM<'gc> {
 
                 // Update lastIndex for global/sticky
                 if is_global || is_sticky {
-                    if matches!(re_obj.borrow().get("__readonly_lastIndex__"), Some(Value::Boolean(true))) {
+                    if matches!(re_obj.borrow().get(&make_readonly_key("lastIndex")), Some(Value::Boolean(true))) {
                         self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
                         return Value::Null;
                     }
@@ -2154,7 +2154,7 @@ impl<'gc> VM<'gc> {
             }
             _ => {
                 if is_global || is_sticky {
-                    if matches!(re_obj.borrow().get("__readonly_lastIndex__"), Some(Value::Boolean(true))) {
+                    if matches!(re_obj.borrow().get(&make_readonly_key("lastIndex")), Some(Value::Boolean(true))) {
                         self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
                         return Value::Null;
                     }

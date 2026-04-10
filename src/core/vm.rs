@@ -1,7 +1,7 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
-    PropAttrs, PropDesc, attrs_from_legacy_map, desc_from_legacy_map, make_getter_key, make_nonconfigurable_key, make_nonenumerable_key,
-    make_readonly_key, make_setter_key, write_attrs_to_legacy_map,
+    GETTER_PREFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map, desc_from_legacy_map, make_getter_key,
+    make_nonconfigurable_key, make_nonenumerable_key, make_readonly_key, make_setter_key, write_attrs_to_legacy_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -8858,8 +8858,8 @@ impl<'gc> VM<'gc> {
                         let ne_key = make_nonenumerable_key(&key);
                         let is_own = if key == "__proto__" {
                             b.contains_key(OWN_DUNDER_PROTO_DATA_KEY)
-                                || b.contains_key("__get___proto__")
-                                || b.contains_key("__set___proto__")
+                                || b.contains_key(&make_getter_key("__proto__"))
+                                || b.contains_key(&make_setter_key("__proto__"))
                         } else if key == "__type__" {
                             false
                         } else {
@@ -10615,7 +10615,7 @@ impl<'gc> VM<'gc> {
                         .cloned()
                         .collect();
                     for k in b.keys() {
-                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                        if let Some(name) = k.strip_prefix(GETTER_PREFIX).or_else(|| k.strip_prefix(SETTER_PREFIX))
                             && !keys.contains(&name.to_string())
                         {
                             keys.push(name.to_string());
@@ -10760,7 +10760,7 @@ impl<'gc> VM<'gc> {
                     }
                     let mut accessor_keys: Vec<String> = Vec::new();
                     for k in b.keys() {
-                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                        if let Some(name) = k.strip_prefix(GETTER_PREFIX).or_else(|| k.strip_prefix(SETTER_PREFIX))
                             && !accessor_keys.contains(&name.to_string())
                         {
                             accessor_keys.push(name.to_string());
@@ -10803,7 +10803,7 @@ impl<'gc> VM<'gc> {
                     }
                     let mut accessor_keys: Vec<String> = Vec::new();
                     for k in b.props.keys() {
-                        if let Some(name) = k.strip_prefix("__get_").or_else(|| k.strip_prefix("__set_"))
+                        if let Some(name) = k.strip_prefix(GETTER_PREFIX).or_else(|| k.strip_prefix(SETTER_PREFIX))
                             && !accessor_keys.contains(&name.to_string())
                         {
                             accessor_keys.push(name.to_string());
@@ -12766,8 +12766,8 @@ impl<'gc> VM<'gc> {
                 Value::VmObject(map) => {
                     let b = map.borrow();
                     b.contains_key(OWN_DUNDER_PROTO_DATA_KEY)
-                        || b.contains_key("__get___proto__")
-                        || b.contains_key("__set___proto__")
+                        || b.contains_key(&make_getter_key("__proto__"))
+                        || b.contains_key(&make_setter_key("__proto__"))
                         || matches!(b.get("__proto__"), Some(Value::Property { .. }))
                 }
                 _ => false,
@@ -12844,8 +12844,8 @@ impl<'gc> VM<'gc> {
             let key_exists = if key == "__proto__" {
                 borrow.contains_key(OWN_DUNDER_PROTO_DATA_KEY)
                     || matches!(borrow.get("__proto__"), Some(Value::Property { .. }))
-                    || borrow.contains_key("__get___proto__")
-                    || borrow.contains_key("__set___proto__")
+                    || borrow.contains_key(&make_getter_key("__proto__"))
+                    || borrow.contains_key(&make_setter_key("__proto__"))
             } else {
                 borrow.contains_key(key) || borrow.contains_key(&make_getter_key(&key)) || borrow.contains_key(&make_setter_key(&key))
             };
@@ -13106,7 +13106,7 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
             } else {
                 let mut b = map.borrow_mut(ctx);
-                if let Some(base_key) = key.strip_prefix("__get_").or_else(|| key.strip_prefix("__set_")) {
+                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX).or_else(|| key.strip_prefix(SETTER_PREFIX)) {
                     let real_base = if base_key == "__proto__" {
                         OWN_DUNDER_PROTO_DATA_KEY
                     } else {
@@ -13131,7 +13131,7 @@ impl<'gc> VM<'gc> {
             Ok(val.clone())
         } else if let Value::VmArray(arr) = &obj {
             if key == "length" {
-                let readonly_length = matches!(arr.borrow().props.get("__readonly_length__"), Some(Value::Boolean(true)));
+                let readonly_length = matches!(arr.borrow().props.get(&make_readonly_key("length")), Some(Value::Boolean(true)));
                 let frozen = matches!(arr.borrow().props.get("__frozen__"), Some(Value::Boolean(true)));
                 if readonly_length || frozen {
                     let err = self.make_type_error_object(ctx, "Cannot assign to read only property 'length' of array");
@@ -14205,8 +14205,8 @@ impl<'gc> VM<'gc> {
                                 // Don't overwrite accessor properties set via Object.defineProperty
                                 // Only update constructor if it already exists as an own property
                                 proto_borrow.contains_key("constructor")
-                                    && !proto_borrow.contains_key("__get_constructor")
-                                    && !proto_borrow.contains_key("__set_constructor")
+                                    && !proto_borrow.contains_key(&make_getter_key("constructor"))
+                                    && !proto_borrow.contains_key(&make_setter_key("constructor"))
                                     && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                                     && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, obj))
                             };
@@ -14480,8 +14480,8 @@ impl<'gc> VM<'gc> {
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
                                 proto_borrow.contains_key("constructor")
-                                    && !proto_borrow.contains_key("__get_constructor")
-                                    && !proto_borrow.contains_key("__set_constructor")
+                                    && !proto_borrow.contains_key(&make_getter_key("constructor"))
+                                    && !proto_borrow.contains_key(&make_setter_key("constructor"))
                                     && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                                     && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                             };
@@ -14541,8 +14541,8 @@ impl<'gc> VM<'gc> {
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
                                 proto_borrow.contains_key("constructor")
-                                    && !proto_borrow.contains_key("__get_constructor")
-                                    && !proto_borrow.contains_key("__set_constructor")
+                                    && !proto_borrow.contains_key(&make_getter_key("constructor"))
+                                    && !proto_borrow.contains_key(&make_setter_key("constructor"))
                                     && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                                     && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                             };
@@ -14724,8 +14724,8 @@ impl<'gc> VM<'gc> {
                         // (auto-created prototype). Don't add it to user-assigned prototypes.
                         // Don't overwrite accessor properties set via Object.defineProperty
                         proto_borrow.contains_key("constructor")
-                            && !proto_borrow.contains_key("__get_constructor")
-                            && !proto_borrow.contains_key("__set_constructor")
+                            && !proto_borrow.contains_key(&make_getter_key("constructor"))
+                            && !proto_borrow.contains_key(&make_setter_key("constructor"))
                             && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                             && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
@@ -14781,8 +14781,8 @@ impl<'gc> VM<'gc> {
                         // Only update constructor if it already exists as an own property
                         // Don't overwrite accessor properties set via Object.defineProperty
                         proto_borrow.contains_key("constructor")
-                            && !proto_borrow.contains_key("__get_constructor")
-                            && !proto_borrow.contains_key("__set_constructor")
+                            && !proto_borrow.contains_key(&make_getter_key("constructor"))
+                            && !proto_borrow.contains_key(&make_setter_key("constructor"))
                             && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                             && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
@@ -17078,7 +17078,7 @@ impl<'gc> VM<'gc> {
             map_props_borrow.insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
             map_props_borrow.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_MAP_GROUPBY));
             map_props_borrow.insert(make_nonenumerable_key("groupBy"), Value::Boolean(true));
-            if !map_props_borrow.contains_key("__get_@@sym:5") {
+            if !map_props_borrow.contains_key(&make_getter_key("@@sym:5")) {
                 Self::insert_species_getter(&mut map_props_borrow, ctx);
             }
         }
@@ -17086,7 +17086,7 @@ impl<'gc> VM<'gc> {
             let set_props = self.get_native_fn_props(ctx, BUILTIN_CTOR_SET);
             let mut set_props_borrow = set_props.borrow_mut(ctx);
             set_props_borrow.insert("__proto__".to_string(), Value::VmObject(fn_proto_obj));
-            if !set_props_borrow.contains_key("__get_@@sym:5") {
+            if !set_props_borrow.contains_key(&make_getter_key("@@sym:5")) {
                 Self::insert_species_getter(&mut set_props_borrow, ctx);
             }
         }
@@ -19610,7 +19610,7 @@ impl<'gc> VM<'gc> {
                 let new_target = self.new_target_stack.last().cloned().unwrap_or(Value::Undefined);
                 let selected_proto = {
                     let proto_candidate = if let Value::VmObject(nt_obj) = &new_target {
-                        let getter = nt_obj.borrow().get("__get_prototype").cloned();
+                        let getter = nt_obj.borrow().get(&make_getter_key("prototype")).cloned();
                         if let Some(getter_fn) = getter {
                             self.invoke_getter_with_receiver(ctx, &getter_fn, &new_target)
                         } else {
@@ -20171,7 +20171,7 @@ impl<'gc> VM<'gc> {
 
                 let selected_proto = {
                     let proto_candidate = if let Value::VmObject(nt_obj) = &new_target {
-                        let getter = nt_obj.borrow().get("__get_prototype").cloned();
+                        let getter = nt_obj.borrow().get(&make_getter_key("prototype")).cloned();
                         if let Some(getter_fn) = getter {
                             self.invoke_getter_with_receiver(ctx, &getter_fn, &new_target)
                         } else {
@@ -22503,10 +22503,10 @@ impl<'gc> VM<'gc> {
                                         .cloned()
                                         .collect();
                                     for k in b.keys() {
-                                        let accessor_key = if let Some(rest) = k.strip_prefix("__get_") {
+                                        let accessor_key = if let Some(rest) = k.strip_prefix(GETTER_PREFIX) {
                                             Some(rest.to_string())
                                         } else {
-                                            k.strip_prefix("__set_").map(|rest| rest.to_string())
+                                            k.strip_prefix(SETTER_PREFIX).map(|rest| rest.to_string())
                                         };
                                         if let Some(ak) = accessor_key
                                             && !keys.contains(&ak)
@@ -22788,8 +22788,8 @@ impl<'gc> VM<'gc> {
                         let borrow = map.borrow();
                         let has = if key == "__proto__" {
                             borrow.contains_key(OWN_DUNDER_PROTO_DATA_KEY)
-                                || borrow.contains_key("__get___proto__")
-                                || borrow.contains_key("__set___proto__")
+                                || borrow.contains_key(&make_getter_key("__proto__"))
+                                || borrow.contains_key(&make_setter_key("__proto__"))
                         } else if key == "__type__" {
                             false
                         } else {
@@ -23645,7 +23645,7 @@ impl<'gc> VM<'gc> {
                             } else {
                                 borrow.elements.len() as f64
                             };
-                            let writable = !matches!(borrow.props.get("__readonly_length__"), Some(Value::Boolean(true)));
+                            let writable = !matches!(borrow.props.get(&make_readonly_key("length")), Some(Value::Boolean(true)));
                             self.make_data_descriptor_object(ctx, &len.into(), writable, false, false)
                         } else {
                             // For TypedArrays, use canonical_numeric_index_string to decide
@@ -25638,8 +25638,8 @@ impl<'gc> VM<'gc> {
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
                             .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -25761,8 +25761,8 @@ impl<'gc> VM<'gc> {
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
                             .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -26053,8 +26053,8 @@ impl<'gc> VM<'gc> {
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<u64>().ok())
                             .or_else(|| prop_key.parse::<u64>().ok())
-                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<u64>().ok()))
-                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<u64>().ok()));
+                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<u64>().ok()))
+                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<u64>().ok()));
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -26151,8 +26151,8 @@ impl<'gc> VM<'gc> {
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
                             .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -27379,8 +27379,8 @@ impl<'gc> VM<'gc> {
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
                             .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix("__get_").and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix("__set_").and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
+                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -29982,8 +29982,8 @@ impl<'gc> VM<'gc> {
                     let borrow = map.borrow();
                     let has = if key == "__proto__" {
                         borrow.contains_key(OWN_DUNDER_PROTO_DATA_KEY)
-                            || borrow.contains_key("__get___proto__")
-                            || borrow.contains_key("__set___proto__")
+                            || borrow.contains_key(&make_getter_key("__proto__"))
+                            || borrow.contains_key(&make_setter_key("__proto__"))
                     } else if key == "__type__" {
                         false
                     } else if let Some(Value::String(type_name_u16)) = borrow.get("__type__") {
@@ -30483,28 +30483,36 @@ impl<'gc> VM<'gc> {
                     Value::VmFunction(ip, arity) => {
                         let props = self.get_fn_props(ctx, *ip, *arity);
                         let borrow = props.borrow();
-                        borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
+                        borrow.contains_key("length")
+                            || borrow.contains_key(&make_getter_key("length"))
+                            || borrow.contains_key(&make_setter_key("length"))
                     }
                     Value::VmClosure(ip, arity, _) => {
                         let shared = self.get_fn_props(ctx, *ip, *arity);
                         let overlay = self.get_closure_overlay(receiver);
                         overlay.is_some_and(|props| {
                             let borrow = props.borrow();
-                            borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
+                            borrow.contains_key("length")
+                                || borrow.contains_key(&make_getter_key("length"))
+                                || borrow.contains_key(&make_setter_key("length"))
                         }) || {
                             let borrow = shared.borrow();
-                            borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
+                            borrow.contains_key("length")
+                                || borrow.contains_key(&make_getter_key("length"))
+                                || borrow.contains_key(&make_setter_key("length"))
                         }
                     }
                     Value::VmObject(obj) => {
                         let borrow = obj.borrow();
-                        borrow.contains_key("length") || borrow.contains_key("__get_length") || borrow.contains_key("__set_length")
+                        borrow.contains_key("length")
+                            || borrow.contains_key(&make_getter_key("length"))
+                            || borrow.contains_key(&make_setter_key("length"))
                     }
                     Value::VmArray(arr) => {
                         let borrow = arr.borrow();
                         borrow.props.contains_key("length")
-                            || borrow.props.contains_key("__get_length")
-                            || borrow.props.contains_key("__set_length")
+                            || borrow.props.contains_key(&make_getter_key("length"))
+                            || borrow.props.contains_key(&make_setter_key("length"))
                     }
                     _ => false,
                 };
@@ -31452,9 +31460,9 @@ impl<'gc> VM<'gc> {
                 None
             } else if raw_key == OWN_DUNDER_PROTO_DATA_KEY {
                 Some("__proto__")
-            } else if let Some(rest) = raw_key.strip_prefix("__get_") {
+            } else if let Some(rest) = raw_key.strip_prefix(GETTER_PREFIX) {
                 if rest.starts_with("@@sym:") { None } else { Some(rest) }
-            } else if let Some(rest) = raw_key.strip_prefix("__set_") {
+            } else if let Some(rest) = raw_key.strip_prefix(SETTER_PREFIX) {
                 if rest.starts_with("@@sym:") { None } else { Some(rest) }
             } else if raw_key.starts_with("__")
                 && (raw_key == "__origin_global"
@@ -31538,9 +31546,9 @@ impl<'gc> VM<'gc> {
             if raw_key.starts_with("@@sym:") {
                 continue;
             }
-            let candidate = if let Some(rest) = raw_key.strip_prefix("__get_") {
+            let candidate = if let Some(rest) = raw_key.strip_prefix(GETTER_PREFIX) {
                 if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
-            } else if let Some(rest) = raw_key.strip_prefix("__set_") {
+            } else if let Some(rest) = raw_key.strip_prefix(SETTER_PREFIX) {
                 if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
             } else if raw_key.starts_with("__")
                 && (raw_key.ends_with("__") || raw_key.starts_with("__brand_") || raw_key.starts_with("__deleted_"))
@@ -32279,7 +32287,7 @@ impl<'gc> VM<'gc> {
 
         if key == "length" && !is_typed_array {
             let old_len = self.array_length_u64(&b);
-            let old_len_writable = !matches!(b.props.get("__readonly_length__"), Some(Value::Boolean(true)));
+            let old_len_writable = !matches!(b.props.get(&make_readonly_key("length")), Some(Value::Boolean(true)));
 
             if is_accessor {
                 self.throw_type_error(ctx, "Cannot redefine array length as accessor property");
@@ -32337,9 +32345,9 @@ impl<'gc> VM<'gc> {
                 for prop_key in b.props.keys() {
                     let parsed = if let Ok(idx) = prop_key.parse::<u64>() {
                         Some(idx)
-                    } else if let Some(rest) = prop_key.strip_prefix("__get_") {
+                    } else if let Some(rest) = prop_key.strip_prefix(GETTER_PREFIX) {
                         rest.parse::<u64>().ok()
-                    } else if let Some(rest) = prop_key.strip_prefix("__set_") {
+                    } else if let Some(rest) = prop_key.strip_prefix(SETTER_PREFIX) {
                         rest.parse::<u64>().ok()
                     } else if let Some(rest) = prop_key.strip_prefix("__nonconfigurable_").and_then(|s| s.strip_suffix("__")) {
                         rest.parse::<u64>().ok()
@@ -32393,7 +32401,7 @@ impl<'gc> VM<'gc> {
                 if !*w {
                     b.props.insert(make_readonly_key("length"), Value::Boolean(true));
                 } else {
-                    b.props.shift_remove("__readonly_length__");
+                    b.props.shift_remove(&make_readonly_key("length"));
                 }
             }
             return true;
@@ -32405,7 +32413,7 @@ impl<'gc> VM<'gc> {
             let is_array_index = idx_u64 < 4294967295;
             if is_array_index {
                 let old_len = self.array_length_u64(&b);
-                let old_len_writable = !matches!(b.props.get("__readonly_length__"), Some(Value::Boolean(true)));
+                let old_len_writable = !matches!(b.props.get(&make_readonly_key("length")), Some(Value::Boolean(true)));
                 let idx_key = key.to_string();
                 let own_exists = (idx_u64 as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx_u64))
                     || b.props.contains_key(&idx_key)
@@ -35269,8 +35277,8 @@ impl<'gc> VM<'gc> {
                 .strip_prefix("__deleted_")
                 .and_then(parse_array_index)
                 .or_else(|| parse_array_index(prop_key))
-                .or_else(|| prop_key.strip_prefix("__get_").and_then(parse_array_index))
-                .or_else(|| prop_key.strip_prefix("__set_").and_then(parse_array_index));
+                .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(parse_array_index))
+                .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(parse_array_index));
             if let Some(idx) = idx_opt {
                 len = len.max(idx.saturating_add(1));
             }
@@ -35299,8 +35307,8 @@ impl<'gc> VM<'gc> {
         }
         for prop_key in arr.props.keys() {
             let idx_opt = parse_array_index(prop_key)
-                .or_else(|| prop_key.strip_prefix("__get_").and_then(parse_array_index))
-                .or_else(|| prop_key.strip_prefix("__set_").and_then(parse_array_index));
+                .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(parse_array_index))
+                .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(parse_array_index));
             if let Some(idx) = idx_opt {
                 indices.insert(idx);
             }

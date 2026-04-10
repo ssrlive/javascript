@@ -3818,25 +3818,30 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "typedarray.subarray", "subarray", 2.0, false),
         );
         // TypedArray-specific getters: buffer, byteLength, byteOffset, length
-        ta_proto_map.insert(
-            make_getter_key("buffer"),
+        set_getter(
+            &mut ta_proto_map,
+            "buffer",
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_buffer", "get buffer", 0.0, false),
         );
-        ta_proto_map.insert(
-            make_getter_key("byteLength"),
+        set_getter(
+            &mut ta_proto_map,
+            "byteLength",
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_byteLength", "get byteLength", 0.0, false),
         );
-        ta_proto_map.insert(
-            make_getter_key("byteOffset"),
+        set_getter(
+            &mut ta_proto_map,
+            "byteOffset",
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_byteOffset", "get byteOffset", 0.0, false),
         );
-        ta_proto_map.insert(
-            make_getter_key("length"),
+        set_getter(
+            &mut ta_proto_map,
+            "length",
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_length", "get length", 0.0, false),
         );
         // Symbol.toStringTag getter
-        ta_proto_map.insert(
-            make_getter_key("@@sym:4"),
+        set_getter(
+            &mut ta_proto_map,
+            "@@sym:4",
             Self::make_host_fn_with_name_len(ctx, "typedarray.get_toStringTag", "get [Symbol.toStringTag]", 0.0, false),
         );
         // Mark getter properties as non-enumerable and configurable

@@ -14656,17 +14656,15 @@ impl<'gc> VM<'gc> {
                 let props = self.get_fn_props(ctx, *ip, *arity);
                 let borrow = props.borrow();
                 let value = borrow.get(key).cloned();
-                let getter_key = make_getter_key(&key);
-                let getter_fn = borrow.get(&getter_key).cloned();
-                let setter_key = make_setter_key(&key);
-                let has_setter = borrow.contains_key(&setter_key);
+                let getter_fn = lookup_getter(&*borrow, &key).cloned();
+                let has_setter_prop = has_setter(&*borrow, &key);
                 let proto = borrow.get("__proto__").cloned();
                 drop(borrow);
                 if let Some(gf) = getter_fn {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
                 // Setter-only accessor: no getter means reads return undefined
-                if has_setter {
+                if has_setter_prop {
                     return Value::Undefined;
                 }
                 if key == "prototype"
@@ -14679,7 +14677,7 @@ impl<'gc> VM<'gc> {
                         // Don't overwrite accessor properties set via Object.defineProperty
                         proto_borrow.contains_key("constructor")
                             && !has_getter(&proto_borrow, "constructor")
-                            && !proto_borrow.contains_key(&make_setter_key("constructor"))
+                            && !has_setter(&proto_borrow, "constructor")
                             && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                             && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
@@ -14711,12 +14709,10 @@ impl<'gc> VM<'gc> {
                 let value = overlay
                     .and_then(|o| o.borrow().get(key).cloned())
                     .or_else(|| shared.borrow().get(key).cloned());
-                let getter_key = make_getter_key(&key);
                 let getter_fn = overlay
-                    .and_then(|o| o.borrow().get(&getter_key).cloned())
-                    .or_else(|| shared.borrow().get(&getter_key).cloned());
-                let setter_key = make_setter_key(&key);
-                let has_setter = overlay.is_some_and(|o| o.borrow().contains_key(&setter_key)) || shared.borrow().contains_key(&setter_key);
+                    .and_then(|o| lookup_getter(&*o.borrow(), &key).cloned())
+                    .or_else(|| lookup_getter(&*shared.borrow(), &key).cloned());
+                let has_setter_prop = overlay.is_some_and(|o| has_setter(&*o.borrow(), &key)) || has_setter(&*shared.borrow(), &key);
                 let proto = overlay
                     .and_then(|o| o.borrow().get("__proto__").cloned())
                     .or_else(|| shared.borrow().get("__proto__").cloned());
@@ -14724,7 +14720,7 @@ impl<'gc> VM<'gc> {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
                 // Setter-only accessor: no getter means reads return undefined
-                if has_setter {
+                if has_setter_prop {
                     return Value::Undefined;
                 }
                 if key == "prototype"
@@ -14736,7 +14732,7 @@ impl<'gc> VM<'gc> {
                         // Don't overwrite accessor properties set via Object.defineProperty
                         proto_borrow.contains_key("constructor")
                             && !has_getter(&proto_borrow, "constructor")
-                            && !proto_borrow.contains_key(&make_setter_key("constructor"))
+                            && !has_setter(&proto_borrow, "constructor")
                             && !matches!(proto_borrow.get("constructor"), Some(Value::Property { .. }))
                             && !matches!(proto_borrow.get("constructor"), Some(existing) if self.values_same(existing, &current_fn))
                     };
@@ -14764,16 +14760,14 @@ impl<'gc> VM<'gc> {
                 let props = self.get_native_fn_props(ctx, *id);
                 let borrow = props.borrow();
                 let value = borrow.get(key).cloned();
-                let getter_key = make_getter_key(&key);
-                let getter_fn = borrow.get(&getter_key).cloned();
-                let setter_key = make_setter_key(&key);
-                let has_setter = borrow.contains_key(&setter_key);
+                let getter_fn = lookup_getter(&*borrow, &key).cloned();
+                let has_setter_prop = has_setter(&*borrow, &key);
                 let proto = borrow.get("__proto__").cloned();
                 drop(borrow);
                 if let Some(gf) = getter_fn {
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
-                if has_setter {
+                if has_setter_prop {
                     return Value::Undefined;
                 }
                 match value {
@@ -14802,8 +14796,7 @@ impl<'gc> VM<'gc> {
                             return v.clone();
                         }
                         // Fall through to prototype getter
-                        let getter_key = make_getter_key("length");
-                        if let Some(gf) = borrow.props.get(&getter_key).cloned() {
+                        if let Some(gf) = lookup_getter(&borrow.props, "length").cloned() {
                             drop(borrow);
                             return self.invoke_getter_with_receiver(ctx, &gf, obj);
                         }
@@ -14820,8 +14813,7 @@ impl<'gc> VM<'gc> {
                     return Value::Number(borrow.elements.len() as f64);
                 }
                 // Check accessor properties
-                let getter_key = make_getter_key(&key);
-                if let Some(gf) = borrow.props.get(&getter_key).cloned() {
+                if let Some(gf) = lookup_getter(&borrow.props, &key).cloned() {
                     drop(borrow);
                     return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
@@ -14867,8 +14859,7 @@ impl<'gc> VM<'gc> {
                         return v.clone();
                     }
                 }
-                let setter_key = make_setter_key(&key);
-                if borrow.props.contains_key(&setter_key) {
+                if has_setter(&borrow.props, &key) {
                     return Value::Undefined;
                 }
                 let mut proto = borrow.props.get("__proto__").cloned();
@@ -15104,7 +15095,6 @@ impl<'gc> VM<'gc> {
     /// Walk the prototype chain starting from `obj` looking for a setter for `key`.
     /// Returns the setter function if found.
     fn lookup_setter_in_chain(&self, obj: &Value<'gc>, key: &str) -> Option<Value<'gc>> {
-        let setter_key = make_setter_key(&key);
         let mut current = Some(obj.clone());
         let mut depth = 0;
         while let Some(ref p) = current {
@@ -15120,7 +15110,7 @@ impl<'gc> VM<'gc> {
                         return Some((**s).clone());
                     }
                     // Check for __set_key convention
-                    if let Some(setter_fn) = borrow.get(&setter_key) {
+                    if let Some(setter_fn) = lookup_setter(&*borrow, key) {
                         return Some(setter_fn.clone());
                     }
                     let next = borrow.get("__proto__").cloned();

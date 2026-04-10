@@ -549,18 +549,21 @@ impl<'gc> VM<'gc> {
     pub(super) fn dataview_init_prototype(&mut self, ctx: &GcContext<'gc>) {
         let mut dv_proto = IndexMap::new();
         Self::insert_property_with_attributes(&mut dv_proto, "@@sym:4", &Value::from("DataView"), false, false, true);
-        dv_proto.insert(
-            make_getter_key("buffer"),
+        set_getter(
+            &mut dv_proto,
+            "buffer",
             Self::make_host_fn_with_name_len(ctx, "dataview.get_buffer", "get buffer", 0.0, false),
         );
         mark_nonenumerable(&mut dv_proto, "buffer");
-        dv_proto.insert(
-            make_getter_key("byteLength"),
+        set_getter(
+            &mut dv_proto,
+            "byteLength",
             Self::make_host_fn_with_name_len(ctx, "dataview.get_byteLength", "get byteLength", 0.0, false),
         );
         mark_nonenumerable(&mut dv_proto, "byteLength");
-        dv_proto.insert(
-            make_getter_key("byteOffset"),
+        set_getter(
+            &mut dv_proto,
+            "byteOffset",
             Self::make_host_fn_with_name_len(ctx, "dataview.get_byteOffset", "get byteOffset", 0.0, false),
         );
         mark_nonenumerable(&mut dv_proto, "byteOffset");

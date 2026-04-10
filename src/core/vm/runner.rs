@@ -4753,10 +4753,12 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let mut borrow = map.borrow_mut(ctx);
-                remove_property_completely(&mut borrow, &key);
                 if key == "__proto__" {
+                    // Only clear the own-data slot; preserve the internal [[Prototype]] chain entry.
+                    borrow.shift_remove(OWN_DUNDER_PROTO_DATA_KEY);
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
+                    remove_property_completely(&mut borrow, &key);
                     borrow.insert(key, val.clone());
                 }
                 if let Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) = &val {
@@ -5655,10 +5657,13 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let mut borrow = map.borrow_mut(ctx);
-                remove_property_completely(&mut borrow, &coerced_key);
                 if coerced_key == "__proto__" {
+                    // Only clear the own-data slot; do NOT remove __proto__
+                    // (that is the internal [[Prototype]] chain entry).
+                    borrow.shift_remove(OWN_DUNDER_PROTO_DATA_KEY);
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
+                    remove_property_completely(&mut borrow, &coerced_key);
                     borrow.insert(coerced_key, val.clone());
                 }
             }

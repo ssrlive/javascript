@@ -1,6 +1,6 @@
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
-    GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, SETTER_PREFIX, attrs_from_legacy_map,
+    GETTER_PREFIX, NONCONFIGURABLE_PREFIX, NONCONFIGURABLE_SUFFIX, PropAttrs, PropDesc, PropKind, SETTER_PREFIX, attrs_from_legacy_map,
     desc_from_legacy_map, get_getter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter,
     lookup_getter, lookup_setter, make_getter_key, make_readonly_key, make_setter_key, mark_nonconfigurable, mark_nonenumerable,
     mark_readonly, read_attrs_from_legacy_map, remove_getter, remove_property_completely, remove_setter, set_getter, set_setter,
@@ -12756,6 +12756,23 @@ impl<'gc> VM<'gc> {
             );
             let receiver_is_proxy = matches!(&setter_receiver, Value::VmObject(map) if map.borrow().contains_key("__proxy_target__"));
 
+            // Proxy receiver: delegate to Object.setPrototypeOf which invokes the
+            // setPrototypeOf trap (spec §10.5.2).
+            if receiver_is_proxy && !val.is_symbol_value() {
+                if matches!(
+                    val,
+                    Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                ) {
+                    let _result = self.call_builtin(ctx, BUILTIN_OBJECT_SETPROTOTYPEOF, &[setter_receiver.clone(), val.clone()]);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                    }
+                    return Ok(val.clone());
+                }
+                // Object.prototype.__proto__ setter ignores primitive values.
+                return Ok(val.clone());
+            }
+
             if receiver_is_object_like && !receiver_is_proxy && !receiver_proto_is_proxy && !val.is_symbol_value() {
                 if matches!(
                     val,
@@ -23427,8 +23444,12 @@ impl<'gc> VM<'gc> {
                                 let a = attrs_from_legacy_map(&borrow, &key);
                                 return self.make_descriptor_object_from_desc(ctx, &PropDesc::data(val.clone(), a));
                             }
-                            // Fall back to accessor lookup (Value::Property or __get_/__set_)
-                            if let Some(desc) = desc_from_legacy_map(&borrow, "__proto__") {
+                            // Fall back to accessor lookup only (Value::Property or __get_/__set_).
+                            // Plain data at "__proto__" is the internal [[Prototype]] slot,
+                            // NOT an own property.
+                            if let Some(desc) = desc_from_legacy_map(&borrow, "__proto__")
+                                && matches!(desc.kind, PropKind::Accessor { .. })
+                            {
                                 return self.make_descriptor_object_from_desc(ctx, &desc);
                             }
                             return Value::Undefined;

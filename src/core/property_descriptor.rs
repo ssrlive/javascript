@@ -497,6 +497,9 @@ pub fn unmark_nonenumerable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>
 /// Returns `true` if `key` has a non-enumerable marker.
 #[inline]
 pub fn has_nonenumerable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    if let Some(Value::Property { attrs, .. }) = map.get(key) {
+        return !attrs.contains(PropAttrs::ENUMERABLE);
+    }
     map.contains_key(&format!("{}{}{}", NONENUMERABLE_PREFIX, key, NONENUMERABLE_SUFFIX))
 }
 
@@ -513,8 +516,16 @@ pub fn unmark_readonly<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, ke
 }
 
 /// Returns `true` if `key` has a read-only marker.
+/// For accessor properties (Value::Property with getter/setter), WRITABLE
+/// does not apply — they are never "readonly" in the data-property sense.
 #[inline]
 pub fn has_readonly_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    if let Some(Value::Property { getter, setter, attrs, .. }) = map.get(key) {
+        if getter.is_some() || setter.is_some() {
+            return false; // accessor properties don't have [[Writable]]
+        }
+        return !attrs.contains(PropAttrs::WRITABLE);
+    }
     map.contains_key(&format!("{}{}{}", READONLY_PREFIX, key, READONLY_SUFFIX))
 }
 
@@ -536,6 +547,9 @@ pub fn unmark_nonconfigurable<'gc>(map: &mut indexmap::IndexMap<String, Value<'g
 /// Returns `true` if `key` has a non-configurable marker.
 #[inline]
 pub fn has_nonconfigurable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
+    if let Some(Value::Property { attrs, .. }) = map.get(key) {
+        return !attrs.contains(PropAttrs::CONFIGURABLE);
+    }
     map.contains_key(&format!("{}{}{}", NONCONFIGURABLE_PREFIX, key, NONCONFIGURABLE_SUFFIX))
 }
 

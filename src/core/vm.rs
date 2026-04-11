@@ -274,6 +274,8 @@ const BUILTIN_DATE_TODATESTRING: FunctionID = 301;
 const BUILTIN_DATE_GETUTCDAY: FunctionID = 302;
 const BUILTIN_DATE_GETUTCMILLISECONDS: FunctionID = 303;
 const BUILTIN_DATE_TOUTCSTRING: FunctionID = 304;
+const BUILTIN_DATE_GETYEAR: FunctionID = 305;
+const BUILTIN_DATE_SETYEAR: FunctionID = 306;
 // ── Timers (320–329) ────────────────────────────────────────────────
 const BUILTIN_SETTIMEOUT: FunctionID = 320;
 const BUILTIN_CLEARTIMEOUT: FunctionID = 321;
@@ -3555,6 +3557,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_DATE_GETUTCDAY => "getUTCDay",
             BUILTIN_DATE_GETUTCMILLISECONDS => "getUTCMilliseconds",
             BUILTIN_DATE_TOUTCSTRING => "toUTCString",
+            BUILTIN_DATE_GETYEAR => "getYear",
+            BUILTIN_DATE_SETYEAR => "setYear",
             BUILTIN_DATE_GETTIMEZONEOFFSET => "getTimezoneOffset",
             BUILTIN_DATE_SETTIME => "setTime",
             BUILTIN_DATE_SETFULLYEAR => "setFullYear",
@@ -3726,9 +3730,10 @@ impl<'gc> VM<'gc> {
             | BUILTIN_DATE_GETUTCMILLISECONDS
             | BUILTIN_DATE_GETTIMEZONEOFFSET
             | BUILTIN_DATE_NOW
-            | BUILTIN_DATE_TOUTCSTRING => 0.0,
+            | BUILTIN_DATE_TOUTCSTRING
+            | BUILTIN_DATE_GETYEAR => 0.0,
             // Date setters
-            BUILTIN_DATE_SETTIME | BUILTIN_DATE_SETDATE => 1.0,
+            BUILTIN_DATE_SETTIME | BUILTIN_DATE_SETDATE | BUILTIN_DATE_SETYEAR => 1.0,
             BUILTIN_DATE_SETMONTH => 2.0,
             BUILTIN_DATE_SETFULLYEAR => 3.0,
             BUILTIN_DATE_SETHOURS => 4.0,

@@ -272,9 +272,17 @@ impl<'gc> VM<'gc> {
             ("getUTCMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES)),
             ("getUTCSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS)),
             ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMILLISECONDS)),
+            // Annex B
+            ("getYear", Value::VmNativeFunction(BUILTIN_DATE_GETYEAR)),
+            ("setYear", Value::VmNativeFunction(BUILTIN_DATE_SETYEAR)),
         ] {
             date_proto.insert(key.to_string(), value);
             mark_nonenumerable(&mut date_proto, key);
+        }
+        // B.2.4.3: toGMTString is the same function object as toUTCString
+        if let Some(utc_fn) = date_proto.get("toUTCString").cloned() {
+            date_proto.insert("toGMTString".to_string(), utc_fn);
+            mark_nonenumerable(&mut date_proto, "toGMTString");
         }
         // Date.prototype[Symbol.toPrimitive]
         date_proto.insert(
@@ -560,6 +568,58 @@ impl<'gc> VM<'gc> {
                         }
                         return Some(Value::from("Invalid Date"));
                     }
+                    BUILTIN_DATE_GETYEAR => {
+                        // B.2.4.1: getYear() returns getFullYear() - 1900
+                        return Some(Value::Number(to_local().map(|dt| dt.year() as f64 - 1900.0).unwrap_or(f64::NAN)));
+                    }
+                    BUILTIN_DATE_SETYEAR => {
+                        // B.2.4.2: setYear(year)
+                        // Step 3: t = [[DateValue]] (read BEFORE ToNumber)
+                        let t = ms;
+                        if args.is_empty() {
+                            obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(f64::NAN));
+                            return Some(Value::Number(f64::NAN));
+                        }
+                        // Step 4: y = ToNumber(year)
+                        let yr = match self.extract_number_with_coercion(ctx, &args[0]) {
+                            Some(n) => n,
+                            None => return Some(Value::Undefined),
+                        };
+                        if yr.is_nan() {
+                            obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(f64::NAN));
+                            return Some(Value::Number(f64::NAN));
+                        }
+                        // Step 5: if t is NaN, set t to +0; else LocalTime(t)
+                        let t_local = if t.is_nan() { 0.0_f64 } else { t };
+                        // Step 6: MakeFullYear - ToInteger(y), if 0 <= yi <= 99 then yi + 1900
+                        let yi = yr.trunc(); // ToInteger: truncate toward zero
+                        let yyyy = if (0.0..=99.0).contains(&yi) { yi + 1900.0 } else { yr };
+                        // Get local components from t_local
+                        #[allow(clippy::if_same_then_else)]
+                        let (month, day, hour, min, sec, ms_comp) = if t_local == 0.0 && t.is_nan() {
+                            (0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+                        } else if t_local.is_infinite() {
+                            (0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+                        } else {
+                            if let Some(dt) = Local.timestamp_millis_opt(t_local as i64).single() {
+                                (
+                                    dt.month0() as f64,
+                                    dt.day() as f64,
+                                    dt.hour() as f64,
+                                    dt.minute() as f64,
+                                    dt.second() as f64,
+                                    dt.timestamp_subsec_millis() as f64,
+                                )
+                            } else {
+                                (0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+                            }
+                        };
+                        let new_ms = Self::time_clip(Self::make_date_from_components_no_year_adjust(
+                            yyyy, month, day, hour, min, sec, ms_comp, true,
+                        ));
+                        obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(new_ms));
+                        return Some(Value::Number(new_ms));
+                    }
                     BUILTIN_DATE_SETTIME => {
                         let new_ms = if args.is_empty() {
                             f64::NAN
@@ -641,6 +701,8 @@ impl<'gc> VM<'gc> {
                 | BUILTIN_DATE_SETDATE
                 | BUILTIN_DATE_SETHOURS
                 | BUILTIN_DATE_SETMINUTES
+                | BUILTIN_DATE_GETYEAR
+                | BUILTIN_DATE_SETYEAR
         )
     }
 

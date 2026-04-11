@@ -8581,14 +8581,33 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "String.prototype[Symbol.iterator] called on null or undefined");
                     return Value::Undefined;
                 }
-                let iter_string = match self.vm_to_string_like_spec(ctx, this_val) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                        return Value::Undefined;
+                let code_points = match this_val {
+                    Value::String(s) => Self::utf16_code_point_strings(s),
+                    Value::VmObject(obj) => {
+                        if let Some(Value::String(s)) = obj.borrow().get("__value__") {
+                            Self::utf16_code_point_strings(s)
+                        } else {
+                            let iter_string = match self.vm_to_string_like_spec(ctx, this_val) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                                    return Value::Undefined;
+                                }
+                            };
+                            Self::utf16_code_point_strings(&crate::unicode::utf8_to_utf16(&iter_string))
+                        }
+                    }
+                    _ => {
+                        let iter_string = match self.vm_to_string_like_spec(ctx, this_val) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                                return Value::Undefined;
+                            }
+                        };
+                        Self::utf16_code_point_strings(&crate::unicode::utf8_to_utf16(&iter_string))
                     }
                 };
-                let code_points = Self::utf16_code_point_strings(&crate::unicode::utf8_to_utf16(&iter_string));
                 let items = code_points.into_iter().map(Value::String).collect::<Vec<_>>();
                 let mut obj = IndexMap::new();
                 obj.insert(

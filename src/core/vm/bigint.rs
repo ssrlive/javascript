@@ -109,7 +109,7 @@ impl<'gc> VM<'gc> {
     pub(super) fn bigint_init_prototype(&mut self, ctx: &GcContext<'gc>) {
         let object_proto = if let Some(Value::VmObject(o)) = self.globals.get("Object").and_then(|v| {
             if let Value::VmObject(obj) = v {
-                obj.borrow().get("prototype").cloned()
+                own_data_from_legacy_map(&obj.borrow(), "prototype")
             } else {
                 None
             }

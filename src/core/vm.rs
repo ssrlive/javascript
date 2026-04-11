@@ -13044,7 +13044,53 @@ impl<'gc> VM<'gc> {
             if own_is_data && !is_frozen && !is_readonly {
                 drop(borrow);
                 let mut b = map.borrow_mut(ctx);
-                if key == "__proto__" {
+                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                    if base_key == "__proto__" {
+                        let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { attrs, .. }) => *attrs,
+                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            None => PropAttrs::EC,
+                        };
+                        let current_setter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { setter: Some(setter), .. }) => Some((**setter).clone()),
+                            _ => None,
+                        };
+                        b.insert(
+                            OWN_DUNDER_PROTO_DATA_KEY.to_string(),
+                            Value::Property {
+                                value: None,
+                                getter: Some(Box::new(val.clone())),
+                                setter: current_setter.map(Box::new),
+                                attrs,
+                            },
+                        );
+                    } else {
+                        set_getter(&mut b, base_key, val.clone());
+                    }
+                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                    if base_key == "__proto__" {
+                        let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { attrs, .. }) => *attrs,
+                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            None => PropAttrs::EC,
+                        };
+                        let current_getter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { getter: Some(getter), .. }) => Some((**getter).clone()),
+                            _ => None,
+                        };
+                        b.insert(
+                            OWN_DUNDER_PROTO_DATA_KEY.to_string(),
+                            Value::Property {
+                                value: None,
+                                getter: current_getter.map(Box::new),
+                                setter: Some(Box::new(val.clone())),
+                                attrs,
+                            },
+                        );
+                    } else {
+                        set_setter(&mut b, base_key, val.clone());
+                    }
+                } else if key == "__proto__" {
                     b.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else if own_is_inline_data {
                     if let Some(Value::Property { value, .. }) = b.get_mut(key) {
@@ -13161,9 +13207,51 @@ impl<'gc> VM<'gc> {
             } else {
                 let mut b = map.borrow_mut(ctx);
                 if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
-                    set_getter(&mut b, base_key, val.clone());
+                    if base_key == "__proto__" {
+                        let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { attrs, .. }) => *attrs,
+                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            None => PropAttrs::EC,
+                        };
+                        let current_setter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { setter: Some(setter), .. }) => Some((**setter).clone()),
+                            _ => None,
+                        };
+                        b.insert(
+                            OWN_DUNDER_PROTO_DATA_KEY.to_string(),
+                            Value::Property {
+                                value: None,
+                                getter: Some(Box::new(val.clone())),
+                                setter: current_setter.map(Box::new),
+                                attrs,
+                            },
+                        );
+                    } else {
+                        set_getter(&mut b, base_key, val.clone());
+                    }
                 } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
-                    set_setter(&mut b, base_key, val.clone());
+                    if base_key == "__proto__" {
+                        let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { attrs, .. }) => *attrs,
+                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            None => PropAttrs::EC,
+                        };
+                        let current_getter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                            Some(Value::Property { getter: Some(getter), .. }) => Some((**getter).clone()),
+                            _ => None,
+                        };
+                        b.insert(
+                            OWN_DUNDER_PROTO_DATA_KEY.to_string(),
+                            Value::Property {
+                                value: None,
+                                getter: current_getter.map(Box::new),
+                                setter: Some(Box::new(val.clone())),
+                                attrs,
+                            },
+                        );
+                    } else {
+                        set_setter(&mut b, base_key, val.clone());
+                    }
                 } else if key == "__proto__" {
                     b.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
@@ -13721,8 +13809,13 @@ impl<'gc> VM<'gc> {
             let props = self.get_fn_props(ctx, *ip, *arity);
             // For VmClosure with overlay, check overlay for setter/getter first
             let overlay = self.get_closure_overlay(obj);
+            let current_desc = overlay
+                .as_ref()
+                .and_then(|o| desc_from_legacy_map(&o.borrow(), key))
+                .or_else(|| desc_from_legacy_map(&props.borrow(), key));
             // Check for setter accessor
             let setter_fn = overlay
+                .as_ref()
                 .and_then(|o| lookup_setter(&o.borrow(), key).cloned())
                 .or_else(|| lookup_setter(&props.borrow(), key).cloned());
             if let Some(sf) = setter_fn {
@@ -13754,9 +13847,31 @@ impl<'gc> VM<'gc> {
             }
             // Write to per-closure overlay when available, otherwise shared fn_props
             if let Some(o) = overlay {
-                o.borrow_mut(ctx).insert(key.to_string(), val.clone());
+                let mut borrow = o.borrow_mut(ctx);
+                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                    set_getter(&mut borrow, base_key, val.clone());
+                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                    set_setter(&mut borrow, base_key, val.clone());
+                } else if let Some(desc) = current_desc
+                    && let PropKind::Data(_) = desc.kind
+                {
+                    PropDesc::data(val.clone(), desc.attrs).write_to_legacy_map(&mut borrow, key);
+                } else {
+                    borrow.insert(key.to_string(), val.clone());
+                }
             } else {
-                props.borrow_mut(ctx).insert(key.to_string(), val.clone());
+                let mut borrow = props.borrow_mut(ctx);
+                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                    set_getter(&mut borrow, base_key, val.clone());
+                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                    set_setter(&mut borrow, base_key, val.clone());
+                } else if let Some(desc) = current_desc
+                    && let PropKind::Data(_) = desc.kind
+                {
+                    PropDesc::data(val.clone(), desc.attrs).write_to_legacy_map(&mut borrow, key);
+                } else {
+                    borrow.insert(key.to_string(), val.clone());
+                }
             }
             Ok(val.clone())
         } else {
@@ -14544,8 +14659,9 @@ impl<'gc> VM<'gc> {
                         if has_setter(&borrow, key) && !borrow.contains_key(&getter_key) {
                             return Value::Undefined;
                         }
+                        let materialized = self.materialize_property_read_value(ctx, receiver, val);
                         if key == "prototype"
-                            && let Value::VmObject(proto_obj) = val.clone()
+                            && let Value::VmObject(proto_obj) = materialized.clone()
                         {
                             drop(borrow);
                             let needs_update = {
@@ -14564,9 +14680,9 @@ impl<'gc> VM<'gc> {
                             return Value::VmObject(proto_obj);
                         }
                         return if let Some(rid) = realm_id {
-                            self.remap_cross_realm_value(ctx, val, rid)
+                            self.remap_cross_realm_value(ctx, materialized, rid)
                         } else {
-                            val
+                            materialized
                         };
                     }
                     if let Some(gf) = borrow.get(&getter_key).cloned() {
@@ -14606,8 +14722,9 @@ impl<'gc> VM<'gc> {
                         if lookup_in(&setter_key).is_some() && lookup_in(&getter_key).is_none() {
                             return Value::Undefined;
                         }
+                        let materialized = self.materialize_property_read_value(ctx, receiver, val);
                         if key == "prototype"
-                            && let Value::VmObject(proto_obj) = val.clone()
+                            && let Value::VmObject(proto_obj) = materialized.clone()
                         {
                             let needs_update = {
                                 let proto_borrow = proto_obj.borrow();
@@ -14624,7 +14741,7 @@ impl<'gc> VM<'gc> {
                             }
                             return Value::VmObject(proto_obj);
                         }
-                        return val;
+                        return materialized;
                     }
                     if let Some(gf) = lookup_in(&getter_key) {
                         return self.invoke_getter_with_receiver(ctx, &gf, receiver);
@@ -15991,7 +16108,7 @@ impl<'gc> VM<'gc> {
         write_attrs_to_legacy_map(&mut array_buffer_map, "prototype", PropAttrs::empty());
         let array_buffer_ctor = Value::VmObject(new_gc_cell_ptr(ctx, array_buffer_map));
         if let Value::VmObject(ctor_obj) = &array_buffer_ctor
-            && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
+            && let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj
                 .borrow_mut(ctx)
@@ -16047,7 +16164,7 @@ impl<'gc> VM<'gc> {
         write_attrs_to_legacy_map(&mut shared_array_buffer_map, "prototype", PropAttrs::empty());
         let sab_ctor = Value::VmObject(new_gc_cell_ptr(ctx, shared_array_buffer_map));
         if let Value::VmObject(ctor_obj) = &sab_ctor
-            && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
+            && let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), sab_ctor.clone());
             mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");
@@ -17311,7 +17428,6 @@ impl<'gc> VM<'gc> {
         async_gen_ctor.insert("name".to_string(), Value::from("AsyncGeneratorFunction"));
         write_attrs_to_legacy_map(&mut async_gen_ctor, "name", PropAttrs::CONFIGURABLE);
         write_attrs_to_legacy_map(&mut async_gen_ctor, "length", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut async_gen_ctor, "prototype", PropAttrs::empty());
         async_gen_ctor.insert("__async_generator_function_constructor__".to_string(), Value::Boolean(true));
 
         if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
@@ -17323,9 +17439,9 @@ impl<'gc> VM<'gc> {
         let async_gen_ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, async_gen_ctor));
         let async_gen_fn_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, async_gen_fn_proto));
         if let Value::VmObject(ctor_obj) = &async_gen_ctor_val {
-            ctor_obj
-                .borrow_mut(ctx)
-                .insert("prototype".to_string(), async_gen_fn_proto_val.clone());
+            let mut ctor_obj = ctor_obj.borrow_mut(ctx);
+            ctor_obj.insert("prototype".to_string(), async_gen_fn_proto_val.clone());
+            write_attrs_to_legacy_map(&mut ctor_obj, "prototype", PropAttrs::empty());
         }
         if let Value::VmObject(proto_obj) = &async_gen_fn_proto_val {
             let mut pb = proto_obj.borrow_mut(ctx);
@@ -17442,9 +17558,6 @@ impl<'gc> VM<'gc> {
 
         // %GeneratorPrototype% — shared prototype for generator iterator objects
         let mut gen_proto = IndexMap::new();
-        mark_nonenumerable(&mut gen_proto, "next");
-        mark_nonenumerable(&mut gen_proto, "return");
-        mark_nonenumerable(&mut gen_proto, "throw");
         gen_proto.insert("@@sym:4".to_string(), Value::from("Generator"));
         write_attrs_to_legacy_map(&mut gen_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         // Per spec: %GeneratorPrototype% [[Prototype]] = %IteratorPrototype%
@@ -17467,6 +17580,9 @@ impl<'gc> VM<'gc> {
             gp.insert("return".to_string(), return_fn);
             gp.insert("throw".to_string(), throw_fn);
             gp.insert("@@sym:1".to_string(), iter_fn);
+            mark_nonenumerable(&mut gp, "next");
+            mark_nonenumerable(&mut gp, "return");
+            mark_nonenumerable(&mut gp, "throw");
             mark_nonenumerable(&mut gp, "@@sym:1");
         }
         self.generator_prototype = Value::VmObject(gen_proto_ptr);
@@ -21443,7 +21559,11 @@ impl<'gc> VM<'gc> {
                             .collect();
                         let mut gt_borrow = gt.borrow_mut(ctx);
                         for (k, v) in public_globals {
-                            gt_borrow.insert(k, v);
+                            if let Some(existing_desc) = desc_from_legacy_map(&gt_borrow, &k) {
+                                PropDesc::data(v, existing_desc.attrs).write_to_legacy_map(&mut gt_borrow, &k);
+                            } else {
+                                gt_borrow.insert(k, v);
+                            }
                         }
                     }
                     eval_vm.script_path = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone());
@@ -21688,15 +21808,13 @@ impl<'gc> VM<'gc> {
                             // For direct eval inside a function, var declarations stay in
                             // the function scope and should not leak to globalThis.
                             let in_fn_scope = self.direct_eval && !self.frames.is_empty();
-                            // CreateGlobalFunctionBinding semantics (§8.1.1.4.18)
-                            // For eval function declarations, update property descriptors:
-                            // if existing property is configurable, set writable + enumerable
-                            if chunk.fn_declared_globals.contains(k) && !in_fn_scope {
+                            if !in_fn_scope {
                                 let mut gt = self.global_this.borrow_mut(ctx);
-                                gt.insert(k.clone(), adjusted);
-                            } else if !in_fn_scope {
-                                // Normal variable: just mirror onto globalThis
-                                self.global_this.borrow_mut(ctx).insert(k.clone(), adjusted);
+                                if let Some(existing_desc) = desc_from_legacy_map(&gt, k) {
+                                    PropDesc::data(adjusted, existing_desc.attrs).write_to_legacy_map(&mut gt, k);
+                                } else {
+                                    gt.insert(k.clone(), adjusted);
+                                }
                             }
                         }
                     }
@@ -23758,8 +23876,20 @@ impl<'gc> VM<'gc> {
                         if key == "__proto__" {
                             // __proto__ data is stored under OWN_DUNDER_PROTO_DATA_KEY
                             if let Some(val) = borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
-                                let a = attrs_from_legacy_map(&borrow, &key);
-                                return self.make_descriptor_object_from_desc(ctx, &PropDesc::data(val.clone(), a));
+                                let desc = match val {
+                                    Value::Property { getter, setter, attrs, .. } => PropDesc {
+                                        kind: PropKind::Accessor {
+                                            get: getter.as_ref().map(|g| (**g).clone()),
+                                            set: setter.as_ref().map(|s| (**s).clone()),
+                                        },
+                                        attrs: *attrs,
+                                    },
+                                    other => {
+                                        let a = attrs_from_legacy_map(&borrow, &key);
+                                        PropDesc::data(other.clone(), a)
+                                    }
+                                };
+                                return self.make_descriptor_object_from_desc(ctx, &desc);
                             }
                             // Fall back to accessor lookup only (Value::Property or __get_/__set_).
                             // Plain data at "__proto__" is the internal [[Prototype]] slot,

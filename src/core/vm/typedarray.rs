@@ -2152,7 +2152,7 @@ impl<'gc> VM<'gc> {
         // Step 5: Let S be ? Get(C, @@species)
         let mut species_ctor = ctor.clone();
         if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
-            && let Some(species_symbol) = symbol_ctor.borrow().get("species").cloned()
+            && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {
             let species = self.read_named_property(ctx, &ctor, &species_key);

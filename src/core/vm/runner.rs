@@ -1561,7 +1561,12 @@ impl<'gc> VM<'gc> {
                     gt.insert(name_str.clone(), val);
                     mark_nonconfigurable(&mut gt, &name_str);
                 } else if !is_lexical_binding && !self.eval_fn_scope {
-                    self.global_this.borrow_mut(ctx).insert(name_str, val);
+                    let mut gt = self.global_this.borrow_mut(ctx);
+                    if let Some(existing_desc) = desc_from_legacy_map(&gt, &name_str) {
+                        PropDesc::data(val, existing_desc.attrs).write_to_legacy_map(&mut gt, &name_str);
+                    } else {
+                        gt.insert(name_str, val);
+                    }
                 }
             }
         }
@@ -2029,7 +2034,12 @@ impl<'gc> VM<'gc> {
             }
             self.globals.insert(name_str.clone(), val.clone());
             if !self.chunk.lexical_declared_globals.contains(&name_str) && !self.eval_fn_scope {
-                self.global_this.borrow_mut(ctx).insert(name_str, val);
+                let mut gt = self.global_this.borrow_mut(ctx);
+                if let Some(existing_desc) = desc_from_legacy_map(&gt, &name_str) {
+                    PropDesc::data(val, existing_desc.attrs).write_to_legacy_map(&mut gt, &name_str);
+                } else {
+                    gt.insert(name_str, val);
+                }
             }
         }
         Ok(OpcodeAction::Continue)
@@ -4291,7 +4301,20 @@ impl<'gc> VM<'gc> {
                         // For TypedArrays, delegate to getter (handles detached buffer)
                         if let Some(v) = b.props.get("length") {
                             // Own data property (from Object.defineProperty)
-                            self.stack.push(v.clone());
+                            match v.clone() {
+                                Value::Property { getter: Some(g), .. } => {
+                                    drop(b);
+                                    let got = self.invoke_getter_with_receiver(ctx, &g, &obj);
+                                    self.stack.push(got);
+                                }
+                                Value::Property { value: Some(inner), .. } => {
+                                    self.stack.push((*inner).clone());
+                                }
+                                Value::Property { value: None, .. } => {
+                                    self.stack.push(Value::Undefined);
+                                }
+                                other => self.stack.push(other),
+                            }
                         } else {
                             let proto = b.props.get("__proto__").cloned();
                             drop(b);
@@ -4793,8 +4816,21 @@ impl<'gc> VM<'gc> {
                     return Ok(OpcodeAction::Continue);
                 }
                 let mut borrow = map.borrow_mut(ctx);
-                if key == "__proto__" {
-                    // Only clear the own-data slot; preserve the internal [[Prototype]] chain entry.
+                if key == OWN_DUNDER_PROTO_DATA_KEY {
+                    if matches!(
+                        val,
+                        Value::Null | Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+                    ) && !val.is_symbol_value()
+                    {
+                        drop(borrow);
+                        let _ = self.set_object_like_prototype(ctx, &obj, &val)?;
+                    } else {
+                        // Object-literal "__proto__": primitive values are ignored and do not
+                        // create an own property.
+                    }
+                } else if key == "__proto__" {
+                    // Visible own "__proto__" data property (e.g. shorthand) is stored
+                    // separately from the internal [[Prototype]] slot.
                     borrow.shift_remove(OWN_DUNDER_PROTO_DATA_KEY);
                     borrow.insert(OWN_DUNDER_PROTO_DATA_KEY.to_string(), val.clone());
                 } else {
@@ -5786,11 +5822,28 @@ impl<'gc> VM<'gc> {
             }
             let mut borrow = map.borrow_mut(ctx);
             if coerced_key == "__proto__" {
-                borrow.shift_remove(OWN_DUNDER_PROTO_DATA_KEY);
+                let attrs = match borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                    Some(Value::Property { attrs, .. }) => *attrs,
+                    Some(_) => attrs_from_legacy_map(&borrow, "__proto__"),
+                    None => PropAttrs::EC,
+                };
+                let current_setter = match borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                    Some(Value::Property { setter: Some(setter), .. }) => Some((**setter).clone()),
+                    _ => None,
+                };
+                borrow.insert(
+                    OWN_DUNDER_PROTO_DATA_KEY.to_string(),
+                    Value::Property {
+                        value: None,
+                        getter: Some(Box::new(val.clone())),
+                        setter: current_setter.map(Box::new),
+                        attrs,
+                    },
+                );
             } else {
                 borrow.shift_remove(&coerced_key);
+                set_getter(&mut borrow, &coerced_key, val.clone());
             }
-            set_getter(&mut borrow, &coerced_key, val.clone());
             // Class computed getters are non-enumerable
             mark_nonenumerable(&mut borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
@@ -5866,11 +5919,28 @@ impl<'gc> VM<'gc> {
             }
             let mut borrow = map.borrow_mut(ctx);
             if coerced_key == "__proto__" {
-                borrow.shift_remove(OWN_DUNDER_PROTO_DATA_KEY);
+                let attrs = match borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                    Some(Value::Property { attrs, .. }) => *attrs,
+                    Some(_) => attrs_from_legacy_map(&borrow, "__proto__"),
+                    None => PropAttrs::EC,
+                };
+                let current_getter = match borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                    Some(Value::Property { getter: Some(getter), .. }) => Some((**getter).clone()),
+                    _ => None,
+                };
+                borrow.insert(
+                    OWN_DUNDER_PROTO_DATA_KEY.to_string(),
+                    Value::Property {
+                        value: None,
+                        getter: current_getter.map(Box::new),
+                        setter: Some(Box::new(val.clone())),
+                        attrs,
+                    },
+                );
             } else {
                 borrow.shift_remove(&coerced_key);
+                set_setter(&mut borrow, &coerced_key, val.clone());
             }
-            set_setter(&mut borrow, &coerced_key, val.clone());
             mark_nonenumerable(&mut borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             if coerced_key == "prototype" {
@@ -6583,12 +6653,15 @@ impl<'gc> VM<'gc> {
             let gc_key = Gc::as_ptr(uv) as usize;
             let mut overlay = IndexMap::new();
             overlay.insert("prototype".to_string(), new_proto);
+            write_attrs_to_legacy_map(&mut overlay, "prototype", PropAttrs::empty());
             let per_closure = new_gc_cell_ptr(ctx, overlay);
             self.closure_fn_props.insert(gc_key, per_closure);
         } else {
             // VmFunction: just update shared fn_props
             let props = self.get_fn_props(ctx, ip, arity);
-            props.borrow_mut(ctx).insert("prototype".to_string(), new_proto);
+            let mut props = props.borrow_mut(ctx);
+            props.insert("prototype".to_string(), new_proto);
+            write_attrs_to_legacy_map(&mut props, "prototype", PropAttrs::empty());
         }
         Ok(OpcodeAction::Continue)
     }
@@ -8599,12 +8672,11 @@ impl<'gc> VM<'gc> {
 
     /// Freeze a VmArray in-place: mark all elements and props as readonly+nonconfigurable.
     fn freeze_vm_array(ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) {
-        let len = arr.borrow().elements.len();
         let mut b = arr.borrow_mut(ctx);
+        let len = b.elements.len();
         for i in 0..len {
             let key = i.to_string();
-            mark_readonly(&mut b.props, &key);
-            mark_nonconfigurable(&mut b.props, &key);
+            PropDesc::data(b.elements[i].clone(), PropAttrs::ENUMERABLE).write_to_legacy_map(&mut b.props, &key);
         }
         let prop_keys: Vec<String> = b.props.keys().filter(|k: &&String| !k.starts_with("__")).cloned().collect();
         for key in prop_keys {
@@ -8614,8 +8686,7 @@ impl<'gc> VM<'gc> {
                 mark_readonly(&mut b.props, &key);
             }
         }
-        mark_readonly(&mut b.props, "length");
-        mark_nonconfigurable(&mut b.props, "length");
+        PropDesc::data(Value::Number(len as f64), PropAttrs::empty()).write_to_legacy_map(&mut b.props, "length");
         b.props.insert("__non_extensible__".to_string(), Value::Boolean(true));
         b.props.insert("__frozen__".to_string(), Value::Boolean(true));
     }

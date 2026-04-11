@@ -5012,12 +5012,12 @@ impl<'gc> Compiler<'gc> {
                                 if let Some(ip) = effective_ip {
                                     self.chunk.fn_names.entry(ip).or_insert_with(|| key_name.clone());
                                 }
-                                let idx = self.chunk.add_constant(Value::String(s.clone()));
-                                self.chunk.write_opcode(if is_proto_colon {
-                                    Opcode::SetProperty
+                                let idx = if is_proto_colon {
+                                    self.chunk.add_constant(Value::from("__own_data___proto__"))
                                 } else {
-                                    Opcode::InitProperty
-                                });
+                                    self.chunk.add_constant(Value::String(s.clone()))
+                                };
+                                self.chunk.write_opcode(Opcode::InitProperty);
                                 self.chunk.write_u16(idx);
                                 self.chunk.write_opcode(Opcode::Pop);
                                 continue;

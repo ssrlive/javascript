@@ -601,7 +601,7 @@ impl<'gc> VM<'gc> {
         write_attrs_to_legacy_map(&mut data_view_map, "prototype", PropAttrs::empty());
         let data_view_ctor = Value::VmObject(new_gc_cell_ptr(ctx, data_view_map));
         if let Value::VmObject(ctor_obj) = &data_view_ctor
-            && let Some(Value::VmObject(proto_obj)) = ctor_obj.borrow().get("prototype").cloned()
+            && let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), data_view_ctor.clone());
             mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");

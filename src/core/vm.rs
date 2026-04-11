@@ -3456,6 +3456,9 @@ impl<'gc> VM<'gc> {
             BUILTIN_PROMISE_ALL => "all",
             BUILTIN_PROMISE_THEN => "then",
             BUILTIN_CTOR_WEAKREF => "WeakRef",
+            BUILTIN_WEAKREF_DEREF => "deref",
+            BUILTIN_CTOR_WEAKMAP => "WeakMap",
+            BUILTIN_CTOR_WEAKSET => "WeakSet",
             BUILTIN_CTOR_FR => "FinalizationRegistry",
             BUILTIN_FR_REGISTER => "register",
             BUILTIN_FR_UNREGISTER => "unregister",
@@ -3622,7 +3625,7 @@ impl<'gc> VM<'gc> {
 
     fn native_function_length(id: FunctionID) -> f64 {
         match id {
-            BUILTIN_CTOR_MAP => 0.0,
+            BUILTIN_CTOR_MAP | BUILTIN_CTOR_WEAKMAP | BUILTIN_CTOR_WEAKSET => 0.0,
             BUILTIN_MAP_GROUPBY => 2.0,
             BUILTIN_MAP_SET | BUILTIN_WEAKMAP_SET => 2.0,
             BUILTIN_MAP_GET | BUILTIN_MAP_HAS | BUILTIN_MAP_DELETE => 1.0,
@@ -3734,6 +3737,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_SET_VALUES | BUILTIN_SET_ENTRIES | BUILTIN_SET_CLEAR => 0.0,
             BUILTIN_FR_REGISTER => 2.0,
             BUILTIN_FR_UNREGISTER => 1.0,
+            BUILTIN_WEAKREF_DEREF => 0.0,
             _ => 1.0,
         }
     }
@@ -16885,8 +16889,16 @@ impl<'gc> VM<'gc> {
             .borrow_mut(ctx)
             .insert("Set".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_SET));
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "Set");
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("WeakMap".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKMAP));
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "WeakMap");
         self.globals
             .insert("WeakMap".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKMAP));
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("WeakSet".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKSET));
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "WeakSet");
         self.globals
             .insert("WeakSet".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKSET));
         for (ctor_name, ctor_id, tag_name) in [
@@ -17002,6 +17014,10 @@ impl<'gc> VM<'gc> {
             b.insert("prototype".to_string(), proto_val);
             write_attrs_to_legacy_map(&mut b, "prototype", PropAttrs::empty());
         }
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("WeakRef".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKREF));
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "WeakRef");
         self.globals
             .insert("WeakRef".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKREF));
         {
@@ -17009,6 +17025,8 @@ impl<'gc> VM<'gc> {
             wr_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
             wr_proto.insert("@@sym:4".to_string(), Value::from("WeakRef"));
             write_attrs_to_legacy_map(&mut wr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            wr_proto.insert("constructor".to_string(), Value::VmNativeFunction(BUILTIN_CTOR_WEAKREF));
+            mark_nonenumerable(&mut wr_proto, "constructor");
             wr_proto.insert("deref".to_string(), Value::VmNativeFunction(BUILTIN_WEAKREF_DEREF));
             mark_nonenumerable(&mut wr_proto, "deref");
             let wr_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, wr_proto));

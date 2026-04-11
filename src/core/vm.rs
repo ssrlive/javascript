@@ -14677,36 +14677,43 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     if depth == 1 {
-                        if let Some(Value::VmMap(map_data)) = borrow.get("__map_data__").cloned() {
-                            // Only use built-in shortcut if the key wasn't explicitly
-                            // overridden on this prototype object.
-                            if !borrow.contains_key(key) {
-                                let is_weak = map_data.borrow().is_weak;
-                                match key {
-                                    "size" if !is_weak => return Value::Number(map_data.borrow().entries.len() as f64),
-                                    "set" => {
-                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET });
-                                    }
-                                    "get" => {
-                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET });
-                                    }
-                                    "has" => {
-                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS });
-                                    }
-                                    "delete" => {
-                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE });
-                                    }
-                                    "keys" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_KEYS),
-                                    "values" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_VALUES),
-                                    "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
-                                    "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
-                                    "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
-                                    _ => {}
+                        // Check if the prototype chain has this key explicitly overridden.
+                        // If so, skip the built-in shortcut and let normal lookup find it.
+                        let proto_has_key = if let Some(Value::VmObject(proto)) = borrow.get("__proto__") {
+                            proto.borrow().contains_key(key)
+                        } else {
+                            false
+                        };
+                        if let Some(Value::VmMap(map_data)) = borrow.get("__map_data__").cloned()
+                            && !borrow.contains_key(key)
+                            && !proto_has_key
+                        {
+                            let is_weak = map_data.borrow().is_weak;
+                            match key {
+                                "size" if !is_weak => return Value::Number(map_data.borrow().entries.len() as f64),
+                                "set" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET });
                                 }
+                                "get" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET });
+                                }
+                                "has" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS });
+                                }
+                                "delete" => {
+                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE });
+                                }
+                                "keys" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_KEYS),
+                                "values" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_VALUES),
+                                "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
+                                "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
+                                "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                                _ => {}
                             }
                         }
                         if let Some(Value::VmSet(set_data)) = borrow.get("__set_data__").cloned()
                             && !borrow.contains_key(key)
+                            && !proto_has_key
                         {
                             let is_weak = set_data.borrow().is_weak;
                             match key {
@@ -29787,7 +29794,7 @@ impl<'gc> VM<'gc> {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Invalid value used as weak map key"));
-                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
+                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
                         let mut borrow = m.borrow_mut(ctx);
@@ -29947,7 +29954,7 @@ impl<'gc> VM<'gc> {
                             let mut err_map = IndexMap::new();
                             err_map.insert("__type__".to_string(), Value::from("TypeError"));
                             err_map.insert("message".to_string(), Value::from("Invalid value used in weak set"));
-                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
+                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
                         let mut borrow = s.borrow_mut(ctx);

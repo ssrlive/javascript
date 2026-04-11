@@ -16905,7 +16905,7 @@ impl<'gc> VM<'gc> {
             symbol_proto.insert("@@sym:3".to_string(), to_prim);
             write_attrs_to_legacy_map(&mut symbol_proto, "@@sym:3", PropAttrs::CONFIGURABLE);
             symbol_proto.insert("@@sym:4".to_string(), Value::from("Symbol"));
-            mark_nonenumerable(&mut symbol_proto, "@@sym:4");
+            write_attrs_to_legacy_map(&mut symbol_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             let symbol_proto = new_gc_cell_ptr(ctx, symbol_proto);
             Self::insert_prototype_property(&mut symbol_ctor.borrow_mut(ctx), &Value::VmObject(symbol_proto));
             Self::insert_constructor_backref(ctx, &symbol_proto, &Value::VmObject(*symbol_ctor));
@@ -25169,10 +25169,23 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_SYMBOL => {
                 // Symbol(description?) — create a unique symbol-like VmObject
-                let desc = args.first().and_then(|v| match v {
-                    Value::Undefined => None,
-                    _ => Some(value_to_string(v)),
-                });
+                // 1.b. If description is undefined, let descString be undefined.
+                // 1.c. Else, let descString be ? ToString(description).
+                let desc = if let Some(v) = args.first() {
+                    if matches!(v, Value::Undefined) {
+                        None
+                    } else {
+                        match self.vm_to_string_like_spec(ctx, v) {
+                            Ok(s) => Some(s),
+                            Err(e) => {
+                                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.symbol_counter += 1;
                 let id = self.symbol_counter;
                 let mut m = IndexMap::new();
@@ -25192,7 +25205,18 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_SYMBOL_FOR => {
                 // Symbol.for(key) — return or create a registered symbol
-                let key = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                // ToString(key) — throws TypeError for Symbols, calls toString/valueOf on objects
+                let key = if let Some(v) = args.first() {
+                    match self.vm_to_string_like_spec(ctx, v) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                            return Value::Undefined;
+                        }
+                    }
+                } else {
+                    "undefined".to_string()
+                };
                 if let Some(existing) = self.symbol_registry.get(&key) {
                     return existing.clone();
                 }
@@ -29729,14 +29753,24 @@ impl<'gc> VM<'gc> {
                     let key = args.first().cloned().unwrap_or(Value::Undefined);
                     let val = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let mut borrow = m.borrow_mut(ctx);
-                    // WeakMap requires object keys
-                    if borrow.is_weak && !matches!(key, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                    // WeakMap requires keys that can be held weakly
+                    if borrow.is_weak {
                         drop(borrow);
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        err_map.insert("message".to_string(), Value::from("Invalid value used as weak map key"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
-                        return Value::Undefined;
+                        if !self.can_be_held_weakly(&key) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert("message".to_string(), Value::from("Invalid value used as weak map key"));
+                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
+                            return Value::Undefined;
+                        }
+                        let mut borrow = m.borrow_mut(ctx);
+                        if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_same_zero(k, &key)) {
+                            entry.1 = val;
+                        } else {
+                            borrow.entries.push((key, val));
+                        }
+                        drop(borrow);
+                        return receiver.clone();
                     }
                     // Update existing key or insert new
                     if let Some(entry) = borrow.entries.iter_mut().find(|(k, _)| self.values_same_zero(k, &key)) {
@@ -29879,14 +29913,22 @@ impl<'gc> VM<'gc> {
                 BUILTIN_SET_ADD | BUILTIN_WEAKSET_ADD => {
                     let val = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut borrow = s.borrow_mut(ctx);
-                    // WeakSet requires object values
-                    if borrow.is_weak && !matches!(val, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+                    // WeakSet requires values that can be held weakly
+                    if borrow.is_weak {
                         drop(borrow);
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        err_map.insert("message".to_string(), Value::from("Invalid value used in weak set"));
-                        self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
-                        return Value::Undefined;
+                        if !self.can_be_held_weakly(&val) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert("message".to_string(), Value::from("Invalid value used in weak set"));
+                            self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map))).ok();
+                            return Value::Undefined;
+                        }
+                        let mut borrow = s.borrow_mut(ctx);
+                        if !borrow.values.iter().any(|v| self.values_same_zero(v, &val)) {
+                            borrow.values.push(val);
+                        }
+                        drop(borrow);
+                        return receiver.clone();
                     }
                     if !borrow.values.iter().any(|v| self.values_same_zero(v, &val)) {
                         borrow.values.push(val);
@@ -29960,11 +30002,17 @@ impl<'gc> VM<'gc> {
         }
 
         // WeakRef.deref()
-        if let Value::VmObject(obj) = receiver
-            && id == BUILTIN_WEAKREF_DEREF
-        {
-            let borrow = obj.borrow();
-            return borrow.get("__target__").cloned().unwrap_or(Value::Undefined);
+        if id == BUILTIN_WEAKREF_DEREF {
+            // Step 2: If Type(weakRef) is not Object, throw TypeError
+            // Step 3: If weakRef does not have a [[Target]] slot, throw TypeError
+            if let Value::VmObject(obj) = receiver
+                && obj.borrow().contains_key("__weakref__")
+            {
+                let borrow = obj.borrow();
+                return borrow.get("__target__").cloned().unwrap_or(Value::Undefined);
+            }
+            self.throw_type_error(ctx, "WeakRef.prototype.deref called on incompatible receiver");
+            return Value::Undefined;
         }
 
         // FinalizationRegistry.prototype.register(target, heldValue [, unregisterToken])

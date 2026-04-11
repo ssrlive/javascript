@@ -3947,7 +3947,9 @@ impl<'gc> VM<'gc> {
                 p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
                 mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
             }
-            self.globals.insert(name.to_string(), ctor_val);
+            self.globals.insert(name.to_string(), ctor_val.clone());
+            self.global_this.borrow_mut(ctx).insert(name.to_string(), ctor_val);
+            mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), name);
         }
     }
 }

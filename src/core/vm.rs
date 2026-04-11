@@ -29592,13 +29592,11 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
                     return Value::Undefined;
                 } else if is_string_method {
-                    // Generic object — ToString via vm_to_string (calls JS toString/valueOf)
                     drop(b);
-                    let s = self.vm_to_string(ctx, receiver);
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
+                    match self.vm_coerce_arg_to_string(ctx, receiver) {
+                        Some(s) => Some(crate::unicode::utf8_to_utf16(&s)),
+                        None => return Value::Undefined,
                     }
-                    Some(crate::unicode::utf8_to_utf16(&s))
                 } else {
                     None
                 }
@@ -29613,11 +29611,10 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
                     return Value::Undefined;
                 }
-                let s = self.vm_to_string(ctx, receiver);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
+                match self.vm_coerce_arg_to_string(ctx, receiver) {
+                    Some(s) => Some(crate::unicode::utf8_to_utf16(&s)),
+                    None => return Value::Undefined,
                 }
-                Some(crate::unicode::utf8_to_utf16(&s))
             }
             // Number, Boolean, BigInt — coerce via ToString for string methods
             other if is_string_method && !matches!(other, Value::Undefined | Value::Null) => {
@@ -29625,8 +29622,10 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
                     return Value::Undefined;
                 }
-                let s = value_to_string(other);
-                Some(crate::unicode::utf8_to_utf16(&s))
+                match self.vm_coerce_arg_to_string(ctx, receiver) {
+                    Some(s) => Some(crate::unicode::utf8_to_utf16(&s)),
+                    None => return Value::Undefined,
+                }
             }
             _ => None,
         };

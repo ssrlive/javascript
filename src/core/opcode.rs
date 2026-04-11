@@ -72,49 +72,51 @@ pub enum Opcode {
     CallSpread = 66,
     NewCallSpread = 67,
     ObjectSpread = 68,
-    GetUpvalue = 69,               // operand: u8 upvalue index — read captured variable
-    SetUpvalue = 70,               // operand: u8 upvalue index — write captured variable
-    MakeClosure = 71,              // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
-    ArrayHole = 72,                // push an empty/hole slot onto TOS array (sparse array support)
-    DefineGlobalConst = 73,        // define an immutable global binding
-    GetNewTarget = 74,             // push current new.target value onto stack
-    Yield = 75,                    // suspend generator: pop yielded value, save state, return {value, done: false}
-    SetComputedGetter = 76,        // pop val, pop computed key, peek obj; store val under __get_<key>
-    SetComputedSetter = 77,        // pop val, pop computed key, peek obj; store val under __set_<key>
-    InitProperty = 78,             // object literal own data property initialization by constant key
-    InitIndex = 79,                // object literal own data property initialization by computed key
-    GeneratorParamInitDone = 80,   // internal marker: generator parameter initialization completed
-    ToPropertyKey = 81,            // coerce top-of-stack value using ToPropertyKey semantics
-    ObjectSpreadExcluding = 82,    // like ObjectSpread but pops an excluded keys array first
-    ValidateClassHeritage = 83,    // validate that TOS is null or a valid constructible value with valid .prototype
-    GetThisSuper = 84,             // like GetThis but bypasses TDZ check (used as receiver for super() calls)
-    ClearThisTdz = 85,             // clear this_tdz on the enclosing constructor frame (after super() returns)
-    ValidateProtoValue = 86,       // validate TOS is object or null (for class extends prototype check); throws TypeError if not
-    GetSuperPropertyComputed = 87, // computed super property: pop key from stack, look up on super prototype
-    ThrowTypeError = 88,           // pop message string from stack, construct TypeError, handle_throw
-    Await = 89,                    // async suspension point: pop awaited value and resume in a microtask
-    EnterFieldInit = 90,           // mark start of class field initializer (for eval restrictions)
-    LeaveFieldInit = 91,           // mark end of class field initializer
-    AllocBrand = 92,               // push a runtime-unique brand number onto stack (for private member brand checks)
-    ResetPrototype = 93,           // create a fresh prototype for the constructor on TOS
-    IteratorClose = 94,            // pop iterator from stack; call .return() if callable
-    AssertIterResult = 95,         // throw TypeError if TOS is not an object (IteratorResult check)
-    BoxLocal = 96,                 // create a shared upvalue cell for a local (for class name heritage scope)
-    ToNumeric = 97,                // ToNumeric: like ToNumber but preserves BigInt values
-    SetSuperPropertyComputed = 98, // assign to super[expr] using current this as receiver
-    DefineComputedMethod = 99,     // like SetIndex but also marks non-enumerable (for class methods)
-    IteratorCloseAbrupt = 100,     // best-effort iterator close for throw completions; never throws
-    DefineGlobalSoft = 101,        // like DefineGlobal but only defines if key doesn't already exist (for var hoisting)
-    ThrowIfNullish = 102,          // throw TypeError if TOS is null or undefined (does not pop)
-    InitNamedFnSelf = 103,         // push the callee (named fn expression's own function) from pending stack
-    FreezeTemplate = 104,          // freeze template object and its .raw property (tagged templates)
-    YieldDirect = 105,             // like Yield but the yielded value is returned directly without make_gen_result wrapping
-    CheckGeneratorReturn = 106,    // push true if generator_return_pending is set, else push false
-    SetGeneratorReturn = 107,      // pop value and set generator_return_pending = Some(value)
-    ThrowIfNotConstructor = 108,   // pop TOS, throw TypeError if it's not a constructor
-    ReboxLocal = 109,              // create a fresh upvalue cell for a local, copying the old value (per-iteration let)
-    ClearLocalCells = 110,         // clear local_cells / top_level_cells entries with index >= operand byte
-    ClearGeneratorReturn = 111,    // clear generator_return_pending (set to None)
+    GetUpvalue = 69,                 // operand: u8 upvalue index — read captured variable
+    SetUpvalue = 70,                 // operand: u8 upvalue index — write captured variable
+    MakeClosure = 71,                // operand: u16 const_idx, u8 capture_count, then capture_count × (u8 is_local, u8 index)
+    ArrayHole = 72,                  // push an empty/hole slot onto TOS array (sparse array support)
+    DefineGlobalConst = 73,          // define an immutable global binding
+    GetNewTarget = 74,               // push current new.target value onto stack
+    Yield = 75,                      // suspend generator: pop yielded value, save state, return {value, done: false}
+    SetComputedGetter = 76,          // pop val, pop computed key, peek obj; store val under __get_<key>
+    SetComputedSetter = 77,          // pop val, pop computed key, peek obj; store val under __set_<key>
+    InitProperty = 78,               // object literal own data property initialization by constant key
+    InitIndex = 79,                  // object literal own data property initialization by computed key
+    GeneratorParamInitDone = 80,     // internal marker: generator parameter initialization completed
+    ToPropertyKey = 81,              // coerce top-of-stack value using ToPropertyKey semantics
+    ObjectSpreadExcluding = 82,      // like ObjectSpread but pops an excluded keys array first
+    ValidateClassHeritage = 83,      // validate that TOS is null or a valid constructible value with valid .prototype
+    GetThisSuper = 84,               // like GetThis but bypasses TDZ check (used as receiver for super() calls)
+    ClearThisTdz = 85,               // clear this_tdz on the enclosing constructor frame (after super() returns)
+    ValidateProtoValue = 86,         // validate TOS is object or null (for class extends prototype check); throws TypeError if not
+    GetSuperPropertyComputed = 87,   // computed super property: pop key from stack, look up on super prototype
+    ThrowTypeError = 88,             // pop message string from stack, construct TypeError, handle_throw
+    Await = 89,                      // async suspension point: pop awaited value and resume in a microtask
+    EnterFieldInit = 90,             // mark start of class field initializer (for eval restrictions)
+    LeaveFieldInit = 91,             // mark end of class field initializer
+    AllocBrand = 92,                 // push a runtime-unique brand number onto stack (for private member brand checks)
+    ResetPrototype = 93,             // create a fresh prototype for the constructor on TOS
+    IteratorClose = 94,              // pop iterator from stack; call .return() if callable
+    AssertIterResult = 95,           // throw TypeError if TOS is not an object (IteratorResult check)
+    BoxLocal = 96,                   // create a shared upvalue cell for a local (for class name heritage scope)
+    ToNumeric = 97,                  // ToNumeric: like ToNumber but preserves BigInt values
+    SetSuperPropertyComputed = 98,   // assign to super[expr] using current this as receiver
+    DefineComputedMethod = 99,       // like SetIndex but also marks non-enumerable (for class methods)
+    IteratorCloseAbrupt = 100,       // best-effort iterator close for throw completions; never throws
+    DefineGlobalSoft = 101,          // like DefineGlobal but only defines if key doesn't already exist (for var hoisting)
+    ThrowIfNullish = 102,            // throw TypeError if TOS is null or undefined (does not pop)
+    InitNamedFnSelf = 103,           // push the callee (named fn expression's own function) from pending stack
+    FreezeTemplate = 104,            // freeze template object and its .raw property (tagged templates)
+    YieldDirect = 105,               // like Yield but the yielded value is returned directly without make_gen_result wrapping
+    CheckGeneratorReturn = 106,      // push true if generator_return_pending is set, else push false
+    SetGeneratorReturn = 107,        // pop value and set generator_return_pending = Some(value)
+    ThrowIfNotConstructor = 108,     // pop TOS, throw TypeError if it's not a constructor
+    ReboxLocal = 109,                // create a fresh upvalue cell for a local, copying the old value (per-iteration let)
+    ClearLocalCells = 110,           // clear local_cells / top_level_cells entries with index >= operand byte
+    ClearGeneratorReturn = 111,      // clear generator_return_pending (set to None)
+    MarkPropertyNonEnumerable = 112, // pop object, read key const, mark property [[Enumerable]] = false
+    MarkPropertyReadonly = 113,      // pop object, read key const, mark property [[Writable]] = false
 }
 
 impl TryFrom<u8> for Opcode {
@@ -234,6 +236,8 @@ impl TryFrom<u8> for Opcode {
             109 => Opcode::ReboxLocal,
             110 => Opcode::ClearLocalCells,
             111 => Opcode::ClearGeneratorReturn,
+            112 => Opcode::MarkPropertyNonEnumerable,
+            113 => Opcode::MarkPropertyReadonly,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

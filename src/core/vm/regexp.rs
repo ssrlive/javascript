@@ -2025,11 +2025,12 @@ impl<'gc> VM<'gc> {
 
     /// Execute a regex match, returning an array result or Null
     pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &VmObjectHandle<'gc>, input: &str) -> Value<'gc> {
+        let rx = Value::VmObject(*re_obj);
         let borrow = re_obj.borrow();
         let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
         let is_global = flags.contains('g');
         let is_sticky = flags.contains('y');
-        let last_index_val = borrow.get("lastIndex").cloned().unwrap_or(Value::Number(0.0));
+        let last_index_val = self.read_named_property(ctx, &rx, "lastIndex");
         drop(borrow);
 
         // ToLength(lastIndex) — must call valueOf on objects
@@ -2137,25 +2138,21 @@ impl<'gc> VM<'gc> {
                 let arr = Value::VmArray(new_gc_cell_ptr(ctx, arr_data));
 
                 // Update lastIndex for global/sticky
-                if is_global || is_sticky {
-                    if has_readonly_mark(&re_obj.borrow(), "lastIndex") {
-                        self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
-                        return Value::Null;
-                    }
-                    re_obj
-                        .borrow_mut(ctx)
-                        .insert("lastIndex".to_string(), Value::Number(match_end as f64));
+                if (is_global || is_sticky)
+                    && let Err(thrown) = self.host_fn_set_property(ctx, &rx, "lastIndex", &Value::Number(match_end as f64))
+                {
+                    self.pending_throw = Some(thrown);
+                    return Value::Null;
                 }
 
                 arr
             }
             _ => {
-                if is_global || is_sticky {
-                    if has_readonly_mark(&re_obj.borrow(), "lastIndex") {
-                        self.throw_type_error(ctx, "Cannot set property lastIndex of RegExp which has only a getter");
-                        return Value::Null;
-                    }
-                    re_obj.borrow_mut(ctx).insert("lastIndex".to_string(), Value::Number(0.0));
+                if (is_global || is_sticky)
+                    && let Err(thrown) = self.host_fn_set_property(ctx, &rx, "lastIndex", &Value::Number(0.0))
+                {
+                    self.pending_throw = Some(thrown);
+                    return Value::Null;
                 }
                 Value::Null
             }

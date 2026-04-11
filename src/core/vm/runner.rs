@@ -137,6 +137,8 @@ impl<'gc> VM<'gc> {
                 Opcode::InitIndex => self.run_opcode_init_index(ctx)?,
                 Opcode::SetComputedGetter => self.run_opcode_set_computed_getter(ctx)?,
                 Opcode::SetComputedSetter => self.run_opcode_set_computed_setter(ctx)?,
+                Opcode::MarkPropertyNonEnumerable => self.run_opcode_mark_property_nonenumerable(ctx)?,
+                Opcode::MarkPropertyReadonly => self.run_opcode_mark_property_readonly(ctx)?,
                 Opcode::ToPropertyKey => self.run_opcode_to_property_key(ctx)?,
                 Opcode::Increment => self.run_opcode_increment(ctx)?,
                 Opcode::Decrement => self.run_opcode_decrement(ctx)?,
@@ -206,7 +208,7 @@ impl<'gc> VM<'gc> {
                         _ => None,
                     })
                     .unwrap_or(0);
-                if let Some(proto) = self.get_fn_props(ctx, frame.func_ip, arity).borrow().get("prototype").cloned() {
+                if let Some(proto) = own_data_from_legacy_map(&self.get_fn_props(ctx, frame.func_ip, arity).borrow(), "prototype") {
                     arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                 }
             }
@@ -514,7 +516,7 @@ impl<'gc> VM<'gc> {
                     if self.chunk.named_fn_self_ips.contains(&target_ip) {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
-                    let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, &[], &this_val, true) {
+                    let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, &[], &this_val, true) {
                         Ok(obj) => obj,
                         Err(err) => {
                             self.set_pending_throw_from_error(&err);
@@ -537,7 +539,7 @@ impl<'gc> VM<'gc> {
                     if self.chunk.named_fn_self_ips.contains(&target_ip) {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
-                    let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, &[], &this_val, false) {
+                    let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, &[], &this_val, false) {
                         Ok(obj) => obj,
                         Err(err) => {
                             self.set_pending_throw_from_error(&err);
@@ -727,7 +729,7 @@ impl<'gc> VM<'gc> {
                     if self.chunk.named_fn_self_ips.contains(&target_ip) {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
-                    let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, upvals, &this_val, true) {
+                    let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, upvals, &this_val, true) {
                         Ok(obj) => obj,
                         Err(err) => {
                             self.set_pending_throw_from_error(&err);
@@ -750,7 +752,7 @@ impl<'gc> VM<'gc> {
                     if self.chunk.named_fn_self_ips.contains(&target_ip) {
                         self.named_fn_callee_stack.push(callee.clone());
                     }
-                    let gen_obj = match self.create_generator_object(ctx, target_ip, arity, &args_vec, upvals, &this_val, false) {
+                    let gen_obj = match self.create_generator_object(ctx, &callee, target_ip, arity, &args_vec, upvals, &this_val, false) {
                         Ok(obj) => obj,
                         Err(err) => {
                             self.set_pending_throw_from_error(&err);
@@ -1167,7 +1169,7 @@ impl<'gc> VM<'gc> {
                         .unwrap_or_default();
                     let is_dynamic_generator = matches!(borrow.get("__dynamic_generator_function__"), Some(Value::Boolean(true)));
                     let is_async_dynamic_gen = matches!(borrow.get("__async_dynamic_generator_function__"), Some(Value::Boolean(true)));
-                    let dynamic_generator_prototype = borrow.get("prototype").cloned();
+                    let dynamic_generator_prototype = own_data_from_legacy_map(&borrow, "prototype");
                     drop(borrow);
                     let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
                     self.stack.pop(); // pop callee
@@ -1881,10 +1883,7 @@ impl<'gc> VM<'gc> {
                     self.stack.push(val);
                 } else {
                     // unresolvable reference
-                    let mut err_map = IndexMap::new();
-                    err_map.insert("message".to_string(), Value::from(&format!("{} is not defined", name_str)));
-                    err_map.insert("__type__".to_string(), Value::from("ReferenceError"));
-                    let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
+                    let err = self.make_reference_error(ctx, &format!("{} is not defined", name_str));
                     self.handle_throw(ctx, &err)?;
                 }
             }
@@ -3192,7 +3191,7 @@ impl<'gc> VM<'gc> {
                 let fn_props = self
                     .get_fn_props_for_value(ctx, &constructor)
                     .unwrap_or_else(|| self.get_fn_props(ctx, target_ip, _arity));
-                if let Some(proto) = fn_props.borrow().get("prototype").cloned() {
+                if let Some(proto) = own_data_from_legacy_map(&fn_props.borrow(), "prototype") {
                     new_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
                 }
                 let this_val = Value::VmObject(new_obj);
@@ -3607,7 +3606,7 @@ impl<'gc> VM<'gc> {
         }
         let closure_value = Value::VmClosure(ip, arity, Gc::new(ctx, captures));
         let props = self.get_fn_props(ctx, ip, arity);
-        if let Some(Value::VmObject(proto_obj)) = props.borrow().get("prototype").cloned() {
+        if let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&props.borrow(), "prototype") {
             // Generator/async-generator prototypes should NOT have a constructor property (spec §27.3.3.1, §27.4.3.1)
             let is_generator = self.chunk.generator_function_ips.contains(&ip);
             if !is_generator {
@@ -3762,8 +3761,7 @@ impl<'gc> VM<'gc> {
         let elems: Vec<Value<'gc>> = self.stack.drain(start..).collect();
         let arr_val = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(elems)));
         // link prototype if Array constructor has prototype property
-        if let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
-            && let Some(proto) = array_ctor.borrow().get("prototype").cloned()
+        if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Array")
             && let Value::VmArray(arr_obj) = &arr_val
         {
             arr_obj.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
@@ -3784,9 +3782,7 @@ impl<'gc> VM<'gc> {
             let val = chunk[1].clone();
             map.insert(key, val);
         }
-        if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
-            && let Some(proto) = object_ctor.borrow().get("prototype").cloned()
-        {
+        if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Object") {
             map.insert("__proto__".to_string(), proto);
         }
         self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, map)));
@@ -3945,7 +3941,7 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         Value::Property { value: Some(v), .. } => {
-                            self.stack.push(v.borrow().clone());
+                            self.stack.push((*v).clone());
                         }
                         _ => {
                             self.stack.push(Value::Undefined);
@@ -4036,7 +4032,7 @@ impl<'gc> VM<'gc> {
                             }
                             Value::Property { value: Some(inner), .. } => {
                                 drop(borrow);
-                                self.stack.push(inner.borrow().clone());
+                                self.stack.push((*inner).clone());
                             }
                             Value::Property { value: None, .. } => {
                                 drop(borrow);
@@ -4107,35 +4103,29 @@ impl<'gc> VM<'gc> {
                         // Cross-realm fix: symbol values should resolve properties
                         // through the current realm's Symbol.prototype, not the
                         // symbol's own __proto__ (which may be from a foreign realm).
-                        if borrow.contains_key("__vm_symbol__")
-                            && let Some(Value::VmObject(sym_ctor)) = self.globals.get("Symbol")
-                        {
-                            proto = sym_ctor.borrow().get("prototype").cloned();
+                        if borrow.contains_key("__vm_symbol__") {
+                            proto = self.ctor_prototype_from_globals(ctx, "Symbol");
                         }
                         drop(borrow);
                         if proto.is_none()
                             && let Some(type_name) = type_name.as_deref()
-                            && let Some(Value::VmObject(ctor)) = self.globals.get(type_name)
-                            && let Some(type_proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(type_proto) = self.ctor_prototype_from_globals(ctx, type_name)
                         {
                             proto = Some(type_proto);
                         }
                         if matches!(type_name.as_deref(), Some("Boolean"))
-                            && let Some(Value::VmObject(boolean_ctor)) = self.globals.get("Boolean")
-                            && let Some(bool_proto) = boolean_ctor.borrow().get("prototype").cloned()
+                            && let Some(bool_proto) = self.ctor_prototype_from_globals(ctx, "Boolean")
                         {
                             proto = Some(bool_proto);
                         }
                         if matches!(type_name.as_deref(), Some("String"))
-                            && let Some(Value::VmObject(string_ctor)) = self.globals.get("String")
-                            && let Some(string_proto) = string_ctor.borrow().get("prototype").cloned()
+                            && let Some(string_proto) = self.ctor_prototype_from_globals(ctx, "String")
                         {
                             proto = Some(string_proto);
                         }
                         if proto.is_none()
                             && is_fn_like
-                            && let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
-                            && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+                            && let Some(fn_proto) = self.ctor_prototype_from_globals(ctx, "Function")
                         {
                             proto = Some(fn_proto);
                         }
@@ -4145,10 +4135,8 @@ impl<'gc> VM<'gc> {
                                     "toFixed" | "toExponential" | "toPrecision" | "toString" | "toLocaleString" | "valueOf"
                                     | "constructor" => {
                                         // Check Number.prototype for the actual value (may be overridden)
-                                        if let Some(Value::VmObject(num_ctor)) = self.globals.get("Number")
-                                            && let Some(Value::VmObject(num_proto)) = num_ctor.borrow().get("prototype").cloned()
-                                        {
-                                            num_proto.borrow().get(&key).cloned()
+                                        if let Some(Value::VmObject(num_proto)) = self.ctor_prototype_from_globals(ctx, "Number") {
+                                            own_data_from_legacy_map(&num_proto.borrow(), &key)
                                         } else {
                                             None
                                         }
@@ -4158,10 +4146,8 @@ impl<'gc> VM<'gc> {
                             }
                             Some("BigInt") => match key.as_str() {
                                 "toString" | "valueOf" | "toLocaleString" | "constructor" => {
-                                    if let Some(Value::VmObject(bi_ctor)) = self.globals.get("BigInt")
-                                        && let Some(Value::VmObject(bi_proto)) = bi_ctor.borrow().get("prototype").cloned()
-                                    {
-                                        bi_proto.borrow().get(&key).cloned()
+                                    if let Some(Value::VmObject(bi_proto)) = self.ctor_prototype_from_globals(ctx, "BigInt") {
+                                        own_data_from_legacy_map(&bi_proto.borrow(), &key)
                                     } else {
                                         None
                                     }
@@ -4211,13 +4197,7 @@ impl<'gc> VM<'gc> {
                             self.stack.push(v);
                         } else {
                             // Walk the __proto__ chain; fallback to Object.prototype for plain objects
-                            let effective_proto = proto.or_else(|| {
-                                if let Some(Value::VmObject(obj_global)) = self.globals.get("Object") {
-                                    obj_global.borrow().get("prototype").cloned()
-                                } else {
-                                    None
-                                }
-                            });
+                            let effective_proto = proto.or_else(|| self.ctor_prototype_from_globals(ctx, "Object"));
                             // If the prototype is a proxy, delegate through the
                             // receiver-aware path so proxy traps fire correctly.
                             if let Some(ref proto_val) = effective_proto
@@ -4291,7 +4271,7 @@ impl<'gc> VM<'gc> {
                                         self.stack.push(got);
                                     }
                                     Some(Value::Property { value: Some(inner), .. }) => {
-                                        self.stack.push(inner.borrow().clone());
+                                        self.stack.push((*inner).clone());
                                     }
                                     Some(Value::Property { value: None, .. }) => {
                                         self.stack.push(Value::Undefined);
@@ -4505,7 +4485,11 @@ impl<'gc> VM<'gc> {
                 } else if let Some(v) = lookup(&key) {
                     // Setter-only accessor shadows data property
                     let setter_key = make_setter_key(&key);
-                    if lookup(&setter_key).is_some() { Value::Undefined } else { v }
+                    if lookup(&setter_key).is_some() {
+                        Value::Undefined
+                    } else {
+                        self.materialize_property_read_value(ctx, &obj, v)
+                    }
                 } else {
                     // Check for setter-only accessor
                     let setter_key = make_setter_key(&key);
@@ -4516,7 +4500,9 @@ impl<'gc> VM<'gc> {
                         }
                         Value::Undefined
                     } else {
-                        let proto = lookup("__proto__");
+                        let proto = lookup("__proto__")
+                            .map(|v| self.materialize_property_read_value(ctx, &obj, v))
+                            .or_else(|| self.ctor_prototype_from_globals(ctx, "Function"));
                         match key.as_str() {
                             "call" | "apply" | "bind" => self.read_named_property(ctx, &obj, &key),
                             "caller" | "arguments" => {
@@ -4538,7 +4524,7 @@ impl<'gc> VM<'gc> {
                                 } else {
                                     match self.lookup_proto_chain(proto.as_ref(), &key) {
                                         Some(Value::Property { getter: Some(g), .. }) => self.invoke_getter_with_receiver(ctx, &g, &obj),
-                                        Some(Value::Property { value: Some(inner), .. }) => inner.borrow().clone(),
+                                        Some(Value::Property { value: Some(inner), .. }) => (*inner).clone(),
                                         Some(Value::Property { value: None, .. }) => Value::Undefined,
                                         Some(v) => v,
                                         None => Value::Undefined,
@@ -4683,6 +4669,60 @@ impl<'gc> VM<'gc> {
                 Err(err)
             }
         }
+    }
+
+    // Opcode::MarkPropertyNonEnumerable
+    fn run_opcode_mark_property_nonenumerable(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let name_idx = self.read_u16() as usize;
+        let name_val = &self.chunk.constants[name_idx];
+        let key = if let Value::String(s) = name_val {
+            crate::unicode::utf16_to_utf8(s)
+        } else {
+            value_to_string(name_val)
+        };
+        let obj = self.stack.pop().expect("VM Stack underflow on MarkPropertyNonEnumerable (obj)");
+        match &obj {
+            Value::VmObject(map) => {
+                mark_nonenumerable(&mut map.borrow_mut(ctx), &key);
+            }
+            Value::VmArray(arr) => {
+                mark_nonenumerable(&mut arr.borrow_mut(ctx).props, &key);
+            }
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                let shared_props = self.get_fn_props(ctx, *ip, *arity);
+                let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
+                mark_nonenumerable(&mut target_props.borrow_mut(ctx), &key);
+            }
+            _ => {}
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::MarkPropertyReadonly
+    fn run_opcode_mark_property_readonly(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let name_idx = self.read_u16() as usize;
+        let name_val = &self.chunk.constants[name_idx];
+        let key = if let Value::String(s) = name_val {
+            crate::unicode::utf16_to_utf8(s)
+        } else {
+            value_to_string(name_val)
+        };
+        let obj = self.stack.pop().expect("VM Stack underflow on MarkPropertyReadonly (obj)");
+        match &obj {
+            Value::VmObject(map) => {
+                mark_readonly(&mut map.borrow_mut(ctx), &key);
+            }
+            Value::VmArray(arr) => {
+                mark_readonly(&mut arr.borrow_mut(ctx).props, &key);
+            }
+            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                let shared_props = self.get_fn_props(ctx, *ip, *arity);
+                let target_props = self.get_closure_overlay(&obj).unwrap_or(shared_props);
+                mark_readonly(&mut target_props.borrow_mut(ctx), &key);
+            }
+            _ => {}
+        }
+        Ok(OpcodeAction::Continue)
     }
 
     // Opcode::InitProperty
@@ -5430,13 +5470,13 @@ impl<'gc> VM<'gc> {
                         _ => self.invoke_getter_with_receiver(ctx, &getter_fn, &obj),
                     }
                 } else if let Some(v) = lookup(&coerced_key) {
-                    v
+                    self.materialize_property_read_value(ctx, &obj, v)
                 } else {
                     let setter_key = make_setter_key(&coerced_key);
                     if lookup(&setter_key).is_some() {
                         Value::Undefined
                     } else {
-                        let proto = lookup("__proto__");
+                        let proto = lookup("__proto__").map(|v| self.materialize_property_read_value(ctx, &obj, v));
                         match coerced_key.as_str() {
                             "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
                             "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
@@ -5721,7 +5761,6 @@ impl<'gc> VM<'gc> {
             }
         };
         self.maybe_infer_accessor_function_name_from_key(ctx, "get", &coerced_key, Some(&index), &val);
-        let getter_key = make_getter_key(&coerced_key);
         if let Value::VmObject(map) = &obj {
             if coerced_key == "prototype"
                 && map
@@ -5751,7 +5790,7 @@ impl<'gc> VM<'gc> {
             } else {
                 borrow.shift_remove(&coerced_key);
             }
-            borrow.insert(getter_key, val.clone());
+            set_getter(&mut borrow, &coerced_key, val.clone());
             // Class computed getters are non-enumerable
             mark_nonenumerable(&mut borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
@@ -5777,7 +5816,7 @@ impl<'gc> VM<'gc> {
             }
             let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
-            borrow.insert(getter_key, val.clone());
+            set_getter(&mut borrow, &coerced_key, val.clone());
             mark_nonenumerable(&mut borrow, &coerced_key);
         }
         self.stack.push(val);
@@ -5802,7 +5841,6 @@ impl<'gc> VM<'gc> {
             }
         };
         self.maybe_infer_accessor_function_name_from_key(ctx, "set", &coerced_key, Some(&index), &val);
-        let setter_key = make_setter_key(&coerced_key);
         if let Value::VmObject(map) = &obj {
             if coerced_key == "prototype"
                 && map
@@ -5832,7 +5870,7 @@ impl<'gc> VM<'gc> {
             } else {
                 borrow.shift_remove(&coerced_key);
             }
-            borrow.insert(setter_key, val.clone());
+            set_setter(&mut borrow, &coerced_key, val.clone());
             mark_nonenumerable(&mut borrow, &coerced_key);
         } else if let Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) = &obj {
             if coerced_key == "prototype" {
@@ -5857,7 +5895,7 @@ impl<'gc> VM<'gc> {
             }
             let mut borrow = target_props.borrow_mut(ctx);
             borrow.shift_remove(&coerced_key);
-            borrow.insert(setter_key, val.clone());
+            set_setter(&mut borrow, &coerced_key, val.clone());
             mark_nonenumerable(&mut borrow, &coerced_key);
         }
         self.stack.push(val);
@@ -6229,14 +6267,14 @@ impl<'gc> VM<'gc> {
                     {
                         let type_name = crate::unicode::utf16_to_utf8(type_name_u16);
                         if let Some(Value::VmObject(ctor)) = self.globals.get(&type_name)
-                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                         {
                             next = Some(proto);
                         }
                     }
                     if next.is_none()
                         && let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
-                        && let Some(Value::VmObject(obj_proto)) = object_ctor.borrow().get("prototype").cloned()
+                        && let Some(Value::VmObject(obj_proto)) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
                         && !Gc::ptr_eq(map, obj_proto)
                     {
                         next = Some(Value::VmObject(obj_proto));
@@ -6336,11 +6374,7 @@ impl<'gc> VM<'gc> {
                 // Private field access bypasses proxy traps — read directly from the object's map
                 if key.contains(PRIVATE_KEY_PREFIX) {
                     let b = map.borrow();
-                    if let Some(val) = b.get(&key) {
-                        val.clone()
-                    } else {
-                        Value::Undefined
-                    }
+                    own_data_from_legacy_map(&b, &key).unwrap_or(Value::Undefined)
                 } else {
                     self.read_named_property(ctx, &obj, &key)
                 }
@@ -6458,15 +6492,17 @@ impl<'gc> VM<'gc> {
                 if let Some(getter_fn) = lookup(&getter_key) {
                     self.invoke_getter_with_receiver(ctx, &getter_fn, &obj)
                 } else if let Some(value) = lookup(&key) {
-                    match value {
-                        Value::Property { getter: Some(g), .. } => self.invoke_getter_with_receiver(ctx, &g, &obj),
-                        other => other,
-                    }
+                    self.materialize_property_read_value(ctx, &obj, value)
                 } else {
-                    let proto = lookup("__proto__");
+                    let proto = lookup("__proto__")
+                        .map(|v| self.materialize_property_read_value(ctx, &obj, v))
+                        .or_else(|| self.ctor_prototype_from_globals(ctx, "Function"));
                     match key.as_str() {
                         "call" | "apply" | "bind" => self.read_named_property(ctx, &obj, &key),
-                        _ => self.lookup_proto_chain(proto.as_ref(), &key).unwrap_or(Value::Undefined),
+                        _ => match self.lookup_proto_chain(proto.as_ref(), &key) {
+                            Some(v) => self.materialize_property_read_value(ctx, &obj, v),
+                            None => Value::Undefined,
+                        },
                     }
                 }
             }
@@ -6536,9 +6572,7 @@ impl<'gc> VM<'gc> {
         let mut proto = IndexMap::new();
         proto.insert("constructor".to_string(), ctor.clone());
         mark_nonenumerable(&mut proto, "constructor");
-        if let Some(Value::VmObject(obj_global)) = self.globals.get("Object")
-            && let Some(obj_proto) = obj_global.borrow().get("prototype").cloned()
-        {
+        if let Some(obj_proto) = self.ctor_prototype_from_globals(ctx, "Object") {
             proto.insert("__proto__".to_string(), obj_proto);
         }
         let new_proto = Value::VmObject(new_gc_cell_ptr(ctx, proto));
@@ -6870,7 +6904,7 @@ impl<'gc> VM<'gc> {
                             {
                                 let tn = crate::unicode::utf16_to_utf8(type_name_u16);
                                 if let Some(Value::VmObject(ctor)) = self.globals.get(&tn)
-                                    && let Some(type_proto) = ctor.borrow().get("prototype").cloned()
+                                    && let Some(type_proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                                 {
                                     drop(b);
                                     self.has_property_in_chain(ctx, &type_proto, &key)
@@ -6953,7 +6987,7 @@ impl<'gc> VM<'gc> {
                             let mut proto = borrow.props.get("__proto__").cloned();
                             if proto.is_none()
                                 && let Some(Value::VmObject(array_ctor)) = self.globals.get("Array")
-                                && let Some(array_proto) = array_ctor.borrow().get("prototype").cloned()
+                                && let Some(array_proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
                             {
                                 proto = Some(array_proto);
                             }
@@ -7136,18 +7170,17 @@ impl<'gc> VM<'gc> {
                         }
                         if matches!(proto, Value::Null) { None } else { Some(proto) }
                     } else if obj.borrow().contains_key("__host_fn__") && !obj.borrow().contains_key("__proto__") {
-                        if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
-                            function_ctor.borrow().get("prototype").cloned()
-                        } else {
-                            None
-                        }
+                        self.ctor_prototype_from_globals(ctx, "Function")
                     } else {
-                        obj.borrow().get("__proto__").cloned()
+                        obj.borrow()
+                            .get("__proto__")
+                            .cloned()
+                            .map(|v| self.materialize_property_read_value(ctx, &lhs, v))
                     }
                 }
                 Value::VmArray(arr) => {
                     if let Some(proto) = arr.borrow().props.get("__proto__").cloned() {
-                        Some(proto)
+                        Some(self.materialize_property_read_value(ctx, &lhs, proto))
                     } else {
                         let arr_ctor = self.globals.get("Array").cloned();
                         arr_ctor.and_then(|ctor| {
@@ -7176,21 +7209,17 @@ impl<'gc> VM<'gc> {
                         .get_fn_props_for_value(ctx, &lhs)
                         .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
                     if let Some(proto) = fn_props.borrow().get("__proto__").cloned() {
-                        Some(proto)
-                    } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
-                        function_ctor.borrow().get("prototype").cloned()
+                        Some(self.materialize_property_read_value(ctx, &lhs, proto))
                     } else {
-                        None
+                        self.ctor_prototype_from_globals(ctx, "Function")
                     }
                 }
                 Value::VmNativeFunction(id) => {
                     let fn_props = self.get_native_fn_props(ctx, *id);
                     if let Some(proto) = fn_props.borrow().get("__proto__").cloned() {
-                        Some(proto)
-                    } else if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
-                        function_ctor.borrow().get("prototype").cloned()
+                        Some(self.materialize_property_read_value(ctx, &lhs, proto))
                     } else {
-                        None
+                        self.ctor_prototype_from_globals(ctx, "Function")
                     }
                 }
                 _ => None,
@@ -7225,16 +7254,21 @@ impl<'gc> VM<'gc> {
                                 }
                                 if matches!(proto, Value::Null) { None } else { Some(proto) }
                             } else if proto_obj.borrow().contains_key("__host_fn__") && !proto_obj.borrow().contains_key("__proto__") {
-                                if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function") {
-                                    function_ctor.borrow().get("prototype").cloned()
-                                } else {
-                                    None
-                                }
+                                self.ctor_prototype_from_globals(ctx, "Function")
                             } else {
-                                proto_obj.borrow().get("__proto__").cloned()
+                                proto_obj
+                                    .borrow()
+                                    .get("__proto__")
+                                    .cloned()
+                                    .map(|v| self.materialize_property_read_value(ctx, &proto_val, v))
                             }
                         }
-                        Value::VmArray(proto_arr) => proto_arr.borrow().props.get("__proto__").cloned(),
+                        Value::VmArray(proto_arr) => proto_arr
+                            .borrow()
+                            .props
+                            .get("__proto__")
+                            .cloned()
+                            .map(|v| self.materialize_property_read_value(ctx, &proto_val, v)),
                         _ => None,
                     };
                 }
@@ -7543,7 +7577,7 @@ impl<'gc> VM<'gc> {
                 let fn_props = self
                     .get_fn_props_for_value(ctx, &callee)
                     .unwrap_or_else(|| self.get_fn_props(ctx, target_ip, _arity));
-                if let Some(proto) = fn_props.borrow().get("prototype").cloned() {
+                if let Some(proto) = own_data_from_legacy_map(&fn_props.borrow(), "prototype") {
                     new_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
                 }
                 let this_val = Value::VmObject(new_obj);
@@ -7747,7 +7781,7 @@ impl<'gc> VM<'gc> {
                         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
                         map.insert("lastIndex".to_string(), Value::Number(0.0));
                         if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
-                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                         {
                             map.insert("__proto__".to_string(), proto);
                         }
@@ -7760,7 +7794,7 @@ impl<'gc> VM<'gc> {
                         map.insert("__type__".to_string(), Value::from("Date"));
                         map.insert("__date_ms__".to_string(), Value::Number(ms));
                         if let Some(Value::VmObject(ctor)) = self.globals.get("Date")
-                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                         {
                             map.insert("__proto__".to_string(), proto);
                         }
@@ -7772,7 +7806,7 @@ impl<'gc> VM<'gc> {
                         m.insert("__type__".to_string(), Value::from("Number"));
                         m.insert("__value__".to_string(), result);
                         if let Some(Value::VmObject(ctor)) = self.globals.get("Number")
-                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                         {
                             m.insert("__proto__".to_string(), proto);
                         }
@@ -7784,7 +7818,7 @@ impl<'gc> VM<'gc> {
                         m.insert("__type__".to_string(), Value::from("String"));
                         m.insert("__value__".to_string(), result);
                         if let Some(Value::VmObject(ctor)) = self.globals.get("String")
-                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                         {
                             m.insert("__proto__".to_string(), proto);
                         }
@@ -7796,7 +7830,7 @@ impl<'gc> VM<'gc> {
                         m.insert("__type__".to_string(), Value::from("Boolean"));
                         m.insert("__value__".to_string(), Value::Boolean(bool_value));
                         if let Some(Value::VmObject(ctor)) = self.globals.get("Boolean")
-                            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+                            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
                         {
                             m.insert("__proto__".to_string(), proto);
                         }
@@ -8140,7 +8174,7 @@ impl<'gc> VM<'gc> {
                         }
                     } else if borrow.contains_key("__fn_body__") {
                         // Dynamic function created via `new Function(...)` — constructible.
-                        let proto = borrow.get("prototype").cloned();
+                        let proto = own_data_from_legacy_map(&borrow, "prototype");
                         drop(borrow);
                         let args: Vec<Value<'gc>> = (0..arg_count)
                             .map(|_| self.stack.pop().expect("VM Stack underflow"))

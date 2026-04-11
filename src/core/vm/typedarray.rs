@@ -2276,17 +2276,13 @@ impl<'gc> VM<'gc> {
         };
         let len = elements.len();
         // Create a new TypedArray with the same type
-        let ta_instance_proto = self
-            .globals
-            .get(&ta_name)
-            .and_then(|v| {
-                if let Value::VmObject(o) = v {
-                    Some(o.borrow().get("prototype").cloned())
-                } else {
-                    None
-                }
-            })
-            .flatten();
+        let ta_instance_proto: Option<Value<'gc>> = self.globals.get(&ta_name).and_then(|v| {
+            if let Value::VmObject(o) = v {
+                own_data_from_legacy_map(&o.borrow(), "prototype")
+            } else {
+                None
+            }
+        });
         let mut data = VmArrayData::new(elements.clone());
         data.props.insert("__typedarray_name__".to_string(), Value::from(&ta_name));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
@@ -2918,17 +2914,13 @@ impl<'gc> VM<'gc> {
         let is_bigint_ta = is_bigint_typed_array(typedarray_name);
 
         // Get prototype from constructor for __proto__ on instances
-        let ta_instance_proto = self
-            .globals
-            .get(typedarray_name)
-            .and_then(|v| {
-                if let Value::VmObject(o) = v {
-                    Some(o.borrow().get("prototype").cloned())
-                } else {
-                    None
-                }
-            })
-            .flatten();
+        let ta_instance_proto: Option<Value<'gc>> = self.globals.get(typedarray_name).and_then(|v| {
+            if let Value::VmObject(o) = v {
+                own_data_from_legacy_map(&o.borrow(), "prototype")
+            } else {
+                None
+            }
+        });
 
         if let Some(Value::VmArray(src_arr)) = args.first()
             && src_arr.borrow().props.contains_key("__typedarray_name__")
@@ -3707,7 +3699,7 @@ impl<'gc> VM<'gc> {
         //        XxxArray.__proto__ → %TypedArray% → Function.prototype
         let mut ta_proto_map = IndexMap::new();
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
         {
             ta_proto_map.insert("__proto__".to_string(), obj_proto);
         }

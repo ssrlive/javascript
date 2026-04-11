@@ -1,4 +1,4 @@
-use crate::core::{Collect, GcPtr, GcTrace};
+use crate::core::{Collect, GcTrace};
 use crate::core::{FunctionID, PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
@@ -71,7 +71,7 @@ pub enum Value<'gc> {
     /// Note: a `Value::Property` is not the same as a JS descriptor object
     /// (which is a descriptor object containing keys like `value`, `writable`, etc.).
     Property {
-        value: Option<GcPtr<'gc, Value<'gc>>>,
+        value: Option<Box<Value<'gc>>>,
         getter: Option<Box<Value<'gc>>>,
         setter: Option<Box<Value<'gc>>>,
         attrs: PropAttrs,

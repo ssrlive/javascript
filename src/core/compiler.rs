@@ -1,5 +1,5 @@
 use crate::core::opcode::{Chunk, Opcode};
-use crate::core::property_descriptor::{make_getter_key, make_nonenumerable_key, make_readonly_key, make_setter_key};
+use crate::core::property_descriptor::{make_getter_key, make_setter_key};
 use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
     StatementKind,
@@ -10644,16 +10644,10 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::InitProperty);
                 self.chunk.write_u16(mk_idx);
                 self.chunk.write_opcode(Opcode::Pop);
-                // Mark static private method as readonly
+                // Mark static private method as readonly ([[Writable]] = false)
                 self.emit_get_class_ref(name, is_expr)?;
-                let readonly_flag = self.chunk.add_constant(Value::Boolean(true));
-                self.chunk.write_opcode(Opcode::Constant);
-                self.chunk.write_u16(readonly_flag);
-                let ro_key = make_readonly_key(&private_name);
-                let ro_idx = self.chunk.add_constant(Value::from(&ro_key));
-                self.chunk.write_opcode(Opcode::InitProperty);
-                self.chunk.write_u16(ro_idx);
-                self.chunk.write_opcode(Opcode::Pop);
+                self.chunk.write_opcode(Opcode::MarkPropertyReadonly);
+                self.chunk.write_u16(mk_idx);
             }
 
             // Static private getters on the constructor
@@ -11086,47 +11080,30 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
-    /// Emit Dup + Constant(true) + SetProperty("__nonenumerable_<name>__") + Pop
-    /// to mark a property as non-enumerable on the object currently on top of stack.
+    /// Mark a property as non-enumerable on the object currently on top of
+    /// stack while preserving the original object value on stack.
     fn emit_nonenumerable_marker(&mut self, prop_name: &str) {
         self.chunk.write_opcode(Opcode::Dup);
-        self.chunk.write_opcode(Opcode::Constant);
-        let true_idx = self.chunk.add_constant(Value::Boolean(true));
-        self.chunk.write_u16(true_idx);
-        let ne_key = make_nonenumerable_key(prop_name);
-        let ne_idx = self.chunk.add_constant(Value::from(&ne_key));
-        self.chunk.write_opcode(Opcode::SetProperty);
-        self.chunk.write_u16(ne_idx);
-        self.chunk.write_opcode(Opcode::Pop);
+        let key_idx = self.chunk.add_constant(Value::from(prop_name));
+        self.chunk.write_opcode(Opcode::MarkPropertyNonEnumerable);
+        self.chunk.write_u16(key_idx);
     }
 
-    /// Emit Constant(true) + SetProperty("__nonenumerable_<name>__") + Pop
-    /// on a standalone object already on top of stack (consumes it).
+    /// Mark a property as non-enumerable on a standalone object already on top
+    /// of stack (consumes that object).
     fn emit_nonenumerable_marker_standalone(&mut self, prop_name: &str) {
-        self.chunk.write_opcode(Opcode::Constant);
-        let true_idx = self.chunk.add_constant(Value::Boolean(true));
-        self.chunk.write_u16(true_idx);
-        let ne_key = make_nonenumerable_key(prop_name);
-        let ne_idx = self.chunk.add_constant(Value::from(&ne_key));
-        self.chunk.write_opcode(Opcode::SetProperty);
-        self.chunk.write_u16(ne_idx);
-        self.chunk.write_opcode(Opcode::Pop);
+        let key_idx = self.chunk.add_constant(Value::from(prop_name));
+        self.chunk.write_opcode(Opcode::MarkPropertyNonEnumerable);
+        self.chunk.write_u16(key_idx);
     }
 
     /// Mark a private method as readonly (non-writable) on `this`.
-    /// Emits: GetThis, Constant(true), SetProperty("__readonly_<key>__"), Pop
+    /// Emits: GetThis, MarkPropertyReadonly(<private_name>)
     fn emit_private_readonly_marker(&mut self, private_name: &str) {
-        // Stack: [...] → GetThis → [..., this] → Constant(true) → [..., this, true]
-        // → SetProperty pops val+obj, pushes result → [..., result] → Pop → [...]
         self.chunk.write_opcode(Opcode::GetThis);
-        self.chunk.write_opcode(Opcode::Constant);
-        let true_idx = self.chunk.add_constant(Value::Boolean(true));
-        self.chunk.write_u16(true_idx);
-        let ro_key = make_readonly_key(private_name);
-        let ro_idx = self.chunk.add_constant(Value::from(&ro_key));
-        self.chunk.write_opcode(Opcode::SetProperty);
-        self.chunk.write_u16(ro_idx);
-        self.chunk.write_opcode(Opcode::Pop); // pop result of SetProperty
+        let key_idx = self.chunk.add_constant(Value::from(private_name));
+        self.chunk.write_opcode(Opcode::MarkPropertyReadonly);
+        self.chunk.write_u16(key_idx);
     }
 
     /// Extract display name from a private key: "\x00#N:name" → "#name"

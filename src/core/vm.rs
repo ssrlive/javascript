@@ -7699,19 +7699,20 @@ impl<'gc> VM<'gc> {
                 let mut i = 0;
                 while i < len {
                     if bytes[i] == b'%' {
-                        if i + 5 < len && bytes[i + 1] == b'u' {
-                            if let Ok(hex) = u16::from_str_radix(std::str::from_utf8(&bytes[i + 2..i + 6]).unwrap_or(""), 16) {
-                                result.push(hex);
-                                i += 6;
-                                continue;
-                            }
+                        if i + 5 < len
+                            && bytes[i + 1] == b'u'
+                            && let Ok(hex) = u16::from_str_radix(std::str::from_utf8(&bytes[i + 2..i + 6]).unwrap_or(""), 16)
+                        {
+                            result.push(hex);
+                            i += 6;
+                            continue;
                         }
-                        if i + 2 < len {
-                            if let Ok(hex) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
-                                result.push(hex as u16);
-                                i += 3;
-                                continue;
-                            }
+                        if i + 2 < len
+                            && let Ok(hex) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+                        {
+                            result.push(hex as u16);
+                            i += 3;
+                            continue;
                         }
                     }
                     result.push(bytes[i] as u16);
@@ -28990,7 +28991,8 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        // String methods
+        // String methods — RequireObjectCoercible(this) + ToString(this)
+        let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id);
         let string_val: Option<Vec<u16>> = match &receiver {
             Value::String(s) => Some(s.clone()),
             Value::VmObject(map) => {
@@ -29000,9 +29002,26 @@ impl<'gc> VM<'gc> {
                         Some(Value::String(s)) => Some(s.clone()),
                         _ => None,
                     }
+                } else if is_string_method {
+                    // Generic object — ToString via vm_to_string (calls JS toString/valueOf)
+                    drop(b);
+                    let s = self.vm_to_string(ctx, receiver);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    Some(crate::unicode::utf8_to_utf16(&s))
                 } else {
                     None
                 }
+            }
+            Value::Undefined | Value::Null if is_string_method => {
+                self.throw_type_error(ctx, "String.prototype method called on null or undefined");
+                return Value::Undefined;
+            }
+            // Number, Boolean, BigInt — coerce via ToString for string methods
+            other if is_string_method && !matches!(other, Value::Undefined | Value::Null) => {
+                let s = value_to_string(other);
+                Some(crate::unicode::utf8_to_utf16(&s))
             }
             _ => None,
         };

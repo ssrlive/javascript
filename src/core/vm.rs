@@ -7699,8 +7699,29 @@ impl<'gc> VM<'gc> {
                 self.uri_handle_host_fn(ctx, name, args)
             }
             "global.escape" => {
-                // B.2.1.1 escape(string)
-                let s = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                // B.2.1.1 escape(string): 1. Let string be ? ToString(string).
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                if arg.is_symbol_value() {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
+                }
+                let s = if matches!(arg, Value::VmObject(_) | Value::VmArray(_)) {
+                    let prim = self.try_to_primitive(ctx, &arg, "string");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if prim.is_symbol_value() {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                        return Value::Undefined;
+                    }
+                    if matches!(prim, Value::VmObject(_) | Value::VmArray(_)) {
+                        self.throw_type_error(ctx, "Cannot convert object to primitive value");
+                        return Value::Undefined;
+                    }
+                    value_to_string(&prim)
+                } else {
+                    value_to_string(&arg)
+                };
                 let mut result = String::new();
                 for ch in s.encode_utf16() {
                     let c = ch as u32;
@@ -7715,8 +7736,29 @@ impl<'gc> VM<'gc> {
                 Value::from(&result)
             }
             "global.unescape" => {
-                // B.2.1.2 unescape(string)
-                let s = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                // B.2.1.2 unescape(string): 1. Let string be ? ToString(string).
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                if arg.is_symbol_value() {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
+                }
+                let s = if matches!(arg, Value::VmObject(_) | Value::VmArray(_)) {
+                    let prim = self.try_to_primitive(ctx, &arg, "string");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if prim.is_symbol_value() {
+                        self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                        return Value::Undefined;
+                    }
+                    if matches!(prim, Value::VmObject(_) | Value::VmArray(_)) {
+                        self.throw_type_error(ctx, "Cannot convert object to primitive value");
+                        return Value::Undefined;
+                    }
+                    value_to_string(&prim)
+                } else {
+                    value_to_string(&arg)
+                };
                 let bytes = s.as_bytes();
                 let len = bytes.len();
                 let mut result: Vec<u16> = Vec::new();
@@ -8419,18 +8461,52 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "String.prototype.substr called on null or undefined");
                     return Value::Undefined;
                 }
-                let utf16 = Self::value_to_utf16(this_val);
+                // Step 2: ToString(this)
+                if this_val.is_symbol_value() {
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
+                }
+                let utf16 = if matches!(this_val, Value::VmObject(_) | Value::VmArray(_)) {
+                    let s = self.vm_to_string(ctx, this_val);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    s.encode_utf16().collect::<Vec<u16>>()
+                } else {
+                    Self::value_to_utf16(this_val)
+                };
                 let len = utf16.len() as i64;
-                let start_raw = args.first().map(to_number).unwrap_or(0.0);
+                // Step 3: ToInteger(start) - with proper coercion
+                let start_raw = match args.first() {
+                    Some(v) => {
+                        if v.is_symbol_value() {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                            return Value::Undefined;
+                        }
+                        match self.extract_number_with_coercion(ctx, v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        }
+                    }
+                    None => 0.0,
+                };
                 let int_start = if start_raw.is_nan() { 0i64 } else { start_raw as i64 };
                 let int_start = if int_start < 0 {
                     (len + int_start).max(0)
                 } else {
                     int_start.min(len)
                 } as usize;
+                // Step 4: ToInteger(length) - with proper coercion
                 let count = match args.get(1) {
                     Some(v) if !matches!(v, Value::Undefined) => {
-                        let n = to_number(v);
+                        if v.is_symbol_value() {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                            return Value::Undefined;
+                        }
+                        let n = match self.extract_number_with_coercion(ctx, v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        };
                         if n.is_nan() || n <= 0.0 { 0usize } else { n as usize }
                     }
                     _ => len.saturating_sub(int_start as i64) as usize,
@@ -8447,7 +8523,11 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "String.prototype method called on null or undefined");
                     return Value::Undefined;
                 }
-                let s = value_to_string(this_val);
+                // ToString(this) - proper JS coercion
+                let s = self.vm_to_string(ctx, this_val);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 let method = &name[7..]; // strip "string."
                 let (tag, attr) = match method {
                     "anchor" => ("a", Some("name")),
@@ -8466,7 +8546,12 @@ impl<'gc> VM<'gc> {
                     _ => unreachable!(),
                 };
                 if let Some(attr_name) = attr {
-                    let val = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                    // ToString(attr) - proper JS coercion
+                    let attr_val = args.first().cloned().unwrap_or(Value::Undefined);
+                    let val = self.vm_to_string(ctx, &attr_val);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     let escaped = val.replace('"', "&quot;");
                     Value::from(&format!("<{} {}=\"{}\">{}</{}>", tag, attr_name, escaped, s, tag))
                 } else {

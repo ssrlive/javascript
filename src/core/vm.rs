@@ -3619,6 +3619,9 @@ impl<'gc> VM<'gc> {
             BUILTIN_BIGINT_TOSTRING => "toString",
             BUILTIN_BIGINT_VALUEOF => "valueOf",
             BUILTIN_BIGINT_TOLOCALESTRING => "toLocaleString",
+            BUILTIN_SYMBOL => "Symbol",
+            BUILTIN_SYMBOL_FOR => "for",
+            BUILTIN_SYMBOL_KEYFOR => "keyFor",
             _ => "",
         }
     }
@@ -3737,7 +3740,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_SET_VALUES | BUILTIN_SET_ENTRIES | BUILTIN_SET_CLEAR => 0.0,
             BUILTIN_FR_REGISTER => 2.0,
             BUILTIN_FR_UNREGISTER => 1.0,
-            BUILTIN_WEAKREF_DEREF => 0.0,
+            BUILTIN_WEAKREF_DEREF | BUILTIN_SYMBOL => 0.0,
             _ => 1.0,
         }
     }
@@ -4620,12 +4623,63 @@ impl<'gc> VM<'gc> {
                 match sym {
                     Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
                         let borrow = obj.borrow();
-                        match borrow.get("description") {
+                        match borrow.get("__description__") {
                             Some(Value::String(d)) => Value::from(&format!("Symbol({})", crate::unicode::utf16_to_utf8(d))),
                             _ => Value::from("Symbol()"),
                         }
                     }
                     _ => Value::Undefined,
+                }
+            }
+            "symbol.getDescription" => {
+                // Symbol.prototype.description getter
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                match this_val {
+                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
+                        obj.borrow().get("__description__").cloned().unwrap_or(Value::Undefined)
+                    }
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Symbol") {
+                            if let Some(inner) = borrow.get("__value__") {
+                                match inner {
+                                    Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => {
+                                        sym.borrow().get("__description__").cloned().unwrap_or(Value::Undefined)
+                                    }
+                                    _ => Value::Undefined,
+                                }
+                            } else {
+                                Value::Undefined
+                            }
+                        } else {
+                            self.throw_type_error(ctx, "Symbol.prototype.description requires that 'this' be a Symbol");
+                            Value::Undefined
+                        }
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "Symbol.prototype.description requires that 'this' be a Symbol");
+                        Value::Undefined
+                    }
+                }
+            }
+            "symbol.toPrimitive" => {
+                // Symbol.prototype[@@toPrimitive](hint)
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                match this_val {
+                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => this_val.clone(),
+                    Value::VmObject(obj) => {
+                        let borrow = obj.borrow();
+                        if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Symbol") {
+                            borrow.get("__value__").cloned().unwrap_or(Value::Undefined)
+                        } else {
+                            self.throw_type_error(ctx, "Symbol.prototype[@@toPrimitive] requires that 'this' be a Symbol");
+                            Value::Undefined
+                        }
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "Symbol.prototype[@@toPrimitive] requires that 'this' be a Symbol");
+                        Value::Undefined
+                    }
                 }
             }
             "boolean.toString" => {
@@ -12235,7 +12289,9 @@ impl<'gc> VM<'gc> {
             | "object.valueOf"
             | "error.toString"
             | "object.isPrototypeOf" => self.call_host_fn(ctx, name, receiver, args),
-            "symbol.toString" | "symbol.valueOf" => self.call_host_fn(ctx, name, receiver, args),
+            "symbol.toString" | "symbol.valueOf" | "symbol.getDescription" | "symbol.toPrimitive" => {
+                self.call_host_fn(ctx, name, receiver, args)
+            }
             _ => self.call_named_host_function(ctx, name, args),
         }
     }
@@ -14049,7 +14105,7 @@ impl<'gc> VM<'gc> {
 
         let inferred = if let Some(symbol_name) = key_value.and_then(|raw| match raw {
             Value::VmObject(sym_obj) if sym_obj.borrow().contains_key("__vm_symbol__") => {
-                let desc_val = own_data_from_legacy_map(&sym_obj.borrow(), "description").unwrap_or(Value::Undefined);
+                let desc_val = own_data_from_legacy_map(&sym_obj.borrow(), "__description__").unwrap_or(Value::Undefined);
                 Some(match desc_val {
                     Value::String(desc) => {
                         let desc = crate::unicode::utf16_to_utf8(&desc);
@@ -14064,7 +14120,7 @@ impl<'gc> VM<'gc> {
         } else if let Some(id_str) = key.strip_prefix("@@sym:") {
             if let Ok(id) = id_str.parse::<u64>() {
                 if let Some(Value::VmObject(sym_obj)) = self.get_symbol_value(ctx, id) {
-                    match own_data_from_legacy_map(&sym_obj.borrow(), "description").unwrap_or(Value::Undefined) {
+                    match own_data_from_legacy_map(&sym_obj.borrow(), "__description__").unwrap_or(Value::Undefined) {
                         Value::String(desc) => {
                             let desc = crate::unicode::utf16_to_utf8(&desc);
                             if desc.is_empty() { String::new() } else { format!("[{}]", desc) }
@@ -15616,7 +15672,7 @@ impl<'gc> VM<'gc> {
             let mut m = IndexMap::new();
             m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
             m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
-            m.insert("description".to_string(), Value::from(&format!("Symbol.{}", name)));
+            m.insert("__description__".to_string(), Value::from(&format!("Symbol.{}", name)));
             Value::VmObject(new_gc_cell_ptr(ctx, m))
         };
         let sym_iterator = make_well_known_symbol(1, "iterator");
@@ -15672,7 +15728,12 @@ impl<'gc> VM<'gc> {
             write_attrs_to_legacy_map(&mut sym_obj, key, PropAttrs::empty());
         }
         sym_obj.insert("for".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_FOR));
+        mark_nonenumerable(&mut sym_obj, "for");
         sym_obj.insert("keyFor".to_string(), Value::VmNativeFunction(BUILTIN_SYMBOL_KEYFOR));
+        mark_nonenumerable(&mut sym_obj, "keyFor");
+        Self::insert_property_with_attributes(&mut sym_obj, "length", &Value::Number(0.0), false, false, true);
+        Self::insert_property_with_attributes(&mut sym_obj, "name", &Value::from("Symbol"), false, false, true);
+        sym_obj.insert("__non_constructor__".to_string(), Value::Boolean(true));
         self.globals
             .insert("Symbol".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, sym_obj)));
         self.globals
@@ -16631,6 +16692,13 @@ impl<'gc> VM<'gc> {
             );
             mark_nonenumerable(&mut symbol_proto, "toString");
             mark_nonenumerable(&mut symbol_proto, "valueOf");
+            // Symbol.prototype.description getter
+            let desc_getter = Self::make_host_fn_with_name_len(ctx, "symbol.getDescription", "get description", 0.0, false);
+            Self::insert_getter_property_with_attributes(&mut symbol_proto, "description", &desc_getter, false, true);
+            // Symbol.prototype[@@toPrimitive]
+            let to_prim = Self::make_host_fn_with_name_len(ctx, "symbol.toPrimitive", "[Symbol.toPrimitive]", 1.0, false);
+            symbol_proto.insert("@@sym:3".to_string(), to_prim);
+            write_attrs_to_legacy_map(&mut symbol_proto, "@@sym:3", PropAttrs::CONFIGURABLE);
             symbol_proto.insert("@@sym:4".to_string(), Value::from("Symbol"));
             mark_nonenumerable(&mut symbol_proto, "@@sym:4");
             let symbol_proto = new_gc_cell_ptr(ctx, symbol_proto);
@@ -17683,7 +17751,7 @@ impl<'gc> VM<'gc> {
             let borrow = map.borrow();
             // VM Symbol toString
             if borrow.contains_key("__vm_symbol__") {
-                return match borrow.get("description") {
+                return match borrow.get("__description__") {
                     Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
                     _ => "Symbol()".to_string(),
                 };
@@ -18510,7 +18578,7 @@ impl<'gc> VM<'gc> {
             let borrow = map.borrow();
             // VM Symbol display
             if borrow.contains_key("__vm_symbol__") {
-                return match borrow.get("description") {
+                return match borrow.get("__description__") {
                     Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
                     _ => "Symbol()".to_string(),
                 };
@@ -24822,9 +24890,7 @@ impl<'gc> VM<'gc> {
                 m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
                 m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
                 if let Some(d) = &desc {
-                    m.insert("description".to_string(), Value::from(d));
-                } else {
-                    m.insert("description".to_string(), Value::Undefined);
+                    m.insert("__description__".to_string(), Value::from(d));
                 }
                 if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
                     && let Some(proto) = symbol_ctor.borrow().get("prototype").cloned()
@@ -24847,7 +24913,7 @@ impl<'gc> VM<'gc> {
                 m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
                 m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
                 m.insert("__registered__".to_string(), Value::Boolean(true));
-                m.insert("description".to_string(), Value::from(&key));
+                m.insert("__description__".to_string(), Value::from(&key));
                 if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
                     && let Some(proto) = symbol_ctor.borrow().get("prototype").cloned()
                 {
@@ -24865,7 +24931,7 @@ impl<'gc> VM<'gc> {
                     Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
                         let borrow = obj.borrow();
                         if borrow.get("__registered__").is_some()
-                            && let Some(Value::String(desc)) = borrow.get("description")
+                            && let Some(Value::String(desc)) = borrow.get("__description__")
                         {
                             return Value::String(desc.clone());
                         }

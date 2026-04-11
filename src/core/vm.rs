@@ -8615,8 +8615,19 @@ impl<'gc> VM<'gc> {
                 Value::from(&out)
             }
             "string.localeCompare" => {
-                let base = receiver.map(value_to_string).unwrap_or_default();
-                let other = args.first().map(value_to_string).unwrap_or_default();
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                if matches!(this_val, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "String.prototype.localeCompare called on null or undefined");
+                    return Value::Undefined;
+                }
+                let base = match self.vm_coerce_arg_to_string(ctx, this_val) {
+                    Some(s) => s.nfc().collect::<String>(),
+                    None => return Value::Undefined,
+                };
+                let other = match self.vm_coerce_arg_to_string(ctx, args.first().unwrap_or(&Value::Undefined)) {
+                    Some(s) => s.nfc().collect::<String>(),
+                    None => return Value::Undefined,
+                };
                 let ord = match base.cmp(&other) {
                     std::cmp::Ordering::Less => -1.0,
                     std::cmp::Ordering::Equal => 0.0,
@@ -17308,7 +17319,10 @@ impl<'gc> VM<'gc> {
         let trim_end_fn = string_proto.get("trimEnd").cloned().unwrap();
         string_proto.insert("trimRight".to_string(), trim_end_fn);
         mark_nonenumerable(&mut string_proto, "trimRight");
-        string_proto.insert("localeCompare".to_string(), Self::make_host_fn(ctx, "string.localeCompare"));
+        string_proto.insert(
+            "localeCompare".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "string.localeCompare", "localeCompare", 1.0, false),
+        );
         mark_nonenumerable(&mut string_proto, "localeCompare");
         // Annex B: HTML wrapper methods and substr
         for (method, host_name, length) in [

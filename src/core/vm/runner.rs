@@ -4515,8 +4515,20 @@ impl<'gc> VM<'gc> {
                     }
                 } else if let Some(v) = lookup(&key) {
                     // Setter-only accessor shadows data property
+                    let setter_only_inline = matches!(
+                        &v,
+                        Value::Property {
+                            getter: None,
+                            setter: Some(_),
+                            ..
+                        }
+                    );
                     let setter_key = make_setter_key(&key);
-                    if lookup(&setter_key).is_some() {
+                    if setter_only_inline || lookup(&setter_key).is_some() {
+                        if key.starts_with(PRIVATE_KEY_PREFIX) {
+                            let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
+                            self.handle_throw(ctx, &err)?;
+                        }
                         Value::Undefined
                     } else {
                         self.materialize_property_read_value(ctx, &obj, v)
@@ -6570,7 +6582,22 @@ impl<'gc> VM<'gc> {
                 if let Some(getter_fn) = lookup(&getter_key) {
                     self.invoke_getter_with_receiver(ctx, &getter_fn, &obj)
                 } else if let Some(value) = lookup(&key) {
-                    self.materialize_property_read_value(ctx, &obj, value)
+                    if key.starts_with(PRIVATE_KEY_PREFIX)
+                        && matches!(
+                            &value,
+                            Value::Property {
+                                getter: None,
+                                setter: Some(_),
+                                ..
+                            }
+                        )
+                    {
+                        let err = self.make_type_error_object(ctx, &format!("'{}' was defined without a getter", key));
+                        self.handle_throw(ctx, &err)?;
+                        Value::Undefined
+                    } else {
+                        self.materialize_property_read_value(ctx, &obj, value)
+                    }
                 } else {
                     let proto = lookup("__proto__")
                         .map(|v| self.materialize_property_read_value(ctx, &obj, v))

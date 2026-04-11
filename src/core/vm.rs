@@ -2133,7 +2133,12 @@ impl<'gc> VM<'gc> {
         key: &str,
     ) -> Result<Option<Value<'gc>>, Value<'gc>> {
         if Self::namespace_is_symbol_like_key(map, key) {
-            return Ok(map.borrow().get(key).cloned());
+            let receiver = Value::VmObject(*map);
+            return Ok(map
+                .borrow()
+                .get(key)
+                .cloned()
+                .map(|value| self.materialize_property_read_value(ctx, &receiver, value)));
         }
         self.ensure_deferred_namespace_evaluation(ctx, map)?;
 
@@ -12898,6 +12903,60 @@ impl<'gc> VM<'gc> {
         }
 
         if let Value::VmObject(map) = &obj {
+            if map.borrow().contains_key("__vm_symbol__") {
+                if let Some(proto_val) = self.ctor_prototype_from_globals(ctx, "Symbol") {
+                    let mut cur = Some(proto_val);
+                    while let Some(ref cv) = cur {
+                        if let Value::VmObject(pm) = cv
+                            && pm.borrow().contains_key("__proxy_target__")
+                            && let Some(result) = self.try_proxy_set(ctx, cv, key, val, Some(obj))?
+                        {
+                            if matches!(result, Value::Boolean(false)) && self.current_execution_is_strict() {
+                                let err =
+                                    self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                                self.handle_throw(ctx, &err)?;
+                            }
+                            return Ok(val.clone());
+                        }
+                        if let Value::VmObject(m) = cv {
+                            let borrow = m.borrow();
+                            if let Some(sf) = lookup_setter(&borrow, key).cloned() {
+                                drop(borrow);
+                                let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
+                                return Ok(val.clone());
+                            }
+                            if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
+                                && !matches!(&**sf, Value::Undefined)
+                            {
+                                let sf_clone = (**sf).clone();
+                                drop(borrow);
+                                let _ = self.vm_call_function_value(ctx, &sf_clone, obj, std::slice::from_ref(val))?;
+                                return Ok(val.clone());
+                            }
+                            if has_readonly_mark(&borrow, key) {
+                                drop(borrow);
+                                if self.current_execution_is_strict() {
+                                    let err = self
+                                        .make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                                    self.handle_throw(ctx, &err)?;
+                                }
+                                return Ok(val.clone());
+                            }
+                            cur = borrow.get("__proto__").cloned();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if self.current_execution_is_strict() {
+                    let err = self.make_type_error_object(
+                        ctx,
+                        &format!("Cannot create property '{}' on symbol '{}'", key, value_to_string(obj)),
+                    );
+                    self.handle_throw(ctx, &err)?;
+                }
+                return Ok(val.clone());
+            }
             let borrow = map.borrow();
             let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
             let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
@@ -13930,9 +13989,7 @@ impl<'gc> VM<'gc> {
                 _ => None,
             };
             if let Some(tn) = type_name {
-                if let Some(Value::VmObject(ctor)) = self.globals.get(tn)
-                    && let Some(proto_val) = ctor.borrow().get("prototype").cloned()
-                {
+                if let Some(proto_val) = self.ctor_prototype_from_globals(ctx, tn) {
                     // Walk the prototype chain from Type.prototype looking for a setter or proxy
                     let mut cur = Some(proto_val);
                     while let Some(ref cv) = cur {
@@ -24446,13 +24503,31 @@ impl<'gc> VM<'gc> {
                     };
                     if let Some(s) = string_wrapper_value {
                         let mut keys: Vec<Value<'gc>> = (0..s.len()).map(|i| Value::from(i.to_string())).collect();
-                        keys.push(Value::from("length"));
                         let implicit_names: std::collections::HashSet<String> = (0..s.len())
                             .map(|i| i.to_string())
                             .chain(std::iter::once("length".to_string()))
                             .collect();
                         let explicit_names = self.collect_object_map_keys(&obj.borrow(), false);
-                        keys.extend(explicit_names.into_iter().filter(|k| !implicit_names.contains(k)).map(Value::from));
+                        let mut extra_indices: Vec<String> = Vec::new();
+                        let mut other_names: Vec<String> = Vec::new();
+                        for name in explicit_names {
+                            if implicit_names.contains(&name) {
+                                continue;
+                            }
+                            if name.parse::<u32>().is_ok() {
+                                extra_indices.push(name);
+                            } else {
+                                other_names.push(name);
+                            }
+                        }
+                        extra_indices.sort_by(|a, b| {
+                            let a_num = a.parse::<u32>().unwrap_or(u32::MAX);
+                            let b_num = b.parse::<u32>().unwrap_or(u32::MAX);
+                            a_num.cmp(&b_num)
+                        });
+                        keys.extend(extra_indices.into_iter().map(Value::from));
+                        keys.push(Value::from("length"));
+                        keys.extend(other_names.into_iter().map(Value::from));
                         return mk_names_array(keys, self);
                     }
                     let borrow = obj.borrow();

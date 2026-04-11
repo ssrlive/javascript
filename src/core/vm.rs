@@ -16687,7 +16687,9 @@ impl<'gc> VM<'gc> {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), sab_ctor.clone());
             mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");
         }
-        self.globals.insert("SharedArrayBuffer".to_string(), sab_ctor);
+        self.globals.insert("SharedArrayBuffer".to_string(), sab_ctor.clone());
+        self.global_this.borrow_mut(ctx).insert("SharedArrayBuffer".to_string(), sab_ctor);
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "SharedArrayBuffer");
 
         let mut atomics_map = IndexMap::new();
         atomics_map.insert(

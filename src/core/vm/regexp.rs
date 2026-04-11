@@ -2216,6 +2216,7 @@ impl<'gc> VM<'gc> {
                 // Add indices array when 'd' (hasIndices) flag is set
                 if flags.contains('d') {
                     let mut indices_items: Vec<Value<'gc>> = Vec::new();
+                    let mut indices_groups_map = IndexMap::new();
                     // Full match indices
                     let pair = vec![Value::Number(match_start as f64), Value::Number(match_end as f64)];
                     indices_items.push(Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
@@ -2237,10 +2238,34 @@ impl<'gc> VM<'gc> {
                             None => indices_items.push(Value::Undefined),
                         }
                     }
-                    arr_data.props.insert(
-                        "indices".to_string(),
-                        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(indices_items))),
-                    );
+                    for (name, range) in m.named_groups() {
+                        let value = match range {
+                            Some(r) => {
+                                let (group_start, group_end) = if mapped_input {
+                                    (
+                                        Self::regex_map_index_back(&input_u16, r.start),
+                                        Self::regex_map_index_back(&input_u16, r.end),
+                                    )
+                                } else {
+                                    (r.start, r.end)
+                                };
+                                let pair = vec![Value::Number(group_start as f64), Value::Number(group_end as f64)];
+                                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(pair)))
+                            }
+                            None => Value::Undefined,
+                        };
+                        indices_groups_map.insert(name.to_string(), value);
+                    }
+                    let mut indices_array = VmArrayData::new(indices_items);
+                    if !indices_groups_map.is_empty() {
+                        indices_groups_map.insert("__proto__".to_string(), Value::Null);
+                        indices_array
+                            .props
+                            .insert("groups".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, indices_groups_map)));
+                    }
+                    arr_data
+                        .props
+                        .insert("indices".to_string(), Value::VmArray(new_gc_cell_ptr(ctx, indices_array)));
                 }
 
                 let arr = Value::VmArray(new_gc_cell_ptr(ctx, arr_data));

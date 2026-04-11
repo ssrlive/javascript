@@ -9193,6 +9193,22 @@ impl<'gc> VM<'gc> {
                                 Value::Boolean(false)
                             };
                         }
+                        if matches!(map.borrow().get("__type__"), Some(Value::String(type_name)) if crate::unicode::utf16_to_utf8(type_name) == "String")
+                        {
+                            let recv_val = Value::VmObject(*map);
+                            let key_val = args.first().cloned().unwrap_or(Value::Undefined);
+                            let desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[recv_val, key_val]);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            return if let Value::VmObject(d) = desc {
+                                let b = d.borrow();
+                                let enumerable = !matches!(b.get("enumerable"), Some(Value::Boolean(false)));
+                                Value::Boolean(enumerable)
+                            } else {
+                                Value::Boolean(false)
+                            };
+                        }
                         let b = map.borrow();
                         let is_own = if key == "__proto__" {
                             b.contains_key(OWN_DUNDER_PROTO_DATA_KEY) || has_getter(&b, "__proto__") || has_setter(&b, "__proto__")
@@ -14936,16 +14952,8 @@ impl<'gc> VM<'gc> {
                         match type_name.as_deref() {
                             Some("String") => {
                                 if let Some(proto) = borrow.get("__proto__").cloned() {
-                                    let has_override = matches!(
-                                        &proto,
-                                        Value::VmObject(proto_obj)
-                                            if {
-                                                let bp = proto_obj.borrow();
-                                                super::property_descriptor::has_getter(&bp, key)
-                                                    || super::property_descriptor::has_setter(&bp, key)
-                                                    || bp.contains_key(key)
-                                            }
-                                    );
+                                    let has_override = self.lookup_proto_chain(Some(&proto), key).is_some()
+                                        || self.has_accessor_in_proto_chain(Some(&proto), key);
                                     if has_override {
                                         drop(borrow);
                                         return self.read_named_property_with_receiver(ctx, &proto, key, receiver);
@@ -37097,7 +37105,7 @@ impl<'gc> VM<'gc> {
                     }
                     return Ok(());
                 }
-                if has_nonconfigurable_mark(&map.borrow(), key) {
+                if has_nonconfigurable_mark(&map.borrow(), key) || self.is_string_wrapper_nonconfigurable_key(map, key) {
                     self.throw_type_error(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
                     return Err(Value::Undefined);
                 }

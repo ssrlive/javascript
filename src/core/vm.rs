@@ -18005,10 +18005,6 @@ impl<'gc> VM<'gc> {
                     _ => "Symbol()".to_string(),
                 };
             }
-            // Error object stringification: "Name: message"
-            if let Some(formatted) = Self::format_vm_error_object(&borrow) {
-                return formatted;
-            }
             drop(borrow);
             // Use try_to_primitive which properly walks the prototype chain
             let prim = self.try_to_primitive(ctx, val, "string");
@@ -18576,6 +18572,38 @@ impl<'gc> VM<'gc> {
         }
 
         Err(crate::raise_type_error!("Cannot convert object to primitive value"))
+    }
+
+    /// ToNumber with object coercion: ToPrimitive(hint "number") then to_number.
+    fn vm_coerce_to_number(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> f64 {
+        if matches!(
+            val,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) {
+            if val.is_symbol_value() {
+                self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number"));
+                return f64::NAN;
+            }
+            let prim = self.try_to_primitive(ctx, val, "number");
+            if self.pending_throw.is_some() {
+                return f64::NAN;
+            }
+            to_number(&prim)
+        } else {
+            to_number(val)
+        }
+    }
+
+    /// ToString with object coercion for string method arguments.
+    /// Returns None and sets pending_throw on error.
+    fn vm_coerce_arg_to_string(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Option<String> {
+        match self.vm_to_string_like_spec(ctx, val) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                None
+            }
+        }
     }
 
     fn map_constructor_consume_iterable(
@@ -29251,10 +29279,28 @@ impl<'gc> VM<'gc> {
             let rust_str = crate::unicode::utf16_to_utf8(s);
             match id {
                 BUILTIN_STRING_SPLIT => {
-                    let limit = args.get(1).and_then(|v| match v {
-                        Value::Number(n) => Some(*n as usize),
-                        _ => None,
-                    });
+                    let limit = if let Some(lim_val) = args.get(1) {
+                        if matches!(lim_val, Value::Undefined) {
+                            None
+                        } else {
+                            let n = self.vm_coerce_to_number(ctx, lim_val);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            Some(to_uint32(n) as usize)
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(0) = limit {
+                        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![]));
+                        if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array")
+                            && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
+                        {
+                            arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
+                        }
+                        return Value::VmArray(arr);
+                    }
                     if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
                         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::String(crate::unicode::utf8_to_utf16(&rust_str))]));
                         if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array")
@@ -29270,7 +29316,13 @@ impl<'gc> VM<'gc> {
                             return self.regexp_string_split(ctx, &rust_str, re_obj, limit);
                         }
                     }
-                    let sep = args.first().map(value_to_string).unwrap_or_default();
+                    let sep = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        },
+                        None => String::new(),
+                    };
                     let parts: Vec<Value<'gc>> = if sep.is_empty() {
                         rust_str.chars().map(|c| Value::from(&c.to_string())).collect()
                     } else {
@@ -29287,41 +29339,69 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(arr);
                 }
                 BUILTIN_STRING_INDEXOF => {
-                    let needle = args.first().map(value_to_string).unwrap_or_default();
-                    let pos = args
-                        .get(1)
-                        .and_then(|v| {
-                            if let Value::Number(n) = v {
-                                Some((*n).max(0.0) as usize)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(0)
-                        .min(rust_str.len());
-                    return match rust_str[pos..].find(&needle) {
+                    let needle = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        },
+                        None => "undefined".to_string(),
+                    };
+                    let pos = if let Some(pos_val) = args.get(1) {
+                        let n = self.vm_coerce_to_number(ctx, pos_val);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() { 0usize } else { n.max(0.0) as usize }
+                    } else {
+                        0
+                    }
+                    .min(s.len());
+                    // Work on UTF-16 code units
+                    return match s[pos..]
+                        .windows(crate::unicode::utf8_to_utf16(&needle).len())
+                        .position(|w| w == crate::unicode::utf8_to_utf16(&needle).as_slice())
+                    {
                         Some(off) => Value::Number((pos + off) as f64),
                         None => Value::Number(-1.0),
                     };
                 }
                 BUILTIN_STRING_SLICE => {
-                    let len = rust_str.len() as i64;
-                    let start = match args.first() {
-                        Some(Value::Number(n)) => {
-                            let s = *n as i64;
-                            if s < 0 { (len + s).max(0) as usize } else { s.min(len) as usize }
+                    let len = s.len() as i64;
+                    let start = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
                         }
-                        _ => 0,
-                    };
-                    let end = match args.get(1) {
-                        Some(Value::Number(n)) => {
-                            let e = *n as i64;
-                            if e < 0 { (len + e).max(0) as usize } else { e.min(len) as usize }
+                        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                        if n < 0.0 {
+                            (len + n as i64).max(0) as usize
+                        } else {
+                            (n as i64).min(len) as usize
                         }
-                        _ => len as usize,
+                    } else {
+                        0
                     };
-                    let sliced = if start < end { &rust_str[start..end] } else { "" };
-                    return Value::from(sliced);
+                    let end = if let Some(v) = args.get(1) {
+                        if matches!(v, Value::Undefined) {
+                            len as usize
+                        } else {
+                            let n = self.vm_coerce_to_number(ctx, v);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            if n < 0.0 {
+                                (len + n as i64).max(0) as usize
+                            } else {
+                                (n as i64).min(len) as usize
+                            }
+                        }
+                    } else {
+                        len as usize
+                    };
+                    // Work on UTF-16 code units
+                    let sliced: Vec<u16> = if start < end { s[start..end].to_vec() } else { vec![] };
+                    return Value::String(sliced);
                 }
                 BUILTIN_STRING_TOUPPERCASE => {
                     return Value::from(&rust_str.to_uppercase());
@@ -29333,19 +29413,46 @@ impl<'gc> VM<'gc> {
                     return Value::from(rust_str.trim());
                 }
                 BUILTIN_STRING_CHARAT => {
-                    if matches!(args.first(), Some(Value::Number(n)) if *n < 0.0) {
+                    let idx = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                        n as i64
+                    } else {
+                        0
+                    };
+                    if idx < 0 || idx as usize >= s.len() {
                         return Value::from("");
                     }
-                    let idx = match args.first() {
-                        Some(Value::Number(n)) => *n as usize,
-                        _ => 0,
-                    };
-                    let ch = rust_str.chars().nth(idx).map(|c| c.to_string()).unwrap_or_default();
-                    return Value::from(&ch);
+                    let ch = s[idx as usize];
+                    return Value::String(vec![ch]);
                 }
                 BUILTIN_STRING_INCLUDES => {
-                    let needle = args.first().map(value_to_string).unwrap_or_default();
-                    return Value::Boolean(rust_str.contains(&needle));
+                    let needle = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        },
+                        None => "undefined".to_string(),
+                    };
+                    let needle_u16 = crate::unicode::utf8_to_utf16(&needle);
+                    let pos = if let Some(pos_val) = args.get(1) {
+                        let n = self.vm_coerce_to_number(ctx, pos_val);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() {
+                            0usize
+                        } else {
+                            (n.trunc().max(0.0) as usize).min(s.len())
+                        }
+                    } else {
+                        0
+                    };
+                    let found = s[pos..].windows(needle_u16.len()).any(|w| w == needle_u16.as_slice());
+                    return Value::Boolean(found || needle_u16.is_empty());
                 }
                 BUILTIN_STRING_REPLACE => {
                     if let Some(Value::VmObject(re_obj)) = args.first() {
@@ -29355,7 +29462,13 @@ impl<'gc> VM<'gc> {
                             return self.regexp_string_replace(&rust_str, re_obj, &replacement);
                         }
                     }
-                    let pattern = args.first().map(value_to_string).unwrap_or_default();
+                    let pattern = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        },
+                        None => "undefined".to_string(),
+                    };
                     // Check if replacement is a callable function
                     let repl = args.get(1).cloned().unwrap_or(Value::Undefined);
                     if self.is_callable_value(&repl) {
@@ -29373,7 +29486,10 @@ impl<'gc> VM<'gc> {
                         }
                         return Value::from(&rust_str);
                     }
-                    let replacement = value_to_string(&repl);
+                    let replacement = match self.vm_coerce_arg_to_string(ctx, &repl) {
+                        Some(s) => s,
+                        None => return Value::Undefined,
+                    };
                     let result = rust_str.replacen(&pattern, &replacement, 1);
                     return Value::from(&result);
                 }
@@ -29385,15 +29501,27 @@ impl<'gc> VM<'gc> {
                         drop(borrow);
                         if is_regex {
                             if !flags.contains('g') {
-                                eprintln!("TypeError: String.prototype.replaceAll called with a non-global RegExp argument");
-                                return Value::from(&rust_str);
+                                self.throw_type_error(ctx, "String.prototype.replaceAll called with a non-global RegExp argument");
+                                return Value::Undefined;
                             }
                             let replacement = args.get(1).map(value_to_string).unwrap_or_default();
                             return self.regexp_string_replace_all(&rust_str, re_obj, &replacement);
                         }
                     }
-                    let pattern = args.first().map(value_to_string).unwrap_or_default();
-                    let replacement = args.get(1).map(value_to_string).unwrap_or_default();
+                    let pattern = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        },
+                        None => "undefined".to_string(),
+                    };
+                    let replacement = match args.get(1) {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        },
+                        None => "undefined".to_string(),
+                    };
                     let result = rust_str.replace(&pattern, &replacement);
                     return Value::from(&result);
                 }
@@ -29404,6 +29532,22 @@ impl<'gc> VM<'gc> {
                             return self.regexp_string_match(ctx, &rust_str, re_obj);
                         }
                     }
+                    // Non-RegExp: coerce to string then create RegExp
+                    let pattern_str = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                        String::new()
+                    } else {
+                        match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        }
+                    };
+                    let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str)]);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if let Value::VmObject(re_obj) = &re {
+                        return self.regexp_string_match(ctx, &rust_str, re_obj);
+                    }
                     return Value::Null;
                 }
                 BUILTIN_STRING_SEARCH => {
@@ -29413,97 +29557,208 @@ impl<'gc> VM<'gc> {
                             return self.regexp_string_search(&rust_str, re_obj);
                         }
                     }
+                    // Non-RegExp: coerce to string then create RegExp
+                    let pattern_str = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                        String::new()
+                    } else {
+                        match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        }
+                    };
+                    let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str)]);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if let Value::VmObject(re_obj) = &re {
+                        return self.regexp_string_search(&rust_str, re_obj);
+                    }
                     return Value::Number(-1.0);
                 }
                 BUILTIN_STRING_STARTSWITH => {
-                    let prefix = args.first().map(value_to_string).unwrap_or_default();
-                    return Value::Boolean(rust_str.starts_with(&prefix));
+                    let prefix = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => crate::unicode::utf8_to_utf16(&s),
+                            None => return Value::Undefined,
+                        },
+                        None => crate::unicode::utf8_to_utf16("undefined"),
+                    };
+                    let pos = if let Some(pos_val) = args.get(1) {
+                        if matches!(pos_val, Value::Undefined) {
+                            0
+                        } else {
+                            let n = self.vm_coerce_to_number(ctx, pos_val);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            (n.max(0.0) as usize).min(s.len())
+                        }
+                    } else {
+                        0
+                    };
+                    return Value::Boolean(s[pos..].starts_with(prefix.as_slice()));
                 }
                 BUILTIN_STRING_ENDSWITH => {
-                    let suffix = args.first().map(value_to_string).unwrap_or_default();
-                    return Value::Boolean(rust_str.ends_with(&suffix));
+                    let suffix = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => crate::unicode::utf8_to_utf16(&s),
+                            None => return Value::Undefined,
+                        },
+                        None => crate::unicode::utf8_to_utf16("undefined"),
+                    };
+                    let end_pos = if let Some(pos_val) = args.get(1) {
+                        if matches!(pos_val, Value::Undefined) {
+                            s.len()
+                        } else {
+                            let n = self.vm_coerce_to_number(ctx, pos_val);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            (n.max(0.0) as usize).min(s.len())
+                        }
+                    } else {
+                        s.len()
+                    };
+                    return Value::Boolean(s[..end_pos].ends_with(suffix.as_slice()));
                 }
                 BUILTIN_STRING_TOSTRING | BUILTIN_STRING_VALUEOF => {
                     return Value::String(s.clone());
                 }
                 BUILTIN_STRING_SUBSTRING => {
-                    let len = rust_str.len() as i64;
-                    let start = match args.first() {
-                        Some(Value::Number(n)) => (*n as i64).max(0).min(len) as usize,
-                        _ => 0,
+                    let len = s.len() as i64;
+                    let start = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                        (n as i64).max(0).min(len) as usize
+                    } else {
+                        0
                     };
-                    let end = match args.get(1) {
-                        Some(Value::Number(n)) => (*n as i64).max(0).min(len) as usize,
-                        _ => len as usize,
+                    let end = if let Some(v) = args.get(1) {
+                        if matches!(v, Value::Undefined) {
+                            len as usize
+                        } else {
+                            let n = self.vm_coerce_to_number(ctx, v);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            (n as i64).max(0).min(len) as usize
+                        }
+                    } else {
+                        len as usize
                     };
-                    let (s, e) = if start <= end { (start, end) } else { (end, start) };
-                    return Value::from(&rust_str[s..e]);
+                    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+                    return Value::String(s[lo..hi].to_vec());
                 }
                 BUILTIN_STRING_PADSTART => {
-                    let target_len = args
-                        .first()
-                        .map(|v| match v {
-                            Value::Number(n) => *n as usize,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
-                    let pad_str = args.get(1).map(value_to_string).unwrap_or_else(|| " ".to_string());
-                    let chars: Vec<char> = rust_str.chars().collect();
-                    if chars.len() >= target_len || pad_str.is_empty() {
-                        return Value::from(&rust_str);
+                    let target_len = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() || n < 0.0 { 0usize } else { n.trunc() as usize }
+                    } else {
+                        0
+                    };
+                    let pad_str = if let Some(v) = args.get(1) {
+                        if matches!(v, Value::Undefined) {
+                            " ".to_string()
+                        } else {
+                            match self.vm_coerce_arg_to_string(ctx, v) {
+                                Some(s) => s,
+                                None => return Value::Undefined,
+                            }
+                        }
+                    } else {
+                        " ".to_string()
+                    };
+                    if s.len() >= target_len || pad_str.is_empty() {
+                        return Value::String(s.to_vec());
                     }
-                    let pad_chars: Vec<char> = pad_str.chars().collect();
-                    let pad_needed = target_len - chars.len();
-                    let mut result = String::new();
+                    let pad_u16 = crate::unicode::utf8_to_utf16(&pad_str);
+                    let pad_needed = target_len - s.len();
+                    let mut result: Vec<u16> = Vec::with_capacity(target_len);
                     for i in 0..pad_needed {
-                        result.push(pad_chars[i % pad_chars.len()]);
+                        result.push(pad_u16[i % pad_u16.len()]);
                     }
-                    result.push_str(&rust_str);
-                    return Value::from(&result);
+                    result.extend_from_slice(s);
+                    return Value::String(result);
                 }
                 BUILTIN_STRING_PADEND => {
-                    let target_len = args
-                        .first()
-                        .map(|v| match v {
-                            Value::Number(n) => *n as usize,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
-                    let pad_str = args.get(1).map(value_to_string).unwrap_or_else(|| " ".to_string());
-                    let chars: Vec<char> = rust_str.chars().collect();
-                    if chars.len() >= target_len || pad_str.is_empty() {
-                        return Value::from(&rust_str);
+                    let target_len = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() || n < 0.0 { 0usize } else { n.trunc() as usize }
+                    } else {
+                        0
+                    };
+                    let pad_str = if let Some(v) = args.get(1) {
+                        if matches!(v, Value::Undefined) {
+                            " ".to_string()
+                        } else {
+                            match self.vm_coerce_arg_to_string(ctx, v) {
+                                Some(s) => s,
+                                None => return Value::Undefined,
+                            }
+                        }
+                    } else {
+                        " ".to_string()
+                    };
+                    if s.len() >= target_len || pad_str.is_empty() {
+                        return Value::String(s.to_vec());
                     }
-                    let pad_chars: Vec<char> = pad_str.chars().collect();
-                    let pad_needed = target_len - chars.len();
-                    let mut result = rust_str.clone();
+                    let pad_u16 = crate::unicode::utf8_to_utf16(&pad_str);
+                    let pad_needed = target_len - s.len();
+                    let mut result: Vec<u16> = s.to_vec();
                     for i in 0..pad_needed {
-                        result.push(pad_chars[i % pad_chars.len()]);
+                        result.push(pad_u16[i % pad_u16.len()]);
                     }
-                    return Value::from(&result);
+                    return Value::String(result);
                 }
                 BUILTIN_STRING_REPEAT => {
-                    let count = args
-                        .first()
-                        .map(|v| match v {
-                            Value::Number(n) => *n as usize,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
+                    let count = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_infinite() && n > 0.0 {
+                            let err = self.make_range_error_object(ctx, "Invalid count value: Infinity");
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        let n = n.trunc();
+                        if n < 0.0 {
+                            let err = self.make_range_error_object(ctx, &format!("Invalid count value: {n}"));
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                        n as usize
+                    } else {
+                        0
+                    };
                     return Value::from(&rust_str.repeat(count));
                 }
                 BUILTIN_STRING_CHARCODEAT => {
-                    let idx = args
-                        .first()
-                        .map(|v| match v {
-                            Value::Number(n) if *n >= 0.0 => *n as usize,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
-                    if idx < s.len() {
-                        return Value::Number(s[idx] as f64);
+                    let idx = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() { 0i64 } else { n.trunc() as i64 }
+                    } else {
+                        0
+                    };
+                    if idx < 0 || idx as usize >= s.len() {
+                        return Value::Number(f64::NAN);
                     }
-                    return Value::Number(f64::NAN);
+                    return Value::Number(s[idx as usize] as f64);
                 }
                 BUILTIN_STRING_TRIMSTART => {
                     return Value::from(rust_str.trim_start());
@@ -29512,24 +29767,41 @@ impl<'gc> VM<'gc> {
                     return Value::from(rust_str.trim_end());
                 }
                 BUILTIN_STRING_LASTINDEXOF => {
-                    let needle = args.first().map(value_to_string).unwrap_or_default();
-                    let default_pos = rust_str.len().saturating_sub(1);
-                    let end_pos = args
-                        .get(1)
-                        .and_then(|v| {
-                            if let Value::Number(n) = v {
-                                Some((*n).max(0.0) as usize)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(default_pos)
-                        .min(default_pos);
-                    let upto = &rust_str[..=end_pos];
-                    return match upto.rfind(&needle) {
-                        Some(pos) => Value::Number(pos as f64),
-                        None => Value::Number(-1.0),
+                    let needle = match args.first() {
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => crate::unicode::utf8_to_utf16(&s),
+                            None => return Value::Undefined,
+                        },
+                        None => crate::unicode::utf8_to_utf16("undefined"),
                     };
+                    let len = s.len();
+                    let pos = if let Some(pos_val) = args.get(1) {
+                        let n = self.vm_coerce_to_number(ctx, pos_val);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() { len } else { (n.trunc().max(0.0) as usize).min(len) }
+                    } else {
+                        len
+                    };
+                    // Search backwards: check positions from pos down to 0
+                    let needle_len = needle.len();
+                    if needle_len == 0 {
+                        return Value::Number(pos as f64);
+                    }
+                    let max_start = if pos + needle_len <= len {
+                        pos
+                    } else if len >= needle_len {
+                        len - needle_len
+                    } else {
+                        return Value::Number(-1.0);
+                    };
+                    for i in (0..=max_start).rev() {
+                        if s[i..i + needle_len] == needle[..] {
+                            return Value::Number(i as f64);
+                        }
+                    }
+                    return Value::Number(-1.0);
                 }
                 _ => {}
             }

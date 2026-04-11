@@ -372,6 +372,7 @@ const BUILTIN_ATOMICS_WAITASYNC: FunctionID = 498;
 // ── AbstractModuleSource (510–514) ──────────────────────────────────
 const BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE: FunctionID = 510;
 const BUILTIN_ABSTRACT_MODULE_SOURCE_TOSTRINGTAG_GET: FunctionID = 511;
+const BUILTIN_STRING_RAW: FunctionID = 512;
 // Next available group: 520
 
 #[derive(Debug, Clone)]
@@ -16912,6 +16913,8 @@ impl<'gc> VM<'gc> {
             Self::make_native_fn(ctx, BUILTIN_STRING_FROMCHARCODE, "fromCharCode", 1.0),
         );
         mark_nonenumerable(&mut string_map, "fromCharCode");
+        string_map.insert("raw".to_string(), Self::make_native_fn(ctx, BUILTIN_STRING_RAW, "raw", 1.0));
+        mark_nonenumerable(&mut string_map, "raw");
         let mut string_proto = IndexMap::new();
         string_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
         string_proto.insert("length".to_string(), Value::Number(0.0));
@@ -22287,6 +22290,58 @@ impl<'gc> VM<'gc> {
                 }
                 Value::String(result)
             }
+            BUILTIN_STRING_RAW => {
+                // 22.1.2.4 String.raw(template, ...substitutions)
+                let template_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let raw_val = match &template_arg {
+                    Value::VmObject(obj) => obj.borrow().get("raw").cloned(),
+                    _ => None,
+                };
+                let raw_arr = match raw_val {
+                    Some(Value::VmArray(arr)) => arr,
+                    Some(Value::VmObject(obj)) => {
+                        // Array-like object
+                        let b = obj.borrow();
+                        let len = match b.get("length") {
+                            Some(Value::Number(n)) => *n as usize,
+                            _ => 0,
+                        };
+                        drop(b);
+                        let mut result_parts: Vec<u16> = Vec::new();
+                        for i in 0..len {
+                            if i > 0
+                                && let Some(sub) = args.get(i)
+                            {
+                                    let sub_str = value_to_string(sub);
+                                    result_parts.extend(sub_str.encode_utf16());
+                            }
+                            let elem = obj.borrow().get(&i.to_string()).cloned().unwrap_or(Value::Undefined);
+                            let s = value_to_string(&elem);
+                            result_parts.extend(s.encode_utf16());
+                        }
+                        return Value::String(result_parts);
+                    }
+                    _ => {
+                        self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                        return Value::Undefined;
+                    }
+                };
+                let raw_data = raw_arr.borrow();
+                let literal_count = raw_data.elements.len();
+                let mut result_parts: Vec<u16> = Vec::new();
+                for i in 0..literal_count {
+                    if i > 0
+                        && let Some(sub) = args.get(i)
+                    {
+                            let sub_str = value_to_string(sub);
+                            result_parts.extend(sub_str.encode_utf16());
+                    }
+                    let s = value_to_string(&raw_data.elements[i]);
+                    result_parts.extend(s.encode_utf16());
+                }
+                drop(raw_data);
+                Value::String(result_parts)
+            }
             BUILTIN_BIGINT | BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {
                 if let Some(v) = self.bigint_call_builtin(ctx, id, args) {
                     return v;
@@ -25431,6 +25486,7 @@ impl<'gc> VM<'gc> {
             | BUILTIN_OBJECT_SETPROTOTYPEOF
             | BUILTIN_OBJECT_GETOWNPROPERTYNAMES
             | BUILTIN_STRING_FROMCHARCODE
+            | BUILTIN_STRING_RAW
             | BUILTIN_EVAL
             | BUILTIN_NEW_FUNCTION
             | BUILTIN_BIGINT

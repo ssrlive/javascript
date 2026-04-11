@@ -22667,8 +22667,22 @@ impl<'gc> VM<'gc> {
             // String() as function: convert argument to string
             BUILTIN_CTOR_STRING => {
                 let arg = args.first().cloned().unwrap_or(Value::String(Vec::new()));
-                let coerced = self.try_to_primitive(ctx, &arg, "string");
-                let s = self.vm_to_string(ctx, &coerced);
+                let constructing = self
+                    .new_target_stack
+                    .last()
+                    .map(|value| !matches!(value, Value::Undefined))
+                    .unwrap_or(false);
+                let s = if arg.is_symbol_value() && !constructing {
+                    self.vm_to_string(ctx, &arg)
+                } else {
+                    match self.vm_to_string_like_spec(ctx, &arg) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                            return Value::Undefined;
+                        }
+                    }
+                };
                 Value::from(&s)
             }
             BUILTIN_CTOR_BOOLEAN => {
@@ -25636,8 +25650,13 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_STRING => {
                 if let Value::VmObject(obj) = receiver {
                     let arg = args.first().cloned().unwrap_or(Value::String(Vec::new()));
-                    let coerced = self.try_to_primitive(ctx, &arg, "string");
-                    let s = self.vm_to_string(ctx, &coerced);
+                    let s = match self.vm_to_string_like_spec(ctx, &arg) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                            return Value::Undefined;
+                        }
+                    };
                     let len = s.encode_utf16().count() as f64;
                     let mut borrow = obj.borrow_mut(ctx);
                     borrow.insert("__type__".to_string(), Value::from("String"));
@@ -29599,21 +29618,22 @@ impl<'gc> VM<'gc> {
                         },
                         None => "undefined".to_string(),
                     };
+                    let needle = crate::unicode::utf8_to_utf16(&needle);
                     let pos = if let Some(pos_val) = args.get(1) {
-                        let n = self.vm_coerce_to_number(ctx, pos_val);
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
+                        let n = match self.extract_number_with_coercion(ctx, pos_val) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        };
                         if n.is_nan() { 0usize } else { n.max(0.0) as usize }
                     } else {
                         0
                     }
                     .min(s.len());
+                    if needle.is_empty() {
+                        return Value::Number(pos as f64);
+                    }
                     // Work on UTF-16 code units
-                    return match s[pos..]
-                        .windows(crate::unicode::utf8_to_utf16(&needle).len())
-                        .position(|w| w == crate::unicode::utf8_to_utf16(&needle).as_slice())
-                    {
+                    return match s[pos..].windows(needle.len()).position(|w| w == needle.as_slice()) {
                         Some(off) => Value::Number((pos + off) as f64),
                         None => Value::Number(-1.0),
                     };
@@ -32183,74 +32203,59 @@ impl<'gc> VM<'gc> {
                 return val.clone();
             }
 
-            // Check own properties for @@toPrimitive (proto-chain is walked by read_named_property if found)
-            let has_sym = {
-                let borrow = map.borrow();
-                borrow.contains_key("@@sym:3") || has_getter(&borrow, "@@sym:3")
-            };
-            if has_sym {
-                let func = self.read_named_property(ctx, val, "@@sym:3");
-                if self.pending_throw.is_some() {
+            let func = self.read_named_property(ctx, val, "@@sym:3");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            // Per GetMethod, undefined/null means "method missing" and we
+            // should continue with ordinary coercion.
+            if !matches!(func, Value::Undefined | Value::Null) {
+                if !self.is_value_callable(&func) {
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "@@toPrimitive is not a function"));
                     return Value::Undefined;
                 }
-                // Per GetMethod, undefined/null means "method missing" and we
-                // should continue with ordinary coercion.
-                if !matches!(func, Value::Undefined | Value::Null) {
-                    if !self.is_value_callable(&func) {
-                        self.pending_throw = Some(self.make_type_error_object(ctx, "@@toPrimitive is not a function"));
-                        return Value::Undefined;
-                    }
-                    match self.call_internal_callback_with_isolated_try_stack(|vm| {
-                        vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)])
-                    }) {
-                        Ok(r) => {
-                            if is_object_like(&r) {
-                                self.pending_throw =
-                                    Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
-                                return Value::Undefined;
-                            }
-                            return r;
-                        }
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
+                match self
+                    .call_internal_callback_with_isolated_try_stack(|vm| vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)]))
+                {
+                    Ok(r) => {
+                        if is_object_like(&r) {
+                            self.pending_throw = Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
                             return Value::Undefined;
                         }
+                        return r;
+                    }
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
                     }
                 }
             }
         }
 
         // Also check VmArray for @@toPrimitive (e.g. TypedArrays with custom Symbol.toPrimitive)
-        if let Value::VmArray(arr) = val {
-            let has_sym = {
-                let borrow = arr.borrow();
-                borrow.props.contains_key("@@sym:3") || has_getter(&borrow.props, "@@sym:3")
-            };
-            if has_sym {
-                let func = self.read_named_property(ctx, val, "@@sym:3");
-                if self.pending_throw.is_some() {
+        if let Value::VmArray(_) = val {
+            let func = self.read_named_property(ctx, val, "@@sym:3");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            if !matches!(func, Value::Undefined | Value::Null) {
+                if !self.is_value_callable(&func) {
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "@@toPrimitive is not a function"));
                     return Value::Undefined;
                 }
-                if !matches!(func, Value::Undefined | Value::Null) {
-                    if !self.is_value_callable(&func) {
-                        self.pending_throw = Some(self.make_type_error_object(ctx, "@@toPrimitive is not a function"));
-                        return Value::Undefined;
-                    }
-                    match self.call_internal_callback_with_isolated_try_stack(|vm| {
-                        vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)])
-                    }) {
-                        Ok(r) => {
-                            if is_object_like(&r) {
-                                self.pending_throw =
-                                    Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
-                                return Value::Undefined;
-                            }
-                            return r;
-                        }
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
+                match self
+                    .call_internal_callback_with_isolated_try_stack(|vm| vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)]))
+                {
+                    Ok(r) => {
+                        if is_object_like(&r) {
+                            self.pending_throw = Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
                             return Value::Undefined;
                         }
+                        return r;
+                    }
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
                     }
                 }
             }

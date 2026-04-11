@@ -1194,10 +1194,9 @@ impl<'gc> Compiler<'gc> {
                         }
                     } else {
                         self.chunk.declared_globals.insert(name.clone());
-                        let name_u16 = crate::unicode::utf8_to_utf16(name);
-                        let name_idx = self.chunk.add_constant(Value::String(name_u16));
-                        self.chunk.write_opcode(Opcode::SetGlobal);
-                        self.chunk.write_u16(name_idx);
+                        // B.3.4: var inside catch block with same name as catch
+                        // parameter writes to the catch binding, not the global.
+                        self.emit_set_global_binding(name);
                         self.chunk.write_opcode(Opcode::Pop);
                     }
                 }
@@ -2136,7 +2135,18 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_byte(pos as u8);
                     self.chunk.write_opcode(Opcode::Pop);
                 } else {
-                    let vn = crate::unicode::utf8_to_utf16(key_binding_name);
+                    // B.3.4: var inside catch block with same name as catch
+                    // parameter writes to the catch binding, not the global.
+                    let effective_name = if !is_lexical_binding {
+                        if let Some((alias, _)) = self.lookup_top_level_block_alias(key_binding_name) {
+                            alias
+                        } else {
+                            key_binding_name.to_string()
+                        }
+                    } else {
+                        key_binding_name.to_string()
+                    };
+                    let vn = crate::unicode::utf8_to_utf16(&effective_name);
                     let vni = self.chunk.add_constant(Value::String(vn));
                     self.chunk.write_opcode(Opcode::DefineGlobal);
                     self.chunk.write_u16(vni);
@@ -2148,7 +2158,16 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_opcode(Opcode::GetLocal);
                     self.chunk.write_byte(pos as u8);
                 } else {
-                    let vn = crate::unicode::utf8_to_utf16(key_binding_name);
+                    let effective_read = if !is_lexical_binding {
+                        if let Some((alias, _)) = self.lookup_top_level_block_alias(key_binding_name) {
+                            alias
+                        } else {
+                            key_binding_name.to_string()
+                        }
+                    } else {
+                        key_binding_name.to_string()
+                    };
+                    let vn = crate::unicode::utf8_to_utf16(&effective_read);
                     let vni = self.chunk.add_constant(Value::String(vn));
                     self.chunk.write_opcode(Opcode::GetGlobal);
                     self.chunk.write_u16(vni);
@@ -3133,7 +3152,17 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_byte(pos as u8);
                         self.chunk.write_opcode(Opcode::Pop);
                     } else {
-                        let vn = crate::unicode::utf8_to_utf16(loop_value_name);
+                        // B.3.4: var inside catch with same name as catch param
+                        let effective = if !is_tdz {
+                            if let Some((alias, _)) = self.lookup_top_level_block_alias(loop_value_name) {
+                                alias
+                            } else {
+                                loop_value_name.to_string()
+                            }
+                        } else {
+                            loop_value_name.to_string()
+                        };
+                        let vn = crate::unicode::utf8_to_utf16(&effective);
                         let vni = self.chunk.add_constant(Value::String(vn));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(vni);
@@ -3298,7 +3327,17 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_byte(pos as u8);
                         self.chunk.write_opcode(Opcode::Pop);
                     } else {
-                        let vn = crate::unicode::utf8_to_utf16(loop_value_name);
+                        // B.3.4: var inside catch with same name as catch param
+                        let effective = if !is_tdz {
+                            if let Some((alias, _)) = self.lookup_top_level_block_alias(loop_value_name) {
+                                alias
+                            } else {
+                                loop_value_name.to_string()
+                            }
+                        } else {
+                            loop_value_name.to_string()
+                        };
+                        let vn = crate::unicode::utf8_to_utf16(&effective);
                         let vni = self.chunk.add_constant(Value::String(vn));
                         self.chunk.write_opcode(Opcode::DefineGlobal);
                         self.chunk.write_u16(vni);

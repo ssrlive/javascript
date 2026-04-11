@@ -57,7 +57,6 @@ pub enum Value<'gc> {
     BigInt(Box<BigInt>),
     String(Vec<u16>),
     Boolean(bool),
-    Function(String),
     VmFunction(usize, u8),
     VmClosure(usize, u8, VmUpvalueCells<'gc>),
     VmArray(VmArrayHandle<'gc>),
@@ -98,7 +97,7 @@ impl<'gc> Value<'gc> {
             Value::BigInt(_) => "bigint",
             Value::Undefined | Value::Uninitialized => "undefined",
             Value::Null => "object",
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::Function(..) | Value::VmNativeFunction(_) => "function",
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => "function",
             Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::Property { .. } => "object",
             Value::VmObject(map) => {
                 let b = map.borrow();
@@ -183,7 +182,6 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
             Value::Boolean(b) => write!(f, "Boolean({})", b),
             Value::Null => write!(f, "Null"),
             Value::Undefined => write!(f, "Undefined"),
-            Value::Function(s) => write!(f, "Function({})", s),
             _ => write!(f, "[value]"),
         }
     }
@@ -221,26 +219,6 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
-        Value::Function(name) => {
-            let is_identifier_name = |s: &str| {
-                let mut chars = s.chars();
-                let Some(first) = chars.next() else {
-                    return false;
-                };
-                let first_ok = first == '_' || first == '$' || first.is_ascii_alphabetic();
-                if !first_ok {
-                    return false;
-                }
-                chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
-            };
-            if name.is_empty() {
-                "function () { [ native code ] }".to_string()
-            } else if is_identifier_name(name) || name.starts_with('[') {
-                format!("function {name}() {{ [ native code ] }}")
-            } else {
-                format!("function [{name}]() {{ [ native code ] }}")
-            }
-        }
         Value::Property { .. } => "[Property]".to_string(),
         Value::Uninitialized => "[uninitialized]".to_string(),
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),

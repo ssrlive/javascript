@@ -5342,11 +5342,7 @@ impl<'gc> VM<'gc> {
                         if let Some(value_of_fn) = value_of
                             && matches!(
                                 value_of_fn,
-                                Value::VmFunction(..)
-                                    | Value::VmClosure(..)
-                                    | Value::VmNativeFunction(_)
-                                    | Value::Function(_)
-                                    | Value::VmObject(_)
+                                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                             )
                         {
                             match vm.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -5362,11 +5358,7 @@ impl<'gc> VM<'gc> {
                             if let Some(to_string_fn) = to_string
                                 && matches!(
                                     to_string_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match vm.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -5532,11 +5524,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -5555,11 +5543,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -5649,11 +5633,7 @@ impl<'gc> VM<'gc> {
                     if let Some(value_of_fn) = value_of
                         && matches!(
                             value_of_fn,
-                            Value::VmFunction(..)
-                                | Value::VmClosure(..)
-                                | Value::VmNativeFunction(_)
-                                | Value::Function(_)
-                                | Value::VmObject(_)
+                            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                         )
                     {
                         match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -5672,11 +5652,7 @@ impl<'gc> VM<'gc> {
                         if let Some(to_string_fn) = to_string
                             && matches!(
                                 to_string_fn,
-                                Value::VmFunction(..)
-                                    | Value::VmClosure(..)
-                                    | Value::VmNativeFunction(_)
-                                    | Value::Function(_)
-                                    | Value::VmObject(_)
+                                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                             )
                         {
                             match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -5759,11 +5735,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -5782,11 +5754,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -5951,11 +5919,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -5974,11 +5938,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6058,11 +6018,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(value_of_fn) = value_of
                                     && matches!(
                                         value_of_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6081,11 +6037,7 @@ impl<'gc> VM<'gc> {
                                     if let Some(to_string_fn) = to_string
                                         && matches!(
                                             to_string_fn,
-                                            Value::VmFunction(..)
-                                                | Value::VmClosure(..)
-                                                | Value::VmNativeFunction(_)
-                                                | Value::Function(_)
-                                                | Value::VmObject(_)
+                                            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                         )
                                     {
                                         match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6218,11 +6170,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6241,11 +6189,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6321,11 +6265,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(value_of_fn) = value_of
                                     && matches!(
                                         value_of_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6344,11 +6284,7 @@ impl<'gc> VM<'gc> {
                                     if let Some(to_string_fn) = to_string
                                         && matches!(
                                             to_string_fn,
-                                            Value::VmFunction(..)
-                                                | Value::VmClosure(..)
-                                                | Value::VmNativeFunction(_)
-                                                | Value::Function(_)
-                                                | Value::VmObject(_)
+                                            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                         )
                                     {
                                         match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6407,11 +6343,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(value_of_fn) = value_of
                                     && matches!(
                                         value_of_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6430,11 +6362,7 @@ impl<'gc> VM<'gc> {
                                     if let Some(to_string_fn) = to_string
                                         && matches!(
                                             to_string_fn,
-                                            Value::VmFunction(..)
-                                                | Value::VmClosure(..)
-                                                | Value::VmNativeFunction(_)
-                                                | Value::Function(_)
-                                                | Value::VmObject(_)
+                                            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                         )
                                     {
                                         match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6531,11 +6459,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6554,11 +6478,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6706,11 +6626,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6729,11 +6645,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -6884,11 +6796,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -6907,11 +6815,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -7081,11 +6985,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -7104,11 +7004,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -7256,11 +7152,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -7279,11 +7171,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -7429,11 +7317,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -7452,11 +7336,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -7605,11 +7485,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -7628,11 +7504,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -7762,12 +7634,7 @@ impl<'gc> VM<'gc> {
                     };
                     if matches!(
                         iterator,
-                        Value::VmObject(_)
-                            | Value::VmArray(_)
-                            | Value::VmFunction(..)
-                            | Value::VmClosure(..)
-                            | Value::VmNativeFunction(_)
-                            | Value::Function(_)
+                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
                     ) {
                         let next_fn = self.read_named_property(ctx, &iterator, "next");
                         if self.pending_throw.is_some() {
@@ -8139,7 +8006,6 @@ impl<'gc> VM<'gc> {
                                     return Value::Undefined;
                                 }
                             }
-                            Value::Function(name) => self.call_named_host_function_with_this(ctx, &name, Some(&iterable), &[]),
                             Value::Undefined => {
                                 let saved_try_depth = self.try_stack.len();
                                 let next_candidate = self.read_named_property(ctx, &iterable, "next");
@@ -18045,7 +17911,6 @@ impl<'gc> VM<'gc> {
                 }
                 Ok(self.call_method_builtin(ctx, *id, this_arg, args))
             }
-            Value::Function(name) => Ok(self.call_named_host_function_with_this(ctx, name, Some(this_arg), args)),
             Value::VmObject(map) => {
                 let function_id = get_function_id(*map);
                 let borrow = map.borrow();
@@ -18384,7 +18249,7 @@ impl<'gc> VM<'gc> {
         }
         if matches!(
             to_string_fn,
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
         ) {
             let out = self.vm_call_function_value(ctx, &to_string_fn, &prim, &[])?;
             if out.is_symbol_value() {
@@ -18401,7 +18266,7 @@ impl<'gc> VM<'gc> {
         }
         if matches!(
             value_of_fn,
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
         ) {
             let out = self.vm_call_function_value(ctx, &value_of_fn, &prim, &[])?;
             if out.is_symbol_value() {
@@ -19138,7 +19003,6 @@ impl<'gc> VM<'gc> {
                                 }));
                             }
                         }
-                        Value::Function(name) => vm.call_named_host_function_with_this(ctx, &name, Some(&this_val), &arg_vals),
                         _ => {
                             return Err(crate::make_js_error!(crate::JSErrorKind::TypeError {
                                 message: "is not a function".to_string()
@@ -19787,11 +19651,7 @@ impl<'gc> VM<'gc> {
                         if let Some(value_of_fn) = value_of
                             && matches!(
                                 value_of_fn,
-                                Value::VmFunction(..)
-                                    | Value::VmClosure(..)
-                                    | Value::VmNativeFunction(_)
-                                    | Value::Function(_)
-                                    | Value::VmObject(_)
+                                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                             )
                         {
                             match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -19807,11 +19667,7 @@ impl<'gc> VM<'gc> {
                             if let Some(to_string_fn) = to_string
                                 && matches!(
                                     to_string_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -20155,11 +20011,7 @@ impl<'gc> VM<'gc> {
                             if let Some(value_of_fn) = value_of
                                 && matches!(
                                     value_of_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -20175,11 +20027,7 @@ impl<'gc> VM<'gc> {
                                 if let Some(to_string_fn) = to_string
                                     && matches!(
                                         to_string_fn,
-                                        Value::VmFunction(..)
-                                            | Value::VmClosure(..)
-                                            | Value::VmNativeFunction(_)
-                                            | Value::Function(_)
-                                            | Value::VmObject(_)
+                                        Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                     )
                                 {
                                     match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -20339,11 +20187,7 @@ impl<'gc> VM<'gc> {
                         if let Some(value_of_fn) = value_of
                             && matches!(
                                 value_of_fn,
-                                Value::VmFunction(..)
-                                    | Value::VmClosure(..)
-                                    | Value::VmNativeFunction(_)
-                                    | Value::Function(_)
-                                    | Value::VmObject(_)
+                                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                             )
                         {
                             match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
@@ -20360,11 +20204,7 @@ impl<'gc> VM<'gc> {
                             if let Some(to_string_fn) = to_string
                                 && matches!(
                                     to_string_fn,
-                                    Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
-                                        | Value::Function(_)
-                                        | Value::VmObject(_)
+                                    Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
                                 )
                             {
                                 match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
@@ -24619,8 +24459,7 @@ impl<'gc> VM<'gc> {
                         | Value::VmSet(_)
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_)
-                        | Value::Function(..) => {
+                        | Value::VmNativeFunction(_) => {
                             if let Value::VmObject(sym_obj) = arg
                                 && sym_obj.borrow().contains_key("__vm_symbol__")
                             {
@@ -30556,7 +30395,7 @@ impl<'gc> VM<'gc> {
                         "Function"
                     }
                 }
-                Value::VmNativeFunction(_) | Value::Function(_) => "Function",
+                Value::VmNativeFunction(_) => "Function",
                 Value::Number(_) => {
                     let proto = self.ctor_prototype_from_globals(ctx, "Number");
                     if let Some(Value::String(tag)) = self.lookup_proto_chain(proto.as_ref(), "@@sym:4") {
@@ -30691,12 +30530,7 @@ impl<'gc> VM<'gc> {
             };
 
             let final_tag = match &receiver {
-                Value::VmObject(_)
-                | Value::VmArray(_)
-                | Value::VmFunction(..)
-                | Value::VmClosure(..)
-                | Value::VmNativeFunction(_)
-                | Value::Function(_) => {
+                Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
                     let sym_tag = self.read_named_property(ctx, receiver, "@@sym:4");
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
@@ -30830,7 +30664,7 @@ impl<'gc> VM<'gc> {
                 }
 
                 let target_has_own_length = match receiver {
-                    Value::VmNativeFunction(_) | Value::Function(_) => true,
+                    Value::VmNativeFunction(_) => true,
                     Value::VmFunction(ip, arity) => {
                         let props = self.get_fn_props(ctx, *ip, *arity);
                         let borrow = props.borrow();
@@ -31388,7 +31222,7 @@ impl<'gc> VM<'gc> {
         let value_of_fn = self.read_named_property(ctx, &prim, "valueOf");
         if matches!(
             value_of_fn,
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
         ) && let Ok(out) = self.vm_call_function_value(ctx, &value_of_fn, &prim, &[])
             && !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_))
         {
@@ -31398,7 +31232,7 @@ impl<'gc> VM<'gc> {
         let to_string_fn = self.read_named_property(ctx, &prim, "toString");
         if matches!(
             to_string_fn,
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::Function(_) | Value::VmObject(_)
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
         ) && let Ok(out) = self.vm_call_function_value(ctx, &to_string_fn, &prim, &[])
             && !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_))
         {
@@ -31740,7 +31574,7 @@ impl<'gc> VM<'gc> {
 
     fn is_value_callable(&self, value: &Value<'gc>) -> bool {
         match value {
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) | Value::Function(..) => true,
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) => true,
             Value::VmObject(map) => {
                 let b = map.borrow();
                 if let Some(target) = b.get("__proxy_target__") {
@@ -33266,7 +33100,7 @@ impl<'gc> VM<'gc> {
 
     fn is_callable_value(&self, value: &Value<'gc>) -> bool {
         match value {
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) | Value::Function(..) => true,
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(..) => true,
             Value::VmObject(map) => {
                 let borrow = map.borrow();
                 if let Some(target) = borrow.get("__proxy_target__") {
@@ -34113,7 +33947,6 @@ impl<'gc> VM<'gc> {
                     Value::VmFunction(ip, arity) => Ok(Value::VmFunction(ip, arity)),
                     Value::VmClosure(ip, arity, upvals) => Ok(Value::VmClosure(ip, arity, upvals)),
                     Value::VmNativeFunction(id) => Ok(Value::VmNativeFunction(id)),
-                    Value::Function(name) => Ok(Value::Function(name)),
                     Value::Undefined => Ok(bound_this),
                     other => {
                         // Derived constructors must not return non-object, non-undefined values.
@@ -36120,7 +35953,7 @@ impl<'gc> VM<'gc> {
                         _ => {}
                     }
                 }
-                Value::Function(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => return None,
+                Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => return None,
                 _ => {}
             }
             return Some(current);

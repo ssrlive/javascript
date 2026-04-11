@@ -895,17 +895,6 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            Value::Function(name) => {
-                let args_collected: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
-                self.stack.pop(); // pop callee
-                let receiver = if is_method { self.stack.pop() } else { None };
-                let result = self.call_named_host_function_with_this(ctx, &name, receiver.as_ref(), &args_collected);
-                self.stack.push(result);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-            }
             Value::VmObject(ref map) => {
                 let function_id = get_function_id(*map);
                 // Check if it's a Function wrapper (VmObject with __fn_body__ or __native_id__)
@@ -4005,15 +3994,6 @@ impl<'gc> VM<'gc> {
                     } else {
                         self.stack.push(Value::Undefined);
                     }
-                } else if let Some(Value::Function(host_name)) = borrow.get(&getter_key) {
-                    let host_name = host_name.clone();
-                    drop(borrow);
-                    let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
-                    self.stack.push(getter_result);
-                    if let Some(thrown) = self.pending_throw.take() {
-                        self.handle_throw(ctx, &thrown)?;
-                        return Ok(OpcodeAction::Continue);
-                    }
                 } else if borrow.contains_key(&getter_key) || has_setter(&borrow, &key) {
                     // Accessor property exists but getter is undefined
                     drop(borrow);
@@ -4264,10 +4244,6 @@ impl<'gc> VM<'gc> {
                                         } else {
                                             self.stack.push(Value::Undefined);
                                         }
-                                    }
-                                    Value::Function(host_name) => {
-                                        let getter_result = self.call_named_host_function_with_this(ctx, &host_name, Some(&obj), &[]);
-                                        self.stack.push(getter_result);
                                     }
                                     _ => self.stack.push(Value::Undefined),
                                 }
@@ -4576,17 +4552,6 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                };
-                self.stack.push(result);
-            }
-            Value::Function(name) => {
-                let result = match key.as_str() {
-                    "name" => Value::from(name),
-                    "length" => Value::Number(1.0),
-                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                    _ => Value::Undefined,
                 };
                 self.stack.push(result);
             }
@@ -5551,17 +5516,6 @@ impl<'gc> VM<'gc> {
                 let val = self.read_named_property(ctx, &obj, &coerced_key);
                 self.stack.push(val);
             }
-            Value::Function(name) => {
-                let val = match coerced_key.as_str() {
-                    "name" => Value::from(name),
-                    "length" => Value::Number(1.0),
-                    "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                    "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                    "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                    _ => Value::Undefined,
-                };
-                self.stack.push(val);
-            }
             _ => {
                 let val = self.read_named_property(ctx, &obj, &coerced_key);
                 self.stack.push(val);
@@ -6176,8 +6130,7 @@ impl<'gc> VM<'gc> {
                             | Value::VmSet(_)
                             | Value::VmFunction(..)
                             | Value::VmClosure(..)
-                            | Value::VmNativeFunction(_)
-                            | Value::Function(_) => true,
+                            | Value::VmNativeFunction(_) => true,
                             _ => false,
                         };
                         if is_object {
@@ -6611,14 +6564,6 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            Value::Function(name) => match key.as_str() {
-                "name" => Value::from(name),
-                "length" => Value::Number(1.0),
-                "call" => Value::VmNativeFunction(BUILTIN_FN_CALL),
-                "apply" => Value::VmNativeFunction(BUILTIN_FN_APPLY),
-                "bind" => Value::VmNativeFunction(BUILTIN_FN_BIND),
-                _ => Value::Undefined,
-            },
             Value::VmNativeFunction(_) => self.read_named_property(ctx, &obj, &key),
             _ => Value::Undefined,
         };
@@ -7744,8 +7689,7 @@ impl<'gc> VM<'gc> {
                             | Value::VmSet(_)
                             | Value::VmFunction(..)
                             | Value::VmClosure(..)
-                            | Value::VmNativeFunction(_)
-                            | Value::Function(_) => true,
+                            | Value::VmNativeFunction(_) => true,
                             _ => false,
                         };
                         if is_real_object {

@@ -29,6 +29,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+use unicode_normalization::UnicodeNormalization;
 
 type VmStrong<'gc, T> = Gc<'gc, GcCell<T>>;
 type VmWeak<'gc, T> = GcWeak<'gc, GcCell<T>>;
@@ -30179,8 +30180,15 @@ impl<'gc> VM<'gc> {
                     };
                     match form.as_str() {
                         "NFC" | "NFD" | "NFKC" | "NFKD" => {
-                            // Return the string as-is (basic implementation without ICU)
-                            return Value::String(s.to_vec());
+                            let source = crate::unicode::utf16_to_utf8(s);
+                            let normalized = match form.as_str() {
+                                "NFC" => source.nfc().collect::<String>(),
+                                "NFD" => source.nfd().collect::<String>(),
+                                "NFKC" => source.nfkc().collect::<String>(),
+                                "NFKD" => source.nfkd().collect::<String>(),
+                                _ => unreachable!(),
+                            };
+                            return Value::String(crate::unicode::utf8_to_utf16(&normalized));
                         }
                         _ => {
                             let err = self.make_range_error_object(

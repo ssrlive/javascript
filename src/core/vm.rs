@@ -14678,30 +14678,36 @@ impl<'gc> VM<'gc> {
                     }
                     if depth == 1 {
                         if let Some(Value::VmMap(map_data)) = borrow.get("__map_data__").cloned() {
-                            let is_weak = map_data.borrow().is_weak;
-                            match key {
-                                "size" if !is_weak => return Value::Number(map_data.borrow().entries.len() as f64),
-                                "set" => {
-                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET });
+                            // Only use built-in shortcut if the key wasn't explicitly
+                            // overridden on this prototype object.
+                            if !borrow.contains_key(key) {
+                                let is_weak = map_data.borrow().is_weak;
+                                match key {
+                                    "size" if !is_weak => return Value::Number(map_data.borrow().entries.len() as f64),
+                                    "set" => {
+                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET });
+                                    }
+                                    "get" => {
+                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET });
+                                    }
+                                    "has" => {
+                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS });
+                                    }
+                                    "delete" => {
+                                        return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE });
+                                    }
+                                    "keys" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_KEYS),
+                                    "values" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_VALUES),
+                                    "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
+                                    "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
+                                    "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                                    _ => {}
                                 }
-                                "get" => {
-                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET });
-                                }
-                                "has" => {
-                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS });
-                                }
-                                "delete" => {
-                                    return Value::VmNativeFunction(if is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE });
-                                }
-                                "keys" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_KEYS),
-                                "values" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_VALUES),
-                                "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
-                                "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
-                                "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
-                                _ => {}
                             }
                         }
-                        if let Some(Value::VmSet(set_data)) = borrow.get("__set_data__").cloned() {
+                        if let Some(Value::VmSet(set_data)) = borrow.get("__set_data__").cloned()
+                            && !borrow.contains_key(key)
+                        {
                             let is_weak = set_data.borrow().is_weak;
                             match key {
                                 "size" if !is_weak => return Value::Number(set_data.borrow().values.len() as f64),
@@ -19763,17 +19769,32 @@ impl<'gc> VM<'gc> {
                         break;
                     }
                     let item = self.read_named_property(ctx, &step, "value");
+                    if self.pending_throw.is_some() {
+                        self.close_iterator(ctx, &iterator);
+                        return Value::Undefined;
+                    }
                     if !matches!(item, Value::VmObject(_) | Value::VmArray(_)) {
+                        self.close_iterator(ctx, &iterator);
                         self.throw_type_error(ctx, "Iterator value is not an object");
                         return Value::Undefined;
                     }
                     let k = self.read_named_property(ctx, &item, "0");
+                    if self.pending_throw.is_some() {
+                        self.close_iterator(ctx, &iterator);
+                        return Value::Undefined;
+                    }
                     let v = self.read_named_property(ctx, &item, "1");
+                    if self.pending_throw.is_some() {
+                        self.close_iterator(ctx, &iterator);
+                        return Value::Undefined;
+                    }
                     if let Err(err) = self.vm_call_function_value(ctx, &adder, &map_value, &[k, v]) {
                         self.set_pending_throw_from_error(&err);
+                        self.close_iterator(ctx, &iterator);
                         return Value::Undefined;
                     }
                     if self.pending_throw.is_some() {
+                        self.close_iterator(ctx, &iterator);
                         return Value::Undefined;
                     }
                 }
@@ -19854,11 +19875,17 @@ impl<'gc> VM<'gc> {
                         break;
                     }
                     let item = self.read_named_property(ctx, &step, "value");
+                    if self.pending_throw.is_some() {
+                        self.close_iterator(ctx, &iterator);
+                        return Value::Undefined;
+                    }
                     if let Err(err) = self.vm_call_function_value(ctx, &adder, &set_value, &[item]) {
                         self.set_pending_throw_from_error(&err);
+                        self.close_iterator(ctx, &iterator);
                         return Value::Undefined;
                     }
                     if self.pending_throw.is_some() {
+                        self.close_iterator(ctx, &iterator);
                         return Value::Undefined;
                     }
                 }
@@ -32045,6 +32072,21 @@ impl<'gc> VM<'gc> {
             }
             Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
             _ => false,
+        }
+    }
+
+    /// IteratorClose: call iterator.return() if it exists, swallowing any error
+    /// (the original error takes precedence per spec step 5).
+    fn close_iterator(&mut self, ctx: &GcContext<'gc>, iterator: &Value<'gc>) {
+        let saved_throw = self.pending_throw.take();
+        let return_fn = self.read_named_property(ctx, iterator, "return");
+        self.pending_throw = None; // ignore any error from reading "return"
+        if self.is_value_callable(&return_fn) {
+            let _ = self.vm_call_function_value(ctx, &return_fn, iterator, &[]);
+            // Per spec: completion from return() is ignored if original error exists
+        }
+        if let Some(saved) = saved_throw {
+            self.pending_throw = Some(saved);
         }
     }
 

@@ -561,7 +561,7 @@ impl<'gc> Chunk<'gc> {
                 }
 
                 // u16 constant index — add const_offset
-                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 | 104 => {
+                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 | 104 | 112 | 113 => {
                     Self::adjust_u16_at(code, i, const_offset);
                     i += 2;
                 }

@@ -3931,6 +3931,14 @@ impl<'gc> VM<'gc> {
                     }
                     return Ok(OpcodeAction::Continue);
                 }
+                if !key.starts_with(PRIVATE_KEY_PREFIX) {
+                    let result = self.read_named_property(ctx, &obj, &key);
+                    self.stack.push(result);
+                    if let Some(thrown) = self.pending_throw.take() {
+                        self.handle_throw(ctx, &thrown)?;
+                    }
+                    return Ok(OpcodeAction::Continue);
+                }
                 let borrow = map.borrow();
                 if matches!(borrow.get("__realm_id__"), Some(Value::Number(_))) {
                     drop(borrow);

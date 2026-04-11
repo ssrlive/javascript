@@ -3765,6 +3765,23 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, desc))
     }
 
+    fn wrap_descriptor_object_for_realm(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        mut desc: IndexMap<String, Value<'gc>>,
+        realm_id: Option<usize>,
+    ) -> Value<'gc> {
+        if let Some(rid) = realm_id {
+            for key in ["value", "get", "set"] {
+                if let Some(val) = desc.get(key).cloned() {
+                    let remapped = self.remap_cross_realm_value(ctx, val, rid);
+                    desc.insert(key.to_string(), remapped);
+                }
+            }
+        }
+        self.wrap_descriptor_object(ctx, desc)
+    }
+
     fn internal_proto_from_object_map(map: &IndexMap<String, Value<'gc>>) -> Option<Value<'gc>> {
         match map.get("__proto__") {
             Some(Value::Property { value: Some(v), .. }) => Some((**v).clone()),
@@ -3823,6 +3840,15 @@ impl<'gc> VM<'gc> {
     /// callers that already have a `PropDesc` should prefer this.
     fn make_descriptor_object_from_desc(&self, ctx: &GcContext<'gc>, prop_desc: &PropDesc<'gc>) -> Value<'gc> {
         self.wrap_descriptor_object(ctx, prop_desc.to_descriptor_map())
+    }
+
+    fn make_descriptor_object_from_desc_for_realm(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        prop_desc: &PropDesc<'gc>,
+        realm_id: Option<usize>,
+    ) -> Value<'gc> {
+        self.wrap_descriptor_object_for_realm(ctx, prop_desc.to_descriptor_map(), realm_id)
     }
 
     /// Read the current own property descriptor for `key` from a VmObject's
@@ -12876,12 +12902,26 @@ impl<'gc> VM<'gc> {
             let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
             let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
             let own_desc = if key == "__proto__" {
-                desc_from_legacy_map(&borrow, "__proto__").or_else(|| {
-                    borrow
-                        .get(OWN_DUNDER_PROTO_DATA_KEY)
-                        .cloned()
-                        .map(|value| PropDesc::data(value, attrs_from_legacy_map(&borrow, "__proto__")))
-                })
+                match borrow.get(OWN_DUNDER_PROTO_DATA_KEY) {
+                    Some(Value::Property { getter, setter, attrs, .. }) => Some(PropDesc {
+                        kind: PropKind::Accessor {
+                            get: getter.as_ref().map(|g| (**g).clone()),
+                            set: setter.as_ref().map(|s| (**s).clone()),
+                        },
+                        attrs: *attrs,
+                    }),
+                    Some(value) => Some(PropDesc::data(value.clone(), attrs_from_legacy_map(&borrow, "__proto__"))),
+                    None => match borrow.get("__proto__") {
+                        Some(Value::Property { getter, setter, attrs, .. }) => Some(PropDesc {
+                            kind: PropKind::Accessor {
+                                get: getter.as_ref().map(|g| (**g).clone()),
+                                set: setter.as_ref().map(|s| (**s).clone()),
+                            },
+                            attrs: *attrs,
+                        }),
+                        _ => None,
+                    },
+                }
             } else {
                 desc_from_legacy_map(&borrow, key)
             };
@@ -17976,6 +18016,7 @@ impl<'gc> VM<'gc> {
                         let result = child.call_named_host_function_with_this(ctx, &host_name, Some(receiver), args);
                         child.realm_parent_ptr = None;
                         if let Some(thrown) = child.pending_throw.take() {
+                            let thrown = self.register_cross_realm_fn(ctx, &mut child, thrown, rid);
                             self.pending_throw = Some(thrown);
                         }
                         let result = self.register_cross_realm_fn(ctx, &mut child, result, rid);
@@ -18049,6 +18090,7 @@ impl<'gc> VM<'gc> {
                             let thrown = child.pending_throw.take();
                             child.restore_temporary_bindings(ctx, saved_placeholders);
                             if let Some(thrown) = thrown {
+                                let thrown = self.register_cross_realm_fn(ctx, &mut child, thrown, rid);
                                 self.sync_runtime_from_child(&child);
                                 self.child_realms[rid] = Some(child);
                                 self.pending_throw = Some(thrown);
@@ -18113,6 +18155,7 @@ impl<'gc> VM<'gc> {
                             gt.shift_remove("__repl_call_this__");
                         }
                         if let Some(thrown) = thrown {
+                            let thrown = self.register_cross_realm_fn(ctx, &mut child, thrown, rid);
                             self.sync_runtime_from_child(&child);
                             self.child_realms[rid] = Some(child);
                             self.pending_throw = Some(thrown);
@@ -18246,6 +18289,7 @@ impl<'gc> VM<'gc> {
                         self.sync_runtime_to_child(&mut child);
                         let result = child.call_method_builtin(ctx, native_id, this_arg, args);
                         if let Some(thrown) = child.pending_throw.take() {
+                            let thrown = self.register_cross_realm_fn(ctx, &mut child, thrown, rid);
                             self.pending_throw = Some(thrown);
                         }
                         let result = self.register_cross_realm_fn(ctx, &mut child, result, rid);
@@ -23834,6 +23878,10 @@ impl<'gc> VM<'gc> {
                             return self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[target, key_arg]);
                         }
                         let borrow = obj.borrow();
+                        let realm_id = match borrow.get("__realm_id__") {
+                            Some(Value::Number(n)) => Some(*n as usize),
+                            _ => None,
+                        };
                         if borrow.contains_key("__vm_symbol__") {
                             return Value::Undefined;
                         }
@@ -23842,7 +23890,7 @@ impl<'gc> VM<'gc> {
                             if Self::namespace_is_symbol_like_key(obj, &key) {
                                 // Symbol properties use ordinary [[GetOwnProperty]]
                                 if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
-                                    return self.make_descriptor_object_from_desc(ctx, &desc);
+                                    return self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id);
                                 }
                                 return Value::Undefined;
                             }
@@ -23889,7 +23937,7 @@ impl<'gc> VM<'gc> {
                                         PropDesc::data(other.clone(), a)
                                     }
                                 };
-                                return self.make_descriptor_object_from_desc(ctx, &desc);
+                                return self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id);
                             }
                             // Fall back to accessor lookup only (Value::Property or __get_/__set_).
                             // Plain data at "__proto__" is the internal [[Prototype]] slot,
@@ -23897,12 +23945,12 @@ impl<'gc> VM<'gc> {
                             if let Some(desc) = desc_from_legacy_map(&borrow, "__proto__")
                                 && matches!(desc.kind, PropKind::Accessor { .. })
                             {
-                                return self.make_descriptor_object_from_desc(ctx, &desc);
+                                return self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id);
                             }
                             return Value::Undefined;
                         }
                         if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
-                            self.make_descriptor_object_from_desc(ctx, &desc)
+                            self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id)
                         } else {
                             Value::Undefined
                         }
@@ -24398,13 +24446,13 @@ impl<'gc> VM<'gc> {
                     };
                     if let Some(s) = string_wrapper_value {
                         let mut keys: Vec<Value<'gc>> = (0..s.len()).map(|i| Value::from(i.to_string())).collect();
+                        keys.push(Value::from("length"));
                         let implicit_names: std::collections::HashSet<String> = (0..s.len())
                             .map(|i| i.to_string())
                             .chain(std::iter::once("length".to_string()))
                             .collect();
                         let explicit_names = self.collect_object_map_keys(&obj.borrow(), false);
                         keys.extend(explicit_names.into_iter().filter(|k| !implicit_names.contains(k)).map(Value::from));
-                        keys.push(Value::from("length"));
                         return mk_names_array(keys, self);
                     }
                     let borrow = obj.borrow();
@@ -31477,13 +31525,11 @@ impl<'gc> VM<'gc> {
         map.insert("__type__".to_string(), Value::from("TypeError"));
         map.insert("name".to_string(), Value::from("TypeError"));
         map.insert("message".to_string(), Value::from(message));
-        if let Some(ctor) = self.globals.get("TypeError").cloned() {
-            map.insert("constructor".to_string(), ctor.clone());
-            if let Value::VmObject(ctor_obj) = ctor
-                && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
-            {
-                map.insert("__proto__".to_string(), proto);
-            }
+        if let Some(ctor) = self.globals.get("TypeError").cloned()
+            && let Value::VmObject(ctor_obj) = ctor
+            && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+        {
+            map.insert("__proto__".to_string(), proto);
         }
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
@@ -35099,6 +35145,7 @@ impl<'gc> VM<'gc> {
         self.sync_runtime_to_child(&mut child);
         let result = child.read_named_property(ctx, obj, key);
         if let Some(thrown) = child.pending_throw.take() {
+            let thrown = self.register_cross_realm_fn(ctx, &mut child, thrown, realm_id);
             self.sync_runtime_from_child(&child);
             self.child_realms[realm_id] = Some(child);
             self.pending_throw = Some(thrown);

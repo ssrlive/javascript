@@ -118,9 +118,9 @@ impl<'gc> VM<'gc> {
             return Gc::ptr_eq(*re_obj, *home);
         }
         if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp")
-            && let Some(Value::VmObject(proto)) = regexp_ctor.borrow().get("prototype")
+            && let Some(Value::VmObject(proto)) = own_data_from_legacy_map(&regexp_ctor.borrow(), "prototype")
         {
-            return Gc::ptr_eq(*re_obj, *proto);
+            return Gc::ptr_eq(*re_obj, proto);
         }
         false
     }
@@ -456,7 +456,7 @@ impl<'gc> VM<'gc> {
     pub(super) fn regexp_init_prototype(&mut self, ctx: &GcContext<'gc>) {
         let mut regexp_proto = IndexMap::new();
         if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
         {
             regexp_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -561,7 +561,7 @@ impl<'gc> VM<'gc> {
         if let Some(iter_proto_val) = self.globals.get("__IteratorPrototype__").cloned() {
             iter_proto.insert("__proto__".to_string(), iter_proto_val);
         } else if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
+            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
         {
             iter_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -643,7 +643,7 @@ impl<'gc> VM<'gc> {
         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
         map.insert("lastIndex".to_string(), Value::Number(0.0));
         if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
-            && let Some(proto) = ctor.borrow().get("prototype").cloned()
+            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
         {
             map.insert("__proto__".to_string(), proto);
         }
@@ -747,7 +747,7 @@ impl<'gc> VM<'gc> {
         let parts = self.regex_split_string(rust_str, re_obj, limit);
         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(parts));
         if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array")
-            && let Some(proto) = arr_ctor.borrow().get("prototype").cloned()
+            && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
         {
             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
         }

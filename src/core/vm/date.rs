@@ -614,9 +614,18 @@ impl<'gc> VM<'gc> {
                                 (0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
                             }
                         };
-                        let new_ms = Self::time_clip(Self::make_date_from_components_no_year_adjust(
-                            yyyy, month, day, hour, min, sec, ms_comp, true,
-                        ));
+                        let mut new_ms = Self::make_date_from_components_no_year_adjust(yyyy, month, day, hour, min, sec, ms_comp, true);
+                        if new_ms.is_nan() {
+                            let fallback_offset_ms = Local
+                                .timestamp_millis_opt(t_local as i64)
+                                .single()
+                                .map(|dt| dt.offset().local_minus_utc() as f64 * 1000.0)
+                                .unwrap_or(0.0);
+                            let utc_ms = Self::make_date_from_components_no_year_adjust(yyyy, month, day, hour, min, sec, ms_comp, false);
+                            if !utc_ms.is_nan() {
+                                new_ms = Self::time_clip(utc_ms - fallback_offset_ms);
+                            }
+                        }
                         obj.borrow_mut(ctx).insert("__date_ms__".to_string(), Value::Number(new_ms));
                         return Some(Value::Number(new_ms));
                     }

@@ -22661,22 +22661,13 @@ impl<'gc> VM<'gc> {
                 Value::Boolean(b)
             }
             BUILTIN_STRING_FROMCHARCODE => {
-                let mut result: Vec<u16> = Vec::new();
+                let mut result: Vec<u16> = Vec::with_capacity(args.len());
                 for arg in args {
-                    let code = match arg {
-                        Value::Number(n) => *n as u32,
-                        Value::String(s) => {
-                            let s_utf8 = crate::unicode::utf16_to_utf8(s);
-                            if let Some(stripped) = s_utf8.strip_prefix("0x").or_else(|| s_utf8.strip_prefix("0X")) {
-                                u32::from_str_radix(stripped, 16).unwrap_or(0)
-                            } else {
-                                s_utf8.parse::<f64>().unwrap_or(0.0) as u32
-                            }
-                        }
-                        _ => 0,
+                    let num = match self.extract_number_with_coercion(ctx, arg) {
+                        Some(num) => num,
+                        None => return Value::Undefined,
                     };
-                    // Per spec, ToUint16(code) — truncate to 16 bits
-                    result.push((code & 0xFFFF) as u16);
+                    result.push(Self::to_uint16(num));
                 }
                 Value::String(result)
             }
@@ -29940,11 +29931,11 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_STRING_ENDSWITH => {
                     // Step 4-6: Throw TypeError if searchString is a RegExp
-                    if let Some(Value::VmObject(obj)) = args.first() {
-                        if obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string()) {
-                            self.throw_type_error(ctx, "First argument to String.prototype.endsWith must not be a regular expression");
-                            return Value::Undefined;
-                        }
+                    if let Some(Value::VmObject(obj)) = args.first()
+                        && obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+                    {
+                        self.throw_type_error(ctx, "First argument to String.prototype.endsWith must not be a regular expression");
+                        return Value::Undefined;
                     }
                     let suffix = match args.first() {
                         Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
@@ -30168,9 +30159,9 @@ impl<'gc> VM<'gc> {
                     let pos = pos as usize;
                     let first = s[pos] as u32;
                     // Check for surrogate pair
-                    if first >= 0xD800 && first <= 0xDBFF && pos + 1 < s.len() as usize {
+                    if (0xD800..=0xDBFF).contains(&first) && pos + 1 < s.len() {
                         let second = s[pos + 1] as u32;
-                        if second >= 0xDC00 && second <= 0xDFFF {
+                        if (0xDC00..=0xDFFF).contains(&second) {
                             let cp = (first - 0xD800) * 0x400 + (second - 0xDC00) + 0x10000;
                             return Value::Number(cp as f64);
                         }

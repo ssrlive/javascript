@@ -16739,41 +16739,44 @@ impl<'gc> VM<'gc> {
         // String constructor (as VmObject with __native_id__ for typeof "function")
         let mut string_map = IndexMap::new();
         Self::init_native_ctor_header(&mut string_map, BUILTIN_CTOR_STRING, "String", 1.0);
-        string_map.insert("fromCharCode".to_string(), Value::VmNativeFunction(BUILTIN_STRING_FROMCHARCODE));
+        string_map.insert(
+            "fromCharCode".to_string(),
+            Self::make_native_fn(ctx, BUILTIN_STRING_FROMCHARCODE, "fromCharCode", 1.0),
+        );
         mark_nonenumerable(&mut string_map, "fromCharCode");
         let mut string_proto = IndexMap::new();
         string_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
         string_proto.insert("length".to_string(), Value::Number(0.0));
         write_attrs_to_legacy_map(&mut string_proto, "length", PropAttrs::empty());
-        for (name, builtin_id) in [
-            ("toString", BUILTIN_STRING_VALUEOF),
-            ("valueOf", BUILTIN_STRING_VALUEOF),
-            ("toLocaleLowerCase", BUILTIN_STRING_TOLOWERCASE),
-            ("toLocaleUpperCase", BUILTIN_STRING_TOUPPERCASE),
-            ("split", BUILTIN_STRING_SPLIT),
-            ("indexOf", BUILTIN_STRING_INDEXOF),
-            ("slice", BUILTIN_STRING_SLICE),
-            ("toUpperCase", BUILTIN_STRING_TOUPPERCASE),
-            ("toLowerCase", BUILTIN_STRING_TOLOWERCASE),
-            ("trim", BUILTIN_STRING_TRIM),
-            ("charAt", BUILTIN_STRING_CHARAT),
-            ("includes", BUILTIN_STRING_INCLUDES),
-            ("replace", BUILTIN_STRING_REPLACE),
-            ("replaceAll", BUILTIN_STRING_REPLACEALL),
-            ("match", BUILTIN_STRING_MATCH),
-            ("search", BUILTIN_STRING_SEARCH),
-            ("startsWith", BUILTIN_STRING_STARTSWITH),
-            ("endsWith", BUILTIN_STRING_ENDSWITH),
-            ("substring", BUILTIN_STRING_SUBSTRING),
-            ("padStart", BUILTIN_STRING_PADSTART),
-            ("padEnd", BUILTIN_STRING_PADEND),
-            ("repeat", BUILTIN_STRING_REPEAT),
-            ("charCodeAt", BUILTIN_STRING_CHARCODEAT),
-            ("trimStart", BUILTIN_STRING_TRIMSTART),
-            ("trimEnd", BUILTIN_STRING_TRIMEND),
-            ("lastIndexOf", BUILTIN_STRING_LASTINDEXOF),
+        for (name, builtin_id, length) in [
+            ("toString", BUILTIN_STRING_VALUEOF, 0.0),
+            ("valueOf", BUILTIN_STRING_VALUEOF, 0.0),
+            ("toLocaleLowerCase", BUILTIN_STRING_TOLOWERCASE, 0.0),
+            ("toLocaleUpperCase", BUILTIN_STRING_TOUPPERCASE, 0.0),
+            ("split", BUILTIN_STRING_SPLIT, 2.0),
+            ("indexOf", BUILTIN_STRING_INDEXOF, 1.0),
+            ("slice", BUILTIN_STRING_SLICE, 2.0),
+            ("toUpperCase", BUILTIN_STRING_TOUPPERCASE, 0.0),
+            ("toLowerCase", BUILTIN_STRING_TOLOWERCASE, 0.0),
+            ("trim", BUILTIN_STRING_TRIM, 0.0),
+            ("charAt", BUILTIN_STRING_CHARAT, 1.0),
+            ("includes", BUILTIN_STRING_INCLUDES, 1.0),
+            ("replace", BUILTIN_STRING_REPLACE, 2.0),
+            ("replaceAll", BUILTIN_STRING_REPLACEALL, 2.0),
+            ("match", BUILTIN_STRING_MATCH, 1.0),
+            ("search", BUILTIN_STRING_SEARCH, 1.0),
+            ("startsWith", BUILTIN_STRING_STARTSWITH, 1.0),
+            ("endsWith", BUILTIN_STRING_ENDSWITH, 1.0),
+            ("substring", BUILTIN_STRING_SUBSTRING, 2.0),
+            ("padStart", BUILTIN_STRING_PADSTART, 1.0),
+            ("padEnd", BUILTIN_STRING_PADEND, 1.0),
+            ("repeat", BUILTIN_STRING_REPEAT, 1.0),
+            ("charCodeAt", BUILTIN_STRING_CHARCODEAT, 1.0),
+            ("trimStart", BUILTIN_STRING_TRIMSTART, 0.0),
+            ("trimEnd", BUILTIN_STRING_TRIMEND, 0.0),
+            ("lastIndexOf", BUILTIN_STRING_LASTINDEXOF, 1.0),
         ] {
-            string_proto.insert(name.to_string(), Value::VmNativeFunction(builtin_id));
+            string_proto.insert(name.to_string(), Self::make_native_fn(ctx, builtin_id, name, length));
             mark_nonenumerable(&mut string_proto, name);
         }
         string_proto.insert("concat".to_string(), Self::make_host_fn(ctx, "string.concat"));

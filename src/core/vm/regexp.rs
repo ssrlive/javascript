@@ -445,6 +445,7 @@ impl<'gc> VM<'gc> {
                 let limit = _args.get(1).cloned().unwrap_or(Value::Undefined);
                 self.regexp_symbol_split(ctx, &rx, &s_str, &limit)
             }
+            "regexp.compile" => self.regexp_compile(ctx, receiver, _args),
             _ => {
                 log::warn!("Unknown regexp host function: {}", name);
                 Value::Undefined
@@ -462,6 +463,10 @@ impl<'gc> VM<'gc> {
         }
         regexp_proto.insert("exec".to_string(), Self::make_native_fn(ctx, BUILTIN_REGEX_EXEC, "exec", 1.0));
         regexp_proto.insert("test".to_string(), Self::make_native_fn(ctx, BUILTIN_REGEX_TEST, "test", 1.0));
+        regexp_proto.insert(
+            "compile".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "regexp.compile", "compile", 2.0, false),
+        );
         regexp_proto.insert(
             "toString".to_string(),
             Self::make_host_fn_with_name_len(ctx, "regexp.toString", "toString", 0.0, false),
@@ -538,6 +543,7 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut regexp_proto, "flags");
         mark_nonenumerable(&mut regexp_proto, "exec");
         mark_nonenumerable(&mut regexp_proto, "test");
+        mark_nonenumerable(&mut regexp_proto, "compile");
         mark_nonenumerable(&mut regexp_proto, "toString");
         mark_nonenumerable(&mut regexp_proto, "@@sym:7");
         mark_nonenumerable(&mut regexp_proto, "@@sym:8");
@@ -1838,6 +1844,106 @@ impl<'gc> VM<'gc> {
             Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
             None => Vec::new(),
         }
+    }
+
+    /// B.2.5.1 RegExp.prototype.compile ( pattern, flags )
+    fn regexp_compile(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        // Step 1: Let O be the this value.
+        let re_obj = match receiver {
+            Some(Value::VmObject(obj)) if obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => *obj,
+            _ => {
+                self.throw_type_error(ctx, "RegExp.prototype.compile called on incompatible receiver");
+                return Value::Undefined;
+            }
+        };
+
+        let pattern_arg = args.first().cloned().unwrap_or(Value::Undefined);
+        let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+        // Step 3: If pattern has [[RegExpMatcher]] (is an actual RegExp)
+        let (pattern_u16, flags) = if let Value::VmObject(pat_obj) = &pattern_arg
+            && pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
+        {
+            // Step 3a: If flags is not undefined, throw a TypeError.
+            if !matches!(flags_arg, Value::Undefined) {
+                self.throw_type_error(ctx, "RegExp.prototype.compile does not accept flags with a RegExp pattern");
+                return Value::Undefined;
+            }
+            // Step 3b: Let P be pattern.[[OriginalSource]].
+            let p = match pat_obj.borrow().get("__regex_pattern__") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
+                None => Vec::new(),
+            };
+            // Step 3c: Let F be pattern.[[OriginalFlags]].
+            let f = pat_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
+            (p, f)
+        } else {
+            // Step 4: Else (not a RegExp) — use RegExpInitialize coercion
+            // Step 4a: If pattern is undefined, let P be "".
+            // Step 4b: Else, let P be ? ToString(pattern).
+            let p = match &pattern_arg {
+                Value::Undefined => Vec::new(),
+                Value::String(s) => s.clone(),
+                v => match self.vm_to_string_like_spec(ctx, v) {
+                    Ok(s) => crate::unicode::utf8_to_utf16(&s),
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                },
+            };
+            // Step 4c: If flags is undefined, let F be "".
+            // Step 4d: Else, let F be ? ToString(flags).
+            let f = match &flags_arg {
+                Value::Undefined => String::new(),
+                v => match self.vm_to_string_like_spec(ctx, v) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                },
+            };
+            (p, f)
+        };
+
+        // Validate flags
+        if let Some(err_msg) = Self::validate_regexp_flags(&flags) {
+            self.throw_syntax_error(ctx, &err_msg);
+            return Value::Undefined;
+        }
+
+        // Validate the pattern compiles
+        let regress_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
+        if let Err(e) = get_or_compile_regex(&pattern_u16, &regress_flags) {
+            let pat_str = crate::unicode::utf16_to_utf8(&pattern_u16);
+            self.throw_syntax_error(ctx, &format!("Invalid regular expression: /{}/: {}", pat_str, e));
+            return Value::Undefined;
+        }
+
+        // Step 5: Re-initialize the RegExp object (update pattern and flags first)
+        {
+            let mut borrow = re_obj.borrow_mut(ctx);
+            borrow.insert("__regex_pattern__".to_string(), Value::String(pattern_u16));
+            borrow.insert("__regex_flags__".to_string(), Value::from(flags.as_str()));
+        }
+
+        // Step 12 of RegExpInitialize: Perform ? Set(obj, "lastIndex", 0, true).
+        // If lastIndex is non-writable, throw TypeError.
+        {
+            let borrow = re_obj.borrow();
+            let attrs = read_attrs_from_legacy_map(&borrow, "lastIndex");
+            if !attrs.contains(PropAttrs::WRITABLE) {
+                drop(borrow);
+                self.throw_type_error(ctx, "Cannot assign to read only property 'lastIndex' of object '[object RegExp]'");
+                return Value::Undefined;
+            }
+        }
+        re_obj.borrow_mut(ctx).insert("lastIndex".to_string(), Value::Number(0.0));
+
+        // Step 6: Return O.
+        Value::VmObject(re_obj)
     }
 
     /// Extract (pattern, flags) from constructor arguments, handling RegExp-as-source.

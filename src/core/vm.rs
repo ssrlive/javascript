@@ -177,6 +177,9 @@ const BUILTIN_STRING_TOSTRING: FunctionID = 133;
 const BUILTIN_STRING_VALUEOF: FunctionID = 134;
 const BUILTIN_CTOR_STRING: FunctionID = 135;
 const BUILTIN_STRING_RAW: FunctionID = 136;
+const BUILTIN_STRING_CODEPOINTAT: FunctionID = 137;
+const BUILTIN_STRING_NORMALIZE: FunctionID = 138;
+const BUILTIN_STRING_MATCHALL: FunctionID = 139;
 // ── Number (160–179) ────────────────────────────────────────────────
 const BUILTIN_CTOR_NUMBER: FunctionID = 160;
 const BUILTIN_NUMBER_ISNAN: FunctionID = 161;
@@ -461,6 +464,119 @@ fn to_uint32(n: f64) -> u32 {
 // JS ToInt32 derived from ToUint32.
 fn to_int32(n: f64) -> i32 {
     to_uint32(n) as i32
+}
+
+/// Returns true if the given UTF-16 code unit is a JS WhiteSpace or LineTerminator.
+/// Covers ECMAScript 2024 Table 65 (WhiteSpace) + Table 66 (LineTerminator).
+fn is_js_whitespace(cu: u16) -> bool {
+    matches!(
+        cu,
+        0x0009  // TAB
+        | 0x000A // LF
+        | 0x000B // VT
+        | 0x000C // FF
+        | 0x000D // CR
+        | 0x0020 // SPACE
+        | 0x00A0 // NO-BREAK SPACE
+        | 0x1680 // OGHAM SPACE MARK
+        | 0x2000 // EN QUAD
+        | 0x2001 // EM QUAD
+        | 0x2002 // EN SPACE
+        | 0x2003 // EM SPACE
+        | 0x2004 // THREE-PER-EM SPACE
+        | 0x2005 // FOUR-PER-EM SPACE
+        | 0x2006 // SIX-PER-EM SPACE
+        | 0x2007 // FIGURE SPACE
+        | 0x2008 // PUNCTUATION SPACE
+        | 0x2009 // THIN SPACE
+        | 0x200A // HAIR SPACE
+        | 0x2028 // LINE SEPARATOR
+        | 0x2029 // PARAGRAPH SEPARATOR
+        | 0x202F // NARROW NO-BREAK SPACE
+        | 0x205F // MEDIUM MATHEMATICAL SPACE
+        | 0x3000 // IDEOGRAPHIC SPACE
+        | 0xFEFF // ZERO WIDTH NO-BREAK SPACE (BOM)
+    )
+}
+
+fn js_trim_start(s: &[u16]) -> &[u16] {
+    let start = s.iter().position(|&cu| !is_js_whitespace(cu)).unwrap_or(s.len());
+    &s[start..]
+}
+
+fn js_trim_end(s: &[u16]) -> &[u16] {
+    let end = s.iter().rposition(|&cu| !is_js_whitespace(cu)).map_or(0, |i| i + 1);
+    &s[..end]
+}
+
+fn js_trim_both(s: &[u16]) -> &[u16] {
+    js_trim_end(js_trim_start(s))
+}
+
+/// GetSubstitution (ES2024 §22.1.3.19.1)
+/// Processes $-substitution patterns in replacement strings.
+fn get_substitution(matched: &str, full_str: &str, position: usize, replacement: &str) -> String {
+    let mut result = String::new();
+    let repl_bytes = replacement.as_bytes();
+    let len = repl_bytes.len();
+    let mut i = 0;
+    while i < len {
+        if repl_bytes[i] == b'$' && i + 1 < len {
+            match repl_bytes[i + 1] {
+                b'$' => {
+                    result.push('$');
+                    i += 2;
+                }
+                b'&' => {
+                    result.push_str(matched);
+                    i += 2;
+                }
+                b'`' => {
+                    // Portion of string before the match
+                    let before = if position <= full_str.len() {
+                        &full_str[..position]
+                    } else {
+                        full_str
+                    };
+                    result.push_str(before);
+                    i += 2;
+                }
+                b'\'' => {
+                    // Portion of string after the match
+                    let tail_pos = position + matched.len();
+                    if tail_pos < full_str.len() {
+                        result.push_str(&full_str[tail_pos..]);
+                    }
+                    i += 2;
+                }
+                c @ b'0'..=b'9' => {
+                    // $n or $nn — capture group references (no captures for string replace)
+                    // Just emit the literal since we have no captures in string.replace
+                    result.push('$');
+                    result.push(c as char);
+                    i += 2;
+                }
+                _ => {
+                    result.push('$');
+                    i += 1;
+                }
+            }
+        } else {
+            result.push(repl_bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// UTF-16 aware version of get_substitution for proper byte-index mapping.
+fn get_substitution_u16(matched: &[u16], full_str: &[u16], position: usize, replacement: &str) -> Vec<u16> {
+    let matched_str = crate::unicode::utf16_to_utf8(matched);
+    let full = crate::unicode::utf16_to_utf8(full_str);
+    // Convert UTF-16 position to UTF-8 byte position
+    let utf8_pos = crate::unicode::utf16_to_utf8(&full_str[..position.min(full_str.len())]).len();
+    let result = get_substitution(&matched_str, &full, utf8_pos, replacement);
+    crate::unicode::utf8_to_utf16(&result)
 }
 
 /// Convert a Number to a string in a given radix (2-36).
@@ -3331,6 +3447,21 @@ impl<'gc> VM<'gc> {
             obj.borrow_mut(ctx).insert("__host_this__".to_string(), receiver.clone());
         }
         func
+    }
+
+    fn ensure_string_iterator_prototype(&mut self, ctx: &GcContext<'gc>) -> Value<'gc> {
+        let mut string_iter_proto = IndexMap::new();
+        if let Some(iterator_proto) = self.globals.get("__IteratorPrototype__").cloned() {
+            string_iter_proto.insert("__proto__".to_string(), iterator_proto);
+        }
+        string_iter_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
+        );
+        mark_nonenumerable(&mut string_iter_proto, "next");
+        string_iter_proto.insert("@@sym:4".to_string(), Value::from("String Iterator"));
+        write_attrs_to_legacy_map(&mut string_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        Value::VmObject(new_gc_cell_ptr(ctx, string_iter_proto))
     }
 
     fn make_promise_settle_host_fn(
@@ -8433,15 +8564,52 @@ impl<'gc> VM<'gc> {
             "os.getcwd" | "os.getpid" | "os.getppid" | "os.open" | "os.write" | "os.read" | "os.seek" | "os.close" | "os.path.basename"
             | "os.path.dirname" | "os.path.join" | "os.path.extname" => self.call_named_host_function(ctx, name, args),
             _ if name.starts_with("date.") => self.date_handle_host_fn(ctx, name, receiver, args),
-            "string.concat" => {
-                let base = receiver.map(value_to_string).unwrap_or_default();
-                let mut out = base;
-                for a in args {
-                    let prim = self.try_to_primitive(ctx, a, "string");
-                    if self.pending_throw.is_some() {
+            "string.iterator" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                if matches!(this_val, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "String.prototype[Symbol.iterator] called on null or undefined");
+                    return Value::Undefined;
+                }
+                let iter_string = match self.vm_to_string_like_spec(ctx, this_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                         return Value::Undefined;
                     }
-                    out.push_str(&value_to_string(&prim));
+                };
+                let code_points = Self::utf16_code_point_strings(&crate::unicode::utf8_to_utf16(&iter_string));
+                let items = code_points.into_iter().map(Value::String).collect::<Vec<_>>();
+                let mut obj = IndexMap::new();
+                obj.insert(
+                    "__items__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(items))),
+                );
+                obj.insert("__index__".to_string(), Value::Number(0.0));
+                obj.insert("__proto__".to_string(), self.ensure_string_iterator_prototype(ctx));
+                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+            }
+            "string.concat" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                if matches!(this_val, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "String.prototype.concat called on null or undefined");
+                    return Value::Undefined;
+                }
+                let base = match self.vm_to_string_like_spec(ctx, this_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                };
+                let mut out = base;
+                for a in args {
+                    match self.vm_to_string_like_spec(ctx, a) {
+                        Ok(s) => out.push_str(&s),
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                            return Value::Undefined;
+                        }
+                    }
                 }
                 Value::from(&out)
             }
@@ -11304,9 +11472,23 @@ impl<'gc> VM<'gc> {
                         values.push(Value::String(vec![u]));
                         i += 1;
                     }
-                    self.make_iterator(ctx, &values)
+                    let mut obj = IndexMap::new();
+                    obj.insert(
+                        "__items__".to_string(),
+                        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(values))),
+                    );
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    obj.insert("__proto__".to_string(), self.ensure_string_iterator_prototype(ctx));
+                    Value::VmObject(new_gc_cell_ptr(ctx, obj))
                 } else {
-                    self.make_iterator(ctx, &[])
+                    let mut obj = IndexMap::new();
+                    obj.insert(
+                        "__items__".to_string(),
+                        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new()))),
+                    );
+                    obj.insert("__index__".to_string(), Value::Number(0.0));
+                    obj.insert("__proto__".to_string(), self.ensure_string_iterator_prototype(ctx));
+                    Value::VmObject(new_gc_cell_ptr(ctx, obj))
                 }
             }
             "array.copyWithin" => {
@@ -14776,6 +14958,9 @@ impl<'gc> VM<'gc> {
                                     "trimStart" => Some(Value::VmNativeFunction(BUILTIN_STRING_TRIMSTART)),
                                     "trimEnd" => Some(Value::VmNativeFunction(BUILTIN_STRING_TRIMEND)),
                                     "lastIndexOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_LASTINDEXOF)),
+                                    "codePointAt" => Some(Value::VmNativeFunction(BUILTIN_STRING_CODEPOINTAT)),
+                                    "normalize" => Some(Value::VmNativeFunction(BUILTIN_STRING_NORMALIZE)),
+                                    "matchAll" => Some(Value::VmNativeFunction(BUILTIN_STRING_MATCHALL)),
                                     _ => None,
                                 };
                                 if let Some(v) = resolved {
@@ -16884,7 +17069,7 @@ impl<'gc> VM<'gc> {
         );
 
         let mut set_iter_proto = IndexMap::new();
-        set_iter_proto.insert("__proto__".to_string(), iterator_proto_val);
+        set_iter_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
         set_iter_proto.insert(
             "next".to_string(),
             Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
@@ -16895,6 +17080,19 @@ impl<'gc> VM<'gc> {
         self.globals.insert(
             "__SetIteratorPrototype__".to_string(),
             Value::VmObject(new_gc_cell_ptr(ctx, set_iter_proto)),
+        );
+        let mut string_iter_proto = IndexMap::new();
+        string_iter_proto.insert("__proto__".to_string(), iterator_proto_val);
+        string_iter_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
+        );
+        mark_nonenumerable(&mut string_iter_proto, "next");
+        string_iter_proto.insert("@@sym:4".to_string(), Value::from("String Iterator"));
+        write_attrs_to_legacy_map(&mut string_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        self.globals.insert(
+            "__StringIteratorPrototype__".to_string(),
+            Value::VmObject(new_gc_cell_ptr(ctx, string_iter_proto)),
         );
         if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol") {
             let mut symbol_proto = IndexMap::new();
@@ -17066,10 +17264,18 @@ impl<'gc> VM<'gc> {
             ("trimStart", BUILTIN_STRING_TRIMSTART, 0.0),
             ("trimEnd", BUILTIN_STRING_TRIMEND, 0.0),
             ("lastIndexOf", BUILTIN_STRING_LASTINDEXOF, 1.0),
+            ("codePointAt", BUILTIN_STRING_CODEPOINTAT, 1.0),
+            ("normalize", BUILTIN_STRING_NORMALIZE, 0.0),
+            ("matchAll", BUILTIN_STRING_MATCHALL, 1.0),
         ] {
             string_proto.insert(name.to_string(), Self::make_native_fn(ctx, builtin_id, name, length));
             mark_nonenumerable(&mut string_proto, name);
         }
+        string_proto.insert(
+            "@@sym:1".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "string.iterator", "[Symbol.iterator]", 0.0, false),
+        );
+        mark_nonenumerable(&mut string_proto, "@@sym:1");
         string_proto.insert("concat".to_string(), Self::make_host_fn(ctx, "string.concat"));
         mark_nonenumerable(&mut string_proto, "concat");
         // Annex B: trimLeft/trimRight are aliases for trimStart/trimEnd (same object)
@@ -29234,7 +29440,8 @@ impl<'gc> VM<'gc> {
         }
 
         // String methods — RequireObjectCoercible(this) + ToString(this)
-        let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id);
+        let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id)
+            || (BUILTIN_STRING_CODEPOINTAT..=BUILTIN_STRING_MATCHALL).contains(&id);
         let string_val: Option<Vec<u16>> = match &receiver {
             Value::String(s) => Some(s.clone()),
             Value::VmObject(map) => {
@@ -29244,6 +29451,11 @@ impl<'gc> VM<'gc> {
                         Some(Value::String(s)) => Some(s.clone()),
                         _ => None,
                     }
+                } else if is_string_method && b.contains_key("__vm_symbol__") {
+                    // ToString(Symbol) must throw TypeError
+                    drop(b);
+                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
                 } else if is_string_method {
                     // Generic object — ToString via vm_to_string (calls JS toString/valueOf)
                     drop(b);
@@ -29410,7 +29622,8 @@ impl<'gc> VM<'gc> {
                     return Value::from(&rust_str.to_lowercase());
                 }
                 BUILTIN_STRING_TRIM => {
-                    return Value::from(rust_str.trim());
+                    let trimmed = js_trim_both(s);
+                    return Value::String(trimmed.to_vec());
                 }
                 BUILTIN_STRING_CHARAT => {
                     let idx = if let Some(v) = args.first() {
@@ -29430,6 +29643,13 @@ impl<'gc> VM<'gc> {
                     return Value::String(vec![ch]);
                 }
                 BUILTIN_STRING_INCLUDES => {
+                    // Step 4-6: Throw TypeError if searchString is a RegExp
+                    if let Some(Value::VmObject(obj)) = args.first()
+                        && obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+                    {
+                        self.throw_type_error(ctx, "First argument to String.prototype.includes must not be a regular expression");
+                        return Value::Undefined;
+                    }
                     let needle = match args.first() {
                         Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
                             Some(s) => s,
@@ -29490,8 +29710,16 @@ impl<'gc> VM<'gc> {
                         Some(s) => s,
                         None => return Value::Undefined,
                     };
-                    let result = rust_str.replacen(&pattern, &replacement, 1);
-                    return Value::from(&result);
+                    // Use GetSubstitution for $-patterns
+                    let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                    if let Some(pos) = s.windows(pattern_u16.len()).position(|w| w == pattern_u16.as_slice()) {
+                        let sub = get_substitution_u16(&pattern_u16, s, pos, &replacement);
+                        let mut result: Vec<u16> = s[..pos].to_vec();
+                        result.extend_from_slice(&sub);
+                        result.extend_from_slice(&s[pos + pattern_u16.len()..]);
+                        return Value::String(result);
+                    }
+                    return Value::from(&rust_str);
                 }
                 BUILTIN_STRING_REPLACEALL => {
                     if let Some(Value::VmObject(re_obj)) = args.first() {
@@ -29515,15 +29743,81 @@ impl<'gc> VM<'gc> {
                         },
                         None => "undefined".to_string(),
                     };
-                    let replacement = match args.get(1) {
-                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
-                            Some(s) => s,
-                            None => return Value::Undefined,
-                        },
-                        None => "undefined".to_string(),
+                    let repl_val = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    // Check if replacement is callable
+                    if self.is_callable_value(&repl_val) {
+                        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                        let mut result_u16: Vec<u16> = Vec::new();
+                        let mut pos = 0usize;
+                        while pos <= s.len() {
+                            if let Some(offset) = s[pos..]
+                                .windows(pattern_u16.len().max(1))
+                                .position(|w| w.len() >= pattern_u16.len() && w[..pattern_u16.len()] == pattern_u16[..])
+                            {
+                                let match_pos = pos + offset;
+                                result_u16.extend_from_slice(&s[pos..match_pos]);
+                                let matched_val = Value::from(&pattern);
+                                let offset_val = Value::Number(match_pos as f64);
+                                let full_val = Value::from(&rust_str);
+                                let cb_result = match self.vm_call_function_value(
+                                    ctx,
+                                    &repl_val,
+                                    &Value::Undefined,
+                                    &[matched_val, offset_val, full_val],
+                                ) {
+                                    Ok(v) => self.vm_to_string(ctx, &v),
+                                    Err(_) => String::new(),
+                                };
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                result_u16.extend_from_slice(&crate::unicode::utf8_to_utf16(&cb_result));
+                                if pattern_u16.is_empty() {
+                                    if match_pos < s.len() {
+                                        result_u16.push(s[match_pos]);
+                                    }
+                                    pos = match_pos + 1;
+                                } else {
+                                    pos = match_pos + pattern_u16.len();
+                                }
+                            } else {
+                                result_u16.extend_from_slice(&s[pos..]);
+                                break;
+                            }
+                        }
+                        return Value::String(result_u16);
+                    }
+                    let replacement = match self.vm_coerce_arg_to_string(ctx, &repl_val) {
+                        Some(s) => s,
+                        None => return Value::Undefined,
                     };
-                    let result = rust_str.replace(&pattern, &replacement);
-                    return Value::from(&result);
+                    // Use GetSubstitution for each occurrence
+                    let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                    let mut result_u16: Vec<u16> = Vec::new();
+                    let mut pos = 0usize;
+                    while pos <= s.len() {
+                        if pattern_u16.is_empty() {
+                            // Empty pattern: insert substitution before every code unit + after last
+                            let sub = get_substitution_u16(&pattern_u16, s, pos, &replacement);
+                            result_u16.extend_from_slice(&sub);
+                            if pos < s.len() {
+                                result_u16.push(s[pos]);
+                                pos += 1;
+                            } else {
+                                break;
+                            }
+                        } else if let Some(offset) = s[pos..].windows(pattern_u16.len()).position(|w| w == pattern_u16.as_slice()) {
+                            let match_pos = pos + offset;
+                            result_u16.extend_from_slice(&s[pos..match_pos]);
+                            let sub = get_substitution_u16(&pattern_u16, s, match_pos, &replacement);
+                            result_u16.extend_from_slice(&sub);
+                            pos = match_pos + pattern_u16.len();
+                        } else {
+                            result_u16.extend_from_slice(&s[pos..]);
+                            break;
+                        }
+                    }
+                    return Value::String(result_u16);
                 }
                 BUILTIN_STRING_MATCH => {
                     if let Some(Value::VmObject(re_obj)) = args.first() {
@@ -29576,6 +29870,16 @@ impl<'gc> VM<'gc> {
                     return Value::Number(-1.0);
                 }
                 BUILTIN_STRING_STARTSWITH => {
+                    // Step 4-6: Throw TypeError if searchString is a RegExp
+                    if let Some(Value::VmObject(obj)) = args.first()
+                        && obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+                    {
+                        self.throw_type_error(
+                            ctx,
+                            "First argument to String.prototype.startsWith must not be a regular expression",
+                        );
+                        return Value::Undefined;
+                    }
                     let prefix = match args.first() {
                         Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
                             Some(s) => crate::unicode::utf8_to_utf16(&s),
@@ -29600,6 +29904,13 @@ impl<'gc> VM<'gc> {
                     return Value::Boolean(s[pos..].starts_with(prefix.as_slice()));
                 }
                 BUILTIN_STRING_ENDSWITH => {
+                    // Step 4-6: Throw TypeError if searchString is a RegExp
+                    if let Some(Value::VmObject(obj)) = args.first() {
+                        if obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string()) {
+                            self.throw_type_error(ctx, "First argument to String.prototype.endsWith must not be a regular expression");
+                            return Value::Undefined;
+                        }
+                    }
                     let suffix = match args.first() {
                         Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
                             Some(s) => crate::unicode::utf8_to_utf16(&s),
@@ -29761,10 +30072,12 @@ impl<'gc> VM<'gc> {
                     return Value::Number(s[idx as usize] as f64);
                 }
                 BUILTIN_STRING_TRIMSTART => {
-                    return Value::from(rust_str.trim_start());
+                    let trimmed = js_trim_start(s);
+                    return Value::String(trimmed.to_vec());
                 }
                 BUILTIN_STRING_TRIMEND => {
-                    return Value::from(rust_str.trim_end());
+                    let trimmed = js_trim_end(s);
+                    return Value::String(trimmed.to_vec());
                 }
                 BUILTIN_STRING_LASTINDEXOF => {
                     let needle = match args.first() {
@@ -29802,6 +30115,122 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     return Value::Number(-1.0);
+                }
+                BUILTIN_STRING_CODEPOINTAT => {
+                    let pos = if let Some(v) = args.first() {
+                        let n = self.vm_coerce_to_number(ctx, v);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        if n.is_nan() { 0i64 } else { n.trunc() as i64 }
+                    } else {
+                        0
+                    };
+                    let size = s.len() as i64;
+                    if pos < 0 || pos >= size {
+                        return Value::Undefined;
+                    }
+                    let pos = pos as usize;
+                    let first = s[pos] as u32;
+                    // Check for surrogate pair
+                    if first >= 0xD800 && first <= 0xDBFF && pos + 1 < s.len() as usize {
+                        let second = s[pos + 1] as u32;
+                        if second >= 0xDC00 && second <= 0xDFFF {
+                            let cp = (first - 0xD800) * 0x400 + (second - 0xDC00) + 0x10000;
+                            return Value::Number(cp as f64);
+                        }
+                    }
+                    return Value::Number(first as f64);
+                }
+                BUILTIN_STRING_NORMALIZE => {
+                    let form = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                        "NFC".to_string()
+                    } else {
+                        match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        }
+                    };
+                    match form.as_str() {
+                        "NFC" | "NFD" | "NFKC" | "NFKD" => {
+                            // Return the string as-is (basic implementation without ICU)
+                            return Value::String(s.to_vec());
+                        }
+                        _ => {
+                            let err = self.make_range_error_object(
+                                ctx,
+                                &format!("The normalization form should be one of NFC, NFD, NFKC, NFKD. Got: {form}"),
+                            );
+                            self.pending_throw = Some(err);
+                            return Value::Undefined;
+                        }
+                    }
+                }
+                BUILTIN_STRING_MATCHALL => {
+                    // Check if argument is a non-global regex
+                    let re_val = if let Some(Value::VmObject(re_obj)) = args.first() {
+                        let borrow = re_obj.borrow();
+                        let is_regex = borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string());
+                        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
+                        drop(borrow);
+                        if is_regex {
+                            if !flags.contains('g') {
+                                self.throw_type_error(ctx, "String.prototype.matchAll called with a non-global RegExp argument");
+                                return Value::Undefined;
+                            }
+                            // Clone the regex with same pattern/flags
+                            let borrow = re_obj.borrow();
+                            let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
+                            drop(borrow);
+                            let cloned = self.regexp_call_builtin(ctx, &[Value::from(&pattern), Value::from(&flags)]);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            cloned
+                        } else {
+                            // Non-RegExp object: coerce to string, create global RegExp
+                            let pattern_str = match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
+                                Some(s) => s,
+                                None => return Value::Undefined,
+                            };
+                            let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str), Value::from("g")]);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            re
+                        }
+                    } else {
+                        // Non-RegExp: create a global RegExp from ToString(arg)
+                        let pattern_str = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+                            String::new()
+                        } else {
+                            match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
+                                Some(s) => s,
+                                None => return Value::Undefined,
+                            }
+                        };
+                        let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str), Value::from("g")]);
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        re
+                    };
+                    // Repeatedly exec to collect all match result objects
+                    if let Value::VmObject(re_obj) = &re_val {
+                        let mut results: Vec<Value<'gc>> = Vec::new();
+                        loop {
+                            let result = self.regex_exec(ctx, re_obj, &rust_str);
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            if matches!(result, Value::Null) {
+                                break;
+                            }
+                            results.push(result);
+                        }
+                        return self.make_iterator(ctx, &results);
+                    }
+                    return self.make_iterator(ctx, &[]);
                 }
                 _ => {}
             }

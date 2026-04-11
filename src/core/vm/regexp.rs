@@ -107,6 +107,16 @@ fn preprocess_pattern_non_unicode(pattern: &[u16]) -> Vec<u32> {
     result
 }
 
+fn canonicalize_regex_flags(flags: &str) -> String {
+    let mut result = String::new();
+    for ch in ['d', 'g', 'i', 'm', 's', 'u', 'v', 'y'] {
+        if flags.contains(ch) {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 impl<'gc> VM<'gc> {
     /// Dispatch all `"regexp.*"` host function calls.
     /// Check if `re_obj` is the "home" RegExp.prototype for the currently
@@ -763,12 +773,6 @@ impl<'gc> VM<'gc> {
     /// String.prototype.replace with RegExp pattern.
     pub(super) fn regexp_string_replace(&self, rust_str: &str, re_obj: &VmObjectHandle<'gc>, replacement: &str) -> Value<'gc> {
         let result = self.regex_replace_string(rust_str, re_obj, replacement, false);
-        Value::from(&result)
-    }
-
-    /// String.prototype.replaceAll with RegExp pattern.
-    pub(super) fn regexp_string_replace_all(&self, rust_str: &str, re_obj: &VmObjectHandle<'gc>, replacement: &str) -> Value<'gc> {
-        let result = self.regex_replace_string(rust_str, re_obj, replacement, true);
         Value::from(&result)
     }
 
@@ -2041,6 +2045,7 @@ impl<'gc> VM<'gc> {
             .get("__regex_flags__")
             .map(value_to_string)
             .unwrap_or_else(|| borrow.get("flags").map(value_to_string).unwrap_or_default());
+        let flags = canonicalize_regex_flags(&flags);
         // EscapeRegExpPattern
         let source = if raw_u16.is_empty() {
             "(?:)".to_string()
@@ -2183,6 +2188,30 @@ impl<'gc> VM<'gc> {
                 let mut arr_data = VmArrayData::new(result_items);
                 arr_data.props.insert("index".to_string(), Value::Number(match_start as f64));
                 arr_data.props.insert("input".to_string(), Value::from(input));
+                let mut groups_map = IndexMap::new();
+                for (name, range) in m.named_groups() {
+                    let value = match range {
+                        Some(r) => {
+                            let (group_start, group_end) = if mapped_input {
+                                (
+                                    Self::regex_map_index_back(&input_u16, r.start),
+                                    Self::regex_map_index_back(&input_u16, r.end),
+                                )
+                            } else {
+                                (r.start, r.end)
+                            };
+                            Value::String(input_u16[group_start..group_end].to_vec())
+                        }
+                        None => Value::Undefined,
+                    };
+                    groups_map.insert(name.to_string(), value);
+                }
+                if !groups_map.is_empty() {
+                    groups_map.insert("__proto__".to_string(), Value::Null);
+                    arr_data
+                        .props
+                        .insert("groups".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, groups_map)));
+                }
 
                 // Add indices array when 'd' (hasIndices) flag is set
                 if flags.contains('d') {

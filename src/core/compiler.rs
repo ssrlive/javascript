@@ -4780,10 +4780,27 @@ impl<'gc> Compiler<'gc> {
                 let mk = self.chunk.add_constant(Value::from(method_name));
                 self.chunk.write_opcode(Opcode::GetSuperProperty);
                 self.chunk.write_u16(mk);
-                for arg in args {
-                    self.compile_expr(arg)?;
+                let has_spread = args.iter().any(|arg| matches!(arg, Expr::Spread(_)));
+                if has_spread {
+                    self.chunk.write_opcode(Opcode::NewArray);
+                    self.chunk.write_byte(0);
+                    for arg in args {
+                        if let Expr::Spread(inner) = arg {
+                            self.compile_expr(inner)?;
+                            self.chunk.write_opcode(Opcode::ArraySpread);
+                        } else {
+                            self.compile_expr(arg)?;
+                            self.chunk.write_opcode(Opcode::ArrayPush);
+                        }
+                    }
+                    self.chunk.write_opcode(Opcode::CallSpread);
+                    self.chunk.write_byte(0x80);
+                } else {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_call_opcode(args.len(), 0x80);
                 }
-                self.emit_call_opcode(args.len(), 0x80);
             }
             Expr::SuperProperty(prop_name) => {
                 // Spec: GetThisBinding() before property lookup (TDZ check)
@@ -4805,10 +4822,27 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.write_opcode(Opcode::GetThis);
                 self.compile_expr(key_expr)?;
                 self.chunk.write_opcode(Opcode::GetSuperPropertyComputed);
-                for arg in args {
-                    self.compile_expr(arg)?;
+                let has_spread = args.iter().any(|arg| matches!(arg, Expr::Spread(_)));
+                if has_spread {
+                    self.chunk.write_opcode(Opcode::NewArray);
+                    self.chunk.write_byte(0);
+                    for arg in args {
+                        if let Expr::Spread(inner) = arg {
+                            self.compile_expr(inner)?;
+                            self.chunk.write_opcode(Opcode::ArraySpread);
+                        } else {
+                            self.compile_expr(arg)?;
+                            self.chunk.write_opcode(Opcode::ArrayPush);
+                        }
+                    }
+                    self.chunk.write_opcode(Opcode::CallSpread);
+                    self.chunk.write_byte(0x80);
+                } else {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_call_opcode(args.len(), 0x80);
                 }
-                self.emit_call_opcode(args.len(), 0x80);
             }
             Expr::Super => {
                 // bare `super` reference — push undefined for now

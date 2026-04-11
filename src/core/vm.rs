@@ -551,12 +551,21 @@ fn get_substitution(matched: &str, full_str: &str, position: usize, replacement:
                     }
                     i += 2;
                 }
+                b'<' => {
+                    result.push('$');
+                    result.push('<');
+                    i += 2;
+                }
                 c @ b'0'..=b'9' => {
-                    // $n or $nn — capture group references (no captures for string replace)
-                    // Just emit the literal since we have no captures in string.replace
+                    // No captures are available for string-value search, so $n/$nn stay literal.
                     result.push('$');
                     result.push(c as char);
-                    i += 2;
+                    if i + 2 < len && repl_bytes[i + 2].is_ascii_digit() {
+                        result.push(repl_bytes[i + 2] as char);
+                        i += 3;
+                    } else {
+                        i += 2;
+                    }
                 }
                 _ => {
                     result.push('$');
@@ -14411,6 +14420,25 @@ impl<'gc> VM<'gc> {
                     }
                     _ => Value::Null,
                 };
+                let base = match &base {
+                    Value::VmObject(map)
+                        if map.borrow().values().any(|value| match value {
+                            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => *ip == func_ip,
+                            _ => false,
+                        }) =>
+                    {
+                        map.borrow().get("__proto__").cloned().unwrap_or(Value::Null)
+                    }
+                    Value::VmArray(arr)
+                        if arr.borrow().props.values().any(|value| match value {
+                            Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => *ip == func_ip,
+                            _ => false,
+                        }) =>
+                    {
+                        arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null)
+                    }
+                    _ => base,
+                };
                 return match base {
                     Value::Null | Value::Undefined => None,
                     proto => Some(proto),
@@ -14449,7 +14477,26 @@ impl<'gc> VM<'gc> {
                     other => other.clone(),
                 }
             } else {
-                direct_proto
+                let direct_proto_owns_current_method = match &direct_proto {
+                    Value::VmObject(map) => map.borrow().values().any(|value| match value {
+                        Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => *ip == func_ip,
+                        _ => false,
+                    }),
+                    Value::VmArray(arr) => arr.borrow().props.values().any(|value| match value {
+                        Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) => *ip == func_ip,
+                        _ => false,
+                    }),
+                    _ => false,
+                };
+                if direct_proto_owns_current_method {
+                    match &direct_proto {
+                        Value::VmObject(map) => map.borrow().get("__proto__").cloned().unwrap_or(Value::Null),
+                        Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned().unwrap_or(Value::Null),
+                        other => other.clone(),
+                    }
+                } else {
+                    direct_proto
+                }
             };
             return match base {
                 Value::Null | Value::Undefined => None,
@@ -29689,6 +29736,50 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        if id == BUILTIN_STRING_REPLACEALL {
+            if matches!(receiver, Value::Undefined | Value::Null) {
+                self.throw_type_error(ctx, "String.prototype method called on null or undefined");
+                return Value::Undefined;
+            }
+            if let Some(search_value) = args.first().filter(|v| !matches!(v, Value::Undefined | Value::Null)) {
+                if matches!(self.is_regexp_like(ctx, search_value), Some(true)) {
+                    let flags = self.read_named_property(ctx, search_value, "flags");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if matches!(flags, Value::Undefined | Value::Null) {
+                        self.throw_type_error(
+                            ctx,
+                            "String.prototype.replaceAll called with a RegExp whose flags are null or undefined",
+                        );
+                        return Value::Undefined;
+                    }
+                    let flags_str = match self.vm_coerce_arg_to_string(ctx, &flags) {
+                        Some(s) => s,
+                        None => return Value::Undefined,
+                    };
+                    if !flags_str.contains('g') {
+                        self.throw_type_error(ctx, "String.prototype.replaceAll called with a non-global RegExp argument");
+                        return Value::Undefined;
+                    }
+                }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let replace_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if let Some(result) = self.maybe_dispatch_string_symbol_method(
+                    ctx,
+                    Some(search_value),
+                    "@@sym:8",
+                    "[Symbol.replace]",
+                    receiver,
+                    &[replace_arg],
+                ) {
+                    return result;
+                }
+            }
+        }
+
         // String methods — RequireObjectCoercible(this) + ToString(this)
         let is_string_value_method = matches!(id, BUILTIN_STRING_TOSTRING | BUILTIN_STRING_VALUEOF);
         let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id)
@@ -29996,20 +30087,6 @@ impl<'gc> VM<'gc> {
                     return Value::from(&rust_str);
                 }
                 BUILTIN_STRING_REPLACEALL => {
-                    if let Some(Value::VmObject(re_obj)) = args.first() {
-                        let borrow = re_obj.borrow();
-                        let is_regex = borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string());
-                        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-                        drop(borrow);
-                        if is_regex {
-                            if !flags.contains('g') {
-                                self.throw_type_error(ctx, "String.prototype.replaceAll called with a non-global RegExp argument");
-                                return Value::Undefined;
-                            }
-                            let replacement = args.get(1).map(value_to_string).unwrap_or_default();
-                            return self.regexp_string_replace_all(&rust_str, re_obj, &replacement);
-                        }
-                    }
                     let pattern = match args.first() {
                         Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
                             Some(s) => s,
@@ -30018,79 +30095,67 @@ impl<'gc> VM<'gc> {
                         None => "undefined".to_string(),
                     };
                     let repl_val = args.get(1).cloned().unwrap_or(Value::Undefined);
-                    // Check if replacement is callable
-                    if self.is_callable_value(&repl_val) {
-                        let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
-                        let mut result_u16: Vec<u16> = Vec::new();
-                        let mut pos = 0usize;
-                        while pos <= s.len() {
-                            if let Some(offset) = s[pos..]
-                                .windows(pattern_u16.len().max(1))
-                                .position(|w| w.len() >= pattern_u16.len() && w[..pattern_u16.len()] == pattern_u16[..])
-                            {
-                                let match_pos = pos + offset;
-                                result_u16.extend_from_slice(&s[pos..match_pos]);
-                                let matched_val = Value::from(&pattern);
-                                let offset_val = Value::Number(match_pos as f64);
-                                let full_val = Value::from(&rust_str);
-                                let cb_result = match self.vm_call_function_value(
-                                    ctx,
-                                    &repl_val,
-                                    &Value::Undefined,
-                                    &[matched_val, offset_val, full_val],
-                                ) {
-                                    Ok(v) => self.vm_to_string(ctx, &v),
-                                    Err(_) => String::new(),
-                                };
-                                if self.pending_throw.is_some() {
+                    let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
+                    let functional_replace = self.is_callable_value(&repl_val);
+                    let replacement = if functional_replace {
+                        None
+                    } else {
+                        Some(match self.vm_coerce_arg_to_string(ctx, &repl_val) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        })
+                    };
+                    let advance_by = pattern_u16.len().max(1);
+                    let mut match_positions = Vec::new();
+                    let mut from_index = 0usize;
+                    loop {
+                        let next = if pattern_u16.is_empty() {
+                            if from_index <= s.len() { Some(from_index) } else { None }
+                        } else {
+                            s[from_index..]
+                                .windows(pattern_u16.len())
+                                .position(|w| w == pattern_u16.as_slice())
+                                .map(|offset| from_index + offset)
+                        };
+                        let Some(position) = next else {
+                            break;
+                        };
+                        match_positions.push(position);
+                        from_index = position + advance_by;
+                    }
+
+                    let mut result_u16 = Vec::new();
+                    let mut end_of_last_match = 0usize;
+                    for position in match_positions {
+                        result_u16.extend_from_slice(&s[end_of_last_match..position]);
+                        if functional_replace {
+                            let replacement_value = match self.vm_call_function_value(
+                                ctx,
+                                &repl_val,
+                                &Value::Undefined,
+                                &[
+                                    Value::String(pattern_u16.clone()),
+                                    Value::Number(position as f64),
+                                    Value::String(s.clone()),
+                                ],
+                            ) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
                                     return Value::Undefined;
                                 }
-                                result_u16.extend_from_slice(&crate::unicode::utf8_to_utf16(&cb_result));
-                                if pattern_u16.is_empty() {
-                                    if match_pos < s.len() {
-                                        result_u16.push(s[match_pos]);
-                                    }
-                                    pos = match_pos + 1;
-                                } else {
-                                    pos = match_pos + pattern_u16.len();
-                                }
-                            } else {
-                                result_u16.extend_from_slice(&s[pos..]);
-                                break;
-                            }
+                            };
+                            let replacement_str = match self.vm_coerce_arg_to_string(ctx, &replacement_value) {
+                                Some(s) => s,
+                                None => return Value::Undefined,
+                            };
+                            result_u16.extend_from_slice(&crate::unicode::utf8_to_utf16(&replacement_str));
+                        } else if let Some(replacement) = replacement.as_ref() {
+                            result_u16.extend_from_slice(&get_substitution_u16(&pattern_u16, s, position, replacement));
                         }
-                        return Value::String(result_u16);
+                        end_of_last_match = position + pattern_u16.len();
                     }
-                    let replacement = match self.vm_coerce_arg_to_string(ctx, &repl_val) {
-                        Some(s) => s,
-                        None => return Value::Undefined,
-                    };
-                    // Use GetSubstitution for each occurrence
-                    let pattern_u16 = crate::unicode::utf8_to_utf16(&pattern);
-                    let mut result_u16: Vec<u16> = Vec::new();
-                    let mut pos = 0usize;
-                    while pos <= s.len() {
-                        if pattern_u16.is_empty() {
-                            // Empty pattern: insert substitution before every code unit + after last
-                            let sub = get_substitution_u16(&pattern_u16, s, pos, &replacement);
-                            result_u16.extend_from_slice(&sub);
-                            if pos < s.len() {
-                                result_u16.push(s[pos]);
-                                pos += 1;
-                            } else {
-                                break;
-                            }
-                        } else if let Some(offset) = s[pos..].windows(pattern_u16.len()).position(|w| w == pattern_u16.as_slice()) {
-                            let match_pos = pos + offset;
-                            result_u16.extend_from_slice(&s[pos..match_pos]);
-                            let sub = get_substitution_u16(&pattern_u16, s, match_pos, &replacement);
-                            result_u16.extend_from_slice(&sub);
-                            pos = match_pos + pattern_u16.len();
-                        } else {
-                            result_u16.extend_from_slice(&s[pos..]);
-                            break;
-                        }
-                    }
+                    result_u16.extend_from_slice(&s[end_of_last_match..]);
                     return Value::String(result_u16);
                 }
                 BUILTIN_STRING_MATCH => {

@@ -5023,7 +5023,27 @@ impl<'gc> VM<'gc> {
             }
             return Ok(OpcodeAction::Continue);
         };
-        let value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
+        let current_func_ip = self.frames.last().map(|frame| frame.func_ip);
+        let mut value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
+        if let Some(func_ip) = current_func_ip
+            && matches!(&value, Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) if *ip == func_ip)
+        {
+            let next_base = match &super_base {
+                Value::VmObject(map) => Self::internal_proto_from_object_map(&map.borrow()),
+                Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned(),
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let shared = self.get_fn_props(ctx, *ip, *arity);
+                    let overlay_proto = self
+                        .get_closure_overlay(&super_base)
+                        .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                    overlay_proto.or_else(|| shared.borrow().get("__proto__").cloned())
+                }
+                _ => None,
+            };
+            if let Some(next_base) = next_base.filter(|value| !matches!(value, Value::Null | Value::Undefined)) {
+                value = self.read_named_property_with_receiver(ctx, &next_base, &key, &receiver);
+            }
+        }
         self.stack.push(value);
         Ok(OpcodeAction::Continue)
     }
@@ -5062,7 +5082,27 @@ impl<'gc> VM<'gc> {
                 return Err(err);
             }
         };
-        let value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
+        let current_func_ip = self.frames.last().map(|frame| frame.func_ip);
+        let mut value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
+        if let Some(func_ip) = current_func_ip
+            && matches!(&value, Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _) if *ip == func_ip)
+        {
+            let next_base = match &super_base {
+                Value::VmObject(map) => Self::internal_proto_from_object_map(&map.borrow()),
+                Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned(),
+                Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
+                    let shared = self.get_fn_props(ctx, *ip, *arity);
+                    let overlay_proto = self
+                        .get_closure_overlay(&super_base)
+                        .and_then(|overlay| overlay.borrow().get("__proto__").cloned());
+                    overlay_proto.or_else(|| shared.borrow().get("__proto__").cloned())
+                }
+                _ => None,
+            };
+            if let Some(next_base) = next_base.filter(|value| !matches!(value, Value::Null | Value::Undefined)) {
+                value = self.read_named_property_with_receiver(ctx, &next_base, &key, &receiver);
+            }
+        }
         self.stack.push(value);
         Ok(OpcodeAction::Continue)
     }

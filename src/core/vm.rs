@@ -18896,6 +18896,57 @@ impl<'gc> VM<'gc> {
         ))
     }
 
+    fn maybe_dispatch_string_symbol_method(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        method_holder: Option<&Value<'gc>>,
+        symbol_key: &str,
+        symbol_name: &str,
+        receiver: &Value<'gc>,
+        extra_args: &[Value<'gc>],
+    ) -> Option<Value<'gc>> {
+        let method_holder = method_holder?;
+        let is_object_like = matches!(
+            method_holder,
+            Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmMap(_)
+                | Value::VmSet(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+        );
+        if !is_object_like {
+            return None;
+        }
+        if matches!(method_holder, Value::Undefined | Value::Null) {
+            return None;
+        }
+
+        let method = self.read_named_property(ctx, method_holder, symbol_key);
+        if self.pending_throw.is_some() {
+            return Some(Value::Undefined);
+        }
+        if matches!(method, Value::Undefined | Value::Null) {
+            return None;
+        }
+        if !self.is_value_callable(&method) {
+            self.throw_type_error(ctx, &format!("{} is not callable", symbol_name));
+            return Some(Value::Undefined);
+        }
+
+        let mut call_args = Vec::with_capacity(1 + extra_args.len());
+        call_args.push(receiver.clone());
+        call_args.extend_from_slice(extra_args);
+        Some(match self.vm_call_function_value(ctx, &method, method_holder, &call_args) {
+            Ok(v) => v,
+            Err(e) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                Value::Undefined
+            }
+        })
+    }
+
     fn map_constructor_consume_iterable(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -29569,6 +29620,75 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        if matches!(
+            id,
+            BUILTIN_STRING_SPLIT | BUILTIN_STRING_REPLACE | BUILTIN_STRING_MATCH | BUILTIN_STRING_SEARCH
+        ) {
+            if matches!(receiver, Value::Undefined | Value::Null) {
+                self.throw_type_error(ctx, "String.prototype method called on null or undefined");
+                return Value::Undefined;
+            }
+
+            let dispatched = match id {
+                BUILTIN_STRING_SPLIT => {
+                    let limit_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    self.maybe_dispatch_string_symbol_method(ctx, args.first(), "@@sym:10", "[Symbol.split]", receiver, &[limit_arg])
+                }
+                BUILTIN_STRING_REPLACE => {
+                    let replace_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    self.maybe_dispatch_string_symbol_method(ctx, args.first(), "@@sym:8", "[Symbol.replace]", receiver, &[replace_arg])
+                }
+                BUILTIN_STRING_MATCH => {
+                    self.maybe_dispatch_string_symbol_method(ctx, args.first(), "@@sym:7", "[Symbol.match]", receiver, &[])
+                }
+                BUILTIN_STRING_SEARCH => {
+                    self.maybe_dispatch_string_symbol_method(ctx, args.first(), "@@sym:9", "[Symbol.search]", receiver, &[])
+                }
+                _ => None,
+            };
+            if let Some(result) = dispatched {
+                return result;
+            }
+        }
+
+        if id == BUILTIN_STRING_MATCHALL {
+            if matches!(receiver, Value::Undefined | Value::Null) {
+                self.throw_type_error(ctx, "String.prototype method called on null or undefined");
+                return Value::Undefined;
+            }
+            if let Some(regexp) = args.first().filter(|v| !matches!(v, Value::Undefined | Value::Null)) {
+                if matches!(self.is_regexp_like(ctx, regexp), Some(true)) {
+                    let flags = self.read_named_property(ctx, regexp, "flags");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if matches!(flags, Value::Undefined | Value::Null) {
+                        self.throw_type_error(
+                            ctx,
+                            "String.prototype.matchAll called with a RegExp whose flags are null or undefined",
+                        );
+                        return Value::Undefined;
+                    }
+                    let flags_str = match self.vm_coerce_arg_to_string(ctx, &flags) {
+                        Some(s) => s,
+                        None => return Value::Undefined,
+                    };
+                    if !flags_str.contains('g') {
+                        self.throw_type_error(ctx, "String.prototype.matchAll called with a non-global RegExp argument");
+                        return Value::Undefined;
+                    }
+                }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if let Some(result) =
+                    self.maybe_dispatch_string_symbol_method(ctx, Some(regexp), "@@sym:11", "[Symbol.matchAll]", receiver, &[])
+                {
+                    return result;
+                }
+            }
+        }
+
         // String methods — RequireObjectCoercible(this) + ToString(this)
         let is_string_value_method = matches!(id, BUILTIN_STRING_TOSTRING | BUILTIN_STRING_VALUEOF);
         let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id)
@@ -29646,6 +29766,18 @@ impl<'gc> VM<'gc> {
                     } else {
                         None
                     };
+                    let sep_str = match args.first() {
+                        Some(Value::VmObject(re_obj))
+                            if re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string()) =>
+                        {
+                            None
+                        }
+                        Some(Value::Undefined) | None => None,
+                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
+                            Some(s) => Some(s),
+                            None => return Value::Undefined,
+                        },
+                    };
                     if let Some(0) = limit {
                         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![]));
                         if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array")
@@ -29670,13 +29802,7 @@ impl<'gc> VM<'gc> {
                             return self.regexp_string_split(ctx, &rust_str, re_obj, limit);
                         }
                     }
-                    let sep = match args.first() {
-                        Some(v) => match self.vm_coerce_arg_to_string(ctx, v) {
-                            Some(s) => s,
-                            None => return Value::Undefined,
-                        },
-                        None => String::new(),
-                    };
+                    let sep = sep_str.unwrap_or_default();
                     let parts: Vec<Value<'gc>> = if sep.is_empty() {
                         rust_str.chars().map(|c| Value::from(&c.to_string())).collect()
                     } else {
@@ -29968,54 +30094,34 @@ impl<'gc> VM<'gc> {
                     return Value::String(result_u16);
                 }
                 BUILTIN_STRING_MATCH => {
-                    if let Some(Value::VmObject(re_obj)) = args.first() {
-                        let is_regex = re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string());
-                        if is_regex {
-                            return self.regexp_string_match(ctx, &rust_str, re_obj);
-                        }
-                    }
-                    // Non-RegExp: coerce to string then create RegExp
-                    let pattern_str = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-                        String::new()
-                    } else {
-                        match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
-                            Some(s) => s,
-                            None => return Value::Undefined,
-                        }
-                    };
-                    let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str)]);
+                    let pattern = args.first().cloned().unwrap_or(Value::Undefined);
+                    let re = self.regexp_call_builtin(ctx, &[pattern]);
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    if let Value::VmObject(re_obj) = &re {
-                        return self.regexp_string_match(ctx, &rust_str, re_obj);
+                    let string_arg = Value::String(s.clone());
+                    if let Some(result) =
+                        self.maybe_dispatch_string_symbol_method(ctx, Some(&re), "@@sym:7", "[Symbol.match]", &string_arg, &[])
+                    {
+                        return result;
                     }
-                    return Value::Null;
+                    self.throw_type_error(ctx, "[Symbol.match] is not callable");
+                    return Value::Undefined;
                 }
                 BUILTIN_STRING_SEARCH => {
-                    if let Some(Value::VmObject(re_obj)) = args.first() {
-                        let is_regex = re_obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string());
-                        if is_regex {
-                            return self.regexp_string_search(&rust_str, re_obj);
-                        }
-                    }
-                    // Non-RegExp: coerce to string then create RegExp
-                    let pattern_str = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-                        String::new()
-                    } else {
-                        match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
-                            Some(s) => s,
-                            None => return Value::Undefined,
-                        }
-                    };
-                    let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str)]);
+                    let pattern = args.first().cloned().unwrap_or(Value::Undefined);
+                    let re = self.regexp_call_builtin(ctx, &[pattern]);
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    if let Value::VmObject(re_obj) = &re {
-                        return self.regexp_string_search(&rust_str, re_obj);
+                    let string_arg = Value::String(s.clone());
+                    if let Some(result) =
+                        self.maybe_dispatch_string_symbol_method(ctx, Some(&re), "@@sym:9", "[Symbol.search]", &string_arg, &[])
+                    {
+                        return result;
                     }
-                    return Value::Number(-1.0);
+                    self.throw_type_error(ctx, "[Symbol.search] is not callable");
+                    return Value::Undefined;
                 }
                 BUILTIN_STRING_STARTSWITH => {
                     if let Some(search_val) = args.first()
@@ -30326,70 +30432,19 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 BUILTIN_STRING_MATCHALL => {
-                    // Check if argument is a non-global regex
-                    let re_val = if let Some(Value::VmObject(re_obj)) = args.first() {
-                        let borrow = re_obj.borrow();
-                        let is_regex = borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string());
-                        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-                        drop(borrow);
-                        if is_regex {
-                            if !flags.contains('g') {
-                                self.throw_type_error(ctx, "String.prototype.matchAll called with a non-global RegExp argument");
-                                return Value::Undefined;
-                            }
-                            // Clone the regex with same pattern/flags
-                            let borrow = re_obj.borrow();
-                            let pattern = borrow.get("__regex_pattern__").map(value_to_string).unwrap_or_default();
-                            drop(borrow);
-                            let cloned = self.regexp_call_builtin(ctx, &[Value::from(&pattern), Value::from(&flags)]);
-                            if self.pending_throw.is_some() {
-                                return Value::Undefined;
-                            }
-                            cloned
-                        } else {
-                            // Non-RegExp object: coerce to string, create global RegExp
-                            let pattern_str = match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
-                                Some(s) => s,
-                                None => return Value::Undefined,
-                            };
-                            let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str), Value::from("g")]);
-                            if self.pending_throw.is_some() {
-                                return Value::Undefined;
-                            }
-                            re
-                        }
-                    } else {
-                        // Non-RegExp: create a global RegExp from ToString(arg)
-                        let pattern_str = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-                            String::new()
-                        } else {
-                            match self.vm_coerce_arg_to_string(ctx, args.first().unwrap()) {
-                                Some(s) => s,
-                                None => return Value::Undefined,
-                            }
-                        };
-                        let re = self.regexp_call_builtin(ctx, &[Value::from(&pattern_str), Value::from("g")]);
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        re
-                    };
-                    // Repeatedly exec to collect all match result objects
-                    if let Value::VmObject(re_obj) = &re_val {
-                        let mut results: Vec<Value<'gc>> = Vec::new();
-                        loop {
-                            let result = self.regex_exec(ctx, re_obj, &rust_str);
-                            if self.pending_throw.is_some() {
-                                return Value::Undefined;
-                            }
-                            if matches!(result, Value::Null) {
-                                break;
-                            }
-                            results.push(result);
-                        }
-                        return self.make_iterator(ctx, &results);
+                    let pattern = args.first().cloned().unwrap_or(Value::Undefined);
+                    let re = self.regexp_call_builtin(ctx, &[pattern, Value::from("g")]);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
                     }
-                    return self.make_iterator(ctx, &[]);
+                    let string_arg = Value::String(s.clone());
+                    if let Some(result) =
+                        self.maybe_dispatch_string_symbol_method(ctx, Some(&re), "@@sym:11", "[Symbol.matchAll]", &string_arg, &[])
+                    {
+                        return result;
+                    }
+                    self.throw_type_error(ctx, "[Symbol.matchAll] is not callable");
+                    return Value::Undefined;
                 }
                 _ => {}
             }

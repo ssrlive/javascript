@@ -772,35 +772,6 @@ impl<'gc> VM<'gc> {
         Value::from(&result)
     }
 
-    /// String.prototype.match with RegExp.
-    pub(super) fn regexp_string_match(&mut self, ctx: &GcContext<'gc>, rust_str: &str, re_obj: &VmObjectHandle<'gc>) -> Value<'gc> {
-        let borrow = re_obj.borrow();
-        let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        drop(borrow);
-        if flags.contains('g') {
-            self.regex_match_all(ctx, rust_str, re_obj)
-        } else {
-            self.regex_exec(ctx, re_obj, rust_str)
-        }
-    }
-
-    /// String.prototype.search with RegExp.
-    pub(super) fn regexp_string_search(&self, rust_str: &str, re_obj: &VmObjectHandle<'gc>) -> Value<'gc> {
-        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
-        let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
-        if let Ok(re) = get_or_compile_regex(&pattern_u16, &flags) {
-            let input_u16: Vec<u16> = rust_str.encode_utf16().collect();
-            let use_unicode = flags.contains('u') || flags.contains('v');
-            let m = if use_unicode {
-                re.find_from_utf16(&input_u16, 0).next()
-            } else {
-                re.find_from_ucs2(&input_u16, 0).next()
-            };
-            return Value::Number(m.map(|m| m.range.start as f64).unwrap_or(-1.0));
-        }
-        Value::Number(-1.0)
-    }
-
     // ── Spec-compliant RegExpExec (ES2024 §22.2.5.2.1) ──────────────
 
     /// Abstract RegExpExec(R, S): Checks for a custom `exec` method on the
@@ -957,15 +928,18 @@ impl<'gc> VM<'gc> {
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
-            let match_str = self.vm_to_string(ctx, &match_val);
+            let match_u16 = match &match_val {
+                Value::String(s) => s.clone(),
+                _ => crate::unicode::utf8_to_utf16(&self.vm_to_string(ctx, &match_val)),
+            };
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
 
-            results.push(Value::from(&match_str));
+            results.push(Value::String(match_u16.clone()));
 
             // e. If matchStr is the empty String, then advance lastIndex
-            if match_str.is_empty() {
+            if match_u16.is_empty() {
                 let this_index_val = self.read_named_property(ctx, rx, "lastIndex");
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
@@ -2185,9 +2159,8 @@ impl<'gc> VM<'gc> {
                     (m.range.start, m.range.end)
                 };
                 let matched_str = &input_u16[match_start..match_end];
-                let matched = crate::unicode::utf16_to_utf8(matched_str);
 
-                let mut result_items: Vec<Value<'gc>> = vec![Value::from(&matched)];
+                let mut result_items: Vec<Value<'gc>> = vec![Value::String(matched_str.to_vec())];
                 // Add capturing groups
                 for cap in &m.captures {
                     match cap {
@@ -2262,49 +2235,6 @@ impl<'gc> VM<'gc> {
                 }
                 Value::Null
             }
-        }
-    }
-
-    /// Global match: return array of all full match strings
-    fn regex_match_all(&self, ctx: &GcContext<'gc>, input: &str, re_obj: &VmObjectHandle<'gc>) -> Value<'gc> {
-        let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
-        let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
-
-        let re = match get_or_compile_regex(&pattern_u16, &flags) {
-            Ok(r) => r,
-            Err(_) => return Value::Null,
-        };
-
-        let input_u16: Vec<u16> = input.encode_utf16().collect();
-        let use_unicode = flags.contains('u') || flags.contains('v');
-        let mut results: Vec<Value<'gc>> = Vec::new();
-        let mut pos = 0usize;
-        loop {
-            let m = if use_unicode {
-                re.find_from_utf16(&input_u16, pos).next()
-            } else {
-                re.find_from_ucs2(&input_u16, pos).next()
-            };
-            match m {
-                Some(m) => {
-                    let matched = &input_u16[m.range.start..m.range.end];
-                    results.push(Value::String(matched.to_vec()));
-                    pos = if m.range.end == m.range.start {
-                        m.range.end + 1
-                    } else {
-                        m.range.end
-                    };
-                    if pos > input_u16.len() {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-        if results.is_empty() {
-            Value::Null
-        } else {
-            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
         }
     }
 

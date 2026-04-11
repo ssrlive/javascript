@@ -15942,7 +15942,6 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut sym_obj, "keyFor");
         Self::insert_property_with_attributes(&mut sym_obj, "length", &Value::Number(0.0), false, false, true);
         Self::insert_property_with_attributes(&mut sym_obj, "name", &Value::from("Symbol"), false, false, true);
-        sym_obj.insert("__non_constructor__".to_string(), Value::Boolean(true));
         self.globals
             .insert("Symbol".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, sym_obj)));
         self.globals
@@ -31467,7 +31466,7 @@ impl<'gc> VM<'gc> {
                 return val.clone();
             }
 
-            // Use read_named_property to properly invoke getters (e.g. Object.defineProperty with get)
+            // Check own properties for @@toPrimitive (proto-chain is walked by read_named_property if found)
             let has_sym = {
                 let borrow = map.borrow();
                 borrow.contains_key("@@sym:3") || has_getter(&borrow, "@@sym:3")
@@ -31725,7 +31724,13 @@ impl<'gc> VM<'gc> {
 
     fn loose_eq_to_primitive(&mut self, ctx: &GcContext<'gc>, v: &Value<'gc>) -> Value<'gc> {
         let prim = self.try_to_primitive(ctx, v, "default");
-        if !matches!(prim, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) {
+        // VM symbols are VmObject but semantically primitive — treat them as such.
+        let is_still_object = match &prim {
+            Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
+            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
+            _ => false,
+        };
+        if !is_still_object {
             return prim;
         }
 
@@ -31734,9 +31739,15 @@ impl<'gc> VM<'gc> {
             value_of_fn,
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
         ) && let Ok(out) = self.vm_call_function_value(ctx, &value_of_fn, &prim, &[])
-            && !matches!(out, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_))
         {
-            return out;
+            let out_is_object = match &out {
+                Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
+                Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
+                _ => false,
+            };
+            if !out_is_object {
+                return out;
+            }
         }
 
         let to_string_fn = self.read_named_property(ctx, &prim, "toString");
@@ -31812,6 +31823,18 @@ impl<'gc> VM<'gc> {
                 self.loose_equal(ctx, a, &num)
             }
             // Object vs primitive: ToPrimitive(object) then recurse.
+            // But VM symbols (VmObject with __vm_symbol__) are primitive Symbols — they never
+            // equal String/Number/BigInt per spec §7.2.14.
+            (Value::VmObject(map), Value::String(_) | Value::Number(_) | Value::BigInt(_))
+                if map.borrow().contains_key("__vm_symbol__") =>
+            {
+                false
+            }
+            (Value::String(_) | Value::Number(_) | Value::BigInt(_), Value::VmObject(map))
+                if map.borrow().contains_key("__vm_symbol__") =>
+            {
+                false
+            }
             (
                 Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_),
                 Value::String(_) | Value::Number(_) | Value::BigInt(_),

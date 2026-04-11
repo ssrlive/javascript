@@ -6749,6 +6749,11 @@ impl<'gc> VM<'gc> {
     fn run_opcode_to_number(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let val = self.stack.pop().expect("VM Stack underflow on ToNumber");
         match &val {
+            // VM symbols are primitive Symbols — ToNumber throws TypeError
+            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                self.stack.push(Value::Number(f64::NAN));
+            }
             Value::VmObject(_) | Value::VmArray(_) => {
                 let prim = self.try_to_primitive(ctx, &val, "number");
                 if self.pending_throw.is_some() {
@@ -6757,6 +6762,11 @@ impl<'gc> VM<'gc> {
                     match &prim {
                         Value::BigInt(_) => {
                             self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                            self.stack.push(Value::Number(f64::NAN));
+                        }
+                        // ToPrimitive may return a symbol (e.g. valueOf on Symbol wrapper)
+                        Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                             self.stack.push(Value::Number(f64::NAN));
                         }
                         _ => self.stack.push(Value::Number(to_number(&prim))),
@@ -6779,6 +6789,11 @@ impl<'gc> VM<'gc> {
             Value::Number(_) | Value::BigInt(_) => {
                 self.stack.push(val);
             }
+            // VM symbols are primitive Symbols — ToNumeric throws TypeError
+            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                self.stack.push(Value::Number(f64::NAN));
+            }
             Value::VmObject(_) | Value::VmArray(_) => {
                 let prim = self.try_to_primitive(ctx, &val, "number");
                 if self.pending_throw.is_some() {
@@ -6786,6 +6801,10 @@ impl<'gc> VM<'gc> {
                 } else {
                     match &prim {
                         Value::BigInt(_) => self.stack.push(prim),
+                        Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                            self.stack.push(Value::Number(f64::NAN));
+                        }
                         _ => self.stack.push(Value::Number(to_number(&prim))),
                     }
                 }

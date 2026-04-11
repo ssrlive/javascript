@@ -7674,7 +7674,51 @@ impl<'gc> VM<'gc> {
             "global.encodeURI" | "global.encodeURIComponent" | "global.decodeURI" | "global.decodeURIComponent" => {
                 self.uri_handle_host_fn(ctx, name, args)
             }
-            "global.escape" | "global.unescape" => args.first().cloned().unwrap_or(Value::Undefined),
+            "global.escape" => {
+                // B.2.1.1 escape(string)
+                let s = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                let mut result = String::new();
+                for ch in s.encode_utf16() {
+                    let c = ch as u32;
+                    if (c < 128) && (ch as u8 as char).is_ascii_alphanumeric() || b"@*_+-./".contains(&(ch as u8)) {
+                        result.push(ch as u8 as char);
+                    } else if c < 256 {
+                        result.push_str(&format!("%{:02X}", c));
+                    } else {
+                        result.push_str(&format!("%u{:04X}", c));
+                    }
+                }
+                Value::from(&result)
+            }
+            "global.unescape" => {
+                // B.2.1.2 unescape(string)
+                let s = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                let bytes = s.as_bytes();
+                let len = bytes.len();
+                let mut result: Vec<u16> = Vec::new();
+                let mut i = 0;
+                while i < len {
+                    if bytes[i] == b'%' {
+                        if i + 5 < len && bytes[i + 1] == b'u' {
+                            if let Ok(hex) = u16::from_str_radix(std::str::from_utf8(&bytes[i + 2..i + 6]).unwrap_or(""), 16) {
+                                result.push(hex);
+                                i += 6;
+                                continue;
+                            }
+                        }
+                        if i + 2 < len {
+                            if let Ok(hex) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                                result.push(hex as u16);
+                                i += 3;
+                                continue;
+                            }
+                        }
+                    }
+                    result.push(bytes[i] as u16);
+                    i += 1;
+                }
+                Value::from(&crate::unicode::utf16_to_utf8(&result))
+            }
             "iterator.self" => receiver.unwrap_or(&Value::Undefined).clone(),
             "iterator.from" => {
                 let source = args.first().cloned().unwrap_or(Value::Undefined);
@@ -8345,22 +8389,64 @@ impl<'gc> VM<'gc> {
                 Value::Number(ord)
             }
             "string.substr" => {
-                let s = receiver.map(value_to_string).unwrap_or_default();
-                let len = s.len() as i64;
-                let start_raw = args.first().map(to_number).unwrap_or(0.0) as i64;
-                let start = if start_raw < 0 {
-                    (len + start_raw).max(0)
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                if matches!(this_val, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "String.prototype.substr called on null or undefined");
+                    return Value::Undefined;
+                }
+                let utf16 = Self::value_to_utf16(this_val);
+                let len = utf16.len() as i64;
+                let start_raw = args.first().map(to_number).unwrap_or(0.0);
+                let int_start = if start_raw.is_nan() { 0i64 } else { start_raw as i64 };
+                let int_start = if int_start < 0 {
+                    (len + int_start).max(0)
                 } else {
-                    start_raw.min(len)
+                    int_start.min(len)
                 } as usize;
                 let count = match args.get(1) {
-                    Some(Value::Number(n)) => (*n).max(0.0) as usize,
-                    Some(_) => 0,
-                    None => len.saturating_sub(start as i64) as usize,
+                    Some(v) if !matches!(v, Value::Undefined) => {
+                        let n = to_number(v);
+                        if n.is_nan() || n <= 0.0 { 0usize } else { n as usize }
+                    }
+                    _ => len.saturating_sub(int_start as i64) as usize,
                 };
-                let end = start.saturating_add(count).min(s.len());
-                let slice = &s[start..end];
-                Value::from(slice)
+                let end = int_start.saturating_add(count).min(utf16.len());
+                let slice = &utf16[int_start..end];
+                Value::String(slice.to_vec())
+            }
+            // Annex B: HTML wrapper methods (B.2.2.2 – B.2.2.14)
+            "string.anchor" | "string.big" | "string.blink" | "string.bold" | "string.fixed" | "string.fontcolor" | "string.fontsize"
+            | "string.italics" | "string.link" | "string.small" | "string.strike" | "string.sub" | "string.sup" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                if matches!(this_val, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "String.prototype method called on null or undefined");
+                    return Value::Undefined;
+                }
+                let s = value_to_string(this_val);
+                let method = &name[7..]; // strip "string."
+                let (tag, attr) = match method {
+                    "anchor" => ("a", Some("name")),
+                    "big" => ("big", None),
+                    "blink" => ("blink", None),
+                    "bold" => ("b", None),
+                    "fixed" => ("tt", None),
+                    "fontcolor" => ("font", Some("color")),
+                    "fontsize" => ("font", Some("size")),
+                    "italics" => ("i", None),
+                    "link" => ("a", Some("href")),
+                    "small" => ("small", None),
+                    "strike" => ("strike", None),
+                    "sub" => ("sub", None),
+                    "sup" => ("sup", None),
+                    _ => unreachable!(),
+                };
+                if let Some(attr_name) = attr {
+                    let val = args.first().map(value_to_string).unwrap_or_else(|| "undefined".to_string());
+                    let escaped = val.replace('"', "&quot;");
+                    Value::from(&format!("<{} {}=\"{}\">{}</{}>", tag, attr_name, escaped, s, tag))
+                } else {
+                    Value::from(&format!("<{}>{}</{}>", tag, s, tag))
+                }
             }
             "object.toLocaleString" => {
                 let this_val = receiver.cloned().unwrap_or(Value::Undefined);
@@ -15749,6 +15835,15 @@ impl<'gc> VM<'gc> {
             .insert("setInterval".to_string(), Value::VmNativeFunction(BUILTIN_SETINTERVAL));
         self.globals
             .insert("clearInterval".to_string(), Value::VmNativeFunction(BUILTIN_CLEARINTERVAL));
+        // Annex B: escape/unescape global functions
+        let escape_fn = Self::make_host_fn_with_name_len(ctx, "global.escape", "escape", 1.0, false);
+        self.globals.insert("escape".to_string(), escape_fn.clone());
+        self.global_this.borrow_mut(ctx).insert("escape".to_string(), escape_fn);
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "escape");
+        let unescape_fn = Self::make_host_fn_with_name_len(ctx, "global.unescape", "unescape", 1.0, false);
+        self.globals.insert("unescape".to_string(), unescape_fn.clone());
+        self.global_this.borrow_mut(ctx).insert("unescape".to_string(), unescape_fn);
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "unescape");
 
         // JSON object
         let mut json_map = IndexMap::new();
@@ -16853,8 +16948,38 @@ impl<'gc> VM<'gc> {
         }
         string_proto.insert("concat".to_string(), Self::make_host_fn(ctx, "string.concat"));
         mark_nonenumerable(&mut string_proto, "concat");
+        // Annex B: trimLeft/trimRight are aliases for trimStart/trimEnd (same object)
+        let trim_start_fn = string_proto.get("trimStart").cloned().unwrap();
+        string_proto.insert("trimLeft".to_string(), trim_start_fn);
+        mark_nonenumerable(&mut string_proto, "trimLeft");
+        let trim_end_fn = string_proto.get("trimEnd").cloned().unwrap();
+        string_proto.insert("trimRight".to_string(), trim_end_fn);
+        mark_nonenumerable(&mut string_proto, "trimRight");
         string_proto.insert("localeCompare".to_string(), Self::make_host_fn(ctx, "string.localeCompare"));
         mark_nonenumerable(&mut string_proto, "localeCompare");
+        // Annex B: HTML wrapper methods and substr
+        for (method, host_name, length) in [
+            ("anchor", "string.anchor", 1.0),
+            ("big", "string.big", 0.0),
+            ("blink", "string.blink", 0.0),
+            ("bold", "string.bold", 0.0),
+            ("fixed", "string.fixed", 0.0),
+            ("fontcolor", "string.fontcolor", 1.0),
+            ("fontsize", "string.fontsize", 1.0),
+            ("italics", "string.italics", 0.0),
+            ("link", "string.link", 1.0),
+            ("small", "string.small", 0.0),
+            ("strike", "string.strike", 0.0),
+            ("sub", "string.sub", 0.0),
+            ("sup", "string.sup", 0.0),
+            ("substr", "string.substr", 2.0),
+        ] {
+            string_proto.insert(
+                method.to_string(),
+                Self::make_host_fn_with_name_len(ctx, host_name, method, length, false),
+            );
+            mark_nonenumerable(&mut string_proto, method);
+        }
         let string_proto_obj = new_gc_cell_ptr(ctx, string_proto);
         let string_ctor = Self::finalize_ctor_with_prototype(ctx, string_map, string_proto_obj);
         self.globals.insert("String".to_string(), string_ctor.clone());

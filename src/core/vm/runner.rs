@@ -7739,46 +7739,11 @@ impl<'gc> VM<'gc> {
                         self.new_target_stack.pop();
                         self.stack.push(out);
                     }
-                    BUILTIN_CTOR_WEAKMAP | BUILTIN_CTOR_WEAKSET => {
+                    BUILTIN_CTOR_WEAKMAP | BUILTIN_CTOR_WEAKSET | BUILTIN_CTOR_WEAKREF => {
                         self.new_target_stack.push(Value::VmNativeFunction(id));
                         let out = self.call_builtin(ctx, id, &args);
                         self.new_target_stack.pop();
                         self.stack.push(out);
-                    }
-                    BUILTIN_CTOR_WEAKREF => {
-                        // WeakRef: target must be an object or unregistered symbol
-                        let target = args.into_iter().next().unwrap_or(Value::Undefined);
-                        // Check for registered VM symbol — reject it
-                        let is_registered_symbol = if let Value::VmObject(ref obj) = target {
-                            let b = obj.borrow();
-                            b.contains_key("__vm_symbol__") && b.contains_key("__registered__")
-                        } else {
-                            false
-                        };
-                        let is_valid = match &target {
-                            Value::VmObject(_) if !is_registered_symbol => true,
-                            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
-                            _ => false,
-                        };
-                        if is_valid {
-                            let mut m = IndexMap::new();
-                            m.insert("__weakref__".to_string(), Value::Boolean(true));
-                            m.insert("__target__".to_string(), target);
-                            m.insert("__type__".to_string(), Value::from("WeakRef"));
-                            if let Some(wr_ctor) = self.globals.get("WeakRef").cloned() {
-                                let proto = self.read_named_property(ctx, &wr_ctor, "prototype");
-                                if !matches!(proto, Value::Undefined) {
-                                    m.insert("__proto__".to_string(), proto);
-                                }
-                            }
-                            self.stack.push(Value::VmObject(new_gc_cell_ptr(ctx, m)));
-                        } else {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Invalid value used as weak reference target"));
-                            let err = Value::VmObject(new_gc_cell_ptr(ctx, err_map));
-                            self.handle_throw(ctx, &err)?;
-                        }
                     }
                     BUILTIN_CTOR_FR => {
                         self.new_target_stack.push(Value::VmNativeFunction(id));

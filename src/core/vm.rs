@@ -19427,8 +19427,41 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_PROMISE_NOOP => Value::Undefined,
             BUILTIN_CTOR_WEAKREF => {
-                self.throw_type_error(ctx, "WeakRef constructor requires 'new'");
-                Value::Undefined
+                let Some(new_target) = self.new_target_stack.last().cloned() else {
+                    self.throw_type_error(ctx, "WeakRef constructor requires 'new'");
+                    return Value::Undefined;
+                };
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let is_registered_symbol = if let Value::VmObject(ref obj) = target {
+                    let b = obj.borrow();
+                    b.contains_key("__vm_symbol__") && b.contains_key("__registered__")
+                } else {
+                    false
+                };
+                let is_valid = match &target {
+                    Value::VmObject(_) if !is_registered_symbol => true,
+                    Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
+                    _ => false,
+                };
+                if !is_valid {
+                    self.throw_type_error(ctx, "Invalid value used as weak reference target");
+                    return Value::Undefined;
+                }
+                let proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, &new_target, "WeakRef") {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
+                let mut m = IndexMap::new();
+                m.insert("__weakref__".to_string(), Value::Boolean(true));
+                m.insert("__target__".to_string(), target);
+                m.insert("__type__".to_string(), Value::from("WeakRef"));
+                if let Some(proto_value) = proto {
+                    m.insert("__proto__".to_string(), proto_value);
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, m))
             }
             BUILTIN_CTOR_FR => {
                 let Some(new_target) = self.new_target_stack.last().cloned() else {

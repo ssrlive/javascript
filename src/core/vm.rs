@@ -18010,52 +18010,12 @@ impl<'gc> VM<'gc> {
                 return formatted;
             }
             drop(borrow);
-            // ToPrimitive(hint "string"): try toString first
-            let ts = map.borrow().get("toString").cloned();
-            if let Some(ts_val) = &ts {
-                match ts_val {
-                    Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
-                        match self.call_vm_function_result(ctx, *ip, &[], None, &[]) {
-                            Ok(result) if !matches!(result, Value::VmObject(_) | Value::VmArray(_)) => {
-                                return value_to_string(&result);
-                            }
-                            Err(e) => {
-                                // toString threw — propagate as pending_throw
-                                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                                return String::new();
-                            }
-                            _ => {} // returned object, fall through to valueOf
-                        }
-                    }
-                    Value::VmNativeFunction(_) => return value_to_string(val),
-                    _ => {} // toString is not callable, fall through to valueOf
-                }
+            // Use try_to_primitive which properly walks the prototype chain
+            let prim = self.try_to_primitive(ctx, val, "string");
+            if self.pending_throw.is_some() {
+                return String::new();
             }
-            // Fall back to valueOf
-            let vo = map.borrow().get("valueOf").cloned();
-            #[allow(clippy::collapsible_match)]
-            if let Some(vo_val) = vo {
-                match vo_val {
-                    Value::VmFunction(ip, _arity) | Value::VmClosure(ip, _arity, _) => {
-                        match self.call_vm_function_result(ctx, ip, &[], None, &[]) {
-                            Ok(result) if !matches!(result, Value::VmObject(_) | Value::VmArray(_)) => {
-                                return value_to_string(&result);
-                            }
-                            Err(e) => {
-                                self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                                return String::new();
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // Check __value__ for wrapper objects (e.g. new String("abc"))
-            let inner = map.borrow().get("__value__").cloned();
-            if let Some(v) = inner {
-                return value_to_string(&v);
-            }
+            return value_to_string(&prim);
         }
         // Array.prototype.toString() → join elements with ","
         if let Value::VmArray(arr) = val {
@@ -29271,6 +29231,14 @@ impl<'gc> VM<'gc> {
             Value::Undefined | Value::Null if is_string_method => {
                 self.throw_type_error(ctx, "String.prototype method called on null or undefined");
                 return Value::Undefined;
+            }
+            // VmArray — use vm_to_string which joins with ","
+            Value::VmArray(_) if is_string_method => {
+                let s = self.vm_to_string(ctx, receiver);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                Some(crate::unicode::utf8_to_utf16(&s))
             }
             // Number, Boolean, BigInt — coerce via ToString for string methods
             other if is_string_method && !matches!(other, Value::Undefined | Value::Null) => {

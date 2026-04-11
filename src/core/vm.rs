@@ -18603,13 +18603,13 @@ impl<'gc> VM<'gc> {
                         None
                     };
                     let callable_expr = if is_async_dynamic_gen {
-                        format!("async function*({}\n){{{}\n}}", params_src, body)
+                        format!("async function*({}\n){{\n{}\n}}", params_src, body)
                     } else if is_async_dynamic_fn {
-                        format!("async function({}\n){{{}\n}}", params_src, body)
+                        format!("async function({}\n){{\n{}\n}}", params_src, body)
                     } else if is_dynamic_generator {
-                        format!("function*({}\n){{{}\n}}", params_src, body)
+                        format!("function*({}\n){{\n{}\n}}", params_src, body)
                     } else {
-                        format!("function({}\n){{{}\n}}", params_src, body)
+                        format!("function({}\n){{\n{}\n}}", params_src, body)
                     };
                     drop(borrow);
 
@@ -22683,13 +22683,13 @@ impl<'gc> VM<'gc> {
                 };
                 // Use newlines after params and body to handle // line comments (spec step 11)
                 let validation_source = if is_async_gen_ctor {
-                    format!("(async function*({}\n){{{}\n}})", params_src, body)
+                    format!("(async function*({}\n){{\n{}\n}})", params_src, body)
                 } else if is_async_ctor {
-                    format!("(async function({}\n){{{}\n}})", params_src, body)
+                    format!("(async function({}\n){{\n{}\n}})", params_src, body)
                 } else if is_generator_ctor {
-                    format!("(function*({}\n){{{}\n}})", params_src, body)
+                    format!("(function*({}\n){{\n{}\n}})", params_src, body)
                 } else {
-                    format!("(function({}\n){{{}\n}})", params_src, body)
+                    format!("(function({}\n){{\n{}\n}})", params_src, body)
                 };
                 // Per spec step 20c-d: check if body contains "use strict" directive.
                 // If it does, apply strict binding checks (eval/arguments as param names are errors).

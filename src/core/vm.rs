@@ -14923,8 +14923,28 @@ impl<'gc> VM<'gc> {
                         let type_name = borrow.get("__type__").map(|v| value_to_string(v));
                         match type_name.as_deref() {
                             Some("String") => {
+                                if let Some(proto) = borrow.get("__proto__").cloned() {
+                                    let has_override = matches!(
+                                        &proto,
+                                        Value::VmObject(proto_obj)
+                                            if {
+                                                let bp = proto_obj.borrow();
+                                                super::property_descriptor::has_getter(&bp, key)
+                                                    || super::property_descriptor::has_setter(&bp, key)
+                                                    || bp.contains_key(key)
+                                            }
+                                    );
+                                    if has_override {
+                                        drop(borrow);
+                                        return self.read_named_property_with_receiver(ctx, &proto, key, receiver);
+                                    }
+                                } else if let Some(proto) = self.ctor_prototype_from_globals(ctx, "String") {
+                                    drop(borrow);
+                                    return self.read_named_property_with_receiver(ctx, &proto, key, receiver);
+                                }
                                 let resolved = match key {
-                                    "toString" | "valueOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_VALUEOF)),
+                                    "toString" => Some(Value::VmNativeFunction(BUILTIN_STRING_TOSTRING)),
+                                    "valueOf" => Some(Value::VmNativeFunction(BUILTIN_STRING_VALUEOF)),
                                     "constructor" => {
                                         drop(borrow);
                                         return self.globals.get("String").cloned().unwrap_or(Value::Undefined);
@@ -17234,11 +17254,13 @@ impl<'gc> VM<'gc> {
         string_map.insert("raw".to_string(), Self::make_native_fn(ctx, BUILTIN_STRING_RAW, "raw", 1.0));
         mark_nonenumerable(&mut string_map, "raw");
         let mut string_proto = IndexMap::new();
+        string_proto.insert("__type__".to_string(), Value::from("String"));
+        string_proto.insert("__value__".to_string(), Value::String(Vec::new()));
         string_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
         string_proto.insert("length".to_string(), Value::Number(0.0));
         write_attrs_to_legacy_map(&mut string_proto, "length", PropAttrs::empty());
         for (name, builtin_id, length) in [
-            ("toString", BUILTIN_STRING_VALUEOF, 0.0),
+            ("toString", BUILTIN_STRING_TOSTRING, 0.0),
             ("valueOf", BUILTIN_STRING_VALUEOF, 0.0),
             ("toLocaleLowerCase", BUILTIN_STRING_TOLOWERCASE, 0.0),
             ("toLocaleUpperCase", BUILTIN_STRING_TOUPPERCASE, 0.0),
@@ -29440,6 +29462,7 @@ impl<'gc> VM<'gc> {
         }
 
         // String methods — RequireObjectCoercible(this) + ToString(this)
+        let is_string_value_method = matches!(id, BUILTIN_STRING_TOSTRING | BUILTIN_STRING_VALUEOF);
         let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id)
             || (BUILTIN_STRING_CODEPOINTAT..=BUILTIN_STRING_MATCHALL).contains(&id);
         let string_val: Option<Vec<u16>> = match &receiver {
@@ -29455,6 +29478,10 @@ impl<'gc> VM<'gc> {
                     // ToString(Symbol) must throw TypeError
                     drop(b);
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                    return Value::Undefined;
+                } else if is_string_value_method {
+                    drop(b);
+                    self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
                     return Value::Undefined;
                 } else if is_string_method {
                     // Generic object — ToString via vm_to_string (calls JS toString/valueOf)
@@ -29474,6 +29501,10 @@ impl<'gc> VM<'gc> {
             }
             // VmArray — use vm_to_string which joins with ","
             Value::VmArray(_) if is_string_method => {
+                if is_string_value_method {
+                    self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
+                    return Value::Undefined;
+                }
                 let s = self.vm_to_string(ctx, receiver);
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
@@ -29482,6 +29513,10 @@ impl<'gc> VM<'gc> {
             }
             // Number, Boolean, BigInt — coerce via ToString for string methods
             other if is_string_method && !matches!(other, Value::Undefined | Value::Null) => {
+                if is_string_value_method {
+                    self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
+                    return Value::Undefined;
+                }
                 let s = value_to_string(other);
                 Some(crate::unicode::utf8_to_utf16(&s))
             }

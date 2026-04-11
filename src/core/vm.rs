@@ -16558,20 +16558,6 @@ impl<'gc> VM<'gc> {
             Self::insert_array_constructor_backref(ctx, &array_proto, &array_ctor);
         }
 
-        let mut arguments_proto = IndexMap::new();
-        if let Some(obj_proto) = self.ctor_prototype_from_globals(ctx, "Object") {
-            arguments_proto.insert("__proto__".to_string(), obj_proto);
-        }
-        arguments_proto.insert(
-            "@@sym:1".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "array.values", "values", 0.0, false),
-        );
-        mark_nonenumerable(&mut arguments_proto, "@@sym:1");
-        self.globals.insert(
-            "__ArgumentsPrototype__".to_string(),
-            Value::VmObject(new_gc_cell_ptr(ctx, arguments_proto)),
-        );
-
         // Error constructor family — each with __native_id__ and prototype
         {
             let error_types: &[(&str, FunctionID)] = &[

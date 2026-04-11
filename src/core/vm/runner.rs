@@ -1930,9 +1930,11 @@ impl<'gc> VM<'gc> {
         map.insert("length".to_string(), Value::Number(arg_count as f64));
         mark_nonenumerable(&mut map, "length");
         map.insert("__type__".to_string(), Value::from("Arguments"));
-        if let Some(arguments_proto) = self.globals.get("__ArgumentsPrototype__").cloned() {
-            map.insert("__proto__".to_string(), arguments_proto);
-        }
+        map.insert(
+            "@@sym:1".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "array.values", "values", 0.0, false),
+        );
+        mark_nonenumerable(&mut map, "@@sym:1");
         let is_strict = self.chunk.fn_strictness.get(&func_ip).copied().unwrap_or(true);
         let is_simple_parameter_list = self.chunk.fn_simple_parameter_list.get(&func_ip).copied().unwrap_or(true);
         if is_strict || !is_simple_parameter_list {

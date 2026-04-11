@@ -7,6 +7,20 @@ thread_local! {
     static REGEX_CACHE: RefCell<HashMap<(Vec<u16>, String), Regex>> = RefCell::new(HashMap::new());
 }
 
+const U16_BANG: u16 = b'!' as u16;
+const U16_BACKSLASH: u16 = b'\\' as u16;
+const U16_CLOSE_ANGLE: u16 = b'>' as u16;
+const U16_CLOSE_BRACKET: u16 = b']' as u16;
+const U16_CLOSE_PAREN: u16 = b')' as u16;
+const U16_COLON: u16 = b':' as u16;
+const U16_EQUAL: u16 = b'=' as u16;
+const U16_K: u16 = b'k' as u16;
+const U16_LT: u16 = b'<' as u16;
+const U16_OPEN_BRACKET: u16 = b'[' as u16;
+const U16_OPEN_PAREN: u16 = b'(' as u16;
+const U16_PIPE: u16 = b'|' as u16;
+const U16_QUESTION: u16 = b'?' as u16;
+
 /// Compile a regex, returning a cached copy when the same pattern+flags
 /// have been compiled before.
 pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex, JSError> {
@@ -23,6 +37,8 @@ pub(crate) fn get_or_compile_regex(pattern: &[u16], flags: &str) -> Result<Regex
 }
 
 fn create_regex_from_utf16(pattern: &[u16], flags: &str) -> Result<Regex, JSError> {
+    let rewritten_pattern = rewrite_duplicate_named_backrefs(pattern);
+    let pattern = rewritten_pattern.as_slice();
     if flags.contains('u') || flags.contains('v') {
         let it = std::char::decode_utf16(pattern.iter().cloned()).map(|r| match r {
             Ok(c) => c as u32,
@@ -115,6 +131,310 @@ fn canonicalize_regex_flags(flags: &str) -> String {
         }
     }
     result
+}
+
+#[derive(Default)]
+struct PatternRewriteSegment {
+    text: Vec<u16>,
+    capture_count: usize,
+    named_captures: Vec<(Vec<u16>, usize)>,
+}
+
+fn rewrite_duplicate_named_backrefs(pattern: &[u16]) -> Vec<u16> {
+    rewrite_pattern_segment(pattern, 0).text
+}
+
+fn rewrite_pattern_segment(pattern: &[u16], base_capture_index: usize) -> PatternRewriteSegment {
+    let mut result = PatternRewriteSegment::default();
+    let mut i = 0;
+    while i < pattern.len() {
+        match pattern[i] {
+            U16_BACKSLASH if i + 1 < pattern.len() => {
+                result.text.push(pattern[i]);
+                result.text.push(pattern[i + 1]);
+                i += 2;
+            }
+            U16_OPEN_BRACKET => {
+                let start = i;
+                i += 1;
+                while i < pattern.len() {
+                    if pattern[i] == U16_BACKSLASH && i + 1 < pattern.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if pattern[i] == U16_CLOSE_BRACKET {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                result.text.extend_from_slice(&pattern[start..i]);
+            }
+            U16_OPEN_PAREN => {
+                let Some(group_end) = find_matching_group_end(pattern, i) else {
+                    result.text.extend_from_slice(&pattern[i..]);
+                    break;
+                };
+                let Some(group_info) = parse_group_info(pattern, i, group_end) else {
+                    result.text.extend_from_slice(&pattern[i..=group_end]);
+                    i = group_end + 1;
+                    continue;
+                };
+
+                let mut alt_infos = Vec::new();
+                let body = &pattern[group_info.body_start..group_end];
+                let alternatives = split_top_level_alternatives(body);
+                let mut alt_base_capture_index = base_capture_index + result.capture_count + usize::from(group_info.is_capturing);
+                for alt in alternatives {
+                    let alt_info = rewrite_pattern_segment(alt, alt_base_capture_index);
+                    alt_base_capture_index += alt_info.capture_count;
+                    alt_infos.push(alt_info);
+                }
+
+                let mut group_text = pattern[i..group_info.body_start].to_vec();
+                for (alt_index, alt_info) in alt_infos.iter().enumerate() {
+                    if alt_index > 0 {
+                        group_text.push(U16_PIPE);
+                    }
+                    group_text.extend_from_slice(&alt_info.text);
+                }
+                group_text.push(U16_CLOSE_PAREN);
+
+                if let Some((name, backref_end)) = parse_named_backref(pattern, group_end + 1)
+                    && group_info.allow_backref_rewrite
+                {
+                    let mut matching_alts = 0usize;
+                    let mut alt_capture_indices = Vec::with_capacity(alt_infos.len());
+                    for alt_info in &alt_infos {
+                        let matches: Vec<usize> = alt_info
+                            .named_captures
+                            .iter()
+                            .filter_map(|(capture_name, capture_index)| {
+                                if capture_name.as_slice() == name.as_slice() {
+                                    Some(*capture_index)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        if matches.len() == 1 {
+                            matching_alts += 1;
+                            alt_capture_indices.push(Some(matches[0]));
+                        } else if matches.is_empty() {
+                            alt_capture_indices.push(None);
+                        } else {
+                            alt_capture_indices.push(None);
+                            matching_alts = 0;
+                            break;
+                        }
+                    }
+
+                    if matching_alts > 1 {
+                        let mut rewritten_group = pattern[i..group_info.body_start].to_vec();
+                        for (alt_index, alt_info) in alt_infos.iter().enumerate() {
+                            if alt_index > 0 {
+                                rewritten_group.push(U16_PIPE);
+                            }
+                            rewritten_group.extend_from_slice(&alt_info.text);
+                            if let Some(capture_index) = alt_capture_indices[alt_index] {
+                                append_numeric_backref(&mut rewritten_group, capture_index);
+                            }
+                        }
+                        rewritten_group.push(U16_CLOSE_PAREN);
+                        group_text = rewritten_group;
+                        i = backref_end;
+                    } else {
+                        i = group_end + 1;
+                    }
+                } else {
+                    i = group_end + 1;
+                }
+
+                if group_info.is_capturing {
+                    let capture_index = base_capture_index + result.capture_count + 1;
+                    if let Some(name) = group_info.capture_name {
+                        result.named_captures.push((name, capture_index));
+                    }
+                    result.capture_count += 1;
+                }
+                for alt_info in &alt_infos {
+                    result.capture_count += alt_info.capture_count;
+                    result.named_captures.extend(alt_info.named_captures.iter().cloned());
+                }
+                result.text.extend_from_slice(&group_text);
+            }
+            _ => {
+                result.text.push(pattern[i]);
+                i += 1;
+            }
+        }
+    }
+    result
+}
+
+struct GroupInfo {
+    body_start: usize,
+    is_capturing: bool,
+    capture_name: Option<Vec<u16>>,
+    allow_backref_rewrite: bool,
+}
+
+fn parse_group_info(pattern: &[u16], open: usize, close: usize) -> Option<GroupInfo> {
+    if pattern[open] != b'(' as u16 || close <= open {
+        return None;
+    }
+    if open + 1 >= close || pattern[open + 1] != U16_QUESTION {
+        return Some(GroupInfo {
+            body_start: open + 1,
+            is_capturing: true,
+            capture_name: None,
+            allow_backref_rewrite: true,
+        });
+    }
+    if open + 2 >= close {
+        return None;
+    }
+    match pattern[open + 2] {
+        U16_COLON => Some(GroupInfo {
+            body_start: open + 3,
+            is_capturing: false,
+            capture_name: None,
+            allow_backref_rewrite: true,
+        }),
+        U16_EQUAL | U16_BANG => Some(GroupInfo {
+            body_start: open + 3,
+            is_capturing: false,
+            capture_name: None,
+            allow_backref_rewrite: false,
+        }),
+        U16_LT => {
+            if open + 3 < close && matches!(pattern[open + 3], U16_EQUAL | U16_BANG) {
+                Some(GroupInfo {
+                    body_start: open + 4,
+                    is_capturing: false,
+                    capture_name: None,
+                    allow_backref_rewrite: false,
+                })
+            } else {
+                let mut name_end = open + 3;
+                while name_end < close && pattern[name_end] != U16_CLOSE_ANGLE {
+                    name_end += 1;
+                }
+                if name_end >= close {
+                    return None;
+                }
+                Some(GroupInfo {
+                    body_start: name_end + 1,
+                    is_capturing: true,
+                    capture_name: Some(pattern[open + 3..name_end].to_vec()),
+                    allow_backref_rewrite: true,
+                })
+            }
+        }
+        _ => Some(GroupInfo {
+            body_start: open + 2,
+            is_capturing: false,
+            capture_name: None,
+            allow_backref_rewrite: false,
+        }),
+    }
+}
+
+fn parse_named_backref(pattern: &[u16], start: usize) -> Option<(Vec<u16>, usize)> {
+    if start + 4 > pattern.len() || pattern[start] != U16_BACKSLASH || pattern[start + 1] != U16_K || pattern[start + 2] != U16_LT {
+        return None;
+    }
+    let mut end = start + 3;
+    while end < pattern.len() && pattern[end] != U16_CLOSE_ANGLE {
+        end += 1;
+    }
+    if end >= pattern.len() {
+        return None;
+    }
+    Some((pattern[start + 3..end].to_vec(), end + 1))
+}
+
+fn append_numeric_backref(out: &mut Vec<u16>, capture_index: usize) {
+    out.push(U16_BACKSLASH);
+    out.extend(capture_index.to_string().encode_utf16());
+}
+
+fn split_top_level_alternatives(pattern: &[u16]) -> Vec<&[u16]> {
+    let mut alternatives = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < pattern.len() {
+        match pattern[i] {
+            U16_BACKSLASH if i + 1 < pattern.len() => {
+                i += 2;
+                continue;
+            }
+            U16_OPEN_BRACKET => {
+                i += 1;
+                while i < pattern.len() {
+                    if pattern[i] == U16_BACKSLASH && i + 1 < pattern.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if pattern[i] == U16_CLOSE_BRACKET {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            U16_OPEN_PAREN => depth += 1,
+            U16_CLOSE_PAREN => depth = depth.saturating_sub(1),
+            U16_PIPE if depth == 0 => {
+                alternatives.push(&pattern[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    alternatives.push(&pattern[start..]);
+    alternatives
+}
+
+fn find_matching_group_end(pattern: &[u16], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < pattern.len() {
+        match pattern[i] {
+            U16_BACKSLASH if i + 1 < pattern.len() => {
+                i += 2;
+                continue;
+            }
+            U16_OPEN_BRACKET => {
+                i += 1;
+                while i < pattern.len() {
+                    if pattern[i] == U16_BACKSLASH && i + 1 < pattern.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if pattern[i] == U16_CLOSE_BRACKET {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            U16_OPEN_PAREN => depth += 1,
+            U16_CLOSE_PAREN => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 impl<'gc> VM<'gc> {
@@ -1170,7 +1490,14 @@ impl<'gc> VM<'gc> {
                 }
             } else {
                 let replace_str = replace_str_owned.as_ref().unwrap();
-                replacement = self.get_substitution(&matched, s, position, &captures, &named_captures, replace_str);
+                if matches!(named_captures, Value::Null) {
+                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                replacement = self.get_substitution(ctx, &matched, s, position, &captures, &named_captures, replace_str);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
             }
 
             if position >= next_source_position {
@@ -1188,8 +1515,10 @@ impl<'gc> VM<'gc> {
     }
 
     /// GetSubstitution (ES2024 §22.1.3.18.1)
+    #[allow(clippy::too_many_arguments)]
     fn get_substitution(
         &mut self,
+        ctx: &GcContext<'gc>,
         matched: &str,
         s: &str,
         position: usize,
@@ -1231,9 +1560,13 @@ impl<'gc> VM<'gc> {
                             i += 2;
                         } else if let Some(close) = chars[i + 2..].iter().position(|&c| c == '>') {
                             let name: String = chars[i + 2..i + 2 + close].iter().collect();
-                            let capture_val = self.read_named_property_str(named_captures, &name);
+                            let capture_val = self.read_named_property(ctx, named_captures, &name);
                             if !matches!(capture_val, Value::Undefined) {
-                                result.push_str(&value_to_string(&capture_val));
+                                let capture_str = self.vm_to_string(ctx, &capture_val);
+                                if self.pending_throw.is_some() {
+                                    return result;
+                                }
+                                result.push_str(&capture_str);
                             }
                             i += 2 + close + 1; // skip $< name >
                         } else {
@@ -1679,17 +2012,6 @@ impl<'gc> VM<'gc> {
         // 7. Throw a TypeError exception.
         self.throw_type_error(ctx, "Species constructor is not a constructor");
         Value::Undefined
-    }
-
-    /// Helper: Read a named property given a &str key (avoids converting to index).
-    fn read_named_property_str(&mut self, obj: &Value<'gc>, key: &str) -> Value<'gc> {
-        // Simple wrapper — we can't call read_named_property without ctx in some
-        // contexts, but value_to_string can fetch from VmObject directly.
-        match obj {
-            Value::VmObject(o) => o.borrow().get(key).cloned().unwrap_or(Value::Undefined),
-            Value::VmArray(a) => a.borrow().props.get(key).cloned().unwrap_or(Value::Undefined),
-            _ => Value::Undefined,
-        }
     }
 
     /// Set a property from within a host function, ensuring errors return as
@@ -2204,14 +2526,20 @@ impl<'gc> VM<'gc> {
                         }
                         None => Value::Undefined,
                     };
-                    groups_map.insert(name.to_string(), value);
+                    let key = if name == "__proto__" {
+                        OWN_DUNDER_PROTO_DATA_KEY.to_string()
+                    } else {
+                        name.to_string()
+                    };
+                    groups_map.insert(key, value);
                 }
-                if !groups_map.is_empty() {
+                let groups_value = if groups_map.is_empty() {
+                    Value::Undefined
+                } else {
                     groups_map.insert("__proto__".to_string(), Value::Null);
-                    arr_data
-                        .props
-                        .insert("groups".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, groups_map)));
-                }
+                    Value::VmObject(new_gc_cell_ptr(ctx, groups_map))
+                };
+                arr_data.props.insert("groups".to_string(), groups_value);
 
                 // Add indices array when 'd' (hasIndices) flag is set
                 if flags.contains('d') {
@@ -2254,15 +2582,21 @@ impl<'gc> VM<'gc> {
                             }
                             None => Value::Undefined,
                         };
-                        indices_groups_map.insert(name.to_string(), value);
+                        let key = if name == "__proto__" {
+                            OWN_DUNDER_PROTO_DATA_KEY.to_string()
+                        } else {
+                            name.to_string()
+                        };
+                        indices_groups_map.insert(key, value);
                     }
                     let mut indices_array = VmArrayData::new(indices_items);
-                    if !indices_groups_map.is_empty() {
+                    let indices_groups_value = if indices_groups_map.is_empty() {
+                        Value::Undefined
+                    } else {
                         indices_groups_map.insert("__proto__".to_string(), Value::Null);
-                        indices_array
-                            .props
-                            .insert("groups".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, indices_groups_map)));
-                    }
+                        Value::VmObject(new_gc_cell_ptr(ctx, indices_groups_map))
+                    };
+                    indices_array.props.insert("groups".to_string(), indices_groups_value);
                     arr_data
                         .props
                         .insert("indices".to_string(), Value::VmArray(new_gc_cell_ptr(ctx, indices_array)));

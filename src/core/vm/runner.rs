@@ -7512,7 +7512,8 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             } else {
                 let attrs = attrs_from_legacy_map(&map.borrow(), &key);
-                if !attrs.contains(PropAttrs::CONFIGURABLE) {
+                let non_configurable = !attrs.contains(PropAttrs::CONFIGURABLE) || self.is_string_wrapper_nonconfigurable_key(map, &key);
+                if non_configurable {
                     if self.current_execution_is_strict() {
                         let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
                         self.handle_throw(ctx, &err)?;

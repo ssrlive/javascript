@@ -22731,55 +22731,70 @@ impl<'gc> VM<'gc> {
                 Value::String(result)
             }
             BUILTIN_STRING_RAW => {
-                // 22.1.2.4 String.raw(template, ...substitutions)
                 let template_arg = args.first().cloned().unwrap_or(Value::Undefined);
-                let raw_val = match &template_arg {
-                    Value::VmObject(obj) => obj.borrow().get("raw").cloned(),
-                    _ => None,
+                if matches!(template_arg, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                let cooked = match &template_arg {
+                    Value::VmObject(_)
+                    | Value::VmArray(_)
+                    | Value::VmMap(_)
+                    | Value::VmSet(_)
+                    | Value::VmFunction(..)
+                    | Value::VmClosure(..)
+                    | Value::VmNativeFunction(_) => template_arg,
+                    _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&template_arg)),
                 };
-                let raw_arr = match raw_val {
-                    Some(Value::VmArray(arr)) => arr,
-                    Some(Value::VmObject(obj)) => {
-                        // Array-like object
-                        let b = obj.borrow();
-                        let len = match b.get("length") {
-                            Some(Value::Number(n)) => *n as usize,
-                            _ => 0,
-                        };
-                        drop(b);
-                        let mut result_parts: Vec<u16> = Vec::new();
-                        for i in 0..len {
-                            if i > 0
-                                && let Some(sub) = args.get(i)
-                            {
-                                let sub_str = value_to_string(sub);
-                                result_parts.extend(sub_str.encode_utf16());
-                            }
-                            let elem = obj.borrow().get(&i.to_string()).cloned().unwrap_or(Value::Undefined);
-                            let s = value_to_string(&elem);
-                            result_parts.extend(s.encode_utf16());
-                        }
-                        return Value::String(result_parts);
-                    }
-                    _ => {
-                        self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                        return Value::Undefined;
-                    }
+                let raw_val = self.read_named_property(ctx, &cooked, "raw");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(raw_val, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                let raw = match &raw_val {
+                    Value::VmObject(_)
+                    | Value::VmArray(_)
+                    | Value::VmMap(_)
+                    | Value::VmSet(_)
+                    | Value::VmFunction(..)
+                    | Value::VmClosure(..)
+                    | Value::VmNativeFunction(_) => raw_val,
+                    _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&raw_val)),
                 };
-                let raw_data = raw_arr.borrow();
-                let literal_count = raw_data.elements.len();
+                let Some(literal_count_u64) = self.array_like_length_u64(ctx, &raw) else {
+                    return Value::Undefined;
+                };
+                let literal_count = literal_count_u64.min(usize::MAX as u64) as usize;
+                if literal_count == 0 {
+                    return Value::String(Vec::new());
+                }
+
                 let mut result_parts: Vec<u16> = Vec::new();
                 for i in 0..literal_count {
-                    if i > 0
-                        && let Some(sub) = args.get(i)
-                    {
-                        let sub_str = value_to_string(sub);
-                        result_parts.extend(sub_str.encode_utf16());
+                    let next_seg = self.read_named_property(ctx, &raw, &i.to_string());
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
                     }
-                    let s = value_to_string(&raw_data.elements[i]);
-                    result_parts.extend(s.encode_utf16());
+                    let next_seg = match self.vm_coerce_arg_to_string(ctx, &next_seg) {
+                        Some(s) => s,
+                        None => return Value::Undefined,
+                    };
+                    result_parts.extend(next_seg.encode_utf16());
+
+                    if i + 1 == literal_count {
+                        break;
+                    }
+                    if let Some(sub) = args.get(i + 1) {
+                        let sub = match self.vm_coerce_arg_to_string(ctx, sub) {
+                            Some(s) => s,
+                            None => return Value::Undefined,
+                        };
+                        result_parts.extend(sub.encode_utf16());
+                    }
                 }
-                drop(raw_data);
                 Value::String(result_parts)
             }
             BUILTIN_BIGINT | BUILTIN_BIGINT_ASUINTN | BUILTIN_BIGINT_ASINTN => {

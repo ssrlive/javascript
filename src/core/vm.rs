@@ -176,6 +176,7 @@ const BUILTIN_STRING_SEARCH: FunctionID = 132;
 const BUILTIN_STRING_TOSTRING: FunctionID = 133;
 const BUILTIN_STRING_VALUEOF: FunctionID = 134;
 const BUILTIN_CTOR_STRING: FunctionID = 135;
+const BUILTIN_STRING_RAW: FunctionID = 136;
 // ── Number (160–179) ────────────────────────────────────────────────
 const BUILTIN_CTOR_NUMBER: FunctionID = 160;
 const BUILTIN_NUMBER_ISNAN: FunctionID = 161;
@@ -372,7 +373,6 @@ const BUILTIN_ATOMICS_WAITASYNC: FunctionID = 498;
 // ── AbstractModuleSource (510–514) ──────────────────────────────────
 const BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE: FunctionID = 510;
 const BUILTIN_ABSTRACT_MODULE_SOURCE_TOSTRINGTAG_GET: FunctionID = 511;
-const BUILTIN_STRING_RAW: FunctionID = 512;
 // Next available group: 520
 
 #[derive(Debug, Clone)]
@@ -1082,7 +1082,18 @@ impl<'gc> VM<'gc> {
 impl<'gc> VM<'gc> {
     fn restricted_thrower_intrinsic(&mut self, ctx: &GcContext<'gc>) -> Value<'gc> {
         if matches!(self.restricted_thrower_intrinsic, Value::Undefined) {
-            self.restricted_thrower_intrinsic = Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+            let thrower = Self::make_host_fn_with_name_len(ctx, "Function.prototype.restrictedThrow", "", 0.0, false);
+            // %ThrowTypeError% must be frozen and non-extensible per spec
+            if let Value::VmObject(ref obj) = thrower {
+                let mut b = obj.borrow_mut(ctx);
+                // Mark name and length as non-writable, non-enumerable, non-configurable
+                write_attrs_to_legacy_map(&mut b, "name", PropAttrs::empty());
+                write_attrs_to_legacy_map(&mut b, "length", PropAttrs::empty());
+                b.insert("__frozen__".to_string(), Value::Boolean(true));
+                b.insert("__sealed__".to_string(), Value::Boolean(true));
+                b.insert("__non_extensible__".to_string(), Value::Boolean(true));
+            }
+            self.restricted_thrower_intrinsic = thrower;
         }
         self.restricted_thrower_intrinsic.clone()
     }
@@ -4388,6 +4399,13 @@ impl<'gc> VM<'gc> {
 
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         match name {
+            "Function.prototype.restrictedThrow" => {
+                self.throw_type_error(
+                    ctx,
+                    "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+                );
+                Value::Undefined
+            }
             "__evalScript__" => {
                 let src = if let Some(v) = args.first() {
                     match self.vm_to_string_like_spec(ctx, v) {
@@ -22312,8 +22330,8 @@ impl<'gc> VM<'gc> {
                             if i > 0
                                 && let Some(sub) = args.get(i)
                             {
-                                    let sub_str = value_to_string(sub);
-                                    result_parts.extend(sub_str.encode_utf16());
+                                let sub_str = value_to_string(sub);
+                                result_parts.extend(sub_str.encode_utf16());
                             }
                             let elem = obj.borrow().get(&i.to_string()).cloned().unwrap_or(Value::Undefined);
                             let s = value_to_string(&elem);
@@ -22333,8 +22351,8 @@ impl<'gc> VM<'gc> {
                     if i > 0
                         && let Some(sub) = args.get(i)
                     {
-                            let sub_str = value_to_string(sub);
-                            result_parts.extend(sub_str.encode_utf16());
+                        let sub_str = value_to_string(sub);
+                        result_parts.extend(sub_str.encode_utf16());
                     }
                     let s = value_to_string(&raw_data.elements[i]);
                     result_parts.extend(s.encode_utf16());

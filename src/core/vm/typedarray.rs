@@ -2287,19 +2287,12 @@ impl<'gc> VM<'gc> {
         data.props.insert("__typedarray_name__".to_string(), Value::from(&ta_name));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         // Create backing ArrayBuffer
-        let mut buf_map = IndexMap::new();
-        buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-        buf_map.insert("byteLength".to_string(), Value::Number((len * bpe) as f64));
         let mut bytes = vec![Value::Number(0.0); len * bpe];
         for i in 0..len {
             let num = to_number(elements.get(i).unwrap_or(&Value::Number(0.0)));
             Self::encode_typed_element(&mut bytes, i * bpe, bpe, &ta_name, num);
         }
-        buf_map.insert(
-            "__buffer_bytes__".to_string(),
-            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
-        );
-        let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+        let buffer_obj = self.create_ordinary_array_buffer(ctx, bytes);
         data.props.insert("buffer".to_string(), buffer_obj.clone());
         mark_nonenumerable(&mut data.props, "buffer");
         data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
@@ -2665,6 +2658,20 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn create_ordinary_array_buffer(&mut self, ctx: &GcContext<'gc>, bytes: Vec<Value<'gc>>) -> Value<'gc> {
+        let mut buf_map = IndexMap::new();
+        buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
+        buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
+        buf_map.insert(
+            "__buffer_bytes__".to_string(),
+            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+        );
+        if let Some(proto) = self.ctor_prototype_from_globals(ctx, "ArrayBuffer") {
+            buf_map.insert("__proto__".to_string(), proto);
+        }
+        Value::VmObject(new_gc_cell_ptr(ctx, buf_map))
+    }
+
     /// If `arr` is a TypedArray backed by a resizable buffer, sync its
     /// elements vector so that `elements.len()` reflects the current
     /// dynamic length after any buffer resize.  No-op for non-resizable TAs.
@@ -2986,9 +2993,6 @@ impl<'gc> VM<'gc> {
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
             // Create backing ArrayBuffer with properly encoded bytes
-            let mut buf_map = IndexMap::new();
-            buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-            buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
             if is_bigint_ta {
                 for (i, bi) in bigint_vals.iter().enumerate() {
@@ -2999,11 +3003,7 @@ impl<'gc> VM<'gc> {
                     Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
                 }
             }
-            buf_map.insert(
-                "__buffer_bytes__".to_string(),
-                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
-            );
-            let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+            let buffer_obj = self.create_ordinary_array_buffer(ctx, bytes);
             data.props.insert("buffer".to_string(), buffer_obj.clone());
             mark_nonenumerable(&mut data.props, "buffer");
             data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
@@ -3119,9 +3119,6 @@ impl<'gc> VM<'gc> {
             let mut data = VmArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
-            let mut buf_map = IndexMap::new();
-            buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-            buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
             if is_bigint_ta {
                 for (i, bi) in bigint_vals.iter().enumerate() {
@@ -3132,11 +3129,7 @@ impl<'gc> VM<'gc> {
                     Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
                 }
             }
-            buf_map.insert(
-                "__buffer_bytes__".to_string(),
-                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
-            );
-            let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+            let buffer_obj = self.create_ordinary_array_buffer(ctx, bytes);
             data.props.insert("buffer".to_string(), buffer_obj.clone());
             mark_nonenumerable(&mut data.props, "buffer");
             data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
@@ -3462,9 +3455,6 @@ impl<'gc> VM<'gc> {
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
             // Create backing ArrayBuffer with properly encoded bytes
-            let mut buf_map = IndexMap::new();
-            buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-            buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
             if is_bigint_ta {
                 for (i, bi) in bigint_vals.iter().enumerate() {
@@ -3475,11 +3465,7 @@ impl<'gc> VM<'gc> {
                     Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
                 }
             }
-            buf_map.insert(
-                "__buffer_bytes__".to_string(),
-                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
-            );
-            let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+            let buffer_obj = self.create_ordinary_array_buffer(ctx, bytes);
             data.props.insert("buffer".to_string(), buffer_obj.clone());
             mark_nonenumerable(&mut data.props, "buffer");
             data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
@@ -3597,9 +3583,6 @@ impl<'gc> VM<'gc> {
                 let mut data = VmArrayData::new(coerced_elements);
                 data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
                 data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
-                let mut buf_map = IndexMap::new();
-                buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-                buf_map.insert("byteLength".to_string(), Value::Number((len * bytes_per_element) as f64));
                 let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
                 if is_bigint_ta {
                     for (i, bi) in bigint_vals.iter().enumerate() {
@@ -3610,11 +3593,7 @@ impl<'gc> VM<'gc> {
                         Self::encode_typed_element(&mut bytes, i * bytes_per_element, bytes_per_element, typedarray_name, num);
                     }
                 }
-                buf_map.insert(
-                    "__buffer_bytes__".to_string(),
-                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
-                );
-                let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+                let buffer_obj = self.create_ordinary_array_buffer(ctx, bytes);
                 data.props.insert("buffer".to_string(), buffer_obj.clone());
                 mark_nonenumerable(&mut data.props, "buffer");
                 data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
@@ -3669,15 +3648,8 @@ impl<'gc> VM<'gc> {
         let mut data = VmArrayData::new(vec![default_elem; length]);
         data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
-        let mut buf_map = IndexMap::new();
-        buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
-        buf_map.insert("byteLength".to_string(), Value::Number((length * bytes_per_element) as f64));
         let bytes = vec![Value::Number(0.0); length * bytes_per_element];
-        buf_map.insert(
-            "__buffer_bytes__".to_string(),
-            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
-        );
-        let buffer_obj = Value::VmObject(new_gc_cell_ptr(ctx, buf_map));
+        let buffer_obj = self.create_ordinary_array_buffer(ctx, bytes);
         data.props.insert("buffer".to_string(), buffer_obj.clone());
         mark_nonenumerable(&mut data.props, "buffer");
         data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);

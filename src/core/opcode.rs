@@ -259,6 +259,8 @@ pub struct Chunk<'gc> {
     pub derived_constructor_ips: std::collections::HashSet<usize>,
     /// Recorded strictness flag for functions by their starting IP
     pub fn_strictness: std::collections::HashMap<usize, bool>,
+    /// Whether a function uses a simple parameter list (no defaults, rest, or destructuring).
+    pub fn_simple_parameter_list: std::collections::HashMap<usize, bool>,
     /// Function IPs that correspond to async functions and should return Promise values.
     pub async_function_ips: std::collections::HashSet<usize>,
     /// Function IPs that correspond to arrow functions and use lexical this.
@@ -435,6 +437,9 @@ impl<'gc> Chunk<'gc> {
         }
         for (ip, strict) in dep.fn_strictness {
             self.fn_strictness.insert(ip + ip_offset, strict);
+        }
+        for (ip, simple) in dep.fn_simple_parameter_list {
+            self.fn_simple_parameter_list.insert(ip + ip_offset, simple);
         }
         for ip in dep.async_function_ips {
             self.async_function_ips.insert(ip + ip_offset);

@@ -1930,22 +1930,12 @@ impl<'gc> VM<'gc> {
         map.insert("length".to_string(), Value::Number(arg_count as f64));
         mark_nonenumerable(&mut map, "length");
         map.insert("__type__".to_string(), Value::from("Arguments"));
-        if let Some(&is_strict) = self.chunk.fn_strictness.get(&func_ip) {
-            if is_strict {
-                let thrower = self.restricted_thrower_intrinsic(ctx);
-                let prop = Value::Property {
-                    value: None,
-                    getter: Some(Box::new(thrower.clone())),
-                    setter: Some(Box::new(thrower)),
-                    attrs: PropAttrs::empty(),
-                };
-                map.insert("callee".to_string(), prop);
-            } else {
-                let callee_val = if bp > 0 { self.stack[bp - 1].clone() } else { Value::Undefined };
-                map.insert("callee".to_string(), callee_val);
-                mark_nonenumerable(&mut map, "callee");
-            }
-        } else {
+        if let Some(arguments_proto) = self.globals.get("__ArgumentsPrototype__").cloned() {
+            map.insert("__proto__".to_string(), arguments_proto);
+        }
+        let is_strict = self.chunk.fn_strictness.get(&func_ip).copied().unwrap_or(true);
+        let is_simple_parameter_list = self.chunk.fn_simple_parameter_list.get(&func_ip).copied().unwrap_or(true);
+        if is_strict || !is_simple_parameter_list {
             let thrower = self.restricted_thrower_intrinsic(ctx);
             let prop = Value::Property {
                 value: None,
@@ -1954,6 +1944,10 @@ impl<'gc> VM<'gc> {
                 attrs: PropAttrs::empty(),
             };
             map.insert("callee".to_string(), prop);
+        } else {
+            let callee_val = if bp > 0 { self.stack[bp - 1].clone() } else { Value::Undefined };
+            map.insert("callee".to_string(), callee_val);
+            mark_nonenumerable(&mut map, "callee");
         }
         let obj_val = Value::VmObject(new_gc_cell_ptr(ctx, map));
         self.frames[frame_idx].arguments_obj = Some(obj_val.clone());

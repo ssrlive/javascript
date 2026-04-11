@@ -4597,11 +4597,24 @@ impl<'gc> VM<'gc> {
                         ("toStringTag", 4),
                         ("species", 5),
                         ("asyncIterator", 6),
+                        ("match", 7),
+                        ("replace", 8),
+                        ("search", 9),
+                        ("split", 10),
+                        ("matchAll", 11),
                     ] {
                         if let Some(shared_symbol) = parent_symbol_obj.borrow().get(key).cloned() {
                             child_symbol_borrow.insert(key.to_string(), shared_symbol.clone());
                             child.cache_symbol_value(id, &shared_symbol);
                         }
+                    }
+                }
+                child.symbol_counter = self.symbol_counter;
+                child.symbol_registry = self.symbol_registry.clone();
+                let shared_symbols: Vec<Value<'gc>> = child.symbol_registry.values().cloned().collect();
+                for value in &shared_symbols {
+                    if let Some(id) = child.symbol_id(value) {
+                        child.cache_symbol_value(id, value);
                     }
                 }
 
@@ -16544,6 +16557,20 @@ impl<'gc> VM<'gc> {
         {
             Self::insert_array_constructor_backref(ctx, &array_proto, &array_ctor);
         }
+
+        let mut arguments_proto = IndexMap::new();
+        if let Some(obj_proto) = self.ctor_prototype_from_globals(ctx, "Object") {
+            arguments_proto.insert("__proto__".to_string(), obj_proto);
+        }
+        arguments_proto.insert(
+            "@@sym:1".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "array.values", "values", 0.0, false),
+        );
+        mark_nonenumerable(&mut arguments_proto, "@@sym:1");
+        self.globals.insert(
+            "__ArgumentsPrototype__".to_string(),
+            Value::VmObject(new_gc_cell_ptr(ctx, arguments_proto)),
+        );
 
         // Error constructor family — each with __native_id__ and prototype
         {
@@ -32817,6 +32844,9 @@ impl<'gc> VM<'gc> {
                     let prim = self.loose_eq_to_primitive(ctx, a);
                     return self.loose_equal(ctx, &prim, b);
                 }
+                if a_sym && b_sym {
+                    return self.symbol_id(a) == self.symbol_id(b);
+                }
                 Gc::ptr_eq(*a_rc, *b_rc)
             }
             (Value::VmArray(a_rc), Value::VmArray(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
@@ -36015,6 +36045,9 @@ impl<'gc> VM<'gc> {
     /// SameValue comparison (like Object.is)
     fn values_same(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
+            (Value::VmObject(_), Value::VmObject(_)) if a.is_symbol_value() && b.is_symbol_value() => {
+                self.symbol_id(a) == self.symbol_id(b)
+            }
             (Value::VmObject(a), Value::VmObject(b)) => Gc::ptr_eq(*a, *b),
             (Value::VmArray(a), Value::VmArray(b)) => Gc::ptr_eq(*a, *b),
             (Value::VmMap(a), Value::VmMap(b)) => Gc::ptr_eq(*a, *b),
@@ -36042,18 +36075,18 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn symbol_key_string(&self, val: &Value<'gc>) -> Option<String> {
+    fn symbol_id(&self, val: &Value<'gc>) -> Option<u64> {
         match val {
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
-                let id = map
-                    .borrow()
-                    .get("__symbol_id__")
-                    .and_then(|v| if let Value::Number(n) = v { Some(*n as u64) } else { None })
-                    .unwrap_or(0);
-                Some(format!("@@sym:{}", id))
-            }
+            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => map
+                .borrow()
+                .get("__symbol_id__")
+                .and_then(|v| if let Value::Number(n) = v { Some(*n as u64) } else { None }),
             _ => None,
         }
+    }
+
+    fn symbol_key_string(&self, val: &Value<'gc>) -> Option<String> {
+        self.symbol_id(val).map(|id| format!("@@sym:{}", id))
     }
 
     fn same_constructor_identity(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
@@ -36533,11 +36566,28 @@ impl<'gc> VM<'gc> {
 
     fn sync_runtime_to_child(&self, child: &mut VM<'gc>) {
         child.runtime_brand_counter = self.runtime_brand_counter;
+        child.symbol_counter = self.symbol_counter;
+        child.symbol_registry = self.symbol_registry.clone();
+        let shared_symbols: Vec<Value<'gc>> = child.symbol_registry.values().cloned().collect();
+        for value in &shared_symbols {
+            if let Some(id) = child.symbol_id(value) {
+                child.cache_symbol_value(id, value);
+            }
+        }
     }
 
     fn sync_runtime_from_child(&mut self, child: &VM<'gc>) {
         if child.runtime_brand_counter > self.runtime_brand_counter {
             self.runtime_brand_counter = child.runtime_brand_counter;
+        }
+        if child.symbol_counter > self.symbol_counter {
+            self.symbol_counter = child.symbol_counter;
+        }
+        for (key, value) in &child.symbol_registry {
+            self.symbol_registry.insert(key.clone(), value.clone());
+            if let Some(id) = self.symbol_id(value) {
+                self.cache_symbol_value(id, value);
+            }
         }
     }
 
@@ -36658,6 +36708,16 @@ impl<'gc> VM<'gc> {
                 }
             }
             Value::VmObject(obj) => {
+                if obj.borrow().contains_key("__vm_symbol__") {
+                    let symbol = Value::VmObject(obj);
+                    if let Some(id) = self.symbol_id(&symbol) {
+                        if let Some(local_symbol) = self.get_symbol_value(ctx, id) {
+                            return local_symbol;
+                        }
+                        self.cache_symbol_value(id, &symbol);
+                    }
+                    return symbol;
+                }
                 // Only stamp the top-level object — do NOT recurse, because
                 // sub-objects may be parent-realm objects (e.g. a proxy's target
                 // or handler) and stamping them would pollute the parent realm's
@@ -37049,6 +37109,9 @@ impl<'gc> VM<'gc> {
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Undefined, Value::Undefined) => true,
             (Value::Null, Value::Null) => true,
+            (Value::VmObject(_), Value::VmObject(_)) if a.is_symbol_value() && b.is_symbol_value() => {
+                self.symbol_id(a) == self.symbol_id(b)
+            }
             (Value::VmObject(a), Value::VmObject(b)) => Gc::ptr_eq(*a, *b),
             (Value::VmArray(a), Value::VmArray(b)) => Gc::ptr_eq(*a, *b),
             _ => false,

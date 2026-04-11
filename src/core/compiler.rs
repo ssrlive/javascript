@@ -484,6 +484,10 @@ impl<'gc> Compiler<'gc> {
         })
     }
 
+    fn has_simple_parameter_list(params: &[DestructuringElement]) -> bool {
+        params.iter().all(|p| matches!(p, DestructuringElement::Variable(_, None)))
+    }
+
     fn emit_hoisted_var_slots(&mut self, body: &[Statement]) {
         self.emit_hoisted_var_slots_with_shadow(body, None);
     }
@@ -2956,6 +2960,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
                 }
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
+                self.chunk
+                    .fn_simple_parameter_list
+                    .insert(func_ip, Self::has_simple_parameter_list(params));
 
                 // Collect upvalues before restoring
                 let fn_upvalues = std::mem::take(&mut self.upvalues);
@@ -3000,6 +3007,9 @@ impl<'gc> Compiler<'gc> {
                 // Register function name for .name property
                 self.chunk.fn_names.insert(func_ip, name.clone());
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
+                self.chunk
+                    .fn_simple_parameter_list
+                    .insert(func_ip, Self::has_simple_parameter_list(params));
 
                 self.emit_fn_decl_binding(name);
             }
@@ -5500,6 +5510,9 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
                 }
                 self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
+                self.chunk
+                    .fn_simple_parameter_list
+                    .insert(func_ip, Self::has_simple_parameter_list(params));
 
                 // Collect upvalues before restoring
                 let fn_upvalues = std::mem::take(&mut self.upvalues);
@@ -8769,6 +8782,9 @@ impl<'gc> Compiler<'gc> {
             self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
         }
         self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
+        self.chunk
+            .fn_simple_parameter_list
+            .insert(func_ip, Self::has_simple_parameter_list(params));
         if let Some(name) = function_name
             && !name.is_empty()
         {
@@ -9175,6 +9191,9 @@ impl<'gc> Compiler<'gc> {
             self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
         }
         self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
+        self.chunk
+            .fn_simple_parameter_list
+            .insert(func_ip, Self::has_simple_parameter_list(params));
         if let Some(name) = function_name
             && !name.is_empty()
         {
@@ -9343,6 +9362,9 @@ impl<'gc> Compiler<'gc> {
             self.chunk.fn_const_local_names.insert(func_ip, self.const_locals.clone());
         }
         self.chunk.fn_lengths.insert(func_ip, Self::expected_argument_count(params));
+        self.chunk
+            .fn_simple_parameter_list
+            .insert(func_ip, Self::has_simple_parameter_list(params));
         if let Some(name) = function_name
             && !name.is_empty()
         {
@@ -10218,6 +10240,7 @@ impl<'gc> Compiler<'gc> {
                     let g_start = self.compile_function_body(Some(&display_name), &empty_params, body, false)?;
                     self.chunk.method_function_ips.insert(g_start);
                     self.chunk.fn_lengths.insert(g_start, 0);
+                    self.chunk.fn_simple_parameter_list.insert(g_start, true);
                     self.record_brand_upvalue_for_fn(g_start);
                     let n16 = crate::unicode::utf8_to_utf16(&global_name);
                     let ni = self.chunk.add_constant(Value::String(n16));
@@ -10750,6 +10773,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.method_function_ips.insert(g_start);
                 self.chunk.fn_names.insert(g_start, format!("get #{}", gname));
                 self.chunk.fn_lengths.insert(g_start, 0);
+                self.chunk.fn_simple_parameter_list.insert(g_start, true);
                 let g_val = Value::VmFunction(g_start, 0);
                 let g_idx = self.chunk.add_constant(g_val);
                 self.chunk.write_opcode(Opcode::Constant);
@@ -10794,6 +10818,9 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.method_function_ips.insert(s_start);
                 self.chunk.fn_names.insert(s_start, format!("set #{}", sname));
                 self.chunk.fn_lengths.insert(s_start, s_arity as usize);
+                self.chunk
+                    .fn_simple_parameter_list
+                    .insert(s_start, Self::has_simple_parameter_list(params));
                 let s_val = Value::VmFunction(s_start, s_arity);
                 let s_idx = self.chunk.add_constant(s_val);
                 self.chunk.write_opcode(Opcode::Constant);
@@ -11129,6 +11156,9 @@ impl<'gc> Compiler<'gc> {
         self.patch_jump(m_jump);
         self.chunk.fn_names.insert(m_start, mname.to_string());
         self.chunk.fn_lengths.insert(m_start, Self::expected_argument_count(params));
+        self.chunk
+            .fn_simple_parameter_list
+            .insert(m_start, Self::has_simple_parameter_list(params));
         self.chunk.method_function_ips.insert(m_start);
 
         // Install: Dup proto, push method, SetProperty/InitProperty, Pop
@@ -11238,6 +11268,7 @@ impl<'gc> Compiler<'gc> {
         // [target, target, closure]
         self.chunk.method_function_ips.insert(g_start);
         self.chunk.fn_lengths.insert(g_start, 0);
+        self.chunk.fn_simple_parameter_list.insert(g_start, true);
         self.record_brand_upvalue_for_fn(g_start);
 
         let getter_key = make_getter_key(gname);

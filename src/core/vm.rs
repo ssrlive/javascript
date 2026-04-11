@@ -181,6 +181,7 @@ const BUILTIN_STRING_RAW: FunctionID = 136;
 const BUILTIN_STRING_CODEPOINTAT: FunctionID = 137;
 const BUILTIN_STRING_NORMALIZE: FunctionID = 138;
 const BUILTIN_STRING_MATCHALL: FunctionID = 139;
+const BUILTIN_STRING_FROMCODEPOINT: FunctionID = 140;
 // ── Number (160–179) ────────────────────────────────────────────────
 const BUILTIN_CTOR_NUMBER: FunctionID = 160;
 const BUILTIN_NUMBER_ISNAN: FunctionID = 161;
@@ -17271,6 +17272,11 @@ impl<'gc> VM<'gc> {
             Self::make_native_fn(ctx, BUILTIN_STRING_FROMCHARCODE, "fromCharCode", 1.0),
         );
         mark_nonenumerable(&mut string_map, "fromCharCode");
+        string_map.insert(
+            "fromCodePoint".to_string(),
+            Self::make_native_fn(ctx, BUILTIN_STRING_FROMCODEPOINT, "fromCodePoint", 1.0),
+        );
+        mark_nonenumerable(&mut string_map, "fromCodePoint");
         string_map.insert("raw".to_string(), Self::make_native_fn(ctx, BUILTIN_STRING_RAW, "raw", 1.0));
         mark_nonenumerable(&mut string_map, "raw");
         let mut string_proto = IndexMap::new();
@@ -17318,7 +17324,10 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "string.iterator", "[Symbol.iterator]", 0.0, false),
         );
         mark_nonenumerable(&mut string_proto, "@@sym:1");
-        string_proto.insert("concat".to_string(), Self::make_host_fn(ctx, "string.concat"));
+        string_proto.insert(
+            "concat".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "string.concat", "concat", 1.0, false),
+        );
         mark_nonenumerable(&mut string_proto, "concat");
         // Annex B: trimLeft/trimRight are aliases for trimStart/trimEnd (same object)
         let trim_start_fn = string_proto.get("trimStart").cloned().unwrap();
@@ -22735,6 +22744,27 @@ impl<'gc> VM<'gc> {
                         None => return Value::Undefined,
                     };
                     result.push(Self::to_uint16(num));
+                }
+                Value::String(result)
+            }
+            BUILTIN_STRING_FROMCODEPOINT => {
+                let mut result: Vec<u16> = Vec::new();
+                for arg in args {
+                    let num = match self.extract_number_with_coercion(ctx, arg) {
+                        Some(num) => num,
+                        None => return Value::Undefined,
+                    };
+                    if !num.is_finite() || num.fract() != 0.0 || !(0.0..=0x10FFFF as f64).contains(&num) {
+                        self.throw_range_error_object(ctx, "Invalid code point");
+                        return Value::Undefined;
+                    }
+                    let cp = num as u32;
+                    if let Some(ch) = char::from_u32(cp) {
+                        result.extend(ch.encode_utf16(&mut [0u16; 2]).iter().copied());
+                    } else {
+                        self.throw_range_error_object(ctx, "Invalid code point");
+                        return Value::Undefined;
+                    }
                 }
                 Value::String(result)
             }

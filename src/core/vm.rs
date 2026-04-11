@@ -18849,6 +18849,36 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn is_regexp_like(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Option<bool> {
+        let is_object_like = matches!(
+            val,
+            Value::VmObject(_)
+                | Value::VmArray(_)
+                | Value::VmMap(_)
+                | Value::VmSet(_)
+                | Value::VmFunction(..)
+                | Value::VmClosure(..)
+                | Value::VmNativeFunction(_)
+        );
+        if !is_object_like {
+            return Some(false);
+        }
+
+        let matcher = self.read_named_property(ctx, val, "@@sym:7");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if !matches!(matcher, Value::Undefined) {
+            return Some(matcher.to_truthy());
+        }
+
+        Some(matches!(
+            val,
+            Value::VmObject(obj)
+                if obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+        ))
+    }
+
     fn map_constructor_consume_iterable(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -29704,11 +29734,13 @@ impl<'gc> VM<'gc> {
                     return Value::String(vec![ch]);
                 }
                 BUILTIN_STRING_INCLUDES => {
-                    // Step 4-6: Throw TypeError if searchString is a RegExp
-                    if let Some(Value::VmObject(obj)) = args.first()
-                        && obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+                    if let Some(search_val) = args.first()
+                        && matches!(self.is_regexp_like(ctx, search_val), Some(true))
                     {
                         self.throw_type_error(ctx, "First argument to String.prototype.includes must not be a regular expression");
+                        return Value::Undefined;
+                    }
+                    if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
                     let needle = match args.first() {
@@ -29732,8 +29764,11 @@ impl<'gc> VM<'gc> {
                     } else {
                         0
                     };
+                    if needle_u16.is_empty() {
+                        return Value::Boolean(true);
+                    }
                     let found = s[pos..].windows(needle_u16.len()).any(|w| w == needle_u16.as_slice());
-                    return Value::Boolean(found || needle_u16.is_empty());
+                    return Value::Boolean(found);
                 }
                 BUILTIN_STRING_REPLACE => {
                     if let Some(Value::VmObject(re_obj)) = args.first() {
@@ -29931,14 +29966,16 @@ impl<'gc> VM<'gc> {
                     return Value::Number(-1.0);
                 }
                 BUILTIN_STRING_STARTSWITH => {
-                    // Step 4-6: Throw TypeError if searchString is a RegExp
-                    if let Some(Value::VmObject(obj)) = args.first()
-                        && obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+                    if let Some(search_val) = args.first()
+                        && matches!(self.is_regexp_like(ctx, search_val), Some(true))
                     {
                         self.throw_type_error(
                             ctx,
                             "First argument to String.prototype.startsWith must not be a regular expression",
                         );
+                        return Value::Undefined;
+                    }
+                    if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
                     let prefix = match args.first() {
@@ -29965,11 +30002,13 @@ impl<'gc> VM<'gc> {
                     return Value::Boolean(s[pos..].starts_with(prefix.as_slice()));
                 }
                 BUILTIN_STRING_ENDSWITH => {
-                    // Step 4-6: Throw TypeError if searchString is a RegExp
-                    if let Some(Value::VmObject(obj)) = args.first()
-                        && obj.borrow().get("__type__").map(value_to_string) == Some("RegExp".to_string())
+                    if let Some(search_val) = args.first()
+                        && matches!(self.is_regexp_like(ctx, search_val), Some(true))
                     {
                         self.throw_type_error(ctx, "First argument to String.prototype.endsWith must not be a regular expression");
+                        return Value::Undefined;
+                    }
+                    if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
                     let suffix = match args.first() {

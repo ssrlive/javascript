@@ -52,6 +52,8 @@ pub use vm::*;
 pub mod compiler;
 pub use compiler::*;
 
+pub(crate) mod function_id;
+
 pub type JsArenaVm = gc_arena::Arena<gc_arena::Rootable!['gc => VM<'gc>]>;
 
 fn extract_injected_module_filepath(script: &str) -> Option<String> {

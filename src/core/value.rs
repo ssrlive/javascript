@@ -1,5 +1,6 @@
+use crate::core::function_id::*;
 use crate::core::{Collect, GcTrace};
-use crate::core::{FunctionID, PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
+use crate::core::{PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
 use num_bigint::BigInt;

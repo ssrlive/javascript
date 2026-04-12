@@ -1,10 +1,11 @@
+use crate::core::function_id::*;
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{make_getter_key, make_setter_key};
 use crate::core::statement::{
     BinaryOp, CatchParamPattern, ClassMember, DestructuringElement, Expr, ImportSpecifier, ObjectDestructuringElement, Statement,
     StatementKind,
 };
-use crate::core::{BUILTIN_NEW_FUNCTION, JSError, Value};
+use crate::core::{JSError, Value};
 use crate::raise_syntax_error;
 
 pub(crate) const INTERNAL_FOROF_HELPER: &str = "__forOfValues internal";

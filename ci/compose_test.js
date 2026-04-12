@@ -372,9 +372,8 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
   const tmpName = composed.tmpPath;
   try { fs.unlinkSync(tmpName); } catch (_) {}
   const outLines = [];
-  if (needStrict) {
-    outLines.push('"use strict";');
-    outLines.push('');
+    if (needStrict && !skipInjects) {
+      outLines.push('"use strict";');
   }
 
   // Write unique prepends
@@ -490,10 +489,12 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
     }
   // append test source
   const absTest = path.resolve(testPath);
-  outLines.push(`// Inject: ${absTest}`);
-  outLines.push(fs.readFileSync(testPath, 'utf8'));
+    if (!skipInjects) {
+      outLines.push(`// Inject: ${absTest}`);
+    }
+    outLines.push(fs.readFileSync(testPath, 'utf8'));
 
-  fs.writeFileSync(tmpName, outLines.join('\n'));
+    fs.writeFileSync(tmpName, outLines.join('\n'));
 
   return {testToRun: tmpName, tmpPath: tmpName, cleanupTmp: true};
 }

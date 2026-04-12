@@ -313,4 +313,4 @@ try {
 
 console.log('=== Running async_n_throw_async_tests_regression.js ===');
 
-return true;
+true;

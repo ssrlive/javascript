@@ -99,4 +99,4 @@ function assert(mustBeTrue, message) {
     assert(numInstance.constructor === Number, 'numInstance.constructor should be Number');
 }
 
-return true;
+true;

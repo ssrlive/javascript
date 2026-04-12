@@ -126,4 +126,4 @@ try {
     testcase();
 }
 
-return true;
+true;

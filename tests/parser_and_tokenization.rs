@@ -380,3 +380,57 @@ fn bigint_in_object_and_class_and_destructuring() {
     let pattern = parse_object_destructuring_pattern(&token_data, &mut idx).expect("should parse bigint key in destructuring");
     assert_eq!(pattern.len(), 1);
 }
+
+#[test]
+fn parse_rejects_class_fields_without_separator() {
+    for script in [
+        "class C { x y() {} }",
+        "class C { x = 1 y() {} }",
+        "class C { static x static y() {} }",
+    ] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for missing class field separator: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_invalid_class_field_names() {
+    for script in [
+        "class C { constructor; }",
+        "class C { static constructor; }",
+        "class C { static prototype; }",
+    ] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for invalid class field name: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_class_field_arguments_and_async_private_method_await() {
+    for script in [
+        "class C { x = arguments; }",
+        "class C extends B { x = super(); }",
+        "class C { async #m() { var await; } }",
+    ] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for class early error: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}

@@ -1308,7 +1308,25 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 }
 
                 if radix != 10 {
+                    // First char after prefix must be a digit, not underscore
+                    if i < chars.len() && chars[i] == '_' {
+                        return Err(raise_tokenize_error!(
+                            "Numeric separator cannot appear right after radix prefix",
+                            line,
+                            column
+                        ));
+                    }
                     while i < chars.len() && (chars[i].is_digit(radix) || chars[i] == '_') {
+                        if chars[i] == '_' {
+                            // No consecutive underscores
+                            if i + 1 < chars.len() && chars[i + 1] == '_' {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column + 1));
+                            }
+                            // Underscore must be followed by a valid digit
+                            if i + 1 >= chars.len() || !chars[i + 1].is_digit(radix) {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column));
+                            }
+                        }
                         i += 1;
                         column += 1;
                     }
@@ -1355,8 +1373,21 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     return Err(raise_tokenize_error!("Octal literals are not allowed in strict mode", line, column));
                 }
 
+                // Also reject 0_ (numeric separator immediately after leading zero in decimal)
+                if chars[start] == '0' && start + 1 < chars.len() && chars[start + 1] == '_' {
+                    return Err(raise_tokenize_error!("Numeric separator cannot follow leading zero", line, column));
+                }
+
                 // integer part (allow underscores as numeric separators)
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
+                    if chars[i] == '_' {
+                        if i + 1 < chars.len() && chars[i + 1] == '_' {
+                            return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column + 1));
+                        }
+                        if i + 1 >= chars.len() || !chars[i + 1].is_ascii_digit() {
+                            return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column));
+                        }
+                    }
                     i += 1;
                     column += 1;
                 }
@@ -1383,7 +1414,19 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 if i < chars.len() && chars[i] == '.' {
                     i += 1;
                     column += 1;
+                    // First char after '.' must be a digit, not underscore
+                    if i < chars.len() && chars[i] == '_' {
+                        return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column));
+                    }
                     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
+                        if chars[i] == '_' {
+                            if i + 1 < chars.len() && chars[i + 1] == '_' {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column + 1));
+                            }
+                            if i + 1 >= chars.len() || !chars[i + 1].is_ascii_digit() {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column));
+                            }
+                        }
                         i += 1;
                         column += 1;
                     }
@@ -1403,6 +1446,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         return Err(raise_tokenize_error!("Invalid exponent in number literal", line, column));
                     }
                     while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
+                        if chars[j] == '_' {
+                            if j + 1 < chars.len() && chars[j + 1] == '_' {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, col_j + 1));
+                            }
+                            if j + 1 >= chars.len() || !chars[j + 1].is_ascii_digit() {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, col_j));
+                            }
+                        }
                         j += 1;
                         col_j += 1;
                     }
@@ -1590,9 +1641,11 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 }
 
                 let mut ident = String::new();
+                let mut ident_has_escape = false;
                 // Consume characters and escape sequences that are valid in identifier
                 while i < chars.len() {
                     if chars[i] == '\\' {
+                        ident_has_escape = true;
                         // Expect unicode escape \uXXXX or \u{...}
                         if i + 1 < chars.len() && chars[i + 1] == 'u' {
                             i += 2; // skip '\u'
@@ -1613,7 +1666,32 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 i += 1; // skip '}'
                                 column += 1;
                                 match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
-                                    Some(ch) => ident.push(ch),
+                                    Some(ch) => {
+                                        // Validate decoded char is valid in identifier
+                                        if ident.is_empty() {
+                                            if !(is_id_start(ch) || other_id_start_contains(ch) || ch == '_' || ch == '$') {
+                                                return Err(raise_tokenize_error!(
+                                                    "Invalid character from unicode escape in identifier",
+                                                    line,
+                                                    column
+                                                ));
+                                            }
+                                        } else if !(is_id_continue(ch)
+                                            || other_id_continue_contains(ch)
+                                            || other_id_start_contains(ch)
+                                            || ch == '_'
+                                            || ch == '$'
+                                            || ch == '\u{200C}'
+                                            || ch == '\u{200D}')
+                                        {
+                                            return Err(raise_tokenize_error!(
+                                                "Invalid character from unicode escape in identifier",
+                                                line,
+                                                column
+                                            ));
+                                        }
+                                        ident.push(ch);
+                                    }
                                     None => return Err(raise_tokenize_error!("Invalid unicode codepoint in identifier", line, column)),
                                 }
                                 continue;
@@ -1629,7 +1707,32 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 i += 4;
                                 column += 4;
                                 match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
-                                    Some(ch) => ident.push(ch),
+                                    Some(ch) => {
+                                        // Validate decoded char is valid in identifier
+                                        if ident.is_empty() {
+                                            if !(is_id_start(ch) || other_id_start_contains(ch) || ch == '_' || ch == '$') {
+                                                return Err(raise_tokenize_error!(
+                                                    "Invalid character from unicode escape in identifier",
+                                                    line,
+                                                    column
+                                                ));
+                                            }
+                                        } else if !(is_id_continue(ch)
+                                            || other_id_continue_contains(ch)
+                                            || other_id_start_contains(ch)
+                                            || ch == '_'
+                                            || ch == '$'
+                                            || ch == '\u{200C}'
+                                            || ch == '\u{200D}')
+                                        {
+                                            return Err(raise_tokenize_error!(
+                                                "Invalid character from unicode escape in identifier",
+                                                line,
+                                                column
+                                            ));
+                                        }
+                                        ident.push(ch);
+                                    }
                                     None => return Err(raise_tokenize_error!("Invalid unicode codepoint in identifier", line, column)),
                                 }
                                 continue;
@@ -1663,6 +1766,34 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
 
                 let token = if let Some(stripped) = ident.strip_prefix('#') {
                     Token::PrivateIdentifier(stripped.to_string())
+                } else if ident_has_escape {
+                    // ES2024 §13.1: identifiers formed via Unicode escapes must
+                    // NOT be treated as keyword tokens.
+                    // True reserved words with escapes are always a SyntaxError.
+                    // Contextual keywords (yield, await, static, etc.) become
+                    // plain Identifier tokens so the parser can decide based on context.
+                    match ident.as_str() {
+                        // Always-reserved words → SyntaxError when escaped
+                        "break" | "case" | "catch" | "continue" | "debugger" | "default" | "delete" | "do" | "else" | "finally" | "for"
+                        | "function" | "if" | "in" | "instanceof" | "new" | "return" | "switch" | "this" | "throw" | "try" | "typeof"
+                        | "var" | "void" | "while" | "with" | "class" | "const" | "enum" | "export" | "extends" | "import" | "super" => {
+                            return Err(raise_tokenize_error!(
+                                &format!("keyword '{}' must not contain escaped characters", ident),
+                                line,
+                                column
+                            ));
+                        }
+                        // Strict-mode reserved words → SyntaxError when escaped (engine is always strict)
+                        "let" | "implements" | "interface" | "package" | "private" | "protected" | "public" => {
+                            return Err(raise_tokenize_error!(
+                                &format!("keyword '{}' must not contain escaped characters", ident),
+                                line,
+                                column
+                            ));
+                        }
+                        // Contextual keywords → Identifier (parser decides)
+                        _ => Token::Identifier(ident),
+                    }
                 } else {
                     match ident.as_str() {
                         "let" => Token::Let,
@@ -1995,6 +2126,15 @@ fn parse_string_literal(
                     current_col += 1;
                 }
                 '0' => {
+                    // \0 not followed by a digit is the null character.
+                    // \0 followed by a digit is a legacy octal/decimal escape → strict error.
+                    if *start + 1 < chars.len() && chars[*start + 1].is_ascii_digit() {
+                        return Err(raise_tokenize_error!(
+                            "Octal escape sequences are not allowed in strict mode",
+                            current_line,
+                            current_col
+                        ));
+                    }
                     result.push(0x00);
                     current_col += 1;
                 }
@@ -2123,6 +2263,15 @@ fn parse_string_literal(
                         }
                     }
                     current_col += 1;
+                }
+                '1'..='9' => {
+                    // Legacy octal (\1-\7) and non-octal decimal (\8, \9)
+                    // escape sequences are forbidden in strict mode.
+                    return Err(raise_tokenize_error!(
+                        "Octal escape sequences are not allowed in strict mode",
+                        current_line,
+                        current_col
+                    ));
                 }
                 other => {
                     // Unknown escape sequence: ignore backslash, keep character

@@ -694,7 +694,7 @@ mod function_tests {
                 };
             }
             myFunc(car);
-            return car.make;
+            car.make;
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"Toyota\"");
@@ -716,7 +716,7 @@ mod function_tests {
                 return add();
             }
 
-            return getScore(); // "Chamakh scored 5"
+            getScore(); // "Chamakh scored 5"
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"Chamakh scored 5\"");

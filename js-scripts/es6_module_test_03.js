@@ -15,4 +15,4 @@ let e_ok = Math.abs(E - 2.71828) < 0.0001;
 let add_ok = add(3, 4) === 7;
 let multiply_ok = multiply(3, 4) === 12;
 
-return pi_ok && e_ok && add_ok && multiply_ok;
+pi_ok && e_ok && add_ok && multiply_ok;

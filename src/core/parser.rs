@@ -15,6 +15,28 @@ use std::{
     collections::HashSet,
     rc::Rc,
 };
+fn is_lexical_declaration(stmt: &Statement) -> bool {
+    matches!(
+        &*stmt.kind,
+        StatementKind::Let(..)
+            | StatementKind::Const(..)
+            | StatementKind::LetDestructuringArray(..)
+            | StatementKind::LetDestructuringObject(..)
+            | StatementKind::ConstDestructuringArray(..)
+            | StatementKind::ConstDestructuringObject(..)
+            | StatementKind::Class(..)
+    )
+}
+fn reject_lexical_in_single_statement(stmt: &Statement, context: &str) -> Result<(), JSError> {
+    if is_lexical_declaration(stmt) {
+        return Err(raise_parse_error!(
+            &format!("Lexical declaration (let/const/class) not allowed in {} body", context),
+            stmt.line,
+            stmt.column
+        ));
+    }
+    Ok(())
+}
 pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
     let mut statements = Vec::new();
     while *index < t.len() && t[*index].token != Token::EOF && t[*index].token != Token::RBrace {
@@ -126,6 +148,15 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             {
                 *index += 2;
                 let stmt = parse_statement_item(t, index)?;
+                // Labeled statements: only FunctionDeclaration is allowed as
+                // a labeled item, not lexical (let/const/class) declarations
+                if is_lexical_declaration(&stmt) {
+                    return Err(raise_parse_error!(
+                        "Lexical declaration (let/const/class) not allowed as labeled statement",
+                        stmt.line,
+                        stmt.column
+                    ));
+                }
                 return Ok(Statement {
                     kind: Box::new(StatementKind::Label(label_name, Box::new(stmt))),
                     line,
@@ -150,6 +181,46 @@ thread_local! {
     static STRICT_BINDING_CHECKS : Cell < bool > = const { Cell::new(true) };
     static FORBID_AWAIT_IDENTIFIER: RefCell<usize> = const { RefCell::new(0) };
     static PARSE_SOURCE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static FUNCTION_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    static FORBID_IN: RefCell<usize> = const { RefCell::new(0) };
+    static GENERATOR_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    static GENERATOR_CONTEXT_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+fn forbid_in() -> bool {
+    FORBID_IN.with(|c| *c.borrow() > 0)
+}
+fn with_forbidden_in<T, F: FnOnce() -> T>(f: F) -> T {
+    FORBID_IN.with(|c| *c.borrow_mut() += 1);
+    let out = f();
+    FORBID_IN.with(|c| *c.borrow_mut() -= 1);
+    out
+}
+fn in_generator_context() -> bool {
+    GENERATOR_CONTEXT.with(|c| *c.borrow() > 0)
+}
+fn push_generator_context() {
+    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+fn pop_generator_context() {
+    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+fn in_function_context() -> bool {
+    FUNCTION_CONTEXT.with(|c| *c.borrow() > 0)
+}
+/// Every function boundary saves+clears generator context automatically.
+fn push_function_context() {
+    FUNCTION_CONTEXT.with(|c| *c.borrow_mut() += 1);
+    let saved = GENERATOR_CONTEXT.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved));
+}
+fn pop_function_context() {
+    FUNCTION_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+    let saved = GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
+    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
 }
 pub(crate) fn in_await_context() -> bool {
     AWAIT_CONTEXT.with(|c| *c.borrow() > 0)
@@ -172,6 +243,18 @@ fn with_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
     FORBID_AWAIT_IDENTIFIER.with(|c| *c.borrow_mut() += 1);
     let out = f();
     FORBID_AWAIT_IDENTIFIER.with(|c| *c.borrow_mut() -= 1);
+    out
+}
+/// Clear FORBID_AWAIT_IDENTIFIER when crossing a function boundary
+/// (function expressions, method bodies) so that `await` is valid as identifier inside.
+fn with_cleared_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
+    let saved = FORBID_AWAIT_IDENTIFIER.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    let out = f();
+    FORBID_AWAIT_IDENTIFIER.with(|c| *c.borrow_mut() = saved);
     out
 }
 /// Temporarily disable strict-mode binding checks (for indirect eval / Function ctor).
@@ -257,6 +340,9 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
                 n
             }
             Token::Await => {
+                if forbid_await_identifier() && !in_await_context() {
+                    return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
+                }
                 *index += 1;
                 "await".to_string()
             }
@@ -283,6 +369,101 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
         column: t[start].column,
     })
 }
+/// Collect names from var declarations inside a statement list (non-recursive into functions/classes).
+fn collect_var_declared_names(stmts: &[Statement], out: &mut Vec<String>) {
+    for s in stmts {
+        match &*s.kind {
+            StatementKind::Var(decls) => {
+                for (name, _) in decls {
+                    out.push(name.clone());
+                }
+            }
+            StatementKind::Block(inner) => collect_var_declared_names(inner, out),
+            StatementKind::If(if_stmt) => {
+                collect_var_declared_names(&if_stmt.then_body, out);
+                if let Some(ref else_body) = if_stmt.else_body {
+                    collect_var_declared_names(else_body, out);
+                }
+            }
+            StatementKind::For(f) => {
+                collect_var_declared_names(&f.body, out);
+            }
+            StatementKind::ForIn(_, _, _, body)
+            | StatementKind::ForOf(_, _, _, body)
+            | StatementKind::ForAwaitOf(_, _, _, body)
+            | StatementKind::ForInExpr(_, _, body)
+            | StatementKind::ForOfExpr(_, _, body)
+            | StatementKind::ForAwaitOfExpr(_, _, body)
+            | StatementKind::ForInDestructuringObject(_, _, _, body)
+            | StatementKind::ForInDestructuringArray(_, _, _, body)
+            | StatementKind::ForOfDestructuringObject(_, _, _, body)
+            | StatementKind::ForOfDestructuringArray(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+            | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body) => {
+                collect_var_declared_names(body, out);
+            }
+            StatementKind::While(_, body) => {
+                collect_var_declared_names(body, out);
+            }
+            StatementKind::DoWhile(body, _) => {
+                collect_var_declared_names(body, out);
+            }
+            StatementKind::Switch(sw) => {
+                for case in &sw.cases {
+                    match case {
+                        crate::core::SwitchCase::Case(_, body) | crate::core::SwitchCase::Default(body) => {
+                            collect_var_declared_names(body, out);
+                        }
+                    }
+                }
+            }
+            StatementKind::TryCatch(tc) => {
+                collect_var_declared_names(&tc.try_body, out);
+                if let Some(ref cb) = tc.catch_body {
+                    collect_var_declared_names(cb, out);
+                }
+                if let Some(ref fb) = tc.finally_body {
+                    collect_var_declared_names(fb, out);
+                }
+            }
+            StatementKind::Label(_, inner) => {
+                collect_var_declared_names(std::slice::from_ref(inner.as_ref()), out);
+            }
+            StatementKind::With(_, body) => {
+                collect_var_declared_names(body, out);
+            }
+            // Function/class declarations do NOT contribute var names to the enclosing scope
+            _ => {}
+        }
+    }
+}
+
+/// Check if for-head lexical bindings conflict with var declarations in the body.
+fn check_for_head_body_var_conflict(init: &Option<Box<Statement>>, body: &[Statement], line: usize, col: usize) -> Result<(), JSError> {
+    if let Some(init_stmt) = init {
+        let head_names: Vec<String> = match &*init_stmt.kind {
+            StatementKind::Let(decls) => decls.iter().map(|(name, _)| name.clone()).collect(),
+            StatementKind::Const(decls) => decls.iter().map(|(name, _)| name.clone()).collect(),
+            _ => return Ok(()),
+        };
+        if head_names.is_empty() {
+            return Ok(());
+        }
+        let mut var_names = Vec::new();
+        collect_var_declared_names(body, &mut var_names);
+        for vn in &var_names {
+            if head_names.contains(vn) {
+                return Err(raise_parse_error!(
+                    format!("SyntaxError: Identifier '{}' has already been declared", vn),
+                    line,
+                    col
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     let line = t[start].line;
@@ -368,6 +549,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         *index += 1;
                     }
                     let body = parse_statement_item(t, index)?;
+                    reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
                     let kind = if is_for_await {
                         StatementKind::ForAwaitOf(Some(crate::core::VarDeclKind::AwaitUsing), first_name, iterable, body_stmts)
@@ -444,6 +626,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     *index += 1;
                 }
                 let body = parse_statement_item(t, index)?;
+                reject_lexical_in_single_statement(&body, "for")?;
                 let body_stmts = vec![body];
                 let init_stmt = Some(Box::new(Statement {
                     kind: Box::new(if is_for_await {
@@ -461,6 +644,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         column,
                     })
                 });
+                check_for_head_body_var_conflict(&init_stmt, &body_stmts, line, column)?;
                 return Ok(Statement {
                     kind: Box::new(StatementKind::For(Box::new(ForStatement {
                         init: init_stmt,
@@ -525,7 +709,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             let pattern = parse_object_assignment_pattern(t, index)?;
             init_expr = Some(Expr::Object(pattern));
         } else {
-            init_expr = Some(parse_expression(t, index)?);
+            init_expr = Some(with_forbidden_in(|| parse_expression(t, index))?);
         }
     }
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -542,6 +726,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             *index += 1;
         }
         let body = parse_statement_item(t, index)?;
+        reject_lexical_in_single_statement(&body, "for")?;
         // Keep Block as-is so its block-scope (alias mechanism at scope_depth 0)
         // is preserved — unwrapping loses let/const scoping in the for body.
         let body_stmts = vec![body];
@@ -596,6 +781,21 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             if let Some(decls) = init_decls {
                 if decls.len() != 1 {
                     return Err(raise_parse_error!("Invalid for-of statement", line, column));
+                }
+                // for-of/for-await-of with let/const must not have initializer;
+                // for-await-of with var must not have initializer either.
+                if decls[0].1.is_some() {
+                    let has_let_const = matches!(
+                        decl_kind_mapped,
+                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const)
+                    );
+                    if has_let_const || is_for_await {
+                        return Err(raise_parse_error!(
+                            "SyntaxError: for-of/for-await-of loop variable declaration may not have an initializer",
+                            line,
+                            column
+                        ));
+                    }
                 }
                 let var_name = decls[0].0.clone();
                 if is_for_await {
@@ -663,6 +863,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 Expr::Var(name, _, _) => {
                     *index += 1;
                     let body = parse_statement_item(t, index)?;
+                    reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForIn(None, name, right_expr, body_stmts)),
@@ -673,6 +874,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 Expr::Property(_, _) | Expr::Index(_, _) | Expr::PrivateMember(_, _) => {
                     *index += 1;
                     let body = parse_statement_item(t, index)?;
+                    reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForInExpr(*left, right_expr, body_stmts)),
@@ -694,6 +896,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             *index += 1;
         }
         let body = parse_statement_item(t, index)?;
+        reject_lexical_in_single_statement(&body, "for")?;
         let body_stmts = vec![body];
         if let Some(pattern) = for_of_pattern {
             if for_pattern_init.is_some() {
@@ -975,6 +1178,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             column,
         })
     });
+    check_for_head_body_var_conflict(&init_stmt, &body_stmts, line, column)?;
     Ok(Statement {
         kind: Box::new(StatementKind::For(Box::new(ForStatement {
             init: init_stmt,
@@ -1011,8 +1215,14 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         *index += 1;
     }
     let name = if let Token::Identifier(name) = &t[*index].token {
+        if name == "await" && forbid_await_identifier() && !in_await_context() {
+            return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
+        }
         name.clone()
     } else if matches!(t[*index].token, Token::Await) {
+        if forbid_await_identifier() && !in_await_context() {
+            return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
+        }
         "await".to_string()
     } else {
         return Err(raise_parse_error_at!(t.get(*index)));
@@ -1025,7 +1235,22 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         return Err(raise_parse_error_at!(t.get(*index)));
     }
     *index += 1;
-    let params = parse_parameters(t, index)?;
+    let params = if is_generator {
+        push_generator_context();
+        let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
+        pop_generator_context();
+        p
+    } else {
+        // Non-generator function params must not see enclosing generator context
+        let saved = GENERATOR_CONTEXT.with(|c| {
+            let old = *c.borrow();
+            *c.borrow_mut() = 0;
+            old
+        });
+        let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
+        GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
+        p
+    };
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
@@ -1035,11 +1260,28 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     *index += 1;
     let body = if is_async {
         push_await_context();
-        let b = parse_statement_block(t, index)?;
+        push_function_context();
+        if is_generator {
+            push_generator_context();
+        }
+        let b = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
+        if is_generator {
+            pop_generator_context();
+        }
+        pop_function_context();
         pop_await_context();
         b
     } else {
-        with_cleared_await_context(|| parse_statement_block(t, index))?
+        push_function_context();
+        if is_generator {
+            push_generator_context();
+        }
+        let b = with_cleared_forbidden_await_identifier(|| with_cleared_await_context(|| parse_statement_block(t, index)))?;
+        if is_generator {
+            pop_generator_context();
+        }
+        pop_function_context();
+        b
     };
     Ok(Statement {
         kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async)),
@@ -1066,6 +1308,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
         *index += 1;
     }
     let then_stmt = parse_statement_item(t, index)?;
+    reject_lexical_in_single_statement(&then_stmt, "if")?;
     let then_block = vec![then_stmt];
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
@@ -1076,6 +1319,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
             *index += 1;
         }
         let else_stmt = parse_statement_item(t, index)?;
+        reject_lexical_in_single_statement(&else_stmt, "else")?;
         Some(vec![else_stmt])
     } else {
         None
@@ -1092,6 +1336,9 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
 }
 fn parse_return_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
+    if !in_function_context() {
+        return Err(raise_parse_error!("Illegal return statement", t[start].line, t[start].column));
+    }
     *index += 1;
     let expr = if *index < t.len() && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace) {
         Some(parse_expression(t, index)?)
@@ -1129,7 +1376,9 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         *index += 1;
         vec![]
     } else {
-        vec![parse_statement_item(t, index)?]
+        let s = parse_statement_item(t, index)?;
+        reject_lexical_in_single_statement(&s, "while")?;
+        vec![s]
     };
     Ok(Statement {
         kind: Box::new(StatementKind::While(condition, body_stmts)),
@@ -1151,6 +1400,7 @@ fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
     } else {
         log::trace!("parse_do_while: parsing body statement at index {}", *index);
         let body = parse_statement_item(t, index)?;
+        reject_lexical_in_single_statement(&body, "do-while")?;
         log::trace!(
             "parse_do_while: after parsing body index {}, next token={:?}",
             *index,
@@ -1740,6 +1990,14 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                     return Err(raise_parse_error!("Expected 'as' after 'import defer *'"));
                 }
             }
+        } else if matches!(&t[*index].token, Token::Identifier(s) if s == "defer")
+            && *index + 1 < t.len()
+            && matches!(t[*index + 1].token, Token::LBrace)
+        {
+            // `import defer { ... }` is not valid - defer only works with `* as name`
+            return Err(raise_parse_error!(
+                "SyntaxError: 'import defer' must use namespace form 'import defer * as name'"
+            ));
         } else if let Some(name) = t[*index].token.as_identifier_string() {
             specifiers.push(ImportSpecifier::Default(name));
             *index += 1;
@@ -2653,7 +2911,7 @@ pub fn parse_conditional(tokens: &[TokenData], index: &mut usize) -> Result<Expr
     }
     if matches!(tokens[look].token, Token::QuestionMark) {
         *index = look + 1;
-        let true_expr = parse_conditional(tokens, index)?;
+        let true_expr = parse_assignment(tokens, index)?;
         while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
             *index += 1;
         }
@@ -2661,7 +2919,7 @@ pub fn parse_conditional(tokens: &[TokenData], index: &mut usize) -> Result<Expr
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
         *index += 1;
-        let false_expr = parse_conditional(tokens, index)?;
+        let false_expr = parse_assignment(tokens, index)?;
         Ok(Expr::Conditional(Box::new(condition), Box::new(true_expr), Box::new(false_expr)))
     } else {
         Ok(condition)
@@ -3056,6 +3314,46 @@ fn find_pattern_end(tokens: &[TokenData], start: usize) -> Option<usize> {
 
 pub fn parse_assignment(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     log::trace!("parse_assignment: entry index={} token={:?}", *index, tokens.get(*index));
+    // YieldExpression is at the AssignmentExpression level (not primary)
+    if *index < tokens.len() && matches!(tokens[*index].token, Token::Yield | Token::YieldStar) {
+        if !in_generator_context() {
+            // In strict mode, yield is always reserved and cannot be an identifier
+            return Err(raise_parse_error_with_token!(tokens[*index], "Unexpected yield"));
+        }
+        let is_star = matches!(tokens[*index].token, Token::YieldStar);
+        *index += 1;
+        if is_star {
+            let inner = parse_assignment(tokens, index)?;
+            return Ok(Expr::YieldStar(Box::new(inner)));
+        }
+        // yield * (separate Multiply token)
+        if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+            *index += 1;
+            let inner = parse_assignment(tokens, index)?;
+            return Ok(Expr::YieldStar(Box::new(inner)));
+        }
+        // yield [no LineTerminator] AssignmentExpression
+        if *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            let mut look = *index;
+            while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
+                look += 1;
+            }
+            if look < tokens.len() && matches!(tokens[look].token, Token::Multiply) {
+                return Err(raise_parse_error_with_token!(tokens[look], "Unexpected * after line terminator"));
+            }
+            return Ok(Expr::Yield(None));
+        }
+        if *index >= tokens.len()
+            || matches!(
+                tokens[*index].token,
+                Token::Semicolon | Token::Comma | Token::RParen | Token::RBracket | Token::RBrace | Token::Colon
+            )
+        {
+            return Ok(Expr::Yield(None));
+        }
+        let inner = parse_assignment(tokens, index)?;
+        return Ok(Expr::Yield(Some(Box::new(inner))));
+    }
     if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace | Token::LBracket) {
         let mut idx = *index;
         let pattern_expr_res = if matches!(tokens[idx].token, Token::LBracket) {
@@ -3131,7 +3429,7 @@ fn parse_relational(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSE
         Token::LessEqual => Some(BinaryOp::LessEqual),
         Token::GreaterEqual => Some(BinaryOp::GreaterEqual),
         Token::InstanceOf => Some(BinaryOp::InstanceOf),
-        Token::In => Some(BinaryOp::In),
+        Token::In if !forbid_in() => Some(BinaryOp::In),
         _ => None,
     })
 }
@@ -3234,6 +3532,21 @@ fn parse_exponentiation(tokens: &[TokenData], index: &mut usize) -> Result<Expr,
         return Ok(left);
     }
     if matches!(tokens[*index].token, Token::Exponent) {
+        // Unary operators cannot be the base of exponentiation (spec: UpdateExpression ** ExponentiationExpression)
+        match &left {
+            Expr::Delete(_)
+            | Expr::Void(_)
+            | Expr::TypeOf(_)
+            | Expr::UnaryPlus(_)
+            | Expr::UnaryNeg(_)
+            | Expr::BitNot(_)
+            | Expr::LogicalNot(_) => {
+                return Err(crate::raise_syntax_error!(
+                    "Unary operator used immediately before exponentiation expression. Parenthesis must be used to disambiguate operator precedence"
+                ));
+            }
+            _ => {}
+        }
         *index += 1;
         let right = parse_exponentiation(tokens, index)?;
         Ok(Expr::Binary(Box::new(left), BinaryOp::Pow, Box::new(right)))
@@ -3555,12 +3868,14 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
             *index += 1;
-            let params = parse_parameters(t, index)?;
+            let params = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
             *index += 1;
-            let body = parse_statement_block(t, index)?;
+            push_function_context();
+            let body = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
+            pop_function_context();
             if is_getter {
                 if let Some(prop_expr) = prop_expr_opt {
                     if is_static {
@@ -3671,23 +3986,48 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             && matches!(t.get(*index).map(|d| &d.token), Some(Token::LParen))
         {
             *index += 1;
-            let params = parse_parameters(t, index)?;
+            let params = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
             *index += 1;
-            let body = parse_statement_block(t, index)?;
+            push_function_context();
+            let body = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
+            pop_function_context();
             members.push(ClassMember::Constructor(params, body));
             continue;
         }
         if *index < t.len() && matches!(t[*index].token, Token::LParen) {
             *index += 1;
-            let params = parse_parameters(t, index)?;
+            let params = if is_generator {
+                push_generator_context();
+                let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
+                pop_generator_context();
+                p
+            } else {
+                let saved = GENERATOR_CONTEXT.with(|c| {
+                    let old = *c.borrow();
+                    *c.borrow_mut() = 0;
+                    old
+                });
+                let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
+                GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
+                p
+            };
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
             *index += 1;
-            let body = parse_statement_block(t, index)?;
+            push_function_context();
+            let body = if is_generator {
+                push_generator_context();
+                let b = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
+                pop_generator_context();
+                b
+            } else {
+                with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?
+            };
+            pop_function_context();
             if is_generator {
                 if let Some(expr) = computed_key_expr {
                     if is_static {
@@ -3766,8 +4106,12 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         } else if *index < t.len() && matches!(t[*index].token, Token::Assign) {
             *index += 1;
             let value = parse_expression(t, index)?;
-            if *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
-                *index += 1;
+            if *index < t.len() {
+                match t[*index].token {
+                    Token::Semicolon | Token::LineTerminator => *index += 1,
+                    Token::RBrace => {}
+                    _ => return Err(raise_parse_error_at!(t.get(*index))),
+                }
             }
             if let Some(expr) = computed_key_expr {
                 if is_static {
@@ -3789,8 +4133,12 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 }
             }
         } else {
-            if *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
-                *index += 1;
+            if *index < t.len() {
+                match t[*index].token {
+                    Token::Semicolon | Token::LineTerminator => *index += 1,
+                    Token::RBrace => {}
+                    _ => return Err(raise_parse_error_at!(t.get(*index))),
+                }
             }
             if let Some(expr) = computed_key_expr {
                 if is_static {
@@ -3915,41 +4263,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
             }
         }
-        Token::Yield => {
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
-                *index += 1;
-                let inner = parse_assignment(tokens, index)?;
-                Expr::YieldStar(Box::new(inner))
-            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
-                let mut look = *index;
-                while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
-                    look += 1;
-                }
-                if look < tokens.len() && matches!(tokens[look].token, Token::Multiply) {
-                    return Err(raise_parse_error_with_token!(tokens[look], "Unexpected * after line terminator"));
-                }
-                Expr::Yield(None)
-            } else if *index >= tokens.len()
-                || matches!(
-                    tokens[*index].token,
-                    Token::Semicolon
-                        | Token::Comma
-                        | Token::RParen
-                        | Token::RBracket
-                        | Token::RBrace
-                        | Token::Colon
-                        | Token::LineTerminator
-                )
-            {
-                Expr::Yield(None)
-            } else {
-                let inner = parse_assignment(tokens, index)?;
-                Expr::Yield(Some(Box::new(inner)))
-            }
-        }
-        Token::YieldStar => {
-            let inner = parse_assignment(tokens, index)?;
-            Expr::YieldStar(Box::new(inner))
+        Token::Yield | Token::YieldStar => {
+            // yield is an AssignmentExpression, not a primary expression.
+            // If we reach here, yield appears in a position where only
+            // primary expressions are valid (e.g., operand of binary +).
+            return Err(raise_parse_error_with_token!(token_data, "Unexpected yield"));
         }
         Token::LogicalNot => {
             let inner = parse_primary(tokens, index, true)?;
@@ -3964,6 +4282,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         n
                     }
                     Token::Await => {
+                        if forbid_await_identifier() && !in_await_context() {
+                            return Err(raise_parse_error_with_token!(
+                                tokens[*index],
+                                "Cannot use 'await' as identifier in static block"
+                            ));
+                        }
                         *index += 1;
                         "await".to_string()
                     }
@@ -4009,6 +4333,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     && let Token::Identifier(id) = &tokens[look].token
                     && id == "target"
                 {
+                    if raw_identifier_source_has_escape(&tokens[look]) {
+                        return Err(raise_parse_error!(
+                            "'target' in new.target must not contain Unicode escape sequences"
+                        ));
+                    }
                     *index = look + 1;
                     true
                 } else {
@@ -4021,6 +4350,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 Expr::NewTarget
             } else {
                 let constructor = parse_primary(tokens, index, false)?;
+                if matches!(constructor, Expr::DynamicImport(..)) {
+                    return Err(raise_parse_error!("Cannot use 'new' with import()"));
+                }
                 let args = if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                     *index += 1;
                     let mut args = Vec::new();
@@ -4181,8 +4513,29 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 }
                 *index += 1;
                 Expr::DynamicImport(Box::new(arg), options_arg)
+            } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Dot) {
+                *index += 1;
+                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                if *index < tokens.len()
+                    && let Token::Identifier(id) = &tokens[*index].token
+                    && id == "meta"
+                {
+                    *index += 1;
+                    Expr::Property(
+                        Box::new(Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column))),
+                        "meta".to_string(),
+                    )
+                } else {
+                    return Err(raise_parse_error!(
+                        "Only 'import.meta' is valid; 'import.' followed by other identifiers is not supported"
+                    ));
+                }
             } else {
-                Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column))
+                return Err(raise_parse_error!(
+                    "'import' keyword cannot be used as an expression; use import() or import.meta"
+                ));
             }
         }
         Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
@@ -4448,8 +4801,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             let next_starts_method_name = peek < tokens.len()
                                 && (matches!(tokens[peek].token, Token::Identifier(_) | Token::LBracket | Token::Multiply)
-                                    || (tokens[peek].token.as_identifier_string().is_some()
-                                        && !matches!(tokens[peek].token, Token::Async)));
+                                    || tokens[peek].token.as_identifier_string().is_some());
                             if next_starts_method_name {
                                 is_async_member = true;
                                 *index += 1;
@@ -4475,7 +4827,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
+                            push_function_context();
+                            if is_generator {
+                                push_generator_context();
+                            }
                             let body = parse_statements(tokens, index)?;
+                            if is_generator {
+                                pop_generator_context();
+                            }
+                            pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -4546,7 +4906,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
                                 *index += 1;
+                                push_function_context();
+                                if is_generator {
+                                    push_generator_context();
+                                }
                                 let body = parse_statements(tokens, index)?;
+                                if is_generator {
+                                    pop_generator_context();
+                                }
+                                pop_function_context();
                                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
@@ -4640,7 +5008,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
                                     }
                                     *index += 1;
+                                    push_function_context();
+                                    if is_generator {
+                                        push_generator_context();
+                                    }
                                     let body = parse_statements(tokens, index)?;
+                                    if is_generator {
+                                        pop_generator_context();
+                                    }
+                                    pop_function_context();
                                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
                                     }
@@ -4754,7 +5130,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
+                            push_function_context();
+                            if is_generator {
+                                push_generator_context();
+                            }
                             let body = parse_statements(tokens, index)?;
+                            if is_generator {
+                                pop_generator_context();
+                            }
+                            pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -4808,7 +5192,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
+                            push_function_context();
                             let body = parse_statements(tokens, index)?;
+                            pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -4837,7 +5223,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
+                            push_function_context();
                             let body = parse_statements(tokens, index)?;
+                            pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -4854,6 +5242,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 false,
                             ));
                         } else {
+                            // Reject * and async prefix without a method body
+                            if is_generator || is_async_member {
+                                return Err(raise_parse_error!("SyntaxError: Expected method definition after '*' or 'async'"));
+                            }
                             if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
                                 *index += 1;
                                 let value = parse_assignment(tokens, index)?;
@@ -5001,12 +5393,35 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     "parse_primary: about to call parse_parameters; tokens (first 8): {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
-                let params = parse_parameters(tokens, index)?;
+                let params = if is_generator {
+                    push_generator_context();
+                    let p = with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?;
+                    pop_generator_context();
+                    p
+                } else {
+                    let saved = GENERATOR_CONTEXT.with(|c| {
+                        let old = *c.borrow();
+                        *c.borrow_mut() = 0;
+                        old
+                    });
+                    let p = with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?;
+                    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
+                    p
+                };
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
                 *index += 1;
-                let body = parse_statements(tokens, index)?;
+                push_function_context();
+                let body = if is_generator {
+                    push_generator_context();
+                    let b = with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?;
+                    pop_generator_context();
+                    b
+                } else {
+                    with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                };
+                pop_function_context();
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
@@ -5024,7 +5439,16 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
                 *index += 1;
-                let body = parse_statements(tokens, index)?;
+                push_function_context();
+                let body = if is_generator {
+                    push_generator_context();
+                    let b = with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?;
+                    pop_generator_context();
+                    b
+                } else {
+                    with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                };
+                pop_function_context();
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
@@ -5099,7 +5523,18 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                         log::trace!("parse_primary (async): parsing parameters at idx {}", *index);
                         *index += 1;
-                        let params = parse_parameters(tokens, index)?;
+                        let params = {
+                            let saved = GENERATOR_CONTEXT.with(|c| {
+                                let old = *c.borrow();
+                                if !is_generator {
+                                    *c.borrow_mut() = 0;
+                                }
+                                old
+                            });
+                            let p = parse_parameters(tokens, index)?;
+                            GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
+                            p
+                        };
                         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                             log::trace!(
                                 "parse_primary (async): expected '{{' after params but found {:?} at idx {}",
@@ -5110,7 +5545,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         }
                         *index += 1;
                         push_await_context();
+                        push_function_context();
+                        if is_generator {
+                            push_generator_context();
+                        }
                         let body = parse_statements(tokens, index)?;
+                        if is_generator {
+                            pop_generator_context();
+                        }
+                        pop_function_context();
                         pop_await_context();
                         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                             return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -5151,7 +5594,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
                                 *index += 1;
                                 push_await_context();
+                                push_function_context();
                                 let body = parse_statement_block(tokens, index)?;
+                                pop_function_context();
                                 pop_await_context();
                                 return Ok(Expr::AsyncArrowFunction(p, body));
                             } else {
@@ -5673,6 +6118,7 @@ fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: boo
     }
     if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
         *index += 1;
+        push_function_context();
         let body = if is_async {
             push_await_context();
             let r = parse_statements(tokens, index);
@@ -5681,12 +6127,14 @@ fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: boo
         } else {
             with_cleared_await_context(|| parse_statements(tokens, index))?
         };
+        pop_function_context();
         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }
         *index += 1;
         Ok(body)
     } else {
+        // Concise arrow body — return is implicit, no need for function context
         let expr = if is_async {
             push_await_context();
             let r = parse_assignment(tokens, index);

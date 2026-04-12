@@ -163,7 +163,7 @@ mod object_literal_tests {
     fn test_object_to_string_with_super_3() {
         let script = r#"
             var obj = { toString() { return 'obj -> ' + super.toString(); } };
-            return obj.toString();
+            obj.toString();
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"obj -> [object Object]\"");
@@ -186,7 +186,7 @@ mod object_literal_tests {
 
             Reflect.setPrototypeOf(obj, proto);
 
-            return obj.toString();
+            obj.toString();
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"obj -> proto\"");
@@ -209,7 +209,7 @@ mod object_literal_tests {
 
             // Reflect.setPrototypeOf(obj, proto);
 
-            return obj.toString();
+            obj.toString();
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "\"obj -> [object Object]\"");

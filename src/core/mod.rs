@@ -1367,6 +1367,339 @@ fn validate_function_like(
     validate_statement_list(body, StatementListKind::ScriptOrFunction)
 }
 
+fn validate_class_field_initializer(value: &Expr) -> Result<(), JSError> {
+    validate_expression(value)?;
+    let found = scan_expr_mask(value, SCAN_ARGUMENTS);
+    if found & SCAN_ARGUMENTS != 0 {
+        return Err(crate::raise_syntax_error!("Class field initializer may not contain arguments"));
+    }
+    if field_initializer_has_direct_super_call(value) {
+        return Err(crate::raise_syntax_error!("Class field initializer may not contain super()"));
+    }
+    Ok(())
+}
+
+/// Check if an expression contains a direct `super()` call (Expr::SuperCall).
+/// Unlike SCAN_SUPER_CALL, this does NOT match `super.method()` (Expr::SuperMethod).
+/// Recurses into arrow functions (which inherit super binding) but not into
+/// regular functions, generators, async functions, or class bodies.
+fn field_initializer_has_direct_super_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::SuperCall(_) => true,
+        // Arrow functions inherit super binding — recurse
+        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(stmt_has_direct_super_call),
+        // Regular functions/classes create new scopes — don't recurse
+        Expr::Function(..) | Expr::GeneratorFunction(..) | Expr::AsyncFunction(..) | Expr::AsyncGeneratorFunction(..) | Expr::Class(_) => {
+            false
+        }
+        // Compound expressions
+        Expr::Assign(a, b)
+        | Expr::Binary(a, _, b)
+        | Expr::LogicalAnd(a, b)
+        | Expr::LogicalOr(a, b)
+        | Expr::NullishCoalescing(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Pow(a, b)
+        | Expr::LogicalAndAssign(a, b)
+        | Expr::LogicalOrAssign(a, b)
+        | Expr::NullishAssign(a, b)
+        | Expr::AddAssign(a, b)
+        | Expr::SubAssign(a, b)
+        | Expr::PowAssign(a, b)
+        | Expr::MulAssign(a, b)
+        | Expr::DivAssign(a, b)
+        | Expr::ModAssign(a, b)
+        | Expr::BitXorAssign(a, b)
+        | Expr::BitAndAssign(a, b)
+        | Expr::BitOrAssign(a, b)
+        | Expr::LeftShiftAssign(a, b)
+        | Expr::RightShiftAssign(a, b)
+        | Expr::UnsignedRightShiftAssign(a, b)
+        | Expr::Index(a, b)
+        | Expr::Comma(a, b)
+        | Expr::OptionalIndex(a, b) => field_initializer_has_direct_super_call(a) || field_initializer_has_direct_super_call(b),
+        Expr::Conditional(a, b, c) => {
+            field_initializer_has_direct_super_call(a)
+                || field_initializer_has_direct_super_call(b)
+                || field_initializer_has_direct_super_call(c)
+        }
+        Expr::Property(e, _)
+        | Expr::OptionalProperty(e, _)
+        | Expr::PrivateMember(e, _)
+        | Expr::OptionalPrivateMember(e, _)
+        | Expr::TypeOf(e)
+        | Expr::Delete(e)
+        | Expr::Void(e)
+        | Expr::Await(e)
+        | Expr::LogicalNot(e)
+        | Expr::UnaryNeg(e)
+        | Expr::UnaryPlus(e)
+        | Expr::BitNot(e)
+        | Expr::Increment(e)
+        | Expr::Decrement(e)
+        | Expr::Spread(e)
+        | Expr::PostIncrement(e)
+        | Expr::PostDecrement(e)
+        | Expr::Getter(e)
+        | Expr::Setter(e)
+        | Expr::YieldStar(e)
+        | Expr::SuperComputedProperty(e) => field_initializer_has_direct_super_call(e),
+        Expr::DynamicImport(e, opts) => {
+            field_initializer_has_direct_super_call(e) || opts.as_ref().is_some_and(|o| field_initializer_has_direct_super_call(o))
+        }
+        Expr::Yield(Some(e)) => field_initializer_has_direct_super_call(e),
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            field_initializer_has_direct_super_call(callee) || args.iter().any(field_initializer_has_direct_super_call)
+        }
+        Expr::SuperMethod(_, args) | Expr::SuperComputedMethod(_, args) => args.iter().any(field_initializer_has_direct_super_call),
+        Expr::Object(entries) => entries
+            .iter()
+            .any(|(k, v, _, _)| field_initializer_has_direct_super_call(k) || field_initializer_has_direct_super_call(v)),
+        Expr::Array(elements) => elements
+            .iter()
+            .any(|e| e.as_ref().is_some_and(field_initializer_has_direct_super_call)),
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => {
+            field_initializer_has_direct_super_call(tag) || exprs.iter().any(field_initializer_has_direct_super_call)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_has_direct_super_call(stmt: &Statement) -> bool {
+    match &*stmt.kind {
+        StatementKind::Expr(e) | StatementKind::Throw(e) | StatementKind::Return(Some(e)) => field_initializer_has_direct_super_call(e),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .any(|(_, init)| init.as_ref().is_some_and(field_initializer_has_direct_super_call)),
+        StatementKind::Const(decls) => decls.iter().any(|(_, e)| field_initializer_has_direct_super_call(e)),
+        StatementKind::Block(stmts) => stmts.iter().any(stmt_has_direct_super_call),
+        StatementKind::If(if_stmt) => {
+            field_initializer_has_direct_super_call(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(stmt_has_direct_super_call)
+                || if_stmt.else_body.as_ref().is_some_and(|b| b.iter().any(stmt_has_direct_super_call))
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt.init.as_ref().is_some_and(|s| stmt_has_direct_super_call(s))
+                || for_stmt.test.as_ref().is_some_and(field_initializer_has_direct_super_call)
+                || for_stmt.update.as_ref().is_some_and(|s| stmt_has_direct_super_call(s))
+                || for_stmt.body.iter().any(stmt_has_direct_super_call)
+        }
+        StatementKind::While(cond, body) => field_initializer_has_direct_super_call(cond) || body.iter().any(stmt_has_direct_super_call),
+        StatementKind::DoWhile(body, cond) => body.iter().any(stmt_has_direct_super_call) || field_initializer_has_direct_super_call(cond),
+        _ => false,
+    }
+}
+
+fn validate_class_field_name(name: &str, is_static: bool) -> Result<(), JSError> {
+    if is_static {
+        if matches!(name, "constructor" | "prototype") {
+            return Err(crate::raise_syntax_error!(format!("Invalid static field name '{}'", name)));
+        }
+    } else if name == "constructor" {
+        return Err(crate::raise_syntax_error!("Invalid field name 'constructor'"));
+    }
+    Ok(())
+}
+
+fn validate_class_method_name(name: &str, is_static: bool, is_special: bool) -> Result<(), JSError> {
+    if is_static && name == "prototype" {
+        return Err(crate::raise_syntax_error!("Invalid static method name 'prototype'"));
+    }
+    if is_special && name == "constructor" {
+        return Err(crate::raise_syntax_error!("Invalid special method name 'constructor'"));
+    }
+    Ok(())
+}
+
+fn record_private_name_kind(
+    private_name_kinds: &mut std::collections::HashMap<String, (usize, usize, usize)>,
+    name: &str,
+    is_getter: bool,
+    is_setter: bool,
+) -> Result<(), JSError> {
+    if name == "constructor" {
+        return Err(crate::raise_syntax_error!("Private names may not be '#constructor'"));
+    }
+    let entry = private_name_kinds.entry(name.to_string()).or_insert((0, 0, 0));
+    if is_getter {
+        entry.0 += 1;
+    } else if is_setter {
+        entry.1 += 1;
+    } else {
+        entry.2 += 1;
+    }
+    Ok(())
+}
+
+fn validate_class_definition(class_def: &ClassDefinition) -> Result<(), JSError> {
+    if let Some(extends) = &class_def.extends {
+        validate_expression(extends)?;
+        if matches!(extends, Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..)) {
+            return Err(crate::raise_syntax_error!("Invalid class heritage expression"));
+        }
+    }
+
+    let mut constructor_count = 0usize;
+    let mut private_name_kinds: HashMap<String, (usize, usize, usize)> = HashMap::new();
+
+    for member in &class_def.members {
+        match member {
+            ClassMember::Constructor(params, body) => {
+                constructor_count += 1;
+                validate_function_like(None, params, body, false, false)?;
+            }
+
+            ClassMember::Method(_, params, body)
+            | ClassMember::StaticMethod(_, params, body)
+            | ClassMember::PrivateMethod(_, params, body)
+            | ClassMember::PrivateStaticMethod(_, params, body) => {
+                validate_function_like(None, params, body, false, false)?;
+            }
+
+            ClassMember::MethodGenerator(_, params, body)
+            | ClassMember::StaticMethodGenerator(_, params, body)
+            | ClassMember::PrivateMethodGenerator(_, params, body)
+            | ClassMember::PrivateStaticMethodGenerator(_, params, body) => {
+                validate_function_like(None, params, body, false, true)?;
+            }
+
+            ClassMember::MethodAsync(_, params, body)
+            | ClassMember::StaticMethodAsync(_, params, body)
+            | ClassMember::PrivateMethodAsync(_, params, body)
+            | ClassMember::PrivateStaticMethodAsync(_, params, body) => {
+                validate_function_like(None, params, body, true, false)?;
+            }
+
+            ClassMember::MethodAsyncGenerator(_, params, body)
+            | ClassMember::StaticMethodAsyncGenerator(_, params, body)
+            | ClassMember::PrivateMethodAsyncGenerator(_, params, body)
+            | ClassMember::PrivateStaticMethodAsyncGenerator(_, params, body) => {
+                validate_function_like(None, params, body, true, true)?;
+            }
+
+            ClassMember::Getter(_, body)
+            | ClassMember::StaticGetter(_, body)
+            | ClassMember::PrivateGetter(_, body)
+            | ClassMember::PrivateStaticGetter(_, body)
+            | ClassMember::StaticBlock(body) => {
+                validate_statement_list(body, StatementListKind::ScriptOrFunction)?;
+            }
+
+            ClassMember::Setter(_, params, body)
+            | ClassMember::StaticSetter(_, params, body)
+            | ClassMember::PrivateSetter(_, params, body)
+            | ClassMember::PrivateStaticSetter(_, params, body) => {
+                validate_function_like(None, params, body, false, false)?;
+            }
+
+            ClassMember::Property(name, value) => {
+                validate_class_field_name(name, false)?;
+                validate_class_field_initializer(value)?;
+            }
+            ClassMember::StaticProperty(name, value) => {
+                validate_class_field_name(name, true)?;
+                validate_class_field_initializer(value)?;
+            }
+            ClassMember::PrivateProperty(_, value) | ClassMember::PrivateStaticProperty(_, value) => {
+                validate_class_field_initializer(value)?;
+            }
+
+            ClassMember::PropertyComputed(key, value) | ClassMember::StaticPropertyComputed(key, value) => {
+                validate_expression(key)?;
+                validate_class_field_initializer(value)?;
+            }
+
+            ClassMember::GetterComputed(key, body) | ClassMember::StaticGetterComputed(key, body) => {
+                validate_expression(key)?;
+                validate_statement_list(body, StatementListKind::ScriptOrFunction)?;
+            }
+            ClassMember::SetterComputed(key, params, body) | ClassMember::StaticSetterComputed(key, params, body) => {
+                validate_expression(key)?;
+                validate_function_like(None, params, body, false, false)?;
+            }
+            ClassMember::MethodComputed(key, params, body) | ClassMember::StaticMethodComputed(key, params, body) => {
+                validate_expression(key)?;
+                validate_function_like(None, params, body, false, false)?;
+            }
+            ClassMember::MethodComputedGenerator(key, params, body) | ClassMember::StaticMethodComputedGenerator(key, params, body) => {
+                validate_expression(key)?;
+                validate_function_like(None, params, body, false, true)?;
+            }
+            ClassMember::MethodComputedAsync(key, params, body) | ClassMember::StaticMethodComputedAsync(key, params, body) => {
+                validate_expression(key)?;
+                validate_function_like(None, params, body, true, false)?;
+            }
+            ClassMember::MethodComputedAsyncGenerator(key, params, body)
+            | ClassMember::StaticMethodComputedAsyncGenerator(key, params, body) => {
+                validate_expression(key)?;
+                validate_function_like(None, params, body, true, true)?;
+            }
+        }
+
+        match member {
+            ClassMember::Method(name, _, _) => {
+                validate_class_method_name(name, false, false)?;
+            }
+            ClassMember::MethodGenerator(name, _, _)
+            | ClassMember::MethodAsync(name, _, _)
+            | ClassMember::MethodAsyncGenerator(name, _, _) => {
+                validate_class_method_name(name, false, true)?;
+            }
+            ClassMember::Getter(name, _) => {
+                validate_class_method_name(name, false, true)?;
+            }
+            ClassMember::Setter(name, _, _) => {
+                validate_class_method_name(name, false, true)?;
+            }
+            ClassMember::StaticMethod(name, _, _)
+            | ClassMember::StaticMethodGenerator(name, _, _)
+            | ClassMember::StaticMethodAsync(name, _, _)
+            | ClassMember::StaticMethodAsyncGenerator(name, _, _) => {
+                validate_class_method_name(name, true, false)?;
+            }
+            ClassMember::StaticGetter(name, _) => {
+                validate_class_method_name(name, true, false)?;
+            }
+            ClassMember::StaticSetter(name, _, _) => {
+                validate_class_method_name(name, true, false)?;
+            }
+            ClassMember::PrivateProperty(name, _) | ClassMember::PrivateStaticProperty(name, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, false, false)?;
+            }
+            ClassMember::PrivateMethod(name, _, _)
+            | ClassMember::PrivateMethodAsync(name, _, _)
+            | ClassMember::PrivateMethodGenerator(name, _, _)
+            | ClassMember::PrivateMethodAsyncGenerator(name, _, _)
+            | ClassMember::PrivateStaticMethod(name, _, _)
+            | ClassMember::PrivateStaticMethodAsync(name, _, _)
+            | ClassMember::PrivateStaticMethodGenerator(name, _, _)
+            | ClassMember::PrivateStaticMethodAsyncGenerator(name, _, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, false, false)?;
+            }
+            ClassMember::PrivateGetter(name, _) | ClassMember::PrivateStaticGetter(name, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, true, false)?;
+            }
+            ClassMember::PrivateSetter(name, _, _) | ClassMember::PrivateStaticSetter(name, _, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, false, true)?;
+            }
+            _ => {}
+        }
+    }
+
+    if constructor_count > 1 {
+        return Err(crate::raise_syntax_error!("Duplicate constructor"));
+    }
+
+    for (name, (getters, setters, others)) in private_name_kinds {
+        let total = getters + setters + others;
+        if total > 1 && !(total == 2 && getters == 1 && setters == 1) {
+            return Err(crate::raise_syntax_error!(format!("Duplicate private name: #{}", name)));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_assignment_target_expr(expr: &Expr, allow_pattern: bool) -> Result<(), JSError> {
     match expr {
         Expr::Assign(lhs, rhs) if allow_pattern => {
@@ -1580,9 +1913,7 @@ fn validate_expression(expr: &Expr) -> Result<(), JSError> {
             }
         }
         Expr::Class(class_def) => {
-            if let Some(extends) = &class_def.extends {
-                validate_expression(extends)?;
-            }
+            validate_class_definition(class_def)?;
         }
         Expr::Yield(None)
         | Expr::Number(_)
@@ -1826,6 +2157,9 @@ fn validate_statement(statement: &Statement) -> Result<(), JSError> {
         StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) => {
             validate_function_like(Some(name), params, body, *is_async, *is_generator)?;
         }
+        StatementKind::Class(class_def) => {
+            validate_class_definition(class_def)?;
+        }
         StatementKind::If(if_stmt) => {
             validate_expression(&if_stmt.condition)?;
             for statement in &if_stmt.then_body {
@@ -1896,6 +2230,30 @@ fn validate_statement(statement: &Statement) -> Result<(), JSError> {
         }
         StatementKind::Switch(switch_stmt) => {
             validate_expression(&switch_stmt.expr)?;
+            // Per spec: "It is a Syntax Error if the LexicallyDeclaredNames of CaseBlock
+            // contains any duplicate entries."
+            // Also: "It is a Syntax Error if any element of the LexicallyDeclaredNames of
+            // CaseBlock also occurs in the VarDeclaredNames of CaseBlock."
+            let mut all_lexical_names = std::collections::HashSet::new();
+            let mut all_var_names = Vec::new();
+            for case in &switch_stmt.cases {
+                let stmts = match case {
+                    crate::core::SwitchCase::Case(_, statements) => statements,
+                    crate::core::SwitchCase::Default(statements) => statements,
+                };
+                for stmt in stmts {
+                    collect_direct_lexical_names(stmt, StatementListKind::Block, &mut all_lexical_names)?;
+                    collect_var_declared_names(stmt, StatementListKind::Block, &mut all_var_names);
+                }
+            }
+            for var_name in &all_var_names {
+                if all_lexical_names.contains(var_name) {
+                    return Err(crate::raise_syntax_error!(format!(
+                        "Identifier '{}' has already been declared",
+                        var_name
+                    )));
+                }
+            }
             for case in &switch_stmt.cases {
                 match case {
                     crate::core::SwitchCase::Case(expr, statements) => {
@@ -1911,6 +2269,35 @@ fn validate_statement(statement: &Statement) -> Result<(), JSError> {
         StatementKind::TryCatch(try_stmt) => {
             validate_statement_list(&try_stmt.try_body, StatementListKind::Block)?;
             if let Some(catch_body) = &try_stmt.catch_body {
+                // Check catch parameter early errors
+                if let Some(catch_param) = &try_stmt.catch_param {
+                    let param_names = collect_catch_param_names(catch_param);
+                    // Check for duplicate names in destructuring catch parameter
+                    {
+                        let mut seen = std::collections::HashSet::new();
+                        for name in &param_names {
+                            if !seen.insert(name.clone()) {
+                                return Err(crate::raise_syntax_error!(format!(
+                                    "Duplicate binding '{}' in catch parameter",
+                                    name
+                                )));
+                            }
+                        }
+                    }
+                    // Check that catch param names don't conflict with lexical names in catch body
+                    let mut lexical_names = std::collections::HashSet::new();
+                    for stmt in catch_body {
+                        collect_direct_lexical_names(stmt, StatementListKind::Block, &mut lexical_names)?;
+                    }
+                    for name in &param_names {
+                        if lexical_names.contains(name) {
+                            return Err(crate::raise_syntax_error!(format!(
+                                "Identifier '{}' has already been declared",
+                                name
+                            )));
+                        }
+                    }
+                }
                 validate_statement_list(catch_body, StatementListKind::Block)?;
             }
             if let Some(finally_body) = &try_stmt.finally_body {
@@ -1927,6 +2314,21 @@ fn validate_statement(statement: &Statement) -> Result<(), JSError> {
         _ => {}
     }
     Ok(())
+}
+
+fn collect_catch_param_names(param: &crate::core::statement::CatchParamPattern) -> Vec<String> {
+    use crate::core::statement::CatchParamPattern;
+    match param {
+        CatchParamPattern::Identifier(name) => vec![name.clone()],
+        CatchParamPattern::Array(elems) => collect_array_destr_binding_names(elems),
+        CatchParamPattern::Object(elems) => {
+            let mut names = Vec::new();
+            for elem in elems {
+                collect_destr_binding_names(elem, &mut names);
+            }
+            names
+        }
+    }
 }
 
 fn validate_early_errors(statements: &[Statement]) -> Result<(), JSError> {

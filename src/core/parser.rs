@@ -69,9 +69,23 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
     let column = start_token.column;
     match start_token.token {
         Token::Import if !matches!(t.get(*index + 1).map(|d| &d.token), Some(Token::LParen) | Some(Token::Dot)) => {
+            if !in_module_context() {
+                return Err(raise_parse_error_with_token!(
+                    t[*index],
+                    "Cannot use import statement outside a module"
+                ));
+            }
             parse_import_statement(t, index)
         }
-        Token::Export => parse_export_statement(t, index),
+        Token::Export => {
+            if !in_module_context() {
+                return Err(raise_parse_error_with_token!(
+                    t[*index],
+                    "Cannot use export statement outside a module"
+                ));
+            }
+            parse_export_statement(t, index)
+        }
         Token::Function | Token::FunctionStar => parse_function_declaration(t, index),
         Token::Class => parse_class_declaration(t, index),
         Token::If => parse_if_statement(t, index),
@@ -212,6 +226,10 @@ thread_local! {
     /// Stacked to support nested classes.
     static CLASS_HAS_HERITAGE: RefCell<bool> = const { RefCell::new(false) };
     static CLASS_HAS_HERITAGE_STACK: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    /// >0 when inside a non-arrow function (where new.target is valid).
+    static NEW_TARGET_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    /// Whether parsing in module mode (export/import declarations allowed).
+    static MODULE_CONTEXT: Cell<bool> = const { Cell::new(false) };
 }
 fn forbid_in() -> bool {
     FORBID_IN.with(|c| *c.borrow() > 0)
@@ -279,6 +297,7 @@ fn in_function_context() -> bool {
 /// Every function boundary saves+clears generator/method/constructor context automatically.
 fn push_function_context() {
     FUNCTION_CONTEXT.with(|c| *c.borrow_mut() += 1);
+    NEW_TARGET_CONTEXT.with(|c| *c.borrow_mut() += 1);
     let saved_gen = GENERATOR_CONTEXT.with(|c| {
         let prev = *c.borrow();
         *c.borrow_mut() = 0;
@@ -300,6 +319,7 @@ fn push_function_context() {
 }
 fn pop_function_context() {
     FUNCTION_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+    NEW_TARGET_CONTEXT.with(|c| *c.borrow_mut() -= 1);
     let saved_gen = GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
     GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved_gen);
     let saved_method = METHOD_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
@@ -347,8 +367,30 @@ fn strict_binding_checks() -> bool {
     STRICT_BINDING_CHECKS.with(|c| c.get())
 }
 
+/// Returns true if `name` is a reserved keyword or strict-mode future reserved word
+/// that must not be used as a binding identifier.
+/// This catches escaped reserved words (e.g. `\u{62}reak` → "break") and
+/// strict-mode-only future reserved words (implements, interface, etc.).
+fn is_reserved_identifier(name: &str) -> bool {
+    if is_always_reserved_word(name) {
+        return true;
+    }
+    // Strict-mode future reserved words — only reject when strict binding checks are active
+    if strict_binding_checks() && is_strict_reserved_word(name) {
+        return true;
+    }
+    false
+}
+
 fn forbid_await_identifier() -> bool {
     FORBID_AWAIT_IDENTIFIER.with(|c| *c.borrow() > 0)
+}
+
+fn in_module_context() -> bool {
+    MODULE_CONTEXT.with(|c| c.get())
+}
+pub(crate) fn set_module_context(v: bool) {
+    MODULE_CONTEXT.with(|c| c.set(v));
 }
 
 fn with_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
@@ -445,6 +487,7 @@ fn is_always_reserved_word(name: &str) -> bool {
             | "enum"
             | "export"
             | "extends"
+            | "false"
             | "finally"
             | "for"
             | "function"
@@ -453,11 +496,13 @@ fn is_always_reserved_word(name: &str) -> bool {
             | "in"
             | "instanceof"
             | "new"
+            | "null"
             | "return"
             | "super"
             | "switch"
             | "this"
             | "throw"
+            | "true"
             | "try"
             | "typeof"
             | "var"
@@ -2422,6 +2467,26 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
+    // Check for duplicate bound names in import specifiers
+    {
+        let mut bound_names = Vec::new();
+        for spec in &specifiers {
+            let local = match spec {
+                ImportSpecifier::Default(n) => n.clone(),
+                ImportSpecifier::Namespace(n) => n.clone(),
+                ImportSpecifier::DeferredNamespace(n) => n.clone(),
+                ImportSpecifier::Named(imported, alias) => alias.as_ref().cloned().unwrap_or_else(|| imported.clone()),
+            };
+            if bound_names.contains(&local) {
+                return Err(raise_parse_error!(
+                    &format!("SyntaxError: Duplicate import bound name '{}'", local),
+                    t[start].line,
+                    t[start].column
+                ));
+            }
+            bound_names.push(local);
+        }
+    }
     Ok(Statement {
         kind: Box::new(StatementKind::Import(specifiers, source)),
         line: t[start].line,
@@ -2767,6 +2832,12 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
         match &t[*index].token {
             Token::Identifier(name) => {
                 let name = name.clone();
+                if is_reserved_identifier(&name) {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        format!("'{}' is a reserved word and cannot be used as an identifier", name)
+                    ));
+                }
                 // Strict mode: 'eval' and 'arguments' cannot be used as binding names
                 if strict_binding_checks() && (name == "eval" || name == "arguments") {
                     return Err(raise_parse_error_with_token!(
@@ -2853,11 +2924,15 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 }
             }
             _ if matches!(t[*index].token, Token::Static) => {
+                if strict_binding_checks() {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        "'static' is a reserved word and cannot be used as an identifier"
+                    ));
+                }
+                // In sloppy mode, `static` is a valid identifier
                 let name = "static".to_string();
                 *index += 1;
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
                 let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
                     *index += 1;
                     Some(parse_assignment(t, index)?)
@@ -2865,9 +2940,6 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                     None
                 };
                 decls.push((name, init));
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
             }
             _ => break,
         }
@@ -4890,6 +4962,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 false
             };
             if is_new_target {
+                let in_new_target_context = NEW_TARGET_CONTEXT.with(|c| *c.borrow() > 0);
+                if !in_new_target_context {
+                    return Err(raise_parse_error!("SyntaxError: new.target expression is not allowed here"));
+                }
                 Expr::NewTarget
             } else {
                 let constructor = parse_primary(tokens, index, false)?;

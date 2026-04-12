@@ -1135,6 +1135,15 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Let(decls) => {
+                // GlobalDeclarationInstantiation: reject let/const names that
+                // shadow non-configurable global properties (undefined, NaN, Infinity).
+                if self.scope_depth == 0 && !self.force_local_let {
+                    for (name, _) in decls.iter() {
+                        if matches!(name.as_str(), "undefined" | "NaN" | "Infinity") {
+                            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
+                        }
+                    }
+                }
                 for (name, init_opt) in decls {
                     if let Some(init) = init_opt {
                         self.compile_expr_with_name_inference(init, name)?;
@@ -1218,6 +1227,13 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Const(decls) => {
+                if self.scope_depth == 0 && !self.force_local_let {
+                    for (name, _) in decls.iter() {
+                        if matches!(name.as_str(), "undefined" | "NaN" | "Infinity") {
+                            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
+                        }
+                    }
+                }
                 for (name, init) in decls {
                     // Infer function name for anonymous function/arrow
                     self.compile_expr_with_name_inference(init, name)?;

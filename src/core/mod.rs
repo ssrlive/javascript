@@ -80,6 +80,7 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
     }
 
     crate::core::parser::with_parse_source(script, || {
+        crate::core::parser::set_module_context(run_as_module);
         let mut index = 0;
         let result = if !run_as_module {
             let enable_top_level_await = !script_declares_await_identifier(script);

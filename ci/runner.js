@@ -75,18 +75,6 @@ function cleanupComposedArtifacts(tmpPath){
   } catch (e) {
     // ignore
   }
-
-  try {
-    if (!tmpPath) return;
-    const dir = path.dirname(tmpPath);
-    const base = path.basename(dir);
-    // Legacy subdirectory cleanup
-    if (base.startsWith('.test262.')) {
-      fs.rmSync(dir, {recursive: true, force: true});
-    }
-  } catch (e) {
-    // ignore
-  }
 }
 
 console.log(`Running Test262 tests (node runner)`);
@@ -167,8 +155,8 @@ function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
 
 // Build harness index
 const HARNESS_INDEX = {};
-function shouldSkipDirEntry(entryName){
-  return entryName.startsWith('.test262.') || entryName.startsWith('.test262_composed_');
+function shouldSkipEntry(entryName){
+  return entryName.startsWith('.test262_composed_');
 }
 
 function walkDir(dir){
@@ -177,7 +165,7 @@ function walkDir(dir){
   let items = fs.readdirSync(dir, {withFileTypes:true});
   items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
   for (const it of items){
-    if (it.isDirectory() && shouldSkipDirEntry(it.name)) continue;
+    if (shouldSkipEntry(it.name)) continue;
     const p = path.join(dir, it.name);
     if (it.isDirectory()) out.push(...walkDir(p));
     else out.push(p);
@@ -233,7 +221,7 @@ function listFilesOnly(dir){
   let items = fs.readdirSync(dir, {withFileTypes:true});
   items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
   return items
-    .filter(it => !(it.isDirectory() && shouldSkipDirEntry(it.name)))
+    .filter(it => !(shouldSkipEntry(it.name)))
     .filter(it => it.isFile())
     .map(it => path.join(dir, it.name))
     .sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));
@@ -261,7 +249,7 @@ function collectTests(){
     }
 
     for (const f of files){
-      if (f.includes('/.test262.') || f.includes('/.test262_composed_')) continue;
+      if (f.includes('/.test262_composed_')) continue;
       const meta = extractMeta(f);
       if (/includes:|flags:\s*\[.*module.*\]|negative:|features:/.test(meta)) {
         other.push(f);
@@ -381,7 +369,7 @@ async function runAll(){
   let scheduledCount = 0; // counts scheduled executions (will end up as pass+fail)
   const running = new Set();
 
-  async function runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule) {
+  async function runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative) {
     let currentSucceeds = false;
     try {
       log(`RUN ${f}`);
@@ -398,15 +386,37 @@ async function runAll(){
         res = await runCommandAsync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
       }
 
-      if (res && res.status === 0) {
+      const outStr = ((res && res.stderr) ? res.stderr : (res && res.stdout ? res.stdout : '') ) || '';
+      let isPass = false;
+      let failReason = '';
+      if (expectedNegative) {
+        if (res && res.status === 0) {
+          failReason = 'Expected test to fail, but it succeeded.';
+        } else if (!outStr.includes(expectedNegative.type)) {
+          failReason = `Expected error type ${expectedNegative.type} not found in output.`;
+        } else {
+          isPass = true;
+        }
+      } else {
+        if (res && res.status === 0) {
+          isPass = true;
+        } else {
+          failReason = 'Test failed with non-zero exit code.';
+        }
+      }
+
+      if (isPass) {
         log(`PASS ${f}`); pass++;
         try { process.stdout.write('.'); } catch (e) { /* ignore */ }
         if (cleanupTmp) cleanupComposedArtifacts(tmpPath);
         currentSucceeds = true;
       } else {
-        log(`FAIL ${f}`);
+        if (failReason) {
+          log(`FAIL ${f} - ${failReason}`);
+        } else {
+          log(`FAIL ${f}`);
+        }
         log('---- OUTPUT (summary) ----');
-        const outStr = ((res && res.stderr) ? res.stderr : (res && res.stdout ? res.stdout : '') ) || '';
         const outLines = String(outStr).split('\n');
         let idx = 0;
         while (idx < outLines.length && outLines[idx].trim() === '') idx++;
@@ -501,7 +511,14 @@ async function runAll(){
     // Skip tests marked as pending via esid: pending, except tests under specific directories we are focusing on
     if (shouldSkipPendingTest(meta, f)) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
 
-    if (/negative:/.test(meta)) { skip++; log(`SKIP (negative) ${f}`); continue; }
+    let expectedNegative = null;
+    if (/negative:\s*/.test(meta)) {
+      const blockMatch = meta.match(/negative:[\s\S]*?(?=(?:\n[^\s]|-{3}|$))/);
+      if (blockMatch) {
+        const tMatch = blockMatch[0].match(/type:\s*(\w+)/);
+        if (tMatch) expectedNegative = { type: tMatch[1] };
+      }
+    }
 
     // features
     const feats = (meta.match(/features:\s*\[(.*?)\]/s) || [])[1];
@@ -594,7 +611,7 @@ async function runAll(){
     // importValue tests) resolve correctly.
     const testCwd = path.dirname(tmpPath);
 
-    const p = runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule)
+    const p = runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative)
       .finally(() => running.delete(p));
     running.add(p);
     scheduledCount++;

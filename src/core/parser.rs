@@ -642,6 +642,58 @@ fn check_for_head_body_var_conflict(init: &Option<Box<Statement>>, body: &[State
     Ok(())
 }
 
+/// Collect all BoundNames from a destructuring pattern.
+fn collect_destructuring_bound_names(pattern: &[DestructuringElement], out: &mut Vec<String>) {
+    for elem in pattern {
+        match elem {
+            DestructuringElement::Variable(name, _) => out.push(name.clone()),
+            DestructuringElement::Rest(name) => out.push(name.clone()),
+            DestructuringElement::Property(_, inner) => collect_destructuring_bound_names(std::slice::from_ref(inner.as_ref()), out),
+            DestructuringElement::ComputedProperty(_, inner) => {
+                collect_destructuring_bound_names(std::slice::from_ref(inner.as_ref()), out)
+            }
+            DestructuringElement::NestedArray(arr, _) => collect_destructuring_bound_names(arr, out),
+            DestructuringElement::NestedObject(obj, _) => collect_destructuring_bound_names(obj, out),
+            _ => {}
+        }
+    }
+}
+
+/// Check for duplicate BoundNames in a destructuring pattern used in for-in/for-of head.
+fn check_for_head_dup_bound_names(pattern: &[DestructuringElement], line: usize, col: usize) -> Result<(), JSError> {
+    let mut names = Vec::new();
+    collect_destructuring_bound_names(pattern, &mut names);
+    for (i, name) in names.iter().enumerate() {
+        if names[..i].contains(name) {
+            return Err(raise_parse_error!(
+                format!("SyntaxError: Duplicate binding '{}' in for-in/for-of head", name),
+                line,
+                col
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check for-in/for-of head let/const names vs var declarations in body.
+fn check_forinof_head_body_var_conflict(head_names: &[String], body: &[Statement], line: usize, col: usize) -> Result<(), JSError> {
+    if head_names.is_empty() {
+        return Ok(());
+    }
+    let mut var_names = Vec::new();
+    collect_var_declared_names(body, &mut var_names);
+    for vn in &var_names {
+        if head_names.contains(vn) {
+            return Err(raise_parse_error!(
+                format!("SyntaxError: Identifier '{}' has already been declared", vn),
+                line,
+                col
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     let line = t[start].line;
@@ -849,11 +901,15 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     let mut decl_kind = None;
     let mut for_of_pattern: Option<ForOfPattern> = None;
     let mut for_pattern_init: Option<Expr> = None;
+    let mut init_was_bare_async = false;
     if is_decl {
         decl_kind = Some(t[*index].token.clone());
         *index += 1;
         if matches!(t[*index].token, Token::LBrace) {
             let pattern = parse_object_destructuring_pattern(t, index)?;
+            if !matches!(decl_kind, Some(Token::Var)) {
+                check_for_head_dup_bound_names(&pattern, line, column)?;
+            }
             log::trace!(
                 "parse_for_statement: parsed object destructuring pattern, index {} token={:?}",
                 *index,
@@ -866,6 +922,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             }
         } else if matches!(t[*index].token, Token::LBracket) {
             let pattern = parse_array_destructuring_pattern(t, index)?;
+            if !matches!(decl_kind, Some(Token::Var)) {
+                check_for_head_dup_bound_names(&pattern, line, column)?;
+            }
             log::trace!(
                 "parse_for_statement: parsed array destructuring pattern, index {} token={:?}",
                 *index,
@@ -893,7 +952,11 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             let pattern = parse_object_assignment_pattern(t, index)?;
             init_expr = Some(Expr::Object(pattern));
         } else {
+            let init_start = *index;
             init_expr = Some(with_forbidden_in(|| parse_expression(t, index))?);
+            if *index == init_start + 1 && matches!(t[init_start].token, Token::Async) {
+                init_was_bare_async = true;
+            }
         }
     }
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -908,6 +971,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
         *index += 1;
         let iterable = parse_assignment(t, index)?;
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
         if !matches!(t[*index].token, Token::RParen) {
             return Err(raise_parse_error_at!(t.get(*index)));
         }
@@ -926,6 +992,24 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             crate::Token::Const => Some(crate::core::VarDeclKind::Const),
             _ => None,
         });
+        // Check for-of head let/const names vs var declarations in body
+        if matches!(
+            decl_kind_mapped,
+            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const)
+        ) {
+            let mut head_names = Vec::new();
+            if let Some(ref pattern) = for_of_pattern {
+                match pattern {
+                    ForOfPattern::Object(p) => collect_destructuring_bound_names(p, &mut head_names),
+                    ForOfPattern::Array(p) => collect_destructuring_bound_names(p, &mut head_names),
+                }
+            } else if let Some(ref decls) = init_decls {
+                for (name, _) in decls {
+                    head_names.push(name.clone());
+                }
+            }
+            check_forinof_head_body_var_conflict(&head_names, &body_stmts, line, column)?;
+        }
         let kind = if let Some(pattern) = for_of_pattern {
             if for_pattern_init.is_some() {
                 return Err(raise_parse_error!(
@@ -972,20 +1056,13 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 if decls.len() != 1 {
                     return Err(raise_parse_error!("Invalid for-of statement", line, column));
                 }
-                // for-of/for-await-of with let/const must not have initializer;
-                // for-await-of with var must not have initializer either.
+                // for-of/for-await-of: initializers are never allowed
                 if decls[0].1.is_some() {
-                    let has_let_const = matches!(
-                        decl_kind_mapped,
-                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const)
-                    );
-                    if has_let_const || is_for_await {
-                        return Err(raise_parse_error!(
-                            "SyntaxError: for-of/for-await-of loop variable declaration may not have an initializer",
-                            line,
-                            column
-                        ));
-                    }
+                    return Err(raise_parse_error!(
+                        "SyntaxError: for-of loop variable declaration may not have an initializer",
+                        line,
+                        column
+                    ));
                 }
                 let var_name = decls[0].0.clone();
                 if is_for_await {
@@ -994,6 +1071,15 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     StatementKind::ForOf(decl_kind_mapped, var_name, iterable, body_stmts)
                 }
             } else if let Some(Expr::Var(s, _, _)) = init_expr {
+                // `for (async of ...)` is always a SyntaxError (spec: it's ambiguous with async arrow)
+                // But `for ((async) of ...)` and `for (\u0061sync of ...)` are allowed
+                if s == "async" && !is_for_await && init_was_bare_async {
+                    return Err(raise_parse_error!(
+                        "SyntaxError: The left-hand side of a for-of loop may not be 'async'",
+                        line,
+                        column
+                    ));
+                }
                 if is_for_await {
                     StatementKind::ForAwaitOf(decl_kind_mapped, s, iterable, body_stmts)
                 } else {
@@ -1079,6 +1165,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
     if is_for_in {
         let rhs = for_in_rhs.unwrap();
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
         if !matches!(t[*index].token, Token::RParen) {
             return Err(raise_parse_error_at!(t.get(*index)));
         }
@@ -1089,6 +1178,26 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         let body = parse_statement_item(t, index)?;
         reject_lexical_in_single_statement(&body, "for")?;
         let body_stmts = vec![body];
+        // Check for-in head let/const names vs var declarations in body
+        let forin_decl_kind_mapped: Option<crate::core::VarDeclKind> = decl_kind.as_ref().and_then(|tk| match tk {
+            Token::Let => Some(crate::core::VarDeclKind::Let),
+            Token::Const => Some(crate::core::VarDeclKind::Const),
+            _ => None,
+        });
+        if forin_decl_kind_mapped.is_some() {
+            let mut head_names = Vec::new();
+            if let Some(ref pattern) = for_of_pattern {
+                match pattern {
+                    ForOfPattern::Object(p) => collect_destructuring_bound_names(p, &mut head_names),
+                    ForOfPattern::Array(p) => collect_destructuring_bound_names(p, &mut head_names),
+                }
+            } else if let Some(ref decls) = init_decls {
+                for (name, _) in decls {
+                    head_names.push(name.clone());
+                }
+            }
+            check_forinof_head_body_var_conflict(&head_names, &body_stmts, line, column)?;
+        }
         if let Some(pattern) = for_of_pattern {
             if for_pattern_init.is_some() {
                 return Err(raise_parse_error!(
@@ -1417,6 +1526,9 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
             return Err(raise_parse_error!(
                 "SyntaxError: Cannot use 'await' as identifier in async function"
             ));
+        }
+        if forbid_await_identifier() {
+            return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
         }
         "await".to_string()
     } else {
@@ -3241,6 +3353,9 @@ fn parse_array_assignment_pattern(tokens: &[TokenData], index: &mut usize) -> Re
             } else {
                 parse_assignment(tokens, index)?
             };
+            if matches!(rest_expr, Expr::Assign(..)) {
+                return Err(raise_parse_error!("SyntaxError: Rest element may not have a default initializer"));
+            }
             elements.push(Some(Expr::Spread(Box::new(rest_expr))));
             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -3753,7 +3868,7 @@ fn check_destructuring_expr_strict(expr: &Expr) -> Result<(), JSError> {
         return Ok(());
     }
     match expr {
-        Expr::Var(name, _, _) if name == "eval" || name == "arguments" => Err(raise_parse_error!(&format!(
+        Expr::Var(name, _, _) if name == "eval" || name == "arguments" || name == "yield" => Err(raise_parse_error!(&format!(
             "'{}' can't be defined or assigned to in strict mode code",
             name
         ))),

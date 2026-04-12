@@ -1,5 +1,5 @@
 use crate::error::JSError;
-use crate::raise_eval_error;
+use crate::{raise_eval_error, raise_syntax_error};
 pub(crate) use gc_arena::GcWeak;
 pub(crate) use gc_arena::Mutation as GcContext;
 pub(crate) use gc_arena::collect::Trace as GcTrace;
@@ -74,13 +74,16 @@ fn script_declares_await_identifier(s: &str) -> bool {
 }
 
 pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Result<Vec<Statement>, JSError> {
+    crate::core::parser::set_module_context(run_as_module);
     let mut tokens = tokenize(script)?;
     if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
         tokens.pop();
     }
 
     crate::core::parser::with_parse_source(script, || {
-        crate::core::parser::set_module_context(run_as_module);
+        if run_as_module {
+            crate::core::parser::reset_module_tracking();
+        }
         let mut index = 0;
         let result = if !run_as_module {
             let enable_top_level_await = !script_declares_await_identifier(script);
@@ -100,6 +103,9 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
             res
         }?;
         validate_early_errors(&result)?;
+        if run_as_module {
+            validate_module_exported_bindings(&result)?;
+        }
         Ok(result)
     })
 }
@@ -2303,6 +2309,98 @@ fn collect_catch_param_names(param: &crate::core::statement::CatchParamPattern) 
 
 fn validate_early_errors(statements: &[Statement]) -> Result<(), JSError> {
     validate_statement_list(statements, StatementListKind::ScriptOrFunction)
+}
+
+/// In module code, every local binding referenced by `export { x }` (without
+/// `from` clause) must be declared as either a var or lexical name.
+fn validate_module_exported_bindings(statements: &[Statement]) -> Result<(), JSError> {
+    use crate::core::statement::{ExportSpecifier as ES, StatementKind as SK};
+    use std::collections::HashSet;
+    let mut declared_names = HashSet::new();
+    // Collect all declared names (var + lexical + function + class + import bindings)
+    collect_module_declared_names(statements, &mut declared_names);
+    // Check exported bindings
+    for stmt in statements {
+        if let SK::Export(specs, _, source) = &*stmt.kind {
+            if source.is_some() {
+                continue; // re-exports don't need local bindings
+            }
+            for spec in specs {
+                if let ES::Named(name, _) = spec
+                    && !declared_names.contains(name.as_str())
+                {
+                    return Err(raise_syntax_error!(format!("Export '{}' is not defined", name)));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_module_declared_names(statements: &[Statement], names: &mut std::collections::HashSet<String>) {
+    use crate::core::statement::{ExportSpecifier as ES, StatementKind as SK};
+    for stmt in statements {
+        match stmt.kind.as_ref() {
+            SK::Var(decls) | SK::Let(decls) => {
+                for decl in decls {
+                    names.insert(decl.0.clone());
+                }
+            }
+            SK::Const(decls) => {
+                for decl in decls {
+                    names.insert(decl.0.clone());
+                }
+            }
+            SK::FunctionDeclaration(n, ..) => {
+                names.insert(n.clone());
+            }
+            SK::Class(def) => {
+                if !def.name.is_empty() {
+                    names.insert(def.name.clone());
+                }
+            }
+            SK::Import(specs, _) => {
+                for spec in specs {
+                    match spec {
+                        crate::core::statement::ImportSpecifier::Default(n) => {
+                            names.insert(n.clone());
+                        }
+                        crate::core::statement::ImportSpecifier::Named(n, alias) => {
+                            names.insert(alias.as_ref().unwrap_or(n).clone());
+                        }
+                        crate::core::statement::ImportSpecifier::Namespace(n)
+                        | crate::core::statement::ImportSpecifier::DeferredNamespace(n) => {
+                            names.insert(n.clone());
+                        }
+                    }
+                }
+            }
+            SK::Export(specs, inner, _) => {
+                if let Some(inner) = inner {
+                    collect_module_declared_names(std::slice::from_ref(inner.as_ref()), names);
+                }
+                for spec in specs {
+                    if let ES::Default(expr) = spec {
+                        match expr {
+                            crate::core::Expr::Function(Some(n), ..)
+                            | crate::core::Expr::GeneratorFunction(Some(n), ..)
+                            | crate::core::Expr::AsyncFunction(Some(n), ..)
+                            | crate::core::Expr::AsyncGeneratorFunction(Some(n), ..) => {
+                                names.insert(n.clone());
+                            }
+                            crate::core::Expr::Class(def) => {
+                                if !def.name.is_empty() {
+                                    names.insert(def.name.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Collect export info from parsed AST statements.

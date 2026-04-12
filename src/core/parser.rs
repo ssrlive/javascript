@@ -38,15 +38,30 @@ fn reject_lexical_in_single_statement(stmt: &Statement, context: &str) -> Result
     Ok(())
 }
 pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
+    push_statement_depth();
+    let is_module_top = in_module_context() && statement_depth() == 1;
     let mut statements = Vec::new();
     while *index < t.len() && t[*index].token != Token::EOF && t[*index].token != Token::RBrace {
         if matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
             *index += 1;
             continue;
         }
-        statements.push(parse_statement_item(t, index)?);
+        let stmt = parse_statement_item(t, index)?;
+        if is_module_top {
+            track_module_level_names(&stmt)?;
+        }
+        statements.push(stmt);
     }
+    pop_statement_depth();
     Ok(statements)
+}
+/// Parse a single statement in a nested context (loop body, if body, etc.)
+/// where import/export declarations are not allowed.
+fn parse_nested_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    push_statement_depth();
+    let result = parse_statement_item(t, index);
+    pop_statement_depth();
+    result
 }
 fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     log::trace!("parse_statement_item: starting at index {} token={:?}", *index, t.get(*index));
@@ -75,6 +90,12 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                     "Cannot use import statement outside a module"
                 ));
             }
+            if statement_depth() > 1 {
+                return Err(raise_parse_error_with_token!(
+                    t[*index],
+                    "import declarations may only appear at top level of a module"
+                ));
+            }
             parse_import_statement(t, index)
         }
         Token::Export => {
@@ -82,6 +103,12 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                 return Err(raise_parse_error_with_token!(
                     t[*index],
                     "Cannot use export statement outside a module"
+                ));
+            }
+            if statement_depth() > 1 {
+                return Err(raise_parse_error_with_token!(
+                    t[*index],
+                    "export declarations may only appear at top level of a module"
                 ));
             }
             parse_export_statement(t, index)
@@ -161,6 +188,14 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                 && *index + 1 < t.len()
                 && matches!(t[*index + 1].token, Token::Colon)
             {
+                // Escaped reserved words cannot be used as labels
+                // e.g. nul\u006c: , f\u0061lse: , tru\u0065:
+                if is_always_reserved_word(&label_name) {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        format!("SyntaxError: '{}' is not allowed as a label", label_name)
+                    ));
+                }
                 // await cannot be a label in module code or static blocks
                 if label_name == "await" && forbid_await_identifier() {
                     return Err(raise_parse_error_with_token!(
@@ -176,7 +211,17 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                     ));
                 }
                 *index += 2;
-                let stmt = parse_statement_item(t, index)?;
+                // Duplicate label check
+                if has_active_label(&label_name) {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index - 2],
+                        format!("Label '{}' has already been declared", label_name)
+                    ));
+                }
+                push_label(&label_name);
+                let stmt = parse_nested_statement_item(t, index);
+                pop_label();
+                let stmt = stmt?;
                 // Labeled statements: only FunctionDeclaration is allowed as
                 // a labeled item, not lexical (let/const/class) declarations
                 if is_lexical_declaration(&stmt) {
@@ -230,6 +275,17 @@ thread_local! {
     static NEW_TARGET_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
     /// Whether parsing in module mode (export/import declarations allowed).
     static MODULE_CONTEXT: Cell<bool> = const { Cell::new(false) };
+    /// Nesting depth for statements. 0 = top-level.
+    /// import/export declarations are only valid at depth 0 in module mode.
+    static STATEMENT_DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// Stack of active label names for duplicate label detection.
+    static LABEL_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Exported names in module code, for duplicate export detection.
+    static EXPORTED_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Module-level lexical names (function declarations, class declarations, let/const).
+    static MODULE_LEXICAL_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Module-level var-declared names.
+    static MODULE_VAR_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 fn forbid_in() -> bool {
     FORBID_IN.with(|c| *c.borrow() > 0)
@@ -386,11 +442,74 @@ fn forbid_await_identifier() -> bool {
     FORBID_AWAIT_IDENTIFIER.with(|c| *c.borrow() > 0)
 }
 
-fn in_module_context() -> bool {
+pub(crate) fn in_module_context() -> bool {
     MODULE_CONTEXT.with(|c| c.get())
 }
 pub(crate) fn set_module_context(v: bool) {
     MODULE_CONTEXT.with(|c| c.set(v));
+}
+fn statement_depth() -> usize {
+    STATEMENT_DEPTH.with(|c| c.get())
+}
+fn push_statement_depth() {
+    STATEMENT_DEPTH.with(|c| c.set(c.get() + 1));
+}
+fn pop_statement_depth() {
+    STATEMENT_DEPTH.with(|c| c.set(c.get() - 1));
+}
+fn has_active_label(name: &str) -> bool {
+    LABEL_STACK.with(|c| c.borrow().iter().any(|l| l == name))
+}
+fn push_label(name: &str) {
+    LABEL_STACK.with(|c| c.borrow_mut().push(name.to_string()));
+}
+fn pop_label() {
+    LABEL_STACK.with(|c| c.borrow_mut().pop());
+}
+pub(crate) fn reset_module_tracking() {
+    EXPORTED_NAMES.with(|c| c.borrow_mut().clear());
+    MODULE_LEXICAL_NAMES.with(|c| c.borrow_mut().clear());
+    MODULE_VAR_NAMES.with(|c| c.borrow_mut().clear());
+}
+fn add_exported_name(name: &str) -> Result<(), JSError> {
+    EXPORTED_NAMES.with(|c| {
+        let mut names = c.borrow_mut();
+        if names.iter().any(|n| n == name) {
+            Err(raise_syntax_error!(format!("Duplicate export name '{}'", name)))
+        } else {
+            names.push(name.to_string());
+            Ok(())
+        }
+    })
+}
+fn add_module_lexical_name(name: &str) -> Result<(), JSError> {
+    MODULE_LEXICAL_NAMES.with(|c| {
+        let mut lex = c.borrow_mut();
+        if lex.iter().any(|n| n == name) {
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
+        }
+        // Also check against var names
+        let conflict = MODULE_VAR_NAMES.with(|v| v.borrow().iter().any(|n| n == name));
+        if conflict {
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
+        }
+        lex.push(name.to_string());
+        Ok(())
+    })
+}
+fn add_module_var_name(name: &str) -> Result<(), JSError> {
+    MODULE_VAR_NAMES.with(|c| {
+        // Check against lexical names
+        let conflict = MODULE_LEXICAL_NAMES.with(|l| l.borrow().iter().any(|n| n == name));
+        if conflict {
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
+        }
+        let mut vars = c.borrow_mut();
+        if !vars.iter().any(|n| n == name) {
+            vars.push(name.to_string());
+        }
+        Ok(())
+    })
 }
 
 fn with_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
@@ -829,7 +948,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                         *index += 1;
                     }
-                    let body = parse_statement_item(t, index)?;
+                    let body = parse_nested_statement_item(t, index)?;
                     reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
                     let kind = if is_for_await {
@@ -906,7 +1025,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
-                let body = parse_statement_item(t, index)?;
+                let body = parse_nested_statement_item(t, index)?;
                 reject_lexical_in_single_statement(&body, "for")?;
                 let body_stmts = vec![body];
                 let init_stmt = Some(Box::new(Statement {
@@ -1026,7 +1145,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
-        let body = parse_statement_item(t, index)?;
+        let body = parse_nested_statement_item(t, index)?;
         reject_lexical_in_single_statement(&body, "for")?;
         // Keep Block as-is so its block-scope (alias mechanism at scope_depth 0)
         // is preserved — unwrapping loses let/const scoping in the for body.
@@ -1184,7 +1303,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             match *left {
                 Expr::Var(name, _, _) => {
                     *index += 1;
-                    let body = parse_statement_item(t, index)?;
+                    let body = parse_nested_statement_item(t, index)?;
                     reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
                     return Ok(Statement {
@@ -1195,7 +1314,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 }
                 Expr::Property(_, _) | Expr::Index(_, _) | Expr::PrivateMember(_, _) => {
                     *index += 1;
-                    let body = parse_statement_item(t, index)?;
+                    let body = parse_nested_statement_item(t, index)?;
                     reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
                     return Ok(Statement {
@@ -1220,7 +1339,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
-        let body = parse_statement_item(t, index)?;
+        let body = parse_nested_statement_item(t, index)?;
         reject_lexical_in_single_statement(&body, "for")?;
         let body_stmts = vec![body];
         // Check for-in head let/const names vs var declarations in body
@@ -1404,7 +1523,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
-    let body = parse_statement_item(t, index)?;
+    let body = parse_nested_statement_item(t, index)?;
     reject_lexical_in_single_statement(&body, "for")?;
     let body_stmts = vec![body];
     let init_stmt = if is_decl {
@@ -1659,7 +1778,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
-    let then_stmt = parse_statement_item(t, index)?;
+    let then_stmt = parse_nested_statement_item(t, index)?;
     reject_lexical_in_single_statement(&then_stmt, "if")?;
     let then_block = vec![then_stmt];
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -1670,7 +1789,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
-        let else_stmt = parse_statement_item(t, index)?;
+        let else_stmt = parse_nested_statement_item(t, index)?;
         reject_lexical_in_single_statement(&else_stmt, "else")?;
         Some(vec![else_stmt])
     } else {
@@ -1728,7 +1847,7 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         *index += 1;
         vec![]
     } else {
-        let s = parse_statement_item(t, index)?;
+        let s = parse_nested_statement_item(t, index)?;
         reject_lexical_in_single_statement(&s, "while")?;
         vec![s]
     };
@@ -1751,7 +1870,7 @@ fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
         vec![]
     } else {
         log::trace!("parse_do_while: parsing body statement at index {}", *index);
-        let body = parse_statement_item(t, index)?;
+        let body = parse_nested_statement_item(t, index)?;
         reject_lexical_in_single_statement(&body, "do-while")?;
         log::trace!(
             "parse_do_while: after parsing body index {}, next token={:?}",
@@ -1825,7 +1944,7 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 if *index >= t.len() || matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
                     break;
                 }
-                stmts.push(parse_statement_item(t, index)?);
+                stmts.push(parse_nested_statement_item(t, index)?);
             }
             cases.push(crate::core::SwitchCase::Case(case_expr, stmts));
         } else if matches!(t[*index].token, Token::Default) {
@@ -1846,7 +1965,7 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 if *index >= t.len() || matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
                     break;
                 }
-                stmts.push(parse_statement_item(t, index)?);
+                stmts.push(parse_nested_statement_item(t, index)?);
             }
             cases.push(crate::core::SwitchCase::Default(stmts));
         } else if matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
@@ -1935,7 +2054,7 @@ fn parse_with_statement(t: &[TokenData], index: &mut usize) -> Result<Statement,
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
-    let stmt = parse_statement_item(t, index)?;
+    let stmt = parse_nested_statement_item(t, index)?;
     let body_stmts = match *stmt.kind {
         StatementKind::Block(stmts) => stmts,
         _ => vec![stmt],
@@ -2467,7 +2586,7 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
-    // Check for duplicate bound names in import specifiers
+    // Check for duplicate bound names and restricted identifiers in import specifiers
     {
         let mut bound_names = Vec::new();
         for spec in &specifiers {
@@ -2477,6 +2596,14 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 ImportSpecifier::DeferredNamespace(n) => n.clone(),
                 ImportSpecifier::Named(imported, alias) => alias.as_ref().cloned().unwrap_or_else(|| imported.clone()),
             };
+            // Modules are strict mode: eval/arguments cannot be import bindings
+            if local == "eval" || local == "arguments" {
+                return Err(raise_parse_error!(
+                    &format!("SyntaxError: '{}' cannot be used as an imported binding name", local),
+                    t[start].line,
+                    t[start].column
+                ));
+            }
             if bound_names.contains(&local) {
                 return Err(raise_parse_error!(
                     &format!("SyntaxError: Duplicate import bound name '{}'", local),
@@ -2526,6 +2653,62 @@ fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Resul
     }
     Err(raise_parse_error!("Unterminated import attributes clause"))
 }
+/// In module code, function declarations are lexically scoped.
+/// Track names for duplicate detection and var/lexical conflicts.
+fn track_module_level_names(stmt: &Statement) -> Result<(), JSError> {
+    match stmt.kind.as_ref() {
+        StatementKind::FunctionDeclaration(name, ..) => {
+            add_module_lexical_name(name)?;
+        }
+        StatementKind::Class(def) => {
+            if !def.name.is_empty() {
+                add_module_lexical_name(&def.name)?;
+            }
+        }
+        StatementKind::Let(decls) => {
+            for decl in decls {
+                add_module_lexical_name(&decl.0)?;
+            }
+        }
+        StatementKind::Const(decls) => {
+            for decl in decls {
+                add_module_lexical_name(&decl.0)?;
+            }
+        }
+        StatementKind::Var(decls) => {
+            for decl in decls {
+                add_module_var_name(&decl.0)?;
+            }
+        }
+        StatementKind::Export(_specs, Some(inner), _) => {
+            track_module_level_names(inner)?;
+        }
+        StatementKind::Export(specs, None, _) => {
+            for spec in specs {
+                if let ExportSpecifier::Default(expr) = spec {
+                    match expr {
+                        Expr::Function(Some(name), ..)
+                        | Expr::GeneratorFunction(Some(name), ..)
+                        | Expr::AsyncFunction(Some(name), ..)
+                        | Expr::AsyncGeneratorFunction(Some(name), ..) => {
+                            if name != "default" {
+                                add_module_lexical_name(name)?;
+                            }
+                        }
+                        Expr::Class(def) => {
+                            if !def.name.is_empty() {
+                                add_module_lexical_name(&def.name)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1;
@@ -2544,6 +2727,14 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             *index < t.len() && matches!(t[*index].token, Token::Function | Token::FunctionStar | Token::Async);
         let mut expr = parse_assignment(t, index)?;
         if should_normalize_default_function_name {
+            // export default HoistableDeclaration[Default] — the function/generator
+            // is a declaration, not an expression, so it must not be called/accessed.
+            match &expr {
+                Expr::Function(..) | Expr::GeneratorFunction(..) | Expr::AsyncFunction(..) | Expr::AsyncGeneratorFunction(..) => {}
+                _ => {
+                    return Err(raise_syntax_error!("Unexpected token after export default declaration"));
+                }
+            }
             expr = match expr {
                 Expr::Function(None, params, body, st) => Expr::Function(Some("default".to_string()), params, body, st),
                 Expr::GeneratorFunction(None, params, body, st) => Expr::GeneratorFunction(Some("default".to_string()), params, body, st),
@@ -2555,8 +2746,8 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             };
         }
         specifiers.push(ExportSpecifier::Default(expr));
-        if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
-            *index += 1;
+        if !should_normalize_default_function_name && !matches!(specifiers.last(), Some(ExportSpecifier::Default(Expr::Class(..)))) {
+            finish_statement_without_semicolon(t, index)?;
         }
     } else if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
         *index += 1;
@@ -2616,9 +2807,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             }
         }
         consume_import_attributes_clause(t, index)?;
-        if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
-            *index += 1;
-        }
+        finish_statement_without_semicolon(t, index)?;
     } else if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
         *index += 1;
         let mut has_string_source_name = false;
@@ -2701,9 +2890,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             ));
         }
         consume_import_attributes_clause(t, index)?;
-        if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
-            *index += 1;
-        }
+        finish_statement_without_semicolon(t, index)?;
     } else {
         let stmt = match t[*index].token {
             Token::Var => parse_var_statement(t, index)?,
@@ -2714,6 +2901,48 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             _ => return Err(raise_parse_error!("Unexpected token in export statement")),
         };
         inner_stmt = Some(Box::new(stmt));
+    }
+    // Track exported names for duplicate detection in module code
+    if in_module_context() {
+        for spec in &specifiers {
+            match spec {
+                ExportSpecifier::Named(name, alias) => {
+                    let exported = alias.as_deref().unwrap_or(name);
+                    add_exported_name(exported)?;
+                }
+                ExportSpecifier::Namespace(name) => {
+                    add_exported_name(name)?;
+                }
+                ExportSpecifier::Default(_) => {
+                    add_exported_name("default")?;
+                }
+                ExportSpecifier::Star => {} // re-exports all, no specific name to track
+            }
+        }
+        // Track names declared by `export var/let/const/function/class`
+        if let Some(ref stmt) = inner_stmt {
+            match stmt.kind.as_ref() {
+                StatementKind::Var(decls) | StatementKind::Let(decls) => {
+                    for decl in decls {
+                        add_exported_name(&decl.0)?;
+                    }
+                }
+                StatementKind::Const(decls) => {
+                    for decl in decls {
+                        add_exported_name(&decl.0)?;
+                    }
+                }
+                StatementKind::FunctionDeclaration(name, ..) => {
+                    add_exported_name(name)?;
+                }
+                StatementKind::Class(def) => {
+                    if !def.name.is_empty() {
+                        add_exported_name(&def.name)?;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     Ok(Statement {
         kind: Box::new(StatementKind::Export(specifiers, inner_stmt, source)),
@@ -2829,6 +3058,8 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
+        #[allow(unused_assignments)]
+        let mut saw_lt_after_init = false;
         match &t[*index].token {
             Token::Identifier(name) => {
                 let name = name.clone();
@@ -2852,6 +3083,7 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                     ));
                 }
                 *index += 1;
+                let had_lt = *index < t.len() && matches!(t[*index].token, Token::LineTerminator);
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2861,7 +3093,13 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     None
                 };
+                let has_init = init.is_some();
                 decls.push((name, init));
+                saw_lt_after_init = if has_init {
+                    *index < t.len() && matches!(t[*index].token, Token::LineTerminator)
+                } else {
+                    had_lt
+                };
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2875,6 +3113,7 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 }
                 let name = "await".to_string();
                 *index += 1;
+                let had_lt = *index < t.len() && matches!(t[*index].token, Token::LineTerminator);
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2884,7 +3123,13 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     None
                 };
+                let has_init = init.is_some();
                 decls.push((name, init));
+                saw_lt_after_init = if has_init {
+                    *index < t.len() && matches!(t[*index].token, Token::LineTerminator)
+                } else {
+                    had_lt
+                };
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2892,6 +3137,7 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
             Token::Async => {
                 let name = "async".to_string();
                 *index += 1;
+                let had_lt = *index < t.len() && matches!(t[*index].token, Token::LineTerminator);
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2901,7 +3147,13 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     None
                 };
+                let has_init = init.is_some();
                 decls.push((name, init));
+                saw_lt_after_init = if has_init {
+                    *index < t.len() && matches!(t[*index].token, Token::LineTerminator)
+                } else {
+                    had_lt
+                };
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2909,6 +3161,7 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
             Token::As => {
                 let name = "as".to_string();
                 *index += 1;
+                let had_lt = *index < t.len() && matches!(t[*index].token, Token::LineTerminator);
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2918,7 +3171,13 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     None
                 };
+                let has_init = init.is_some();
                 decls.push((name, init));
+                saw_lt_after_init = if has_init {
+                    *index < t.len() && matches!(t[*index].token, Token::LineTerminator)
+                } else {
+                    had_lt
+                };
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
                 }
@@ -2933,19 +3192,45 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 // In sloppy mode, `static` is a valid identifier
                 let name = "static".to_string();
                 *index += 1;
+                let had_lt = *index < t.len() && matches!(t[*index].token, Token::LineTerminator);
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
                 let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
                     *index += 1;
                     Some(parse_assignment(t, index)?)
                 } else {
                     None
                 };
+                let has_init = init.is_some();
                 decls.push((name, init));
+                saw_lt_after_init = if has_init {
+                    *index < t.len() && matches!(t[*index].token, Token::LineTerminator)
+                } else {
+                    had_lt
+                };
+                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
             }
             _ => break,
         }
         if *index < t.len() && matches!(t[*index].token, Token::Comma) {
             *index += 1;
         } else {
+            // No comma: check ASI validity. If no line terminator was seen after
+            // the initializer, the next token must be ; or } or EOF or a token
+            // that legitimately follows in for-in/for-of context.
+            if !saw_lt_after_init
+                && *index < t.len()
+                && !matches!(
+                    t[*index].token,
+                    Token::Semicolon | Token::RBrace | Token::EOF | Token::In | Token::RParen
+                )
+                && !matches!(&t[*index].token, Token::Identifier(n) if n == "of")
+            {
+                return Err(raise_parse_error_at!(t.get(*index)));
+            }
             break;
         }
     }
@@ -4853,6 +5138,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     if next_can_start_expr {
                         let inner = parse_primary(tokens, index, true)?;
                         Expr::Await(Box::new(inner))
+                    } else if forbid_await_identifier() {
+                        return Err(raise_parse_error_with_token!(token_data, "'await' requires an operand"));
                     } else {
                         Expr::Var("await".to_string(), Some(token_data.line), Some(token_data.column))
                     }
@@ -5332,7 +5619,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     Expr::SuperComputedProperty(Box::new(key_expr))
                 }
             } else {
-                Expr::Super
+                return Err(raise_parse_error_with_token!(tokens[*index - 1], "'super' keyword unexpected here"));
             }
         }
         Token::LBrace => {
@@ -6008,6 +6295,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                             return Err(raise_parse_error!(
                                                 "SyntaxError: 'await' is not allowed as an identifier in this context"
                                             ));
+                                        }
+                                        // Keywords cannot be used as shorthand properties
+                                        // ({this}), ({null}), ({true}), ({false}) etc. are SyntaxErrors
+                                        if is_reserved_identifier(&name) || matches!(name.as_str(), "this" | "null" | "true" | "false") {
+                                            return Err(raise_parse_error!(format!(
+                                                "SyntaxError: Unexpected reserved word '{}' in shorthand property",
+                                                name
+                                            )));
                                         }
                                         properties.push((key_expr, Expr::Var(name, None, None), key_is_computed, false));
                                     } else {

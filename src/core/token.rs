@@ -1,5 +1,5 @@
 use crate::core::{Collect, GcTrace};
-use crate::{JSError, raise_tokenize_error};
+use crate::{JSError, raise_syntax_error, raise_tokenize_error};
 use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive};
 use regress::Regex;
@@ -532,6 +532,12 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] == '>' {
                     let after_lt = tokens.is_empty() || matches!(tokens.last().map(|t| &t.token), Some(Token::LineTerminator));
                     if after_lt {
+                        // HTML-like comments are not allowed in module code
+                        if crate::core::parser::in_module_context() {
+                            let mut err = raise_syntax_error!("HTML close comment is not allowed in module code");
+                            err.set_js_location(line, column);
+                            return Err(err);
+                        }
                         i += 3;
                         column += 3;
                         while i < chars.len() && !matches!(chars[i], '\n' | '\r' | '\u{2028}' | '\u{2029}') {
@@ -1063,6 +1069,12 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
             '<' => {
                 // AnnexB B.1.1: HTMLOpenComment  <!--  acts as a single-line comment
                 if i + 3 < chars.len() && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-' {
+                    // HTML-like comments are not allowed in module code
+                    if crate::core::parser::in_module_context() {
+                        let mut err = raise_syntax_error!("HTML open comment is not allowed in module code");
+                        err.set_js_location(line, column);
+                        return Err(err);
+                    }
                     i += 4;
                     column += 4;
                     while i < chars.len() && !matches!(chars[i], '\n' | '\r' | '\u{2028}' | '\u{2029}') {

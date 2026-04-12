@@ -307,6 +307,13 @@ const BUILTIN_SET_VALUES: FunctionID = 354;
 const BUILTIN_SET_ENTRIES: FunctionID = 355;
 const BUILTIN_SET_FOREACH: FunctionID = 356;
 const BUILTIN_SET_CLEAR: FunctionID = 357;
+const BUILTIN_SET_UNION: FunctionID = 358;
+const BUILTIN_SET_INTERSECTION: FunctionID = 359;
+const BUILTIN_SET_DIFFERENCE: FunctionID = 360;
+const BUILTIN_SET_SYMMETRIC_DIFFERENCE: FunctionID = 361;
+const BUILTIN_SET_IS_SUBSET_OF: FunctionID = 362;
+const BUILTIN_SET_IS_SUPERSET_OF: FunctionID = 363;
+const BUILTIN_SET_IS_DISJOINT_FROM: FunctionID = 364;
 // ── Iterator (370–374) ──────────────────────────────────────────────
 const BUILTIN_ITERATOR_NEXT: FunctionID = 370;
 // ── Generator (375–379) ─────────────────────────────────────────────
@@ -3769,6 +3776,13 @@ impl<'gc> VM<'gc> {
             BUILTIN_SET_ENTRIES => "entries",
             BUILTIN_SET_FOREACH => "forEach",
             BUILTIN_SET_CLEAR => "clear",
+            BUILTIN_SET_UNION => "union",
+            BUILTIN_SET_INTERSECTION => "intersection",
+            BUILTIN_SET_DIFFERENCE => "difference",
+            BUILTIN_SET_SYMMETRIC_DIFFERENCE => "symmetricDifference",
+            BUILTIN_SET_IS_SUBSET_OF => "isSubsetOf",
+            BUILTIN_SET_IS_SUPERSET_OF => "isSupersetOf",
+            BUILTIN_SET_IS_DISJOINT_FROM => "isDisjointFrom",
             BUILTIN_WEAKSET_ADD => "add",
             BUILTIN_WEAKSET_HAS => "has",
             BUILTIN_WEAKSET_DELETE => "delete",
@@ -3794,6 +3808,15 @@ impl<'gc> VM<'gc> {
             BUILTIN_MAP_KEYS | BUILTIN_MAP_VALUES | BUILTIN_MAP_ENTRIES | BUILTIN_MAP_CLEAR => 0.0,
             BUILTIN_MAP_FOREACH => 1.0,
             BUILTIN_CTOR_SET => 0.0,
+            BUILTIN_SET_ADD | BUILTIN_SET_HAS | BUILTIN_SET_DELETE => 1.0,
+            BUILTIN_SET_FOREACH => 1.0,
+            BUILTIN_SET_UNION
+            | BUILTIN_SET_INTERSECTION
+            | BUILTIN_SET_DIFFERENCE
+            | BUILTIN_SET_SYMMETRIC_DIFFERENCE
+            | BUILTIN_SET_IS_SUBSET_OF
+            | BUILTIN_SET_IS_SUPERSET_OF
+            | BUILTIN_SET_IS_DISJOINT_FROM => 1.0,
             BUILTIN_CTOR_PROMISE => 1.0,
             BUILTIN_PROMISE_RESOLVE => 1.0,
             BUILTIN_PROMISE_ALL => 1.0,
@@ -15389,6 +15412,17 @@ impl<'gc> VM<'gc> {
                                 "entries" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
                                 "forEach" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_FOREACH),
                                 "clear" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_CLEAR),
+                                "union" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_UNION),
+                                "intersection" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_INTERSECTION),
+                                "difference" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_DIFFERENCE),
+                                "symmetricDifference" if !is_weak => {
+                                    return Value::VmNativeFunction(BUILTIN_SET_SYMMETRIC_DIFFERENCE);
+                                }
+                                "isSubsetOf" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_IS_SUBSET_OF),
+                                "isSupersetOf" if !is_weak => return Value::VmNativeFunction(BUILTIN_SET_IS_SUPERSET_OF),
+                                "isDisjointFrom" if !is_weak => {
+                                    return Value::VmNativeFunction(BUILTIN_SET_IS_DISJOINT_FROM);
+                                }
                                 _ => {}
                             }
                         }
@@ -16087,6 +16121,13 @@ impl<'gc> VM<'gc> {
                 "entries" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_ENTRIES),
                 "forEach" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_FOREACH),
                 "clear" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_CLEAR),
+                "union" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_UNION),
+                "intersection" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_INTERSECTION),
+                "difference" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_DIFFERENCE),
+                "symmetricDifference" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_SYMMETRIC_DIFFERENCE),
+                "isSubsetOf" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_IS_SUBSET_OF),
+                "isSupersetOf" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_IS_SUPERSET_OF),
+                "isDisjointFrom" if !set.borrow().is_weak => Value::VmNativeFunction(BUILTIN_SET_IS_DISJOINT_FROM),
                 "toString" => Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING),
                 _ => Value::Undefined,
             },
@@ -18081,12 +18122,29 @@ impl<'gc> VM<'gc> {
                         proto.insert("entries".to_string(), Value::VmNativeFunction(BUILTIN_SET_ENTRIES));
                         proto.insert("forEach".to_string(), Value::VmNativeFunction(BUILTIN_SET_FOREACH));
                         proto.insert("clear".to_string(), Value::VmNativeFunction(BUILTIN_SET_CLEAR));
+                        proto.insert("union".to_string(), Value::VmNativeFunction(BUILTIN_SET_UNION));
+                        proto.insert("intersection".to_string(), Value::VmNativeFunction(BUILTIN_SET_INTERSECTION));
+                        proto.insert("difference".to_string(), Value::VmNativeFunction(BUILTIN_SET_DIFFERENCE));
+                        proto.insert(
+                            "symmetricDifference".to_string(),
+                            Value::VmNativeFunction(BUILTIN_SET_SYMMETRIC_DIFFERENCE),
+                        );
+                        proto.insert("isSubsetOf".to_string(), Value::VmNativeFunction(BUILTIN_SET_IS_SUBSET_OF));
+                        proto.insert("isSupersetOf".to_string(), Value::VmNativeFunction(BUILTIN_SET_IS_SUPERSET_OF));
+                        proto.insert("isDisjointFrom".to_string(), Value::VmNativeFunction(BUILTIN_SET_IS_DISJOINT_FROM));
                         mark_nonenumerable(&mut proto, "keys");
                         mark_nonenumerable(&mut proto, "values");
                         mark_nonenumerable(&mut proto, "@@sym:1");
                         mark_nonenumerable(&mut proto, "entries");
                         mark_nonenumerable(&mut proto, "forEach");
                         mark_nonenumerable(&mut proto, "clear");
+                        mark_nonenumerable(&mut proto, "union");
+                        mark_nonenumerable(&mut proto, "intersection");
+                        mark_nonenumerable(&mut proto, "difference");
+                        mark_nonenumerable(&mut proto, "symmetricDifference");
+                        mark_nonenumerable(&mut proto, "isSubsetOf");
+                        mark_nonenumerable(&mut proto, "isSupersetOf");
+                        mark_nonenumerable(&mut proto, "isDisjointFrom");
                     }
                 }
                 _ => {}
@@ -31366,6 +31424,13 @@ impl<'gc> VM<'gc> {
                 | BUILTIN_SET_ENTRIES
                 | BUILTIN_SET_FOREACH
                 | BUILTIN_SET_CLEAR
+                | BUILTIN_SET_UNION
+                | BUILTIN_SET_INTERSECTION
+                | BUILTIN_SET_DIFFERENCE
+                | BUILTIN_SET_SYMMETRIC_DIFFERENCE
+                | BUILTIN_SET_IS_SUBSET_OF
+                | BUILTIN_SET_IS_SUPERSET_OF
+                | BUILTIN_SET_IS_DISJOINT_FROM
         ) && receiver_set_is_weak != Some(false))
             || (matches!(id, BUILTIN_WEAKSET_ADD | BUILTIN_WEAKSET_HAS | BUILTIN_WEAKSET_DELETE) && receiver_set_is_weak != Some(true))
         {
@@ -31377,6 +31442,13 @@ impl<'gc> VM<'gc> {
                 BUILTIN_SET_ENTRIES => "entries",
                 BUILTIN_SET_FOREACH => "forEach",
                 BUILTIN_SET_CLEAR => "clear",
+                BUILTIN_SET_UNION => "union",
+                BUILTIN_SET_INTERSECTION => "intersection",
+                BUILTIN_SET_DIFFERENCE => "difference",
+                BUILTIN_SET_SYMMETRIC_DIFFERENCE => "symmetricDifference",
+                BUILTIN_SET_IS_SUBSET_OF => "isSubsetOf",
+                BUILTIN_SET_IS_SUPERSET_OF => "isSupersetOf",
+                BUILTIN_SET_IS_DISJOINT_FROM => "isDisjointFrom",
                 _ => unreachable!(),
             };
             self.throw_type_error(ctx, &format!("Set.prototype.{} called on incompatible receiver", method_name));
@@ -31470,6 +31542,229 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     return Value::Undefined;
+                }
+                BUILTIN_SET_UNION => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((_size, _has, keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    let Some((result, result_set)) = self.create_plain_set(ctx) else {
+                        return Value::Undefined;
+                    };
+                    let receiver_values = s.borrow().values.clone();
+                    for value in receiver_values {
+                        self.append_set_value(ctx, result_set, value);
+                    }
+                    let Some((iterator, next_method)) = self.open_set_like_keys_iterator(ctx, &other, &keys) else {
+                        return Value::Undefined;
+                    };
+                    loop {
+                        match self.iterator_step_value(ctx, &iterator, &next_method) {
+                            Some(Some(value)) => {
+                                self.append_set_value(ctx, result_set, value);
+                            }
+                            Some(None) => break,
+                            None => return Value::Undefined,
+                        }
+                    }
+                    return result;
+                }
+                BUILTIN_SET_INTERSECTION => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((other_size, has, keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    let Some((result, result_set)) = self.create_plain_set(ctx) else {
+                        return Value::Undefined;
+                    };
+                    let this_size = s.borrow().values.len() as f64;
+                    if this_size <= other_size {
+                        let mut index = 0usize;
+                        let mut current = None;
+                        while let Some(value) = self.next_live_set_value(s, &mut index, current.as_ref()) {
+                            current = Some(value.clone());
+                            let Some(in_other) = self.call_set_like_has(ctx, &other, &has, &value) else {
+                                return Value::Undefined;
+                            };
+                            if in_other {
+                                self.append_set_value(ctx, result_set, value);
+                            }
+                        }
+                    } else {
+                        let Some((iterator, next_method)) = self.open_set_like_keys_iterator(ctx, &other, &keys) else {
+                            return Value::Undefined;
+                        };
+                        loop {
+                            match self.iterator_step_value(ctx, &iterator, &next_method) {
+                                Some(Some(value)) => {
+                                    if self.set_contains_value(s, &value) {
+                                        self.append_set_value(ctx, result_set, value);
+                                    }
+                                }
+                                Some(None) => break,
+                                None => return Value::Undefined,
+                            }
+                        }
+                    }
+                    return result;
+                }
+                BUILTIN_SET_DIFFERENCE => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((other_size, has, keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    let Some((result, result_set)) = self.create_plain_set(ctx) else {
+                        return Value::Undefined;
+                    };
+                    let this_size = s.borrow().values.len() as f64;
+                    if this_size <= other_size {
+                        let mut index = 0usize;
+                        let mut current = None;
+                        while let Some(value) = self.next_live_set_value(s, &mut index, current.as_ref()) {
+                            current = Some(value.clone());
+                            let Some(in_other) = self.call_set_like_has(ctx, &other, &has, &value) else {
+                                return Value::Undefined;
+                            };
+                            if !in_other {
+                                self.append_set_value(ctx, result_set, value);
+                            }
+                        }
+                    } else {
+                        let receiver_values = s.borrow().values.clone();
+                        for value in receiver_values {
+                            self.append_set_value(ctx, result_set, value);
+                        }
+                        let Some((iterator, next_method)) = self.open_set_like_keys_iterator(ctx, &other, &keys) else {
+                            return Value::Undefined;
+                        };
+                        loop {
+                            match self.iterator_step_value(ctx, &iterator, &next_method) {
+                                Some(Some(value)) => {
+                                    self.remove_set_value(ctx, result_set, &value);
+                                }
+                                Some(None) => break,
+                                None => return Value::Undefined,
+                            }
+                        }
+                    }
+                    return result;
+                }
+                BUILTIN_SET_SYMMETRIC_DIFFERENCE => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((_size, _has, keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    let Some((result, result_set)) = self.create_plain_set(ctx) else {
+                        return Value::Undefined;
+                    };
+                    let receiver_values = s.borrow().values.clone();
+                    for value in receiver_values {
+                        self.append_set_value(ctx, result_set, value);
+                    }
+                    let Some((iterator, next_method)) = self.open_set_like_keys_iterator(ctx, &other, &keys) else {
+                        return Value::Undefined;
+                    };
+                    loop {
+                        match self.iterator_step_value(ctx, &iterator, &next_method) {
+                            Some(Some(value)) => {
+                                if self.set_contains_value(s, &value) {
+                                    self.remove_set_value(ctx, result_set, &value);
+                                } else if !self.set_contains_value(result_set, &value) {
+                                    self.append_set_value(ctx, result_set, value);
+                                }
+                            }
+                            Some(None) => break,
+                            None => return Value::Undefined,
+                        }
+                    }
+                    return result;
+                }
+                BUILTIN_SET_IS_SUBSET_OF => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((other_size, has, _keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    if (s.borrow().values.len() as f64) > other_size {
+                        return Value::Boolean(false);
+                    }
+                    let mut index = 0usize;
+                    let mut current = None;
+                    while let Some(value) = self.next_live_set_value(s, &mut index, current.as_ref()) {
+                        current = Some(value.clone());
+                        let Some(in_other) = self.call_set_like_has(ctx, &other, &has, &value) else {
+                            return Value::Undefined;
+                        };
+                        if !in_other {
+                            return Value::Boolean(false);
+                        }
+                    }
+                    return Value::Boolean(true);
+                }
+                BUILTIN_SET_IS_SUPERSET_OF => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((other_size, _has, keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    if (s.borrow().values.len() as f64) < other_size {
+                        return Value::Boolean(false);
+                    }
+                    let Some((iterator, next_method)) = self.open_set_like_keys_iterator(ctx, &other, &keys) else {
+                        return Value::Undefined;
+                    };
+                    loop {
+                        match self.iterator_step_value(ctx, &iterator, &next_method) {
+                            Some(Some(value)) => {
+                                if !self.set_contains_value(s, &value) {
+                                    if !self.iterator_close_normal(ctx, &iterator) {
+                                        return Value::Undefined;
+                                    }
+                                    return Value::Boolean(false);
+                                }
+                            }
+                            Some(None) => break,
+                            None => return Value::Undefined,
+                        }
+                    }
+                    return Value::Boolean(true);
+                }
+                BUILTIN_SET_IS_DISJOINT_FROM => {
+                    let other = args.first().cloned().unwrap_or(Value::Undefined);
+                    let Some((other_size, has, keys)) = self.get_set_record(ctx, &other) else {
+                        return Value::Undefined;
+                    };
+                    let this_size = s.borrow().values.len() as f64;
+                    if this_size <= other_size {
+                        let mut index = 0usize;
+                        let mut current = None;
+                        while let Some(value) = self.next_live_set_value(s, &mut index, current.as_ref()) {
+                            current = Some(value.clone());
+                            let Some(in_other) = self.call_set_like_has(ctx, &other, &has, &value) else {
+                                return Value::Undefined;
+                            };
+                            if in_other {
+                                return Value::Boolean(false);
+                            }
+                        }
+                    } else {
+                        let Some((iterator, next_method)) = self.open_set_like_keys_iterator(ctx, &other, &keys) else {
+                            return Value::Undefined;
+                        };
+                        loop {
+                            match self.iterator_step_value(ctx, &iterator, &next_method) {
+                                Some(Some(value)) => {
+                                    if self.set_contains_value(s, &value) {
+                                        if !self.iterator_close_normal(ctx, &iterator) {
+                                            return Value::Undefined;
+                                        }
+                                        return Value::Boolean(false);
+                                    }
+                                }
+                                Some(None) => break,
+                                None => return Value::Undefined,
+                            }
+                        }
+                    }
+                    return Value::Boolean(true);
                 }
                 _ => {}
             }
@@ -33870,6 +34165,162 @@ impl<'gc> VM<'gc> {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => (x.is_nan() && y.is_nan()) || x == y,
             _ => self.values_same(a, b),
+        }
+    }
+
+    fn set_handle_from_value(&self, value: &Value<'gc>) -> Option<VmSetHandle<'gc>> {
+        match value {
+            Value::VmSet(set) => Some(*set),
+            Value::VmObject(obj) => match obj.borrow().get("__set_data__").cloned() {
+                Some(Value::VmSet(set)) => Some(set),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn create_plain_set(&mut self, ctx: &GcContext<'gc>) -> Option<(Value<'gc>, VmSetHandle<'gc>)> {
+        let ctor = Value::VmNativeFunction(BUILTIN_CTOR_SET);
+        let set_value = match self.construct_value(ctx, &ctor, &[], None) {
+            Ok(v) => v,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return None;
+            }
+        };
+        let Some(set_handle) = self.set_handle_from_value(&set_value) else {
+            self.throw_type_error(ctx, "Set constructor did not create a Set");
+            return None;
+        };
+        Some((set_value, set_handle))
+    }
+
+    fn append_set_value(&self, ctx: &GcContext<'gc>, set: VmSetHandle<'gc>, value: Value<'gc>) {
+        let value = Self::normalize_set_method_value(value);
+        let mut borrow = set.borrow_mut(ctx);
+        if !borrow.values.iter().any(|existing| self.values_same_zero(existing, &value)) {
+            borrow.values.push(value);
+        }
+    }
+
+    fn remove_set_value(&self, ctx: &GcContext<'gc>, set: VmSetHandle<'gc>, value: &Value<'gc>) -> bool {
+        let value = Self::normalize_set_method_value(value.clone());
+        let mut borrow = set.borrow_mut(ctx);
+        let len_before = borrow.values.len();
+        borrow.values.retain(|existing| !self.values_same_zero(existing, &value));
+        borrow.values.len() < len_before
+    }
+
+    fn set_contains_value(&self, set: VmSetHandle<'gc>, value: &Value<'gc>) -> bool {
+        let value = Self::normalize_set_method_value(value.clone());
+        set.borrow().values.iter().any(|existing| self.values_same_zero(existing, &value))
+    }
+
+    fn normalize_set_method_value(value: Value<'gc>) -> Value<'gc> {
+        match value {
+            Value::Number(0.0) => Value::Number(0.0),
+            _ => value,
+        }
+    }
+
+    fn get_set_record(&mut self, ctx: &GcContext<'gc>, other: &Value<'gc>) -> Option<(f64, Value<'gc>, Value<'gc>)> {
+        if !matches!(
+            other,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..)
+        ) || other.is_symbol_value()
+        {
+            self.throw_type_error(ctx, "Set methods require an object argument");
+            return None;
+        }
+
+        let raw_size = self.read_named_property(ctx, other, "size");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let size = self.vm_coerce_to_number(ctx, &raw_size);
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if size.is_nan() {
+            self.throw_type_error(ctx, "Set-like object size is NaN");
+            return None;
+        }
+
+        let has = self.read_named_property(ctx, other, "has");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if !self.is_value_callable(&has) {
+            self.throw_type_error(ctx, "Set-like object has is not callable");
+            return None;
+        }
+
+        let keys = self.read_named_property(ctx, other, "keys");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if !self.is_value_callable(&keys) {
+            self.throw_type_error(ctx, "Set-like object keys is not callable");
+            return None;
+        }
+
+        Some((size, has, keys))
+    }
+
+    fn open_set_like_keys_iterator(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        other: &Value<'gc>,
+        keys: &Value<'gc>,
+    ) -> Option<(Value<'gc>, Value<'gc>)> {
+        let iterator = match self.vm_call_function_value(ctx, keys, other, &[]) {
+            Ok(v) => v,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return None;
+            }
+        };
+
+        if !matches!(
+            iterator,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) || iterator.is_symbol_value()
+        {
+            self.throw_type_error(ctx, "Set-like keys() did not return an object");
+            return None;
+        }
+
+        let next = self.read_named_property(ctx, &iterator, "next");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if !self.is_value_callable(&next) {
+            self.throw_type_error(ctx, "Set-like keys iterator next is not callable");
+            return None;
+        }
+
+        Some((iterator, next))
+    }
+
+    fn next_live_set_value(&self, set: VmSetHandle<'gc>, index: &mut usize, current: Option<&Value<'gc>>) -> Option<Value<'gc>> {
+        if let Some(current) = current {
+            let borrow = set.borrow();
+            if let Some(pos) = borrow.values.iter().position(|value| self.values_same_zero(value, current)) {
+                *index = pos + 1;
+            }
+        }
+
+        let borrow = set.borrow();
+        borrow.values.get(*index).cloned()
+    }
+
+    fn call_set_like_has(&mut self, ctx: &GcContext<'gc>, other: &Value<'gc>, has: &Value<'gc>, value: &Value<'gc>) -> Option<bool> {
+        match self.vm_call_function_value(ctx, has, other, std::slice::from_ref(value)) {
+            Ok(result) => Some(Self::value_is_truthy(&result)),
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                None
+            }
         }
     }
 

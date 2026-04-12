@@ -16,5 +16,5 @@ try {
   if (!a.isDisjointFrom(new Set([4,5]))) throw new Error('isDisjointFrom failed');
   console.log('OK');
 } catch (e) {
-  console.log('NO');
+  console.log('NO. reason:', e.message);
 }

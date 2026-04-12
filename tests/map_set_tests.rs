@@ -236,6 +236,60 @@ fn test_set_add_has_standard_name() {
 }
 
 #[test]
+fn test_set_methods_probe_surface() {
+    let result = evaluate_script(
+        r#"
+        const a = new Set([1, 2, 3]);
+        const b = new Set([2, 3, 4]);
+        const u = a.union(b);
+        const i = a.intersection(b);
+        const d = a.difference(b);
+        const sd = a.symmetricDifference(b);
+        typeof Set.prototype.union === "function" &&
+        typeof Set.prototype.intersection === "function" &&
+        typeof Set.prototype.difference === "function" &&
+        typeof Set.prototype.symmetricDifference === "function" &&
+        typeof Set.prototype.isSubsetOf === "function" &&
+        typeof Set.prototype.isSupersetOf === "function" &&
+        typeof Set.prototype.isDisjointFrom === "function" &&
+        u instanceof Set && u.size === 4 &&
+        i.size === 2 &&
+        d.size === 1 &&
+        sd.size === 2 &&
+        a.isSubsetOf(new Set([1, 2, 3, 4])) &&
+        a.isSupersetOf(new Set([1, 2])) &&
+        a.isDisjointFrom(new Set([4, 5]))
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_set_union_allows_set_like_object() {
+    let result = evaluate_script(
+        r#"
+        const s1 = new Set([1, 2]);
+        const s2 = {
+          size: 2,
+          has() { throw new Error("union should not call has"); },
+          keys: function* () {
+            yield 2;
+            yield 3;
+          }
+        };
+        JSON.stringify([...s1.union(s2)])
+    "#,
+        false,
+        None::<&std::path::Path>,
+    )
+    .unwrap();
+    assert_eq!(result, "\"[1,2,3]\"");
+}
+
+#[test]
 fn test_set_other_builtin_methods_reject_invalid_receivers() {
     let result = evaluate_script(
         r#"

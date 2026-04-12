@@ -514,7 +514,11 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
     };
     let extends = if *index < t.len() && matches!(t[*index].token, Token::Extends) {
         *index += 1;
-        Some(parse_expression(t, index)?)
+        let heritage = parse_assignment(t, index)?;
+        if matches!(&heritage, Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..)) {
+            return Err(raise_parse_error!("Arrow function is not allowed in class heritage"));
+        }
+        Some(heritage)
     } else {
         None
     };
@@ -3624,15 +3628,63 @@ fn parse_shift(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError>
     })
 }
 fn parse_relational(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, index, parse_shift, |token| match token {
-        Token::LessThan => Some(BinaryOp::LessThan),
-        Token::GreaterThan => Some(BinaryOp::GreaterThan),
-        Token::LessEqual => Some(BinaryOp::LessEqual),
-        Token::GreaterEqual => Some(BinaryOp::GreaterEqual),
-        Token::InstanceOf => Some(BinaryOp::InstanceOf),
-        Token::In if !forbid_in() => Some(BinaryOp::In),
-        _ => None,
-    })
+    let mut left = parse_shift(tokens, index)?;
+    loop {
+        let mut look = *index;
+        while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
+            look += 1;
+        }
+        if look >= tokens.len() {
+            break;
+        }
+        let op = match &tokens[look].token {
+            Token::LessThan => Some(BinaryOp::LessThan),
+            Token::GreaterThan => Some(BinaryOp::GreaterThan),
+            Token::LessEqual => Some(BinaryOp::LessEqual),
+            Token::GreaterEqual => Some(BinaryOp::GreaterEqual),
+            Token::InstanceOf => Some(BinaryOp::InstanceOf),
+            Token::In if !forbid_in() => Some(BinaryOp::In),
+            _ => None,
+        };
+        if let Some(op) = op {
+            // Validate PrivateIdentifier `in` constraints per spec
+            if op == BinaryOp::In {
+                if let Expr::PrivateName(_) = &left {
+                    // PrivateIdentifier in ShiftExpression: validate RHS is not arrow/PrivateName
+                    *index = look + 1;
+                    let right = parse_shift(tokens, index)?;
+                    if matches!(
+                        &right,
+                        Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..) | Expr::PrivateName(..)
+                    ) {
+                        return Err(raise_parse_error!("Invalid right-hand side in private field 'in' expression"));
+                    }
+                    left = Expr::Binary(Box::new(left), op, Box::new(right));
+                    // After PrivateIdentifier `in` expr, the result cannot be the LHS of another `in`
+                    // (it's a RelationalExpression, not a PrivateIdentifier)
+                    continue;
+                }
+                // If the LHS already contains a PrivateIdentifier `in` pattern, disallow nested `in`
+                if contains_private_in(&left) {
+                    return Err(raise_parse_error!(
+                        "Cannot nest 'in' expressions when left-hand side is PrivateIdentifier"
+                    ));
+                }
+            }
+            *index = look + 1;
+            let right = parse_shift(tokens, index)?;
+            left = Expr::Binary(Box::new(left), op, Box::new(right));
+        } else {
+            break;
+        }
+    }
+    Ok(left)
+}
+fn contains_private_in(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary(left, BinaryOp::In, _) => matches!(&**left, Expr::PrivateName(..)),
+        _ => false,
+    }
 }
 fn parse_equality(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     parse_binary_op(tokens, index, parse_relational, |token| match token {
@@ -4656,7 +4708,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             };
             let extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
                 *index += 1;
-                Some(parse_expression(tokens, index)?)
+                let heritage = parse_assignment(tokens, index)?;
+                if matches!(&heritage, Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..)) {
+                    return Err(raise_parse_error!("Arrow function is not allowed in class heritage"));
+                }
+                Some(heritage)
             } else {
                 None
             };
@@ -4855,7 +4911,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
             expr
         }
-        Token::PrivateIdentifier(name) => Expr::PrivateName(name.clone()),
+        Token::PrivateIdentifier(name) => {
+            let invalid = PRIVATE_NAME_STACK.with(|s| {
+                let stack = s.borrow();
+                !stack.iter().rev().any(|rc| rc.borrow().contains(name))
+            });
+            if invalid {
+                let msg = format!("Private field '#{name}' must be declared in an enclosing class");
+                return Err(raise_parse_error_with_token!(tokens[*index - 1], msg));
+            }
+            Expr::PrivateName(name.clone())
+        }
         Token::Import => {
             if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                 *index += 1;
@@ -5067,6 +5133,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index += 1;
             }
             let mut properties = Vec::new();
+            let mut has_proto = false;
             if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
                 *index += 1;
             } else {
@@ -5200,6 +5267,24 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 is_async_member = true;
                                 *index += 1;
                             }
+                        } else if *index < tokens.len()
+                            && matches!(tokens[*index].token, Token::Identifier(ref s) if s == "async")
+                            && raw_identifier_source_has_escape(&tokens[*index])
+                        {
+                            // Escaped "async" — check if next tokens look like a method def
+                            let mut peek = *index + 1;
+                            while peek < tokens.len() && matches!(tokens[peek].token, Token::LineTerminator) {
+                                peek += 1;
+                            }
+                            let next_starts_method_name = peek < tokens.len()
+                                && (matches!(tokens[peek].token, Token::Identifier(_) | Token::LBracket | Token::Multiply)
+                                    || tokens[peek].token.as_identifier_string().is_some());
+                            if next_starts_method_name {
+                                return Err(raise_parse_error_with_token!(
+                                    tokens[*index],
+                                    "'async' keyword must not contain escaped characters"
+                                ));
+                            }
                         }
                         let mut is_generator = false;
                         if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
@@ -5216,8 +5301,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         {
                             *index += 1;
                             *index += 1;
-                            let params = parse_parameters(tokens, index)?;
+                            push_method_context();
+                            let params = with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?;
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                pop_method_context();
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
@@ -5226,12 +5313,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             if is_generator {
                                 push_generator_context();
                             }
-                            let body = parse_statements(tokens, index)?;
+                            let body = with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?;
                             if is_generator {
                                 pop_generator_context();
                             }
                             pop_method_context();
                             pop_function_context();
+                            pop_method_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -5297,8 +5385,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
                                 *index += 1;
                                 *index += 1;
-                                let params = parse_parameters(tokens, index)?;
+                                push_method_context();
+                                let params = if is_async_member {
+                                    parse_parameters(tokens, index)?
+                                } else {
+                                    with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?
+                                };
                                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                    pop_method_context();
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
                                 *index += 1;
@@ -5307,12 +5401,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 if is_generator {
                                     push_generator_context();
                                 }
-                                let body = parse_statements(tokens, index)?;
+                                let body = if is_async_member {
+                                    parse_statements(tokens, index)?
+                                } else {
+                                    with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                                };
                                 if is_generator {
                                     pop_generator_context();
                                 }
                                 pop_method_context();
                                 pop_function_context();
+                                pop_method_context();
                                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
@@ -5401,8 +5500,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 {
                                     *index += 1;
                                     *index += 1;
-                                    let params = parse_parameters(tokens, index)?;
+                                    push_method_context();
+                                    let params = if is_async_member {
+                                        parse_parameters(tokens, index)?
+                                    } else {
+                                        with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?
+                                    };
                                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                        pop_method_context();
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
                                     }
                                     *index += 1;
@@ -5411,12 +5516,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                     if is_generator {
                                         push_generator_context();
                                     }
-                                    let body = parse_statements(tokens, index)?;
+                                    let body = if is_async_member {
+                                        parse_statements(tokens, index)?
+                                    } else {
+                                        with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                                    };
                                     if is_generator {
                                         pop_generator_context();
                                     }
                                     pop_method_context();
                                     pop_function_context();
+                                    pop_method_context();
                                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
                                     }
@@ -5498,7 +5608,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                                 key_is_computed = true;
                                 *index += 1;
-                                let expr = parse_assignment(tokens, index)?;
+                                let expr = with_allowed_in(|| parse_assignment(tokens, index))?;
                                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
@@ -5510,7 +5620,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                             key_is_computed = true;
                             *index += 1;
-                            let expr = parse_assignment(tokens, index)?;
+                            let expr = with_allowed_in(|| parse_assignment(tokens, index))?;
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -5525,8 +5635,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         }
                         if !is_getter && !is_setter && *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                             *index += 1;
-                            let params = parse_parameters(tokens, index)?;
+                            push_method_context();
+                            let params = if is_async_member {
+                                parse_parameters(tokens, index)?
+                            } else {
+                                with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?
+                            };
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                pop_method_context();
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
@@ -5535,12 +5651,17 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             if is_generator {
                                 push_generator_context();
                             }
-                            let body = parse_statements(tokens, index)?;
+                            let body = if is_async_member {
+                                parse_statements(tokens, index)?
+                            } else {
+                                with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                            };
                             if is_generator {
                                 pop_generator_context();
                             }
                             pop_method_context();
                             pop_function_context();
+                            pop_method_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -5596,7 +5717,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             *index += 1;
                             push_function_context();
                             push_method_context();
-                            let body = parse_statements(tokens, index)?;
+                            let body = with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?;
                             pop_method_context();
                             pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
@@ -5619,19 +5740,23 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
-                            let params = parse_parameters(tokens, index)?;
+                            push_method_context();
+                            let params = with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?;
                             if params.len() != 1 {
+                                pop_method_context();
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                pop_method_context();
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1;
                             push_function_context();
                             push_method_context();
-                            let body = parse_statements(tokens, index)?;
+                            let body = with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?;
                             pop_method_context();
                             pop_function_context();
+                            pop_method_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
@@ -5653,6 +5778,18 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error!("SyntaxError: Expected method definition after '*' or 'async'"));
                             }
                             if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
+                                // Check for duplicate __proto__ (B.3.1)
+                                if !key_is_computed && let Expr::StringLit(ref s) = key_expr {
+                                    let name = utf16_to_utf8(s);
+                                    if name == "__proto__" {
+                                        if has_proto {
+                                            return Err(raise_parse_error!(
+                                                "SyntaxError: Duplicate __proto__ fields are not allowed in object literals"
+                                            ));
+                                        }
+                                        has_proto = true;
+                                    }
+                                }
                                 *index += 1;
                                 let value = parse_assignment(tokens, index)?;
                                 properties.push((key_expr, value, key_is_computed, true));
@@ -5660,6 +5797,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 if is_shorthand_candidate {
                                     if let Expr::StringLit(s) = &key_expr {
                                         let name = utf16_to_utf8(s);
+                                        if name == "await" && forbid_await_identifier() {
+                                            return Err(raise_parse_error!(
+                                                "SyntaxError: 'await' is not allowed as an identifier in this context"
+                                            ));
+                                        }
                                         properties.push((key_expr, Expr::Var(name, None, None), key_is_computed, false));
                                     } else {
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -6282,6 +6424,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             Token::LBracket => {
                 *index += 1;
                 let index_expr = parse_expression(tokens, index)?;
+                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
@@ -6381,6 +6526,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 } else if matches!(tokens[*index].token, Token::LBracket) {
                     *index += 1;
                     let index_expr = parse_expression(tokens, index)?;
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                        *index += 1;
+                    }
                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
@@ -6486,6 +6634,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 expr = Expr::PostDecrement(Box::new(expr));
             }
             Token::TemplateString(parts) => {
+                if contains_optional_chain(&expr) {
+                    return Err(raise_parse_error!("Tagged template cannot be used in an optional chain"));
+                }
                 let parts = parts.clone();
                 *index += 1;
                 let site_id = next_template_site_id();

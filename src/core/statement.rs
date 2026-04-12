@@ -221,7 +221,7 @@ unsafe impl<'gc> Collect<'gc> for Expr {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BinaryOp {
     Add,
     Sub,

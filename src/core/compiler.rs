@@ -100,6 +100,7 @@ struct LoopContext {
     for_of_iter_var: Option<String>,  // iterator variable name for for-of loops (IteratorClose on early exit)
     body_saved_locals: Option<usize>, // locals count at start of loop body (for cleaning up block-scoped lets on continue/break)
     is_switch: bool,                  // true for switch statements (continue should skip these)
+    is_iteration: bool,               // true for iteration statements (while, do-while, for, for-in, for-of)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -813,6 +814,7 @@ impl<'gc> Compiler<'gc> {
     fn make_loop_context(&mut self, _loop_start: usize) -> LoopContext {
         LoopContext {
             label: self.pending_label.take(),
+            is_iteration: true,
             ..LoopContext::default()
         }
     }
@@ -1853,6 +1855,21 @@ impl<'gc> Compiler<'gc> {
                 }
             }
             StatementKind::Continue(label_opt) => {
+                // Validate continue target is an iteration statement
+                if let Some(label) = label_opt {
+                    if let Some(ctx) = self.loop_stack.iter().rev().find(|c| c.label.as_deref() == Some(label.as_str())) {
+                        if !ctx.is_iteration {
+                            return Err(crate::raise_syntax_error!(format!(
+                                "label '{}' is not an iteration statement for continue",
+                                label
+                            )));
+                        }
+                    } else {
+                        return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
+                    }
+                } else if !self.loop_stack.iter().rev().any(|c| c.is_iteration) {
+                    return Err(crate::raise_syntax_error!("continue statement not in loop"));
+                }
                 if !self.try_finally_stack.is_empty() {
                     let action_id = self.try_finally_counter;
                     self.try_finally_counter += 1;
@@ -1922,11 +1939,17 @@ impl<'gc> Compiler<'gc> {
                     let patch = self.emit_jump(Opcode::Jump);
                     if let Some(label) = label_opt {
                         if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| c.label.as_deref() == Some(label)) {
+                            if !ctx.is_iteration {
+                                return Err(crate::raise_syntax_error!(format!(
+                                    "label '{}' is not an iteration statement for continue",
+                                    label
+                                )));
+                            }
                             ctx.continue_patches.push(patch);
                         } else {
                             return Err(crate::raise_syntax_error!(format!("label '{}' not found for continue", label)));
                         }
-                    } else if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| !c.is_switch) {
+                    } else if let Some(ctx) = self.loop_stack.iter_mut().rev().find(|c| !c.is_switch && c.is_iteration) {
                         ctx.continue_patches.push(patch);
                     } else {
                         return Err(crate::raise_syntax_error!("continue statement not in loop"));
@@ -11729,6 +11752,8 @@ impl<'gc> Compiler<'gc> {
                 self.record_function_source_path(sb_start);
                 let saved_locals = std::mem::take(&mut self.locals);
                 let saved_const_locals = self.const_locals.clone();
+                let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+                let saved_try_finally_stack = std::mem::take(&mut self.try_finally_stack);
                 self.scope_depth += 1;
                 if !class_name.is_empty() {
                     self.chunk.write_opcode(Opcode::GetThis);
@@ -11745,6 +11770,8 @@ impl<'gc> Compiler<'gc> {
                 self.scope_depth -= 1;
                 self.locals = saved_locals;
                 self.const_locals = saved_const_locals;
+                self.loop_stack = saved_loop_stack;
+                self.try_finally_stack = saved_try_finally_stack;
                 self.patch_jump(sb_jump);
 
                 let sb_val = Value::VmFunction(sb_start, 0);

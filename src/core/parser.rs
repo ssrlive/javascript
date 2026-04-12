@@ -342,6 +342,9 @@ fn with_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
     FORBID_AWAIT_IDENTIFIER.with(|c| *c.borrow_mut() -= 1);
     out
 }
+pub fn with_forbidden_await_identifier_pub<T, F: FnOnce() -> T>(f: F) -> T {
+    with_forbidden_await_identifier(f)
+}
 /// Clear FORBID_AWAIT_IDENTIFIER when crossing a function boundary
 /// (function expressions, method bodies) so that `await` is valid as identifier inside.
 fn with_cleared_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
@@ -480,13 +483,22 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
     let name = if *index < t.len() {
         match &t[*index].token {
             Token::Identifier(name) => {
+                // All parts of a ClassDeclaration are strict mode code.
+                // Strict reserved words cannot be used as class names.
+                if is_strict_reserved_word(name) || is_always_reserved_word(name) {
+                    let msg = format!("'{}' is not allowed as a class name in strict mode", name);
+                    return Err(raise_parse_error_with_token!(t[*index], msg));
+                }
+                if name == "await" && forbid_await_identifier() {
+                    return Err(raise_parse_error_with_token!(t[*index], "Cannot use 'await' as class name"));
+                }
                 let n = name.clone();
                 *index += 1;
                 n
             }
             Token::Await => {
-                if forbid_await_identifier() && !in_await_context() {
-                    return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
+                if forbid_await_identifier() {
+                    return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as class name"));
                 }
                 *index += 1;
                 "await".to_string()
@@ -1377,13 +1389,15 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         *index += 1;
     }
     let name = if let Token::Identifier(name) = &t[*index].token {
-        if name == "await" && forbid_await_identifier() && !in_await_context() {
+        if name == "await" && is_async && forbid_await_identifier() && !in_await_context() {
             return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
         }
         name.clone()
     } else if matches!(t[*index].token, Token::Await) {
-        if forbid_await_identifier() && !in_await_context() {
-            return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
+        if is_async {
+            return Err(raise_parse_error!(
+                "SyntaxError: Cannot use 'await' as identifier in async function"
+            ));
         }
         "await".to_string()
     } else {
@@ -1681,6 +1695,9 @@ fn parse_break_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         label = Some(name.clone());
         *index += 1;
     }
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
@@ -1699,6 +1716,9 @@ fn parse_continue_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
         && let Token::Identifier(name) = &t[*index].token
     {
         label = Some(name.clone());
+        *index += 1;
+    }
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
@@ -2622,6 +2642,12 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                         format!("'{}' can't be defined or assigned to in strict mode code", name)
                     ));
                 }
+                if name == "await" && forbid_await_identifier() {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        "'await' cannot be used as an identifier here"
+                    ));
+                }
                 *index += 1;
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
                     *index += 1;
@@ -2638,6 +2664,12 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 }
             }
             Token::Await => {
+                if forbid_await_identifier() {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        "'await' cannot be used as an identifier here"
+                    ));
+                }
                 let name = "await".to_string();
                 *index += 1;
                 while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -4027,8 +4059,24 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         };
         if is_static && *index < t.len() && matches!(t[*index].token, Token::LBrace) {
             *index += 1;
-            // Per spec §15.7.1, static blocks must not contain `await` as keyword.
+            // Per spec §15.7.1, static blocks: StatementList[~Yield, +Await, ~Return]
+            // Save and clear generator context (~Yield)
+            let saved_gen = GENERATOR_CONTEXT.with(|c| {
+                let prev = *c.borrow();
+                *c.borrow_mut() = 0;
+                prev
+            });
+            // Save and clear function context (~Return: return is not allowed)
+            let saved_fn = FUNCTION_CONTEXT.with(|c| {
+                let prev = *c.borrow();
+                *c.borrow_mut() = 0;
+                prev
+            });
+            push_method_context(); // static blocks have a HomeObject (super property access)
             let body = with_forbidden_await_identifier(|| with_cleared_await_context(|| parse_statement_block(t, index)))?;
+            pop_method_context();
+            FUNCTION_CONTEXT.with(|c| *c.borrow_mut() = saved_fn);
+            GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved_gen);
             members.push(ClassMember::StaticBlock(body));
             continue;
         }
@@ -4109,7 +4157,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 }
                 Token::LBracket => {
                     *index += 1;
-                    let expr = parse_assignment(t, index)?;
+                    let expr = with_allowed_in(|| parse_assignment(t, index))?;
                     if *index >= t.len() || !matches!(t[*index].token, Token::RBracket) {
                         return Err(raise_parse_error_at!(t.get(*index)));
                     }
@@ -4130,6 +4178,9 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1;
             let params = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
+            if is_getter && !params.is_empty() {
+                return Err(raise_parse_error!("SyntaxError: Getter must not have any formal parameters"));
+            }
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
@@ -4216,7 +4267,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             Token::LBracket => {
                 *index += 1;
-                let expr = parse_assignment(t, index)?;
+                let expr = with_allowed_in(|| parse_assignment(t, index))?;
                 if *index >= t.len() || !matches!(t[*index].token, Token::RBracket) {
                     return Err(raise_parse_error_at!(t.get(*index)));
                 }
@@ -4260,23 +4311,29 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             && matches!(t.get(*index).map(|d| &d.token), Some(Token::LParen))
         {
             *index += 1;
+            push_method_context(); // for super.x in default params
+            push_constructor_context(); // for super() in default params
             let params = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
             *index += 1;
             push_function_context();
-            push_method_context();
-            push_constructor_context();
+            push_method_context(); // re-push for body
+            push_constructor_context(); // re-push for body
             let body = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
             pop_constructor_context();
             pop_method_context();
             pop_function_context();
+            pop_constructor_context(); // pop pre-params
+            pop_method_context(); // pop pre-params
             members.push(ClassMember::Constructor(params, body));
             continue;
         }
         if *index < t.len() && matches!(t[*index].token, Token::LParen) {
             *index += 1;
+            // Push method context before params so super.x works in default parameters
+            push_method_context();
             let params = if is_generator {
                 push_generator_context();
                 let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
@@ -4297,7 +4354,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1;
             push_function_context();
-            push_method_context();
+            push_method_context(); // re-push for body (push_function_context cleared it)
             let body = if is_generator {
                 push_generator_context();
                 let b = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
@@ -4306,8 +4363,9 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             } else {
                 with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?
             };
-            pop_method_context();
+            pop_method_context(); // pop body method context
             pop_function_context();
+            pop_method_context(); // pop pre-params method context
             if is_generator {
                 if let Some(expr) = computed_key_expr {
                     if is_static {
@@ -4569,16 +4627,20 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             let name = if *index < tokens.len() {
                 match &tokens[*index].token {
                     Token::Identifier(n) => {
+                        if is_strict_reserved_word(n) || is_always_reserved_word(n) {
+                            let msg = format!("'{}' is not allowed as a class name in strict mode", n);
+                            return Err(raise_parse_error_with_token!(tokens[*index], msg));
+                        }
+                        if n == "await" && forbid_await_identifier() {
+                            return Err(raise_parse_error_with_token!(tokens[*index], "Cannot use 'await' as class name"));
+                        }
                         let n = n.clone();
                         *index += 1;
                         n
                     }
                     Token::Await => {
-                        if forbid_await_identifier() && !in_await_context() {
-                            return Err(raise_parse_error_with_token!(
-                                tokens[*index],
-                                "Cannot use 'await' as identifier in static block"
-                            ));
+                        if forbid_await_identifier() {
+                            return Err(raise_parse_error_with_token!(tokens[*index], "Cannot use 'await' as class name"));
                         }
                         *index += 1;
                         "await".to_string()
@@ -5013,7 +5075,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         "parse_primary: object literal loop; next tokens (first 8): {:?}",
                         tokens.iter().take(8).collect::<Vec<_>>()
                     );
-                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
                         *index += 1;
                     }
                     if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
@@ -6465,11 +6527,11 @@ fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: boo
         push_arrow_function_context();
         let body = if is_async {
             push_await_context();
-            let r = parse_statements(tokens, index);
+            let r = with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index));
             pop_await_context();
             r?
         } else {
-            with_cleared_await_context(|| parse_statements(tokens, index))?
+            with_cleared_await_context(|| with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index)))?
         };
         pop_arrow_function_context();
         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
@@ -6481,11 +6543,11 @@ fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: boo
         // Concise arrow body — return is implicit, no need for function context
         let expr = if is_async {
             push_await_context();
-            let r = parse_assignment(tokens, index);
+            let r = with_cleared_forbidden_await_identifier(|| parse_assignment(tokens, index));
             pop_await_context();
             r?
         } else {
-            with_cleared_await_context(|| parse_assignment(tokens, index))?
+            with_cleared_await_context(|| with_cleared_forbidden_await_identifier(|| parse_assignment(tokens, index)))?
         };
         Ok(vec![Statement::from(StatementKind::Return(Some(expr)))])
     }

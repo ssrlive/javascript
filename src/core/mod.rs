@@ -93,7 +93,8 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
             }
         } else {
             crate::core::parser::push_await_context();
-            let res = parse_statements(&tokens, &mut index);
+            // In module mode, `await` is reserved and cannot be used as an identifier
+            let res = crate::core::parser::with_forbidden_await_identifier_pub(|| parse_statements(&tokens, &mut index));
             crate::core::parser::pop_await_context();
             res
         }?;
@@ -671,31 +672,6 @@ fn params_use_identifier(params: &[crate::core::statement::DestructuringElement]
 fn scan_expr_mask(expr: &Expr, mask: u8) -> u8 {
     let statement = Statement::from(StatementKind::Return(Some(expr.clone())));
     eval_ast_scan(&[statement], mask)
-}
-
-fn destructuring_element_scan_mask(elem: &crate::core::statement::DestructuringElement, mask: u8) -> u8 {
-    use crate::core::statement::DestructuringElement;
-
-    match elem {
-        DestructuringElement::Variable(_, default_expr) => default_expr.as_ref().map(|expr| scan_expr_mask(expr, mask)).unwrap_or(0),
-        DestructuringElement::Property(_, inner) => destructuring_element_scan_mask(inner, mask),
-        DestructuringElement::ComputedProperty(expr, inner) => scan_expr_mask(expr, mask) | destructuring_element_scan_mask(inner, mask),
-        DestructuringElement::Rest(_) => 0,
-        DestructuringElement::RestPattern(inner) => destructuring_element_scan_mask(inner, mask),
-        DestructuringElement::NestedArray(elems, default_expr) | DestructuringElement::NestedObject(elems, default_expr) => {
-            elems
-                .iter()
-                .fold(0, |found, elem| found | destructuring_element_scan_mask(elem, mask))
-                | default_expr.as_ref().map(|expr| scan_expr_mask(expr, mask)).unwrap_or(0)
-        }
-        DestructuringElement::Empty => 0,
-    }
-}
-
-fn params_scan_mask(params: &[crate::core::statement::DestructuringElement], mask: u8) -> u8 {
-    params
-        .iter()
-        .fold(0, |found, param| found | destructuring_element_scan_mask(param, mask))
 }
 
 fn statement_contains_yield(statement: &Statement) -> bool {
@@ -1346,10 +1322,6 @@ fn validate_function_like(
         if statement_list_uses_identifier(body, "await") {
             return Err(crate::raise_syntax_error!("Unexpected await"));
         }
-        let super_mask = SCAN_SUPER_CALL | SCAN_SUPER_PROP;
-        if (params_scan_mask(params, super_mask) & super_mask) != 0 || (eval_ast_scan(body, super_mask) & super_mask) != 0 {
-            return Err(crate::raise_syntax_error!("super is not allowed here"));
-        }
         if body.iter().any(statement_contains_arrow_params_with_await) {
             return Err(crate::raise_syntax_error!("Unexpected await"));
         }
@@ -1534,9 +1506,6 @@ fn record_private_name_kind(
 fn validate_class_definition(class_def: &ClassDefinition) -> Result<(), JSError> {
     if let Some(extends) = &class_def.extends {
         validate_expression(extends)?;
-        if matches!(extends, Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..)) {
-            return Err(crate::raise_syntax_error!("Invalid class heritage expression"));
-        }
     }
 
     let mut constructor_count = 0usize;

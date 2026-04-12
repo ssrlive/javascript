@@ -195,6 +195,16 @@ fn with_forbidden_in<T, F: FnOnce() -> T>(f: F) -> T {
     FORBID_IN.with(|c| *c.borrow_mut() -= 1);
     out
 }
+fn with_allowed_in<T, F: FnOnce() -> T>(f: F) -> T {
+    let saved = FORBID_IN.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    let out = f();
+    FORBID_IN.with(|c| *c.borrow_mut() = saved);
+    out
+}
 fn in_generator_context() -> bool {
     GENERATOR_CONTEXT.with(|c| *c.borrow() > 0)
 }
@@ -1107,6 +1117,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         *index += 1;
     }
     let body = parse_statement_item(t, index)?;
+    reject_lexical_in_single_statement(&body, "for")?;
     let body_stmts = vec![body];
     let init_stmt = if is_decl {
         let k = if let Some(d) = init_decls {
@@ -2966,7 +2977,7 @@ pub fn parse_conditional(tokens: &[TokenData], index: &mut usize) -> Result<Expr
     }
     if matches!(tokens[look].token, Token::QuestionMark) {
         *index = look + 1;
-        let true_expr = parse_assignment(tokens, index)?;
+        let true_expr = with_allowed_in(|| parse_assignment(tokens, index))?;
         while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
             *index += 1;
         }
@@ -3549,8 +3560,25 @@ fn parse_logical_or(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSE
         Ok(left)
     }
 }
+/// Check if tokens in range [start..end) contain || or && at paren depth 0.
+fn has_bare_logical_in_range(tokens: &[TokenData], start: usize, end: usize) -> bool {
+    let mut depth = 0usize;
+    for i in start..end {
+        match &tokens[i].token {
+            Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+            Token::RParen | Token::RBracket | Token::RBrace => {
+                depth = depth.saturating_sub(1);
+            }
+            Token::LogicalOr | Token::LogicalAnd if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
 fn parse_nullish(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let start = *index;
     let left = parse_logical_or(tokens, index)?;
+    let left_end = *index;
     let mut look = *index;
     while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
         look += 1;
@@ -3559,8 +3587,22 @@ fn parse_nullish(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSErro
         return Ok(left);
     }
     if matches!(tokens[look].token, Token::NullishCoalescing) {
+        if has_bare_logical_in_range(tokens, start, left_end) {
+            return Err(raise_parse_error!(
+                "Nullish coalescing operator(??) requires parens when mixed with logical OR/AND",
+                tokens[look].line,
+                tokens[look].column
+            ));
+        }
         *index = look + 1;
+        let right_start = *index;
         let right = parse_nullish(tokens, index)?;
+        let right_end = *index;
+        if has_bare_logical_in_range(tokens, right_start, right_end) {
+            return Err(raise_parse_error!(
+                "Nullish coalescing operator(??) requires parens when mixed with logical OR/AND"
+            ));
+        }
         Ok(Expr::NullishCoalescing(Box::new(left), Box::new(right)))
     } else {
         Ok(left)
@@ -3861,11 +3903,23 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                     || matches!(next.token, Token::StringLit(_))
                     || matches!(next.token, Token::Number(_))
                 {
+                    if raw_identifier_source_has_escape(&t[*index]) {
+                        return Err(raise_parse_error_with_token!(
+                            t[*index],
+                            format!("'{}' keyword in accessor must not contain escaped characters", kw)
+                        ));
+                    }
                     is_accessor = true;
                     is_getter = kw == "get";
                     log::trace!("parse_primary: accessor recognized (kw={}) at idx={}", kw, *index);
                 } else {
                     if !matches!(next.token, Token::LParen) && next.token.as_identifier_string().is_some() {
+                        if raw_identifier_source_has_escape(&t[*index]) {
+                            return Err(raise_parse_error_with_token!(
+                                t[*index],
+                                format!("'{}' keyword in accessor must not contain escaped characters", kw)
+                            ));
+                        }
                         is_accessor = true;
                         is_getter = kw == "get";
                         log::trace!("parse_primary: accessor recognized for keyword-name (kw={}) at idx={}", kw, *index);
@@ -4251,6 +4305,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             if let Expr::PrivateMember(_, prop_name) = &inner {
                 let msg = format!("Private field '{prop_name}' cannot be deleted");
                 return Err(raise_parse_error_with_token!(token_data, msg));
+            }
+            if let Expr::Var(..) = &inner {
+                if strict_binding_checks() {
+                    return Err(raise_parse_error_with_token!(
+                        token_data,
+                        "Delete of an unqualified identifier in strict mode"
+                    ));
+                }
             }
             Expr::Delete(Box::new(inner))
         }
@@ -4847,6 +4909,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 false
                             };
                         if is_getter || is_setter {
+                            if raw_identifier_source_has_escape(&tokens[*index]) {
+                                let kw = if is_getter { "get" } else { "set" };
+                                return Err(raise_parse_error_with_token!(
+                                    tokens[*index],
+                                    format!("'{}' keyword in accessor must not contain escaped characters", kw)
+                                ));
+                            }
                             log::trace!(
                                 "parse_primary: object property is getter/setter; next tokens (first 8): {:?}",
                                 tokens.iter().take(8).collect::<Vec<_>>()

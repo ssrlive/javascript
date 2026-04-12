@@ -49,7 +49,7 @@ myobj.h = 4; // create property h
 var res2, res3, res4, res5;
 
 try {
-  res2 = delete yy; // throws SyntaxError in strict mode
+  res2 = eval("delete yy"); // throws SyntaxError in strict mode (early error)
   assert(false, "delete yy did not throw");
 } catch (e) {
   console.log("Caught expected error for delete yy:", e.message);
@@ -68,7 +68,7 @@ try {
 res4 = delete myobj.h; // returns true (configurable)
 
 try {
-  res5 = delete myobj; // throws SyntaxError in strict mode
+  res5 = eval("delete myobj"); // throws SyntaxError in strict mode (early error)
   assert(false, "delete myobj did not throw");
 } catch (e) {
   console.log("Caught expected error for delete myobj:", e.message);

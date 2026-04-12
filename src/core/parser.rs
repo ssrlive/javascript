@@ -310,6 +310,54 @@ fn token_matches_unescaped_identifier_name(token: &TokenData, expected: &str) ->
 fn token_is_escaped_identifier_name(token: &TokenData, expected: &str) -> bool {
     token.token.as_identifier_string().as_deref() == Some(expected) && raw_identifier_source_has_escape(token)
 }
+/// Returns true if the given name is a reserved word that can NEVER be an identifier.
+/// These correspond to keywords that normally have their own Token variants;
+/// if they appear as Token::Identifier it means they were Unicode-escaped.
+fn is_always_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+    )
+}
+/// Returns true if the given name is a strict-mode reserved word.
+fn is_strict_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "implements" | "interface" | "let" | "package" | "private" | "protected" | "public" | "static" | "yield"
+    )
+}
 fn finish_statement_without_semicolon(t: &[TokenData], index: &mut usize) -> Result<(), JSError> {
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
@@ -1552,6 +1600,13 @@ fn parse_with_statement(t: &[TokenData], index: &mut usize) -> Result<Statement,
     let start = *index;
     let line = t[start].line;
     let column = t[start].column;
+    if strict_binding_checks() {
+        return Err(raise_parse_error!(
+            "Strict mode code may not include a with statement",
+            line,
+            column
+        ));
+    }
     *index += 1;
     if !matches!(t[*index].token, Token::LParen) {
         return Err(raise_parse_error_at!(t.get(*index)));
@@ -4473,6 +4528,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::Identifier(name) => {
             let line = token_data.line;
             let column = token_data.column;
+            if is_always_reserved_word(name) || is_strict_reserved_word(name) {
+                return Err(raise_parse_error!(
+                    &format!("Keyword '{}' cannot contain escaped characters", name),
+                    line,
+                    column
+                ));
+            }
             let mut expr = Expr::Var(name.clone(), Some(line), Some(column));
             if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
                 *index += 1;

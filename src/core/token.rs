@@ -1769,31 +1769,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 } else if ident_has_escape {
                     // ES2024 §13.1: identifiers formed via Unicode escapes must
                     // NOT be treated as keyword tokens.
-                    // True reserved words with escapes are always a SyntaxError.
-                    // Contextual keywords (yield, await, static, etc.) become
-                    // plain Identifier tokens so the parser can decide based on context.
-                    match ident.as_str() {
-                        // Always-reserved words → SyntaxError when escaped
-                        "break" | "case" | "catch" | "continue" | "debugger" | "default" | "delete" | "do" | "else" | "finally" | "for"
-                        | "function" | "if" | "in" | "instanceof" | "new" | "return" | "switch" | "this" | "throw" | "try" | "typeof"
-                        | "var" | "void" | "while" | "with" | "class" | "const" | "enum" | "export" | "extends" | "import" | "super" => {
-                            return Err(raise_tokenize_error!(
-                                &format!("keyword '{}' must not contain escaped characters", ident),
-                                line,
-                                column
-                            ));
-                        }
-                        // Strict-mode reserved words → SyntaxError when escaped (engine is always strict)
-                        "let" | "implements" | "interface" | "package" | "private" | "protected" | "public" => {
-                            return Err(raise_tokenize_error!(
-                                &format!("keyword '{}' must not contain escaped characters", ident),
-                                line,
-                                column
-                            ));
-                        }
-                        // Contextual keywords → Identifier (parser decides)
-                        _ => Token::Identifier(ident),
-                    }
+                    // Escaped reserved/contextual keywords become plain Identifier
+                    // tokens; the parser rejects them in binding/label contexts
+                    // but allows them as IdentifierName (e.g. property access).
+                    Token::Identifier(ident)
                 } else {
                     match ident.as_str() {
                         "let" => Token::Let,

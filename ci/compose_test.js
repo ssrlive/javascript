@@ -288,8 +288,11 @@ function verifyComposeStubMarkerCount(testPath, harnessIndex = {}, prependFiles 
   return count === expected;
 }
 
-function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true, needsAgent = false}) {
+function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true, needsAgent = false, expectedNegative = null}) {
   // Returns { testToRun, tmpPath, cleanupTmp }
+
+  // Check if we should skip injecting harness codes because this is a parsing failure negative test
+  const skipInjects = expectedNegative && expectedNegative.phase && expectedNegative.phase !== 'runtime';
 
   // prepends are file paths
   let PREPEND_FILES = prependFiles.slice();
@@ -379,106 +382,112 @@ function composeTest({testPath, repoDir, harnessIndex, prependFiles = [], needSt
 
   const meta = extractMeta(testPath);
   const isModule = hasFlag(meta, 'module');
-  inject262Shim(outLines, testPath, meta, PREPEND_FILES, needsAgent);
 
-  let moduleBootstrapPath = null;
-  if (isModule) {
-    const bootstrapPrepends = ensureArrayDistinct(
-      PREPEND_FILES.filter((p) => {
-        const base = path.basename(p);
-        return base === 'sta.js' || base === 'assert.js';
-      })
-    );
-    if (bootstrapPrepends.length > 0) {
-      moduleBootstrapPath = createModuleBootstrapTarget(testPath).tmpPath;
-      const bootstrapLines = [];
-      for (const p of bootstrapPrepends) {
-        const absP = path.resolve(p);
-        bootstrapLines.push(`// Inject: ${absP}`);
-        bootstrapLines.push(fs.readFileSync(p, 'utf8'));
-        bootstrapLines.push('');
+    let moduleBootstrapPath = null;
+    if (!skipInjects) {
+      inject262Shim(outLines, testPath, meta, PREPEND_FILES, needsAgent);
+
+      if (isModule) {
+        const bootstrapPrepends = ensureArrayDistinct(
+          PREPEND_FILES.filter((p) => {
+            const base = path.basename(p);
+            return base === 'sta.js' || base === 'assert.js';
+          })
+        );
+        if (bootstrapPrepends.length > 0) {
+          moduleBootstrapPath = createModuleBootstrapTarget(testPath).tmpPath;
+          const bootstrapLines = [];
+          for (const p of bootstrapPrepends) {
+            const absP = path.resolve(p);
+            bootstrapLines.push(`// Inject: ${absP}`);
+            bootstrapLines.push(fs.readFileSync(p, 'utf8'));
+            bootstrapLines.push('');
+          }
+          bootstrapLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
+          bootstrapLines.push('if (typeof globalThis !== "undefined") {');
+          bootstrapLines.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
+          bootstrapLines.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
+          bootstrapLines.push('}');
+          bootstrapLines.push('');
+          fs.writeFileSync(moduleBootstrapPath, bootstrapLines.join('\n'));
+        
+          }
+        }
       }
-      bootstrapLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
-      bootstrapLines.push('if (typeof globalThis !== "undefined") {');
-      bootstrapLines.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
-      bootstrapLines.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
-      bootstrapLines.push('}');
-      bootstrapLines.push('');
-      fs.writeFileSync(moduleBootstrapPath, bootstrapLines.join('\n'));
-    }
-  }
+
 
   if (moduleBootstrapPath) {
     outLines.push(`import ${JSON.stringify(`./${path.basename(moduleBootstrapPath)}`)};`);
     outLines.push('');
   }
 
-  // Inject $262.agent shim BEFORE harness files (atomicsHelper.js extends $262.agent)
-  if (needsAgent) {
-    outLines.push('// Inject: $262.agent shim for multi-agent tests');
-    outLines.push('if (!$262.agent) { $262.agent = {}; }');
-    outLines.push('$262.agent.start = function(script) { __agent_start(script); };');
-    outLines.push('$262.agent.broadcast = function(sab) {');
-    outLines.push('  if (sab && sab.buffer) { __agent_broadcast(sab.buffer); }');
-    outLines.push('  else { __agent_broadcast(sab); }');
-    outLines.push('};');
-    outLines.push('$262.agent.getReport = function() { return __agent_getReport(); };');
-    outLines.push('$262.agent.sleep = function(ms) { __agent_sleep(ms); };');
-    outLines.push('$262.agent.monotonicNow = function() { return __agent_monotonicNow(); };');
-    outLines.push('$262.agent.leaving = function() { __agent_leaving(); };');
-    outLines.push('$262.agent.report = function(val) { __agent_report(String(val)); };');
-    outLines.push('');
-  }
+    if (!skipInjects) {
+      // Inject $262.agent shim BEFORE harness files (atomicsHelper.js extends $262.agent)
+      if (needsAgent) {
+        outLines.push('// Inject: $262.agent shim for multi-agent tests');
+        outLines.push('if (!$262.agent) { $262.agent = {}; }');
+        outLines.push('$262.agent.start = function(script) { __agent_start(script); };');
+        outLines.push('$262.agent.broadcast = function(sab) {');
+        outLines.push('  if (sab && sab.buffer) { __agent_broadcast(sab.buffer); }');
+        outLines.push('  else { __agent_broadcast(sab); }');
+        outLines.push('};');
+        outLines.push('$262.agent.getReport = function() { return __agent_getReport(); };');
+        outLines.push('$262.agent.sleep = function(ms) { __agent_sleep(ms); };');
+        outLines.push('$262.agent.monotonicNow = function() { return __agent_monotonicNow(); };');
+        outLines.push('$262.agent.leaving = function() { __agent_leaving(); };');
+        outLines.push('$262.agent.report = function(val) { __agent_report(String(val)); };');
+        outLines.push('');
+      }
 
-  for (const p of PREPEND_FILES) {
-    if (!p) continue;
-    if (fs.existsSync(p)) {
-      const absP = path.resolve(p);
-      outLines.push(`// Inject: ${absP}`);
-      outLines.push(fs.readFileSync(p, 'utf8'));
+      for (const p of PREPEND_FILES) {
+        if (!p) continue;
+        if (fs.existsSync(p)) {
+          const absP = path.resolve(p);
+          outLines.push(`// Inject: ${absP}`);
+          outLines.push(fs.readFileSync(p, 'utf8'));
+          outLines.push('');
+        }
+      }
+
+      // Ensure host-provided `print` exists for test harnesses: if absent, bind to console.log
+      outLines.push('// Inject: ensure print is defined for harnesses');
+      outLines.push('if (typeof print === "undefined") {');
+      outLines.push('  if (typeof console !== "undefined" && typeof console.log === "function") {');
+      outLines.push('    var print = function(msg) { console.log(msg); };');
+      outLines.push('  } else {');
+      outLines.push('    var print = function() {};');
+      outLines.push('  }');
+      outLines.push('}');
+      outLines.push('');
+
+      // In module tests, harness declarations are module-scoped. Re-export common
+      // harness helpers onto globalThis so imported modules can access them.
+      outLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
+      outLines.push('if (typeof globalThis !== "undefined") {');
+      outLines.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
+      outLines.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
+      outLines.push('  if (typeof $DONE !== "undefined" && typeof globalThis.$DONE === "undefined") globalThis.$DONE = $DONE;');
+      outLines.push('}');
       outLines.push('');
     }
-  }
 
-  // Ensure host-provided `print` exists for test harnesses: if absent, bind to console.log
-  outLines.push('// Inject: ensure print is defined for harnesses');
-  outLines.push('if (typeof print === "undefined") {');
-  outLines.push('  if (typeof console !== "undefined" && typeof console.log === "function") {');
-  outLines.push('    var print = function(msg) { console.log(msg); };');
-  outLines.push('  } else {');
-  outLines.push('    var print = function() {};');
-  outLines.push('  }');
-  outLines.push('}');
-  outLines.push('');
+    // Ensure dynamic import resolves relative to the original test file path,
+    // not the composed file path. Only inject when the test actually
+    // contains an import (either a static `import` declaration or dynamic
+    // `import()` expression) to avoid polluting tests that don't need it.
+    const _test_src = fs.readFileSync(testPath, 'utf8');
+    const _uses_import = /^\s*import\b/m.test(_test_src) || /\bimport\s*\(/.test(_test_src);
+    if (_uses_import && !skipInjects) {
+      outLines.push('// Inject: stabilize __filepath for module resolution (only for tests that use import)');
+      outLines.push(`globalThis.__filepath = ${JSON.stringify(path.resolve(testPath))};`);
+      outLines.push('');
+    }
 
-  // In module tests, harness declarations are module-scoped. Re-export common
-  // harness helpers onto globalThis so imported modules can access them.
-  outLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
-  outLines.push('if (typeof globalThis !== "undefined") {');
-  outLines.push('  if (typeof assert !== "undefined" && typeof globalThis.assert === "undefined") globalThis.assert = assert;');
-  outLines.push('  if (typeof Test262Error !== "undefined" && typeof globalThis.Test262Error === "undefined") globalThis.Test262Error = Test262Error;');
-  outLines.push('  if (typeof $DONE !== "undefined" && typeof globalThis.$DONE === "undefined") globalThis.$DONE = $DONE;');
-  outLines.push('}');
-  outLines.push('');
-
-  // Ensure dynamic import resolves relative to the original test file path,
-  // not the composed file path. Only inject when the test actually
-  // contains an import (either a static `import` declaration or dynamic
-  // `import()` expression) to avoid polluting tests that don't need it.
-  const _test_src = fs.readFileSync(testPath, 'utf8');
-  const _uses_import = /^\s*import\b/m.test(_test_src) || /\bimport\s*\(/.test(_test_src);
-  if (_uses_import) {
-    outLines.push('// Inject: stabilize __filepath for module resolution (only for tests that use import)');
-    outLines.push(`globalThis.__filepath = ${JSON.stringify(path.resolve(testPath))};`);
-    outLines.push('');
-  }
-
-  if (testPath.includes('/language/global-code/') || /\$262\.evalScript\b/.test(_test_src)) {
-    outLines.push('// Inject: enable focused global-code semantics mode');
-    outLines.push('// __test262_global_code_mode');
-    outLines.push('');
-  }
-
+    if (!skipInjects && (testPath.includes('/language/global-code/') || /\$262\.evalScript\b/.test(_test_src))) {
+        outLines.push('// Inject: enable focused global-code semantics mode');
+        outLines.push('// __test262_global_code_mode');
+        outLines.push('');
+    }
   // append test source
   const absTest = path.resolve(testPath);
   outLines.push(`// Inject: ${absTest}`);

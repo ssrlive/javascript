@@ -435,7 +435,11 @@ async function runAll(){
           log(summaryText);
         }
         try {
-          console.error(`\nFAIL ${f}`);
+          if (failReason) {
+            console.error(`\nFAIL ${f} - ${failReason}`);
+          } else {
+            console.error(`\nFAIL ${f}`);
+          }
           console.error(summaryText);
           if (KEEP_TMP) console.error(`TEST FILE KEPT: ${tmpPath}`);
           console.error('----------------');
@@ -516,7 +520,13 @@ async function runAll(){
       const blockMatch = meta.match(/negative:[\s\S]*?(?=(?:\n[^\s]|-{3}|$))/);
       if (blockMatch) {
         const tMatch = blockMatch[0].match(/type:\s*(\w+)/);
-        if (tMatch) expectedNegative = { type: tMatch[1] };
+        const pMatch = blockMatch[0].match(/phase:\s*(\w+)/);
+        if (tMatch) {
+          expectedNegative = {
+            type: tMatch[1],
+            phase: pMatch ? pMatch[1] : 'runtime'
+          };
+        }
       }
     }
 
@@ -604,7 +614,15 @@ async function runAll(){
     // not inject a global "use strict" which can change eval semantics.
     const isModule = hasFlag(meta, 'module');
     const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
-    const {testToRun, tmpPath, cleanupTmp} = composeTest({testPath: f, repoDir: TEST262_ROOT_DIR, harnessIndex:HARNESS_INDEX, prependFiles: resolved_includes, needStrict, needsAgent});
+    const {testToRun, tmpPath, cleanupTmp} = composeTest({
+      testPath: f,
+      repoDir: TEST262_ROOT_DIR,
+      harnessIndex: HARNESS_INDEX,
+      prependFiles: resolved_includes,
+      needStrict,
+      needsAgent,
+      expectedNegative
+    });
 
     // Set cwd to the directory of the composed test file so that relative
     // module specifiers (e.g. './import-value_FIXTURE.js' in ShadowRealm

@@ -5307,6 +5307,20 @@ impl<'gc> Compiler<'gc> {
                         self.emit_syntax_error("Unexpected eval or arguments in strict mode");
                         return Ok(());
                     }
+                    // Strict-mode pre-check: if the LHS resolves to an undeclared
+                    // global, assert it exists BEFORE evaluating the RHS so that
+                    // side effects in the RHS cannot create the binding first.
+                    let is_global = self.locals.iter().rposition(|l| l == name).is_none()
+                        && self.resolve_upvalue(name).is_none()
+                        && self.lookup_top_level_block_alias(name).is_none()
+                        && self.current_class_expr_names.iter().rposition(|n| n == name).is_none()
+                        && !self.is_const_upvalue(name);
+                    if self.current_strict && is_global {
+                        let n = crate::unicode::utf8_to_utf16(name);
+                        let ni = self.chunk.add_constant(Value::String(n));
+                        self.chunk.write_opcode(Opcode::AssertGlobalDefined);
+                        self.chunk.write_u16(ni);
+                    }
                     // Infer function name for anonymous function/arrow assigned to a variable
                     // Parenthesized identifier targets are represented as Var(name, None, None)
                     // and must not trigger NamedEvaluation name inference.
@@ -7152,6 +7166,9 @@ impl<'gc> Compiler<'gc> {
                 } else if let Some(upvalue_idx) = self.resolve_upvalue(name) {
                     self.chunk.write_opcode(Opcode::SetUpvalue);
                     self.chunk.write_byte(upvalue_idx);
+                } else if self.current_class_expr_names.iter().any(|n| n == name) {
+                    // Class expression names are immutable (const) bindings
+                    self.emit_const_assign_error(name);
                 } else {
                     self.emit_set_global_binding(name);
                 }

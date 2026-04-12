@@ -139,6 +139,7 @@ impl<'gc> VM<'gc> {
                 Opcode::SetComputedSetter => self.run_opcode_set_computed_setter(ctx)?,
                 Opcode::MarkPropertyNonEnumerable => self.run_opcode_mark_property_nonenumerable(ctx)?,
                 Opcode::MarkPropertyReadonly => self.run_opcode_mark_property_readonly(ctx)?,
+                Opcode::AssertGlobalDefined => self.run_opcode_assert_global_defined(ctx)?,
                 Opcode::ToPropertyKey => self.run_opcode_to_property_key(ctx)?,
                 Opcode::Increment => self.run_opcode_increment(ctx)?,
                 Opcode::Decrement => self.run_opcode_decrement(ctx)?,
@@ -2001,7 +2002,11 @@ impl<'gc> VM<'gc> {
                 return Ok(OpcodeAction::Continue);
             }
             // In strict mode, assigning to an undeclared variable throws ReferenceError.
-            if !self.globals.contains_key(&name_str) && self.current_execution_is_strict() {
+            // Also check globalThis — properties set on globalThis make the binding resolvable.
+            if !self.globals.contains_key(&name_str)
+                && !self.global_this.borrow().contains_key(&name_str)
+                && self.current_execution_is_strict()
+            {
                 let err = self.make_reference_error(ctx, &format!("{} is not defined", name_str));
                 self.handle_throw(ctx, &err)?;
                 return Ok(OpcodeAction::Continue);
@@ -4725,6 +4730,22 @@ impl<'gc> VM<'gc> {
                 mark_readonly(&mut target_props.borrow_mut(ctx), &key);
             }
             _ => {}
+        }
+        Ok(OpcodeAction::Continue)
+    }
+
+    // Opcode::AssertGlobalDefined — strict-mode pre-check before RHS evaluation
+    fn run_opcode_assert_global_defined(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        let name_idx = self.read_u16() as usize;
+        let name_val = &self.chunk.constants[name_idx];
+        let name_str = if let Value::String(s) = name_val {
+            crate::unicode::utf16_to_utf8(s)
+        } else {
+            value_to_string(name_val)
+        };
+        if !self.globals.contains_key(&name_str) && !self.global_this.borrow().contains_key(&name_str) {
+            let err = self.make_reference_error(ctx, &format!("{name_str} is not defined"));
+            self.handle_throw(ctx, &err)?;
         }
         Ok(OpcodeAction::Continue)
     }

@@ -775,6 +775,52 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             j += 1;
                             col_j += 1;
                         }
+
+                        // Early error: validate regex flags
+                        {
+                            let mut seen = [false; 128];
+                            for ch in flags.chars() {
+                                let idx = ch as usize;
+                                if !matches!(ch, 'd' | 'g' | 'i' | 'm' | 's' | 'u' | 'v' | 'y') {
+                                    return Err(raise_tokenize_error!(
+                                        format!("Invalid regular expression flags '{flags}'"),
+                                        line,
+                                        start_col
+                                    ));
+                                }
+                                if idx < 128 && seen[idx] {
+                                    return Err(raise_tokenize_error!(
+                                        format!("Invalid regular expression flags '{flags}'"),
+                                        line,
+                                        start_col
+                                    ));
+                                }
+                                if idx < 128 {
+                                    seen[idx] = true;
+                                }
+                            }
+                            // u and v are mutually exclusive
+                            if flags.contains('u') && flags.contains('v') {
+                                return Err(raise_tokenize_error!(
+                                    format!("Invalid regular expression flags '{flags}'"),
+                                    line,
+                                    start_col
+                                ));
+                            }
+                        }
+
+                        // Early error: validate regex pattern at parse time
+                        {
+                            let validate_flags: String = flags.chars().filter(|c| "gimsuvy".contains(*c)).collect();
+                            if let Err(e) = Regex::with_flags(&pattern, validate_flags.as_str()) {
+                                return Err(raise_tokenize_error!(
+                                    format!("Invalid regular expression: /{pattern}/{flags}: {e}"),
+                                    line,
+                                    start_col
+                                ));
+                            }
+                        }
+
                         tokens.push(TokenData {
                             token: Token::Regex(pattern, flags),
                             line,
@@ -893,6 +939,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     i += 1; // consume '.'
                     column += 1;
                     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
+                        if chars[i] == '_' {
+                            if i + 1 < chars.len() && chars[i + 1] == '_' {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column + 1));
+                            }
+                            if i + 1 >= chars.len() || !chars[i + 1].is_ascii_digit() {
+                                return Err(raise_tokenize_error!("Numeric separator must be between digits", line, column));
+                            }
+                        }
                         i += 1;
                         column += 1;
                     }
@@ -905,16 +959,31 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         }
                         if j < chars.len() && chars[j].is_ascii_digit() {
                             while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
+                                if chars[j] == '_' {
+                                    if j + 1 < chars.len() && chars[j + 1] == '_' {
+                                        return Err(raise_tokenize_error!("Numeric separator must be between digits", line, col_j + 1));
+                                    }
+                                    if j + 1 >= chars.len() || !chars[j + 1].is_ascii_digit() {
+                                        return Err(raise_tokenize_error!("Numeric separator must be between digits", line, col_j));
+                                    }
+                                }
                                 j += 1;
                                 col_j += 1;
                             }
                             i = j;
                             column = col_j;
                         } else {
-                            // Invalid exponent, but we can't easily backtrack or fail gracefully
-                            // strict tokenization might fail here
                             return Err(raise_tokenize_error!("Invalid exponent in number literal", line, column));
                         }
+                    }
+
+                    // Reject IdentifierStart immediately after numeric literal
+                    if i < chars.len() && (chars[i].is_alphabetic() || chars[i] == '$' || chars[i] == '_' || chars[i] == '\\') {
+                        return Err(raise_tokenize_error!(
+                            "Identifier starts immediately after numeric literal",
+                            line,
+                            column
+                        ));
                     }
 
                     let mut num_str: String = chars[start..i].iter().collect();
@@ -1366,6 +1435,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     match BigInt::from_str_radix(&num_str, radix) {
                         Ok(n) => {
                             let f = n.to_f64().unwrap_or(f64::INFINITY);
+                            // Reject IdentifierStart immediately after numeric literal
+                            if i < chars.len() && (chars[i].is_alphabetic() || chars[i] == '$' || chars[i] == '_' || chars[i] == '\\') {
+                                return Err(raise_tokenize_error!(
+                                    "Identifier starts immediately after numeric literal",
+                                    line,
+                                    column
+                                ));
+                            }
                             tokens.push(TokenData {
                                 token: Token::Number(f),
                                 line,
@@ -1471,6 +1548,15 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     }
                     i = j;
                     column = col_j;
+                }
+
+                // Reject IdentifierStart immediately after numeric literal
+                if i < chars.len() && (chars[i].is_alphabetic() || chars[i] == '$' || chars[i] == '_' || chars[i] == '\\') {
+                    return Err(raise_tokenize_error!(
+                        "Identifier starts immediately after numeric literal",
+                        line,
+                        column
+                    ));
                 }
 
                 // Build numeric string and remove numeric separators

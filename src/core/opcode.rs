@@ -117,6 +117,7 @@ pub enum Opcode {
     ClearGeneratorReturn = 111,      // clear generator_return_pending (set to None)
     MarkPropertyNonEnumerable = 112, // pop object, read key const, mark property [[Enumerable]] = false
     MarkPropertyReadonly = 113,      // pop object, read key const, mark property [[Writable]] = false
+    AssertGlobalDefined = 114,       // read name const; throw ReferenceError if name not in globals/globalThis (strict pre-check)
 }
 
 impl TryFrom<u8> for Opcode {
@@ -238,6 +239,7 @@ impl TryFrom<u8> for Opcode {
             111 => Opcode::ClearGeneratorReturn,
             112 => Opcode::MarkPropertyNonEnumerable,
             113 => Opcode::MarkPropertyReadonly,
+            114 => Opcode::AssertGlobalDefined,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -566,7 +568,7 @@ impl<'gc> Chunk<'gc> {
                 }
 
                 // u16 constant index — add const_offset
-                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 | 104 | 112 | 113 => {
+                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 | 104 | 112 | 113 | 114 => {
                     Self::adjust_u16_at(code, i, const_offset);
                     i += 2;
                 }

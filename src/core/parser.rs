@@ -273,6 +273,9 @@ thread_local! {
     static CLASS_HAS_HERITAGE_STACK: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     /// >0 when inside a non-arrow function (where new.target is valid).
     static NEW_TARGET_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    /// >0 when inside a class static block (where `arguments` is forbidden).
+    static STATIC_BLOCK_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    static STATIC_BLOCK_CONTEXT_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     /// Whether parsing in module mode (export/import declarations allowed).
     static MODULE_CONTEXT: Cell<bool> = const { Cell::new(false) };
     /// Nesting depth for statements. 0 = top-level.
@@ -286,6 +289,9 @@ thread_local! {
     static MODULE_LEXICAL_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Module-level var-declared names.
     static MODULE_VAR_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// When true, arrow-function detection in the LParen branch of parse_primary
+    /// is suppressed (for ClassHeritage: extends LeftHandSideExpression).
+    static NO_ARROW_IN_PAREN: Cell<bool> = const { Cell::new(false) };
 }
 fn forbid_in() -> bool {
     FORBID_IN.with(|c| *c.borrow() > 0)
@@ -372,6 +378,13 @@ fn push_function_context() {
         prev
     });
     CONSTRUCTOR_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved_ctor));
+    // Functions have their own `arguments`, so clear static block context
+    let saved_sb = STATIC_BLOCK_CONTEXT.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    STATIC_BLOCK_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved_sb));
 }
 fn pop_function_context() {
     FUNCTION_CONTEXT.with(|c| *c.borrow_mut() -= 1);
@@ -382,6 +395,8 @@ fn pop_function_context() {
     METHOD_CONTEXT.with(|c| *c.borrow_mut() = saved_method);
     let saved_ctor = CONSTRUCTOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
     CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() = saved_ctor);
+    let saved_sb = STATIC_BLOCK_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
+    STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb);
 }
 /// Arrow functions inherit super/method/constructor context but NOT generator context
 fn push_arrow_function_context() {
@@ -418,6 +433,12 @@ pub(crate) fn push_constructor_context_for_eval() {
 }
 pub(crate) fn pop_constructor_context_for_eval() {
     CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+pub(crate) fn push_new_target_context_for_eval() {
+    NEW_TARGET_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+pub(crate) fn pop_new_target_context_for_eval() {
+    NEW_TARGET_CONTEXT.with(|c| *c.borrow_mut() -= 1);
 }
 fn strict_binding_checks() -> bool {
     STRICT_BINDING_CHECKS.with(|c| c.get())
@@ -524,6 +545,10 @@ pub fn with_forbidden_await_identifier_pub<T, F: FnOnce() -> T>(f: F) -> T {
 /// Clear FORBID_AWAIT_IDENTIFIER when crossing a function boundary
 /// (function expressions, method bodies) so that `await` is valid as identifier inside.
 fn with_cleared_forbidden_await_identifier<T, F: FnOnce() -> T>(f: F) -> T {
+    // In module code, `await` is always a reserved word, so never clear the restriction.
+    if in_module_context() {
+        return f();
+    }
     let saved = FORBID_AWAIT_IDENTIFIER.with(|c| {
         let prev = *c.borrow();
         *c.borrow_mut() = 0;
@@ -550,6 +575,54 @@ pub(crate) fn with_parse_source<T, F: FnOnce() -> T>(source: &str, f: F) -> T {
         stack.borrow_mut().pop();
     });
     out
+}
+/// Convert any token to its IdentifierName string, or empty string if not an identifier-like token.
+fn token_to_identifier_name(td: &TokenData) -> String {
+    match &td.token {
+        Token::Identifier(s) => s.clone(),
+        Token::Async => "async".into(),
+        Token::Await => "await".into(),
+        Token::As => "as".into(),
+        Token::Break => "break".into(),
+        Token::Case => "case".into(),
+        Token::Catch => "catch".into(),
+        Token::Class => "class".into(),
+        Token::Const => "const".into(),
+        Token::Continue => "continue".into(),
+        Token::Debugger => "debugger".into(),
+        Token::Default => "default".into(),
+        Token::Delete => "delete".into(),
+        Token::Do => "do".into(),
+        Token::Else => "else".into(),
+        Token::Export => "export".into(),
+        Token::Extends => "extends".into(),
+        Token::False => "false".into(),
+        Token::Finally => "finally".into(),
+        Token::For => "for".into(),
+        Token::Function | Token::FunctionStar => "function".into(),
+        Token::If => "if".into(),
+        Token::Import => "import".into(),
+        Token::In => "in".into(),
+        Token::InstanceOf => "instanceof".into(),
+        Token::Let => "let".into(),
+        Token::New => "new".into(),
+        Token::Null => "null".into(),
+        Token::Return => "return".into(),
+        Token::Static => "static".into(),
+        Token::Super => "super".into(),
+        Token::Switch => "switch".into(),
+        Token::This => "this".into(),
+        Token::Throw => "throw".into(),
+        Token::True => "true".into(),
+        Token::Try => "try".into(),
+        Token::TypeOf => "typeof".into(),
+        Token::Var => "var".into(),
+        Token::Void => "void".into(),
+        Token::While => "while".into(),
+        Token::With => "with".into(),
+        Token::Yield | Token::YieldStar => "yield".into(),
+        _ => String::new(),
+    }
 }
 fn raw_identifier_source_has_escape(token: &TokenData) -> bool {
     PARSE_SOURCE_STACK.with(|stack| {
@@ -693,11 +766,10 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
     };
     let extends = if *index < t.len() && matches!(t[*index].token, Token::Extends) {
         *index += 1;
-        let heritage = parse_assignment(t, index)?;
-        if matches!(&heritage, Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..)) {
-            return Err(raise_parse_error!("Arrow function is not allowed in class heritage"));
-        }
-        Some(heritage)
+        NO_ARROW_IN_PAREN.with(|c| c.set(true));
+        let heritage = parse_assignment(t, index);
+        NO_ARROW_IN_PAREN.with(|c| c.set(false));
+        Some(heritage?)
     } else {
         None
     };
@@ -1686,13 +1758,10 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         }
         name.clone()
     } else if matches!(t[*index].token, Token::Await) {
-        if is_async {
-            return Err(raise_parse_error!(
-                "SyntaxError: Cannot use 'await' as identifier in async function"
-            ));
-        }
-        if forbid_await_identifier() {
-            return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier in static block"));
+        // The function name uses the enclosing scope's [Await] parameter (BindingIdentifier[?Yield, ?Await]),
+        // NOT the function's own +Await. So `async function await(){}` is valid in script scope.
+        if in_module_context() || forbid_await_identifier() || in_await_context() {
+            return Err(raise_parse_error!("SyntaxError: Cannot use 'await' as identifier"));
         }
         "await".to_string()
     } else {
@@ -1706,6 +1775,12 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         return Err(raise_parse_error_at!(t.get(*index)));
     }
     *index += 1;
+    // Functions have their own `arguments`, clear static block restriction for params
+    let saved_sb_fd = STATIC_BLOCK_CONTEXT.with(|c| {
+        let p = *c.borrow();
+        *c.borrow_mut() = 0;
+        p
+    });
     let params = if is_generator {
         push_generator_context();
         let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
@@ -1718,7 +1793,7 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
             *c.borrow_mut() = 0;
             old
         });
-        let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
+        let p = with_cleared_await_context(|| with_cleared_forbidden_await_identifier(|| parse_parameters(t, index)))?;
         GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
         p
     };
@@ -1754,6 +1829,7 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
         pop_function_context();
         b
     };
+    STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb_fd);
     Ok(Statement {
         kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async)),
         line: t[start].line,
@@ -2630,28 +2706,74 @@ fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Resul
         return Ok(());
     }
     *index += 1;
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
         return Err(raise_parse_error!("Expected '{' after import attributes 'with'"));
     }
-    let mut depth = 0_i32;
-    while *index < t.len() {
-        match t[*index].token {
-            Token::LBrace => depth += 1,
-            Token::RBrace => {
-                depth -= 1;
-                if depth == 0 {
-                    *index += 1;
-                    return Ok(());
+    *index += 1; // skip '{'
+    let mut seen_keys: Vec<String> = Vec::new();
+    loop {
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+        if *index >= t.len() {
+            return Err(raise_parse_error!("Unterminated import attributes clause"));
+        }
+        if matches!(t[*index].token, Token::RBrace) {
+            *index += 1;
+            return Ok(());
+        }
+        // Parse attribute key: IdentifierName or StringLiteral
+        let key = match &t[*index].token {
+            Token::StringLit(s) => {
+                let k = utf16_to_utf8(s);
+                *index += 1;
+                k
+            }
+            _ => {
+                // Any IdentifierName (including keywords) is valid as attribute key
+                let k = token_to_identifier_name(&t[*index]);
+                if k.is_empty() {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        "Expected attribute key (identifier or string)"
+                    ));
                 }
+                *index += 1;
+                k
             }
-            Token::EOF => {
-                return Err(raise_parse_error!("Unterminated import attributes clause"));
-            }
-            _ => {}
+        };
+        // Duplicate key check
+        if seen_keys.contains(&key) {
+            return Err(raise_syntax_error!(format!("Duplicate import attribute key '{}'", key)));
+        }
+        seen_keys.push(key);
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+        // Expect ':'
+        if *index >= t.len() || !matches!(t[*index].token, Token::Colon) {
+            return Err(raise_parse_error!("Expected ':' in import attribute"));
         }
         *index += 1;
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+        // Expect string value
+        if *index >= t.len() || !matches!(t[*index].token, Token::StringLit(_)) {
+            return Err(raise_parse_error!("Import attribute value must be a string"));
+        }
+        *index += 1;
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+        // Optional comma
+        if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+            *index += 1;
+        }
     }
-    Err(raise_parse_error!("Unterminated import attributes clause"))
 }
 /// In module code, function declarations are lexically scoped.
 /// Track names for duplicate detection and var/lexical conflicts.
@@ -3100,9 +3222,6 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     had_lt
                 };
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
             }
             Token::Await => {
                 if forbid_await_identifier() {
@@ -3130,9 +3249,6 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     had_lt
                 };
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
             }
             Token::Async => {
                 let name = "async".to_string();
@@ -3154,9 +3270,6 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     had_lt
                 };
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
             }
             Token::As => {
                 let name = "as".to_string();
@@ -3178,9 +3291,6 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     had_lt
                 };
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
             }
             _ if matches!(t[*index].token, Token::Static) => {
                 if strict_binding_checks() {
@@ -3209,11 +3319,13 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 } else {
                     had_lt
                 };
-                while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
-                    *index += 1;
-                }
             }
             _ => break,
+        }
+        // Save index before consuming line terminators so we can restore for ASI
+        let saved_idx = *index;
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
         if *index < t.len() && matches!(t[*index].token, Token::Comma) {
             *index += 1;
@@ -3231,6 +3343,8 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
             {
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
+            // Restore index so caller can see LineTerminators for ASI
+            *index = saved_idx;
             break;
         }
     }
@@ -4613,7 +4727,13 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 prev
             });
             push_method_context(); // static blocks have a HomeObject (super property access)
+            // new.target is valid inside static blocks (evaluates to undefined)
+            NEW_TARGET_CONTEXT.with(|c| *c.borrow_mut() += 1);
+            // `arguments` is forbidden inside static blocks (ContainsArguments early error)
+            STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() += 1);
             let body = with_forbidden_await_identifier(|| with_cleared_await_context(|| parse_statement_block(t, index)))?;
+            STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+            NEW_TARGET_CONTEXT.with(|c| *c.borrow_mut() -= 1);
             pop_method_context();
             FUNCTION_CONTEXT.with(|c| *c.borrow_mut() = saved_fn);
             GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved_gen);
@@ -4717,6 +4837,11 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 return Err(raise_parse_error_at!(t.get(*index)));
             }
             *index += 1;
+            let saved_sb_gs = STATIC_BLOCK_CONTEXT.with(|c| {
+                let p = *c.borrow();
+                *c.borrow_mut() = 0;
+                p
+            });
             let params = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
             if is_getter && !params.is_empty() {
                 return Err(raise_parse_error!("SyntaxError: Getter must not have any formal parameters"));
@@ -4730,6 +4855,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             let body = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
             pop_method_context();
             pop_function_context();
+            STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb_gs);
             if is_getter {
                 if let Some(prop_expr) = prop_expr_opt {
                     if is_static {
@@ -4853,6 +4979,12 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             *index += 1;
             push_method_context(); // for super.x in default params
             push_constructor_context(); // for super() in default params
+            // Functions have their own `arguments`, clear static block restriction for params
+            let saved_sb = STATIC_BLOCK_CONTEXT.with(|c| {
+                let p = *c.borrow();
+                *c.borrow_mut() = 0;
+                p
+            });
             let params = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
                 return Err(raise_parse_error_at!(t.get(*index)));
@@ -4867,6 +4999,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             pop_function_context();
             pop_constructor_context(); // pop pre-params
             pop_method_context(); // pop pre-params
+            STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb);
             members.push(ClassMember::Constructor(params, body));
             continue;
         }
@@ -4874,6 +5007,12 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             *index += 1;
             // Push method context before params so super.x works in default parameters
             push_method_context();
+            // Functions have their own `arguments`, clear static block restriction for params
+            let saved_sb_m = STATIC_BLOCK_CONTEXT.with(|c| {
+                let p = *c.borrow();
+                *c.borrow_mut() = 0;
+                p
+            });
             let params = if is_generator {
                 push_generator_context();
                 let p = with_cleared_forbidden_await_identifier(|| parse_parameters(t, index))?;
@@ -4906,6 +5045,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             pop_method_context(); // pop body method context
             pop_function_context();
             pop_method_context(); // pop pre-params method context
+            STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb_m);
             if is_generator {
                 if let Some(expr) = computed_key_expr {
                     if is_static {
@@ -5053,6 +5193,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
     if *index >= tokens.len() {
         return Err(raise_parse_error_at!(tokens.get(*index)));
     }
+    // Consume the heritage arrow-suppression flag once at the top of parse_primary.
+    // This prevents arrows at the outermost level of ClassHeritage while still
+    // allowing arrows inside nested grouping expressions.
+    let suppress_arrow = NO_ARROW_IN_PAREN.with(|c| c.replace(false));
     let token_data = &tokens[*index];
     *index += 1;
     let current = &token_data.token;
@@ -5198,11 +5342,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             };
             let extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
                 *index += 1;
-                let heritage = parse_assignment(tokens, index)?;
-                if matches!(&heritage, Expr::ArrowFunction(..) | Expr::AsyncArrowFunction(..)) {
-                    return Err(raise_parse_error!("Arrow function is not allowed in class heritage"));
-                }
-                Some(heritage)
+                NO_ARROW_IN_PAREN.with(|c| c.set(true));
+                let heritage = parse_assignment(tokens, index);
+                NO_ARROW_IN_PAREN.with(|c| c.set(false));
+                Some(heritage?)
             } else {
                 None
             };
@@ -5255,8 +5398,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 }
                 Expr::NewTarget
             } else {
+                // `new import(...)` is a SyntaxError, but `new (import(...))` is valid
+                let bare_import = *index < tokens.len() && matches!(tokens[*index].token, Token::Import);
                 let constructor = parse_primary(tokens, index, false)?;
-                if matches!(constructor, Expr::DynamicImport(..)) {
+                if bare_import && matches!(constructor, Expr::DynamicImport(..)) {
                     return Err(raise_parse_error!("Cannot use 'new' with import()"));
                 }
                 let args = if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
@@ -5386,8 +5531,16 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     column
                 ));
             }
+            // ContainsArguments early error: `arguments` is forbidden in class static blocks
+            if name == "arguments" && STATIC_BLOCK_CONTEXT.with(|c| *c.borrow() > 0) {
+                return Err(raise_parse_error!(
+                    "SyntaxError: 'arguments' is not allowed in class static initialization blocks",
+                    line,
+                    column
+                ));
+            }
             let mut expr = Expr::Var(name.clone(), Some(line), Some(column));
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+            if !suppress_arrow && *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
                 *index += 1;
                 let body = parse_arrow_body(tokens, index)?;
                 expr = Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body);
@@ -5398,7 +5551,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             let line = token_data.line;
             let column = token_data.column;
             let mut expr = Expr::Var("as".to_string(), Some(line), Some(column));
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+            if !suppress_arrow && *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
                 *index += 1;
                 let body = parse_arrow_body(tokens, index)?;
                 expr = Expr::ArrowFunction(vec![DestructuringElement::Variable("as".to_string(), None)], body);
@@ -5419,12 +5572,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::Import => {
             if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                 *index += 1;
-                let arg = parse_assignment(tokens, index)?;
+                // `in` is allowed inside import() arguments even in for-loop context
+                let arg = with_allowed_in(|| parse_assignment(tokens, index))?;
                 let mut options_arg: Option<Box<Expr>> = None;
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
                     *index += 1;
                     if !(*index < tokens.len() && matches!(tokens[*index].token, Token::RParen)) {
-                        let opt = parse_assignment(tokens, index)?;
+                        let opt = with_allowed_in(|| parse_assignment(tokens, index))?;
                         options_arg = Some(Box::new(opt));
                         if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
                             *index += 1;
@@ -6443,6 +6597,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     "parse_primary: about to call parse_parameters; tokens (first 8): {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
+                // Functions have their own `arguments`, clear static block restriction for params
+                let saved_sb_fe = STATIC_BLOCK_CONTEXT.with(|c| {
+                    let p = *c.borrow();
+                    *c.borrow_mut() = 0;
+                    p
+                });
                 let params = if is_generator {
                     push_generator_context();
                     let p = with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?;
@@ -6454,7 +6614,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         *c.borrow_mut() = 0;
                         old
                     });
-                    let p = with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index))?;
+                    let p = with_cleared_await_context(|| with_cleared_forbidden_await_identifier(|| parse_parameters(tokens, index)))?;
                     GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
                     p
                 };
@@ -6469,9 +6629,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     pop_generator_context();
                     b
                 } else {
-                    with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                    with_cleared_await_context(|| with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index)))?
                 };
                 pop_function_context();
+                STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb_fe);
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }
@@ -6496,7 +6657,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     pop_generator_context();
                     b
                 } else {
-                    with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index))?
+                    with_cleared_await_context(|| with_cleared_forbidden_await_identifier(|| parse_statements(tokens, index)))?
                 };
                 pop_function_context();
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
@@ -6581,7 +6742,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 }
                                 old
                             });
+                            let saved_sb_af = STATIC_BLOCK_CONTEXT.with(|c| {
+                                let p = *c.borrow();
+                                *c.borrow_mut() = 0;
+                                p
+                            });
                             let p = parse_parameters(tokens, index)?;
+                            STATIC_BLOCK_CONTEXT.with(|c| *c.borrow_mut() = saved_sb_af);
                             GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
                             p
                         };
@@ -6634,7 +6801,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         );
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
-                } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                } else if !suppress_arrow && *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                     log::trace!("parse_primary (async): detected '(' => possible async arrow at idx {}", *index);
                     *index += 1;
                     let saved_idx = *index;
@@ -6714,7 +6881,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     } else {
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     }
-                } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Identifier(_)) {
+                } else if !suppress_arrow && *index < tokens.len() && matches!(tokens[*index].token, Token::Identifier(_)) {
                     if let Token::Identifier(name) = &tokens[*index].token {
                         let ident_name = name.clone();
                         let j = *index + 1;
@@ -6729,7 +6896,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     let line = token_data.line;
                     let column = token_data.column;
                     let mut expr = Expr::Var("async".to_string(), Some(line), Some(column));
-                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                    if !suppress_arrow && *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
                         *index += 1;
                         let body = parse_arrow_body(tokens, index)?;
                         expr = Expr::ArrowFunction(vec![DestructuringElement::Variable("async".to_string(), None)], body);
@@ -6739,7 +6906,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     let line = token_data.line;
                     let column = token_data.column;
                     let mut expr = Expr::Var("async".to_string(), Some(line), Some(column));
-                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                    if !suppress_arrow && *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
                         *index += 1;
                         let body = parse_arrow_body(tokens, index)?;
                         expr = Expr::ArrowFunction(vec![DestructuringElement::Variable("async".to_string(), None)], body);
@@ -6754,138 +6921,153 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index,
                 tokens.iter().skip(*index).take(8).collect::<Vec<_>>()
             );
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
-                let prev = if *index >= 1 { Some(&tokens[*index - 1]) } else { None };
-                log::trace!("paren-rcase: idx={} prev={:?} token_at_idx={:?}", *index, prev, tokens.get(*index));
-                if let Some(prev_td) = prev
-                    && matches!(prev_td.token, Token::LParen)
-                {
-                    let next = *index + 1;
-                    log::trace!("paren-rcase: next={} token_next={:?}", next, tokens.get(next));
-                    if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
-                        *index = next + 1;
-                        let body = parse_arrow_body(tokens, index)?;
-                        log::trace!("constructing arrow (empty paren via rcase) params=Vec::new()");
-                        return Ok(Expr::ArrowFunction(Vec::new(), body));
-                    } else {
-                        log::trace!("paren-rcase: not arrow; token_next={:?}", tokens.get(next));
+            // ClassHeritage: extends LeftHandSideExpression — arrows not allowed
+            // at the outermost paren level.
+            if suppress_arrow {
+                // Parse as grouping expression only — no arrow detection
+                let expr_inner = parse_expression(tokens, index)?;
+                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
+                *index += 1;
+                expr_inner
+            } else {
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                    let prev = if *index >= 1 { Some(&tokens[*index - 1]) } else { None };
+                    log::trace!("paren-rcase: idx={} prev={:?} token_at_idx={:?}", *index, prev, tokens.get(*index));
+                    if let Some(prev_td) = prev
+                        && matches!(prev_td.token, Token::LParen)
+                    {
+                        let next = *index + 1;
+                        log::trace!("paren-rcase: next={} token_next={:?}", next, tokens.get(next));
+                        if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                            *index = next + 1;
+                            let body = parse_arrow_body(tokens, index)?;
+                            log::trace!("constructing arrow (empty paren via rcase) params=Vec::new()");
+                            return Ok(Expr::ArrowFunction(Vec::new(), body));
+                        } else {
+                            log::trace!("paren-rcase: not arrow; token_next={:?}", tokens.get(next));
+                        }
                     }
                 }
-            }
-            {
-                if *index < tokens.len() && !matches!(tokens[*index].token, Token::Spread) {
-                    let mut j = *index + 1;
-                    while j < tokens.len() && matches!(tokens[j].token, Token::LineTerminator) {
-                        j += 1;
-                    }
-                    if j < tokens.len() && matches!(tokens[j].token, Token::Identifier(_)) {
-                        let mut k = j + 1;
-                        while k < tokens.len() && matches!(tokens[k].token, Token::LineTerminator) {
-                            k += 1;
+                {
+                    if *index < tokens.len() && !matches!(tokens[*index].token, Token::Spread) {
+                        let mut j = *index + 1;
+                        while j < tokens.len() && matches!(tokens[j].token, Token::LineTerminator) {
+                            j += 1;
                         }
-                        if k < tokens.len() && matches!(tokens[k].token, Token::RParen) {
-                            let m = k + 1;
-                            if m < tokens.len()
-                                && matches!(tokens[m].token, Token::Arrow)
-                                && let Token::Identifier(name) = &tokens[j].token
-                            {
-                                *index = m + 1;
-                                let body = parse_arrow_body(tokens, index)?;
-                                log::trace!(
-                                    "constructing arrow (single-id fast-path) params={:?}",
-                                    vec![DestructuringElement::Variable(name.clone(), None)]
-                                );
-                                return Ok(Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body));
+                        if j < tokens.len() && matches!(tokens[j].token, Token::Identifier(_)) {
+                            let mut k = j + 1;
+                            while k < tokens.len() && matches!(tokens[k].token, Token::LineTerminator) {
+                                k += 1;
+                            }
+                            if k < tokens.len() && matches!(tokens[k].token, Token::RParen) {
+                                let m = k + 1;
+                                if m < tokens.len()
+                                    && matches!(tokens[m].token, Token::Arrow)
+                                    && let Token::Identifier(name) = &tokens[j].token
+                                {
+                                    *index = m + 1;
+                                    let body = parse_arrow_body(tokens, index)?;
+                                    log::trace!(
+                                        "constructing arrow (single-id fast-path) params={:?}",
+                                        vec![DestructuringElement::Variable(name.clone(), None)]
+                                    );
+                                    return Ok(Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body));
+                                }
                             }
                         }
                     }
                 }
-            }
-            {
                 {
-                    if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
-                        let next = *index + 1;
-                        log::trace!(
-                            "empty-paren-fastpath: index={} token_at_index={:?} next={} token_next={:?}",
-                            *index,
-                            tokens.get(*index),
-                            next,
-                            tokens.get(next)
-                        );
-                        if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
-                            *index = next + 1;
-                            let body = parse_arrow_body(tokens, index)?;
-                            log::trace!("constructing arrow (empty paren) params=Vec::new()");
-                            return Ok(Expr::ArrowFunction(Vec::new(), body));
+                    {
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                            let next = *index + 1;
+                            log::trace!(
+                                "empty-paren-fastpath: index={} token_at_index={:?} next={} token_next={:?}",
+                                *index,
+                                tokens.get(*index),
+                                next,
+                                tokens.get(next)
+                            );
+                            if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                                *index = next + 1;
+                                let body = parse_arrow_body(tokens, index)?;
+                                log::trace!("constructing arrow (empty paren) params=Vec::new()");
+                                return Ok(Expr::ArrowFunction(Vec::new(), body));
+                            } else {
+                                log::trace!("empty-paren-fastpath: not arrow, skipped (token_next={:?})", tokens.get(next));
+                            }
                         } else {
-                            log::trace!("empty-paren-fastpath: not arrow, skipped (token_next={:?})", tokens.get(next));
+                            log::trace!(
+                                "empty-paren-fastpath: index did not point to RParen (token={:?})",
+                                tokens.get(*index)
+                            );
                         }
-                    } else {
-                        log::trace!(
-                            "empty-paren-fastpath: index did not point to RParen (token={:?})",
-                            tokens.get(*index)
-                        );
                     }
-                }
-                let mut depth = 1usize;
-                let mut j = *index + 1;
-                while j < tokens.len() && depth > 0 {
-                    match tokens[j].token {
-                        Token::LParen => depth += 1,
-                        Token::RParen => depth -= 1,
-                        _ => {}
+                    let mut depth = 1usize;
+                    let mut j = *index + 1;
+                    while j < tokens.len() && depth > 0 {
+                        match tokens[j].token {
+                            Token::LParen => depth += 1,
+                            Token::RParen => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
                     }
-                    if depth > 0 {
-                        j += 1;
-                    }
-                }
-                if depth == 0 {
-                    let next = j + 1;
-                    if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
-                        log::trace!(
-                            "paren-arrow-check: index={}, j={}, next={} token_at_index={:?} token_at_j={:?}",
-                            *index,
-                            j,
-                            next,
-                            tokens.get(*index),
-                            tokens.get(j)
-                        );
-                        let mut t = *index;
-                        log::trace!(
-                            "paren-arrow: index={} t={} token_at_t={:?} token_at_j_plus_one={:?}",
-                            *index,
-                            t,
-                            tokens.get(t),
-                            tokens.get(j + 1)
-                        );
-                        if let Ok(params) = parse_parameters(tokens, &mut t)
-                            && t == j + 1
-                        {
-                            *index = next + 1;
-                            let body = parse_arrow_body(tokens, index)?;
-                            log::trace!("constructing arrow (paren params) params={:?}", params);
-                            return Ok(Expr::ArrowFunction(params, body));
+                    if depth == 0 {
+                        let next = j + 1;
+                        if next < tokens.len() && matches!(tokens[next].token, Token::Arrow) {
+                            log::trace!(
+                                "paren-arrow-check: index={}, j={}, next={} token_at_index={:?} token_at_j={:?}",
+                                *index,
+                                j,
+                                next,
+                                tokens.get(*index),
+                                tokens.get(j)
+                            );
+                            let mut t = *index;
+                            log::trace!(
+                                "paren-arrow: index={} t={} token_at_t={:?} token_at_j_plus_one={:?}",
+                                *index,
+                                t,
+                                tokens.get(t),
+                                tokens.get(j + 1)
+                            );
+                            if let Ok(params) = parse_parameters(tokens, &mut t)
+                                && t == j + 1
+                            {
+                                *index = next + 1;
+                                let body = parse_arrow_body(tokens, index)?;
+                                log::trace!("constructing arrow (paren params) params={:?}", params);
+                                return Ok(Expr::ArrowFunction(params, body));
+                            }
                         }
                     }
                 }
-            }
-            let expr_inner = parse_expression(tokens, index)?;
-            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                let expr_inner = parse_expression(tokens, index)?;
+                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
                 *index += 1;
-            }
-            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
-                return Err(raise_parse_error_at!(tokens.get(*index)));
-            }
-            *index += 1;
-            if *index < tokens.len() && get_assignment_ctor(&tokens[*index].token).is_some() && matches!(expr_inner, Expr::Object(_)) {
-                return Err(raise_parse_error_at!(tokens.get(*index)));
-            }
-            match expr_inner {
-                // Parenthesized identifiers are not IdentifierReference in assignment
-                // named-evaluation rules; clear marker metadata used by compiler.
-                Expr::Var(name, _, _) => Expr::Var(name, None, None),
-                other => other,
-            }
+                if *index < tokens.len() && get_assignment_ctor(&tokens[*index].token).is_some() && matches!(expr_inner, Expr::Object(_)) {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
+                match expr_inner {
+                    // Parenthesized identifiers are not IdentifierReference in assignment
+                    // named-evaluation rules; clear marker metadata used by compiler.
+                    Expr::Var(name, _, _) => Expr::Var(name, None, None),
+                    other => other,
+                }
+            } // end else (non-heritage arrow suppression)
         }
         _ => {
             if *index < tokens.len() {

@@ -22044,17 +22044,26 @@ impl<'gc> VM<'gc> {
                         crate::core::push_private_names_for_eval(all_names)
                     });
                     let statements = if is_direct {
-                        // Set method/constructor context for super access in direct eval
+                        // Set method/constructor/new.target context for direct eval
                         let caller_ip = self.frames.last().map(|f| f.func_ip);
                         let in_method = caller_ip.map(|ip| self.chunk.method_function_ips.contains(&ip)).unwrap_or(false);
                         let in_ctor = caller_ip.map(|ip| self.chunk.class_constructor_ips.contains(&ip)).unwrap_or(false);
+                        // new.target is valid inside any function (arrow or not).
+                        // Allow at parse time; runtime check validates actual context.
+                        let in_function = self.frames.iter().rev().any(|f| f.func_ip != 0);
                         if in_method || in_ctor {
                             crate::core::parser::push_method_context_for_eval();
                         }
                         if in_ctor {
                             crate::core::parser::push_constructor_context_for_eval();
                         }
+                        if in_function {
+                            crate::core::parser::push_new_target_context_for_eval();
+                        }
                         let result = do_parse(&code);
+                        if in_function {
+                            crate::core::parser::pop_new_target_context_for_eval();
+                        }
                         if in_ctor {
                             crate::core::parser::pop_constructor_context_for_eval();
                         }

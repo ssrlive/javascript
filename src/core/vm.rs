@@ -22044,7 +22044,24 @@ impl<'gc> VM<'gc> {
                         crate::core::push_private_names_for_eval(all_names)
                     });
                     let statements = if is_direct {
-                        do_parse(&code)?
+                        // Set method/constructor context for super access in direct eval
+                        let caller_ip = self.frames.last().map(|f| f.func_ip);
+                        let in_method = caller_ip.map(|ip| self.chunk.method_function_ips.contains(&ip)).unwrap_or(false);
+                        let in_ctor = caller_ip.map(|ip| self.chunk.class_constructor_ips.contains(&ip)).unwrap_or(false);
+                        if in_method || in_ctor {
+                            crate::core::parser::push_method_context_for_eval();
+                        }
+                        if in_ctor {
+                            crate::core::parser::push_constructor_context_for_eval();
+                        }
+                        let result = do_parse(&code);
+                        if in_ctor {
+                            crate::core::parser::pop_constructor_context_for_eval();
+                        }
+                        if in_method || in_ctor {
+                            crate::core::parser::pop_method_context_for_eval();
+                        }
+                        result?
                     } else {
                         // Indirect eval: relax strict-mode binding checks unless
                         // the eval'd code itself starts with "use strict".

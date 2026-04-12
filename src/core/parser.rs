@@ -185,6 +185,14 @@ thread_local! {
     static FORBID_IN: RefCell<usize> = const { RefCell::new(0) };
     static GENERATOR_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
     static GENERATOR_CONTEXT_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// >0 when parsing inside a method body (class/object method, getter, setter).
+    /// super.x / super[x] are allowed when this is >0.
+    static METHOD_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    static METHOD_CONTEXT_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// >0 when parsing inside a constructor body (derived class).
+    /// super() is allowed when this is >0.
+    static CONSTRUCTOR_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
+    static CONSTRUCTOR_CONTEXT_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 fn forbid_in() -> bool {
     FORBID_IN.with(|c| *c.borrow() > 0)
@@ -214,23 +222,72 @@ fn push_generator_context() {
 fn pop_generator_context() {
     GENERATOR_CONTEXT.with(|c| *c.borrow_mut() -= 1);
 }
+fn in_method_context() -> bool {
+    METHOD_CONTEXT.with(|c| *c.borrow() > 0)
+}
+fn in_constructor_context() -> bool {
+    CONSTRUCTOR_CONTEXT.with(|c| *c.borrow() > 0)
+}
+fn push_method_context() {
+    METHOD_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+fn pop_method_context() {
+    METHOD_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+fn push_constructor_context() {
+    CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+fn pop_constructor_context() {
+    CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
 fn in_function_context() -> bool {
     FUNCTION_CONTEXT.with(|c| *c.borrow() > 0)
 }
-/// Every function boundary saves+clears generator context automatically.
+/// Every function boundary saves+clears generator/method/constructor context automatically.
 fn push_function_context() {
     FUNCTION_CONTEXT.with(|c| *c.borrow_mut() += 1);
-    let saved = GENERATOR_CONTEXT.with(|c| {
+    let saved_gen = GENERATOR_CONTEXT.with(|c| {
         let prev = *c.borrow();
         *c.borrow_mut() = 0;
         prev
     });
-    GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved));
+    GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved_gen));
+    let saved_method = METHOD_CONTEXT.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    METHOD_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved_method));
+    let saved_ctor = CONSTRUCTOR_CONTEXT.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    CONSTRUCTOR_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved_ctor));
 }
 fn pop_function_context() {
     FUNCTION_CONTEXT.with(|c| *c.borrow_mut() -= 1);
-    let saved = GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
-    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved);
+    let saved_gen = GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
+    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved_gen);
+    let saved_method = METHOD_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
+    METHOD_CONTEXT.with(|c| *c.borrow_mut() = saved_method);
+    let saved_ctor = CONSTRUCTOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
+    CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() = saved_ctor);
+}
+/// Arrow functions inherit super/method/constructor context but NOT generator context
+fn push_arrow_function_context() {
+    FUNCTION_CONTEXT.with(|c| *c.borrow_mut() += 1);
+    let saved_gen = GENERATOR_CONTEXT.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = 0;
+        prev
+    });
+    GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().push(saved_gen));
+}
+fn pop_arrow_function_context() {
+    FUNCTION_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+    let saved_gen = GENERATOR_CONTEXT_STACK.with(|s| s.borrow_mut().pop().unwrap_or(0));
+    GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved_gen);
 }
 pub(crate) fn in_await_context() -> bool {
     AWAIT_CONTEXT.with(|c| *c.borrow() > 0)
@@ -240,6 +297,18 @@ pub(crate) fn push_await_context() {
 }
 pub(crate) fn pop_await_context() {
     AWAIT_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+pub(crate) fn push_method_context_for_eval() {
+    METHOD_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+pub(crate) fn pop_method_context_for_eval() {
+    METHOD_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+pub(crate) fn push_constructor_context_for_eval() {
+    CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() += 1);
+}
+pub(crate) fn pop_constructor_context_for_eval() {
+    CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() -= 1);
 }
 fn strict_binding_checks() -> bool {
     STRICT_BINDING_CHECKS.with(|c| c.get())
@@ -594,6 +663,12 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     *index += 1;
                 }
                 if *index < t.len() && matches!(& t[* index].token, Token::Identifier(n) if n == "of") {
+                    if raw_identifier_source_has_escape(&t[*index]) {
+                        return Err(raise_parse_error_with_token!(
+                            t[*index],
+                            "'of' keyword must not contain Unicode escape sequences"
+                        ));
+                    }
                     *index += 1;
                     let iterable = parse_assignment(t, index)?;
                     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -774,6 +849,12 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         *index += 1;
     }
     if *index < t.len() && matches!(t[* index].token, Token::Identifier(ref s) if s == "of") {
+        if raw_identifier_source_has_escape(&t[*index]) {
+            return Err(raise_parse_error_with_token!(
+                t[*index],
+                "'of' keyword must not contain Unicode escape sequences"
+            ));
+        }
         *index += 1;
         let iterable = parse_assignment(t, index)?;
         if !matches!(t[*index].token, Token::RParen) {
@@ -3624,25 +3705,30 @@ fn parse_multiplicative(tokens: &[TokenData], index: &mut usize) -> Result<Expr,
     })
 }
 fn parse_exponentiation(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let start = *index;
     let left = parse_primary(tokens, index, true)?;
     if *index >= tokens.len() {
         return Ok(left);
     }
     if matches!(tokens[*index].token, Token::Exponent) {
         // Unary operators cannot be the base of exponentiation (spec: UpdateExpression ** ExponentiationExpression)
-        match &left {
-            Expr::Delete(_)
-            | Expr::Void(_)
-            | Expr::TypeOf(_)
-            | Expr::UnaryPlus(_)
-            | Expr::UnaryNeg(_)
-            | Expr::BitNot(_)
-            | Expr::LogicalNot(_) => {
-                return Err(crate::raise_syntax_error!(
-                    "Unary operator used immediately before exponentiation expression. Parenthesis must be used to disambiguate operator precedence"
-                ));
+        // But parenthesized unary expressions are fine: (-1n) ** -1n is valid
+        let was_parenthesized = matches!(tokens[start].token, Token::LParen);
+        if !was_parenthesized {
+            match &left {
+                Expr::Delete(_)
+                | Expr::Void(_)
+                | Expr::TypeOf(_)
+                | Expr::UnaryPlus(_)
+                | Expr::UnaryNeg(_)
+                | Expr::BitNot(_)
+                | Expr::LogicalNot(_) => {
+                    return Err(crate::raise_syntax_error!(
+                        "Unary operator used immediately before exponentiation expression. Parenthesis must be used to disambiguate operator precedence"
+                    ));
+                }
+                _ => {}
             }
-            _ => {}
         }
         *index += 1;
         let right = parse_exponentiation(tokens, index)?;
@@ -3983,7 +4069,9 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1;
             push_function_context();
+            push_method_context();
             let body = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
+            pop_method_context();
             pop_function_context();
             if is_getter {
                 if let Some(prop_expr) = prop_expr_opt {
@@ -4101,7 +4189,11 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1;
             push_function_context();
+            push_method_context();
+            push_constructor_context();
             let body = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
+            pop_constructor_context();
+            pop_method_context();
             pop_function_context();
             members.push(ClassMember::Constructor(params, body));
             continue;
@@ -4128,6 +4220,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1;
             push_function_context();
+            push_method_context();
             let body = if is_generator {
                 push_generator_context();
                 let b = with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?;
@@ -4136,6 +4229,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             } else {
                 with_cleared_forbidden_await_identifier(|| parse_statement_block(t, index))?
             };
+            pop_method_context();
             pop_function_context();
             if is_generator {
                 if let Some(expr) = computed_key_expr {
@@ -4666,6 +4760,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::This => Expr::This,
         Token::Super => {
             if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                if !in_constructor_context() {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index - 1],
+                        "'super()' is only valid inside a class constructor"
+                    ));
+                }
                 *index += 1;
                 let mut args = Vec::new();
                 if *index < tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
@@ -4690,6 +4790,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 *index += 1;
                 Expr::SuperCall(args)
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::Dot) {
+                if !in_method_context() && !in_constructor_context() {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index - 1],
+                        "'super' property access is only valid inside a method"
+                    ));
+                }
                 *index += 1;
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::Identifier(_)) {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -4745,6 +4851,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 }
             } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                 // super[expr] — computed super property access
+                if !in_method_context() && !in_constructor_context() {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index - 1],
+                        "'super' property access is only valid inside a method"
+                    ));
+                }
                 *index += 1;
                 let key_expr = parse_assignment(tokens, index)?;
                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
@@ -4959,6 +5071,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1;
                             push_function_context();
+                            push_method_context();
                             if is_generator {
                                 push_generator_context();
                             }
@@ -4966,6 +5079,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             if is_generator {
                                 pop_generator_context();
                             }
+                            pop_method_context();
                             pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -5038,6 +5152,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 }
                                 *index += 1;
                                 push_function_context();
+                                push_method_context();
                                 if is_generator {
                                     push_generator_context();
                                 }
@@ -5045,6 +5160,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 if is_generator {
                                     pop_generator_context();
                                 }
+                                pop_method_context();
                                 pop_function_context();
                                 if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -5140,6 +5256,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                     }
                                     *index += 1;
                                     push_function_context();
+                                    push_method_context();
                                     if is_generator {
                                         push_generator_context();
                                     }
@@ -5147,6 +5264,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                     if is_generator {
                                         pop_generator_context();
                                     }
+                                    pop_method_context();
                                     pop_function_context();
                                     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                         return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -5262,6 +5380,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1;
                             push_function_context();
+                            push_method_context();
                             if is_generator {
                                 push_generator_context();
                             }
@@ -5269,6 +5388,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             if is_generator {
                                 pop_generator_context();
                             }
+                            pop_method_context();
                             pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -5324,7 +5444,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1;
                             push_function_context();
+                            push_method_context();
                             let body = parse_statements(tokens, index)?;
+                            pop_method_context();
                             pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -5355,7 +5477,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1;
                             push_function_context();
+                            push_method_context();
                             let body = parse_statements(tokens, index)?;
+                            pop_method_context();
                             pop_function_context();
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
@@ -6249,7 +6373,7 @@ fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: boo
     }
     if *index < tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
         *index += 1;
-        push_function_context();
+        push_arrow_function_context();
         let body = if is_async {
             push_await_context();
             let r = parse_statements(tokens, index);
@@ -6258,7 +6382,7 @@ fn parse_arrow_body_inner(tokens: &[TokenData], index: &mut usize, is_async: boo
         } else {
             with_cleared_await_context(|| parse_statements(tokens, index))?
         };
-        pop_function_context();
+        pop_arrow_function_context();
         if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
             return Err(raise_parse_error_at!(tokens.get(*index)));
         }

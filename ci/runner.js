@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const {spawnSync, spawn} = require('child_process');
-const {composeTest, extractMeta, parseList, hasFlag, referencesAssert} = require('./compose_test');
+const { spawnSync, spawn } = require('child_process');
+const { composeTest, extractMeta, parseList, hasFlag, referencesAssert } = require('./compose_test');
 
 const SCRIPT_START_NS = process.hrtime.bigint();
 
@@ -30,16 +30,24 @@ process.on('exit', (code) => {
 
 // Simple arg parsing
 const argv = process.argv.slice(2);
-for (let i=0;i<argv.length;i++){
+for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--limit') { LIMIT = Number(argv[++i]); }
-  else if (a === '--fail-on-failure') { FAIL_ON_FAILURE = true; }
-  else if (a === '--cap-multiplier') { CAP_MULTIPLIER = Number(argv[++i]); }
-  else if (a === '--jobs') { JOBS = Number(argv[++i]); }
-  else if (a === '--focus') { const val = argv[++i]; FOCUS_LIST.push(...String(val).split(',').map(s=>s.trim()).filter(Boolean)); }
-  else if (a === '--timeout') { TIMEOUT_SECS = Number(argv[++i]); }
-  else if (a === '--keep-tmp') { KEEP_TMP = true; }
-  else if (a === '--help') {
+  if (a === '--limit') {
+    LIMIT = Number(argv[++i]);
+  } else if (a === '--fail-on-failure') {
+    FAIL_ON_FAILURE = true;
+  } else if (a === '--cap-multiplier') {
+    CAP_MULTIPLIER = Number(argv[++i]);
+  } else if (a === '--jobs') {
+    JOBS = Number(argv[++i]);
+  } else if (a === '--focus') {
+    const val = argv[++i];
+    FOCUS_LIST.push(...String(val).split(',').map(s => s.trim()).filter(Boolean));
+  } else if (a === '--timeout') {
+    TIMEOUT_SECS = Number(argv[++i]);
+  } else if (a === '--keep-tmp') {
+    KEEP_TMP = true;
+  } else if (a === '--help') {
     console.log('Usage: node ci/runner.js [--keep-tmp] [--jobs N] --limit N --focus name[,name2] (multiple --focus allowed)');
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
     process.exit(0);
@@ -48,7 +56,7 @@ for (let i=0;i<argv.length;i++){
 
 JOBS = Math.max(1, Number.isFinite(JOBS) ? Math.floor(JOBS) : 1);
 
-function formatElapsed(elapsedMs){
+function formatElapsed(elapsedMs) {
   const totalSeconds = Math.floor(elapsedMs / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -61,7 +69,7 @@ function formatElapsed(elapsedMs){
   return `${ms}ms`;
 }
 
-function cleanupComposedArtifacts(tmpPath){
+function cleanupComposedArtifacts(tmpPath) {
   try {
     if (tmpPath && fs.existsSync(tmpPath)) {
       fs.unlinkSync(tmpPath);
@@ -112,21 +120,21 @@ function runCommandAsync(cmd, args, options = {}) {
       if (settled) return;
       settled = true;
       if (timeoutId) clearTimeout(timeoutId);
-      resolve({status: -1, stdout, stderr: `${stderr}\n${String(err)}`});
+      resolve({ status: -1, stdout, stderr: `${stderr}\n${String(err)}` });
     });
 
     child.on('close', (code) => {
       if (settled) return;
       settled = true;
       if (timeoutId) clearTimeout(timeoutId);
-      resolve({status: code, stdout, stderr});
+      resolve({ status: code, stdout, stderr });
     });
   });
 }
 
-if (!fs.existsSync(TEST262_ROOT_DIR)){
+if (!fs.existsSync(TEST262_ROOT_DIR)) {
   console.log('Cloning test262...');
-  spawnSync('git', ['clone', '--depth', '1', 'https://github.com/tc39/test262.git', TEST262_ROOT_DIR], {stdio:'inherit'});
+  spawnSync('git', ['clone', '--depth', '1', 'https://github.com/tc39/test262.git', TEST262_ROOT_DIR], { stdio: 'inherit' });
 }
 
 // Build engine
@@ -134,13 +142,13 @@ console.log('Building engine interpreter...');
 const USE_RELEASE = process.env.TEST262_RELEASE !== '0';
 const buildArgs = ['build', '-p', 'js', '--all-features'];
 if (USE_RELEASE) buildArgs.push('--release');
-const buildRes = spawnSync('cargo', buildArgs, {stdio:'inherit'});
+const buildRes = spawnSync('cargo', buildArgs, { stdio: 'inherit' });
 if (!buildRes || buildRes.status !== 0) {
   console.error('ERROR: Engine build failed. Aborting tests.');
   process.exit(buildRes && buildRes.status ? buildRes.status : 1);
 }
 
-// locate binary
+// Locate binary
 let BIN = '';
 if (USE_RELEASE) {
   if (fs.existsSync('target/release/js')) BIN = path.resolve('target/release/js');
@@ -151,29 +159,28 @@ if (!BIN) {
 console.log(`JS engine binary: ${BIN}`);
 
 fs.writeFileSync(RESULTS_FILE, '');
-function log(line){ fs.appendFileSync(RESULTS_FILE, line + '\n'); }
+function log(line) { fs.appendFileSync(RESULTS_FILE, line + '\n'); }
 
 // Build harness index
 const HARNESS_INDEX = {};
-function shouldSkipEntry(entryName){
+function shouldSkipEntry(entryName) {
   return entryName.startsWith('.test262_composed_');
 }
 
-function walkDir(dir){
+function walkDir(dir) {
   const out = [];
-  // Read directory entries and sort by name for deterministic traversal
-  let items = fs.readdirSync(dir, {withFileTypes:true});
-  items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
-  for (const it of items){
+  let items = fs.readdirSync(dir, { withFileTypes: true });
+  items = items.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
+  for (const it of items) {
     if (shouldSkipEntry(it.name)) continue;
     const p = path.join(dir, it.name);
     if (it.isDirectory()) out.push(...walkDir(p));
     else out.push(p);
   }
-  // Return sorted list of paths to ensure caller sees deterministic order
-  return out.sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));
+  return out.sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 }
-for (const p of walkDir(path.join(TEST262_ROOT_DIR,'harness'))){
+
+for (const p of walkDir(path.join(TEST262_ROOT_DIR, 'harness'))) {
   const b = path.basename(p);
   HARNESS_INDEX[b] = p;
 }
@@ -182,7 +189,7 @@ for (const p of walkDir(path.join(TEST262_ROOT_DIR,'harness'))){
 const FILES_ONLY_MARKER = '(filesonly)';
 const SEARCH_DIRS = [];
 
-function stripFilesOnlyMarker(raw){
+function stripFilesOnlyMarker(raw) {
   let text = String(raw || '').trim();
   let filesOnly = false;
   if (text.endsWith(FILES_ONLY_MARKER)) {
@@ -192,23 +199,30 @@ function stripFilesOnlyMarker(raw){
       text = text.slice(0, -1);
     }
   }
-  return {text, filesOnly};
+  return { text, filesOnly };
 }
 
-if (FOCUS_LIST.length){
+if (FOCUS_LIST.length) {
   const toks = FOCUS_LIST;
-  for (const tokRaw of toks){
-    const {text: tok, filesOnly} = stripFilesOnlyMarker(tokRaw);
+  for (const tokRaw of toks) {
+    const { text: tok, filesOnly } = stripFilesOnlyMarker(tokRaw);
     if (!tok) continue;
-    if (tok === 'language') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test','language'), filesOnly});
-    else if (tok === 'built-ins' || tok === 'builtins') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test','built-ins'), filesOnly});
-    else if (tok === 'intl') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test','intl402'), filesOnly});
-    else if (tok === 'all') SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test'), filesOnly});
-    else if (fs.existsSync(path.join(TEST262_ROOT_DIR,'test',tok))) SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test',tok), filesOnly});
-    else if (fs.existsSync(tok)) SEARCH_DIRS.push({path: tok, filesOnly});
+    if (tok === 'language') {
+      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', 'language'), filesOnly });
+    } else if (tok === 'built-ins' || tok === 'builtins') {
+      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', 'built-ins'), filesOnly });
+    } else if (tok === 'intl') {
+      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', 'intl402'), filesOnly });
+    } else if (tok === 'all') {
+      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test'), filesOnly });
+    } else if (fs.existsSync(path.join(TEST262_ROOT_DIR, 'test', tok))) {
+      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', tok), filesOnly });
+    } else if (fs.existsSync(tok)) {
+      SEARCH_DIRS.push({ path: tok, filesOnly });
+    }
   }
 } else {
-  SEARCH_DIRS.push({path: path.join(TEST262_ROOT_DIR,'test'), filesOnly: false});
+  SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test'), filesOnly: false });
 }
 
 const CAP = LIMIT * CAP_MULTIPLIER;
@@ -217,38 +231,36 @@ const searchDirsLabel = SEARCH_DIRS
   .join(',');
 console.log(`Collecting up to ${CAP} candidate tests (LIMIT=${LIMIT}, CAP_MULTIPLIER=${CAP_MULTIPLIER}). Search dirs: ${searchDirsLabel}`);
 
-function listFilesOnly(dir){
-  let items = fs.readdirSync(dir, {withFileTypes:true});
-  items = items.sort((a,b)=>a.name.localeCompare(b.name, 'en', {numeric:true}));
+function listFilesOnly(dir) {
+  let items = fs.readdirSync(dir, { withFileTypes: true });
+  items = items.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
   return items
-    .filter(it => !(shouldSkipEntry(it.name)))
+    .filter(it => !shouldSkipEntry(it.name))
     .filter(it => it.isFile())
     .map(it => path.join(dir, it.name))
-    .sort((a,b)=>a.localeCompare(b, 'en', {numeric:true}));
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 }
 
-function collectTests(){
+function collectTests() {
   const basic = [];
   const other = [];
-  for (const entry of SEARCH_DIRS){
+  for (const entry of SEARCH_DIRS) {
     const dir = entry.path;
     if (!fs.existsSync(dir)) continue;
-    // Support both directories and single-file focus entries. If `dir` is a file,
-    // treat it as the sole candidate; if it's a directory, walk it recursively
-    // unless (filesonly) is specified for that entry.
+
     let files = [];
     const stat = fs.statSync(dir);
     if (stat.isFile()) {
       if (dir.endsWith('.js')) files = [dir];
     } else if (stat.isDirectory()) {
       if (entry.filesOnly) {
-        files = listFilesOnly(dir).filter(p=>p.endsWith('.js')).sort();
+        files = listFilesOnly(dir).filter(p => p.endsWith('.js')).sort();
       } else {
-        files = walkDir(dir).filter(p=>p.endsWith('.js')).sort();
+        files = walkDir(dir).filter(p => p.endsWith('.js')).sort();
       }
     }
 
-    for (const f of files){
+    for (const f of files) {
       if (f.includes('/.test262_composed_')) continue;
       const meta = extractMeta(f);
       if (/includes:|flags:\s*\[.*module.*\]|negative:|features:/.test(meta)) {
@@ -260,23 +272,21 @@ function collectTests(){
     }
     if ((basic.length + other.length) >= CAP) break;
   }
-  console.log(`Collected: basic=${basic.length} other=${other.length} (total=${basic.length+other.length})`);
+  console.log(`Collected: basic=${basic.length} other=${other.length} (total=${basic.length + other.length})`);
   return basic.concat(other);
 }
 
 const ordered = collectTests();
 
-// feature probe cache
+// Feature probe cache
 const FEATURE_SUPPORTED = {};
-// Hard-coded unsupported features: treat these as unsupported even if probes are absent
+// Hard-coded unsupported features
 const HARDCODED_UNSUPPORTED = new Set([]);
 
 function findProbeFile(feat) {
   const names = new Set([
     feat,
     feat.replace(/\./g, '_'),
-    // feat.replace(/-/g, '_'),
-    // feat.replace(/[.-]/g, '_'),
   ]);
   for (const name of names) {
     const probeFile = path.join(__dirname, 'feature_probes', `${name}.js`);
@@ -285,20 +295,24 @@ function findProbeFile(feat) {
   return null;
 }
 
-function detectFeature(feat){
+function detectFeature(feat) {
   // Allow environment override to force running unsupported features
-  if (process.env.FORCE_RUN_UNSUPPORTED_FEATURES && process.env.FORCE_RUN_UNSUPPORTED_FEATURES !== 'false') { FEATURE_SUPPORTED[feat] = true; return true; }
+  if (process.env.FORCE_RUN_UNSUPPORTED_FEATURES && process.env.FORCE_RUN_UNSUPPORTED_FEATURES !== 'false') {
+    FEATURE_SUPPORTED[feat] = true;
+    return true;
+  }
 
   // Short-circuit for known-unsupported features
-  if (HARDCODED_UNSUPPORTED.has(feat)) { FEATURE_SUPPORTED[feat] = false; return false; }
+  if (HARDCODED_UNSUPPORTED.has(feat)) {
+    FEATURE_SUPPORTED[feat] = false;
+    return false;
+  }
 
   if (feat in FEATURE_SUPPORTED) return FEATURE_SUPPORTED[feat];
+
   const probeFile = findProbeFile(feat);
-  if (probeFile && BIN){
+  if (probeFile && BIN) {
     // Determine whether this probe should be run as an ES module.
-    // Heuristic: if the probe file contains top-level `await`, an `import` or
-    // `export` declaration, or an explicit `// module` pragma, run with
-    // `--module` so engines requiring module context are exercised.
     let probeIsModule = false;
     try {
       const src = fs.readFileSync(probeFile, 'utf8');
@@ -307,7 +321,6 @@ function detectFeature(feat){
       if (/^\s*import\b/m.test(src)) probeIsModule = true;
       if (/^\s*export\b/m.test(src)) probeIsModule = true;
     } catch (e) {
-      // If we can't read the probe, assume non-module
       probeIsModule = false;
     }
 
@@ -315,46 +328,41 @@ function detectFeature(feat){
     if (probeIsModule) runArgs.push('--module');
     runArgs.push(probeFile);
     const probeTimeoutMs = Math.max(5000, Number(TIMEOUT_SECS || 0) * 1000);
-    const res = spawnSync(BIN, runArgs, {timeout: probeTimeoutMs, encoding:'utf8'});
+    const res = spawnSync(BIN, runArgs, { timeout: probeTimeoutMs, encoding: 'utf8' });
     const out = (res && res.stdout) ? String(res.stdout) : '';
-    if (out.includes('OK')) FEATURE_SUPPORTED[feat] = true; else FEATURE_SUPPORTED[feat] = false;
+    FEATURE_SUPPORTED[feat] = out.includes('OK');
   } else {
     FEATURE_SUPPORTED[feat] = false;
   }
   return FEATURE_SUPPORTED[feat];
 }
 
-let pass=0, fail=0, skip=0, n=0;
+let pass = 0, fail = 0, skip = 0, n = 0;
 
 function shouldSkipPendingTest(meta, f) {
-  // Skip tests marked as pending via esid: pending, except tests under specific directories we are focusing on
   const allowPending = [
-      path.join('language','expressions','async-arrow-function'),
-      path.join('language','expressions','async-function'),
-      path.join('language','expressions','await'),
-      path.join('language','expressions','object','method-definition'),
-      path.join('language','statements','async-function'),
-      path.join('language','statements','class','definition'),
-      path.join('language','statements','try'),
-      'built-ins',
-      'staging',
+    path.join('language', 'expressions', 'async-arrow-function'),
+    path.join('language', 'expressions', 'async-function'),
+    path.join('language', 'expressions', 'await'),
+    path.join('language', 'expressions', 'object', 'method-definition'),
+    path.join('language', 'statements', 'async-function'),
+    path.join('language', 'statements', 'class', 'definition'),
+    path.join('language', 'statements', 'try'),
+    'built-ins',
+    'staging',
   ];
-  // Do not force-skip files inside the allowed directories when their metadata contains `esid: pending`.
   return /esid\s*:\s*pending\b/.test(meta) && !allowPending.some(p => f.includes(p));
 }
 
 // Skip tests known to be too slow for a tree-walking interpreter
-// (exhaustive multi-byte UTF-8 loops with ~1M iterations)
 const SLOW_TESTS = [
-  'S15.1.3.1_A2.5_T1.js',  // decodeURI 4-byte exhaustive
-  'S15.1.3.1_A2.4_T1.js',  // decodeURI 3-byte exhaustive
-  'S15.1.3.2_A2.5_T1.js',  // decodeURIComponent 4-byte exhaustive
-  'S15.1.3.2_A2.4_T1.js',  // decodeURIComponent 3-byte exhaustive
+  'S15.1.3.1_A2.5_T1.js',
+  'S15.1.3.1_A2.4_T1.js',
+  'S15.1.3.2_A2.5_T1.js',
+  'S15.1.3.2_A2.4_T1.js',
 ];
 
-// Skip entire directories whose tests are too slow for a tree-walking
-// interpreter (e.g. generated Unicode property-escape tests that build
-// strings spanning the full 0-0x10FFFF code-point range).
+// Skip entire directories whose tests are too slow
 const SLOW_DIRS = [
   'built-ins/RegExp/property-escapes/generated',
 ];
@@ -363,10 +371,10 @@ const SLOW_DIRS = [
   Execution semantics:
   - --limit N controls the number of tests *executed* (pass+fail == N).
   - The CAP_MULTIPLIER is applied to compute how many candidate files to parse (CAP = LIMIT * CAP_MULTIPLIER).
-  - Skipped tests (noStrict, negative, missing includes, unsupported features) do NOT count toward the limit.
+  - Skipped tests do NOT count toward the limit.
 */
-async function runAll(){
-  let scheduledCount = 0; // counts scheduled executions (will end up as pass+fail)
+async function runAll() {
+  let scheduledCount = 0;
   const running = new Set();
 
   async function runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative) {
@@ -378,17 +386,18 @@ async function runAll(){
         const binArgs = [];
         if (isModule) binArgs.push('--module');
         binArgs.push(tmpPath);
-        res = await runCommandAsync(BIN, binArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
+        res = await runCommandAsync(BIN, binArgs, { timeout: TIMEOUT_SECS * 1000, cwd: testCwd });
       } else {
         const cargoArgs = ['run', '--all-features', '--package', 'js', '--'];
         if (isModule) cargoArgs.push('--module');
         cargoArgs.push(tmpPath);
-        res = await runCommandAsync('cargo', cargoArgs, {timeout: TIMEOUT_SECS*1000, cwd: testCwd});
+        res = await runCommandAsync('cargo', cargoArgs, { timeout: TIMEOUT_SECS * 1000, cwd: testCwd });
       }
 
-      const outStr = ((res && res.stderr) ? res.stderr : (res && res.stdout ? res.stdout : '') ) || '';
+      const outStr = ((res && res.stderr) ? res.stderr : (res && res.stdout ? res.stdout : '')) || '';
       let isPass = false;
       let failReason = '';
+
       if (expectedNegative) {
         if (res && res.status === 0) {
           failReason = 'Expected test to fail, but it succeeded.';
@@ -406,7 +415,8 @@ async function runAll(){
       }
 
       if (isPass) {
-        log(`PASS ${f}`); pass++;
+        log(`PASS ${f}`);
+        pass++;
         try { process.stdout.write('.'); } catch (e) { /* ignore */ }
         if (cleanupTmp) cleanupComposedArtifacts(tmpPath);
         currentSucceeds = true;
@@ -428,7 +438,7 @@ async function runAll(){
           summaryText = '<no output>';
           log(summaryText);
         } else if (outLines.length > 0) {
-          summaryText = outLines.slice(0,5).join('\n');
+          summaryText = outLines.slice(0, 5).join('\n');
           log(summaryText);
         } else {
           summaryText = '<no output>';
@@ -449,7 +459,7 @@ async function runAll(){
             if (KEEP_TMP) {
               log(`TEST FILE KEPT: ${tmpPath}`);
               if (process.env.TEST262_LOG_LEVEL === 'debug') {
-                const content = fs.readFileSync(tmpPath,'utf8').split('\n').slice(0,60).join('\n');
+                const content = fs.readFileSync(tmpPath, 'utf8').split('\n').slice(0, 60).join('\n');
                 log('---- TEST FILE (head 60 lines): ----');
                 log(content);
                 log('---- END TEST FILE ----');
@@ -489,32 +499,24 @@ async function runAll(){
     }
   }
 
-  for (const f of ordered){
-    // stop when we've scheduled LIMIT tests
+  for (const f of ordered) {
     if (scheduledCount >= LIMIT) break;
     n++;
+
     if (/_FIXTURE\.js$/.test(f)) { skip++; log(`SKIP (fixture) ${f}`); continue; }
-
     if (SLOW_TESTS.some(s => f.endsWith(s))) { skip++; log(`SKIP (slow) ${f}`); continue; }
-
     if (SLOW_DIRS.some(d => f.includes(d))) { skip++; log(`SKIP (slow-dir) ${f}`); continue; }
 
     const meta = extractMeta(f);
 
-    // detect noStrict (capture the full flags array reliably)
+    // Detect noStrict
     const flagsBlock = (meta.match(/flags\s*:\s*\[[\s\S]*?\]/) || [''])[0];
-    if (flagsBlock && flagsBlock.includes('noStrict')){ skip++; log(`SKIP (noStrict) ${f}`); continue; }
-
-    // Skip raw tests (they require special raw-source handling)
+    if (flagsBlock && flagsBlock.includes('noStrict')) { skip++; log(`SKIP (noStrict) ${f}`); continue; }
     if (flagsBlock && flagsBlock.includes('raw')) { skip++; log(`SKIP (raw) ${f}`); continue; }
-
-    // Skip tests tagged CanBlockIsFalse – they require a non-blocking host (browser).
-    // Our engine is a standalone runtime where [[CanBlock]] is true.
     if (flagsBlock && flagsBlock.includes('CanBlockIsFalse')) { skip++; log(`SKIP (CanBlockIsFalse) ${f}`); continue; }
-
-    // Skip tests marked as pending via esid: pending, except tests under specific directories we are focusing on
     if (shouldSkipPendingTest(meta, f)) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
 
+    // Parse negative metadata
     let expectedNegative = null;
     if (/negative:\s*/.test(meta)) {
       const blockMatch = meta.match(/negative:[\s\S]*?(?=(?:\n[^\s]|-{3}|$))/);
@@ -530,11 +532,11 @@ async function runAll(){
       }
     }
 
-    // features
+    // Feature detection
     const feats = (meta.match(/features:\s*\[(.*?)\]/s) || [])[1];
-    if (feats){
-      const featsList = feats.split(',').map(s=>s.trim().replace(/^['\"]|['\"]$/g,''));
-      let unsupported=false;
+    if (feats) {
+      const featsList = feats.split(',').map(s => s.trim().replace(/^['\"]|['\"]$/g, ''));
+      let unsupported = false;
       for (const ft of featsList) {
         if (!detectFeature(ft)) {
           unsupported = true;
@@ -549,7 +551,7 @@ async function runAll(){
     // Read test source once and reuse for all checks below
     const testSrc = fs.readFileSync(f, 'utf8');
 
-    // fast skip for Intl
+    // Fast skip for Intl
     if (/features:/.test(meta) && /Intl/.test(meta)) { skip++; log(`SKIP (feature: Intl) ${f}`); continue; }
     if (/\bIntl\b/.test(testSrc)) { skip++; log(`SKIP (contains Intl) ${f}`); continue; }
 
@@ -561,60 +563,61 @@ async function runAll(){
       continue;
     }
 
-    // handle includes
+    // Handle includes
     const includes = parseList(meta, 'includes');
     let resolved_includes = [];
-    let missing=false;
-    if (includes.length>0){
-      for (const inc of includes){
+    let missing = false;
+    if (includes.length > 0) {
+      for (const inc of includes) {
         const incBasename = inc;
         let incPath = HARNESS_INDEX[incBasename] || '';
-        // If the include has a path prefix (e.g. "sm/non262-Reflect-shell.js"),
-        // try resolving it relative to the harness directory first, then fall
-        // back to matching by the trailing basename component.
+
+        // If the include has a path prefix, try resolving relative to harness first
         if (!incPath && inc.includes('/')) {
           const rel = path.join(TEST262_ROOT_DIR, 'harness', inc);
-          if (fs.existsSync(rel)) { incPath = rel; }
+          if (fs.existsSync(rel)) incPath = rel;
           if (!incPath) {
             const bn = path.basename(inc);
             incPath = HARNESS_INDEX[bn] || '';
           }
         }
-        if (!incPath){
-          // search repo
+
+        if (!incPath) {
           const found = ordered.find(p => path.basename(p) === incBasename) || null;
-          if (found) incPath = found; else {
-            // search harness
-            // fallback: try find under repo harness
+          if (found) {
+            incPath = found;
+          } else {
             incPath = Object.values(HARNESS_INDEX).find(p => path.basename(p) === incBasename) || '';
           }
         }
-        if (!incPath){ log(`MISSING INCLUDE ${inc} for ${f}`); missing=true; break; }
-        // special-case compareArray.js -> ensure assert.js present
-        if (incBasename === 'compareArray.js'){
+
+        if (!incPath) { log(`MISSING INCLUDE ${inc} for ${f}`); missing = true; break; }
+
+        // Special-case compareArray.js -> ensure assert.js present
+        if (incBasename === 'compareArray.js') {
           if (HARNESS_INDEX['assert.js']) resolved_includes.push(HARNESS_INDEX['assert.js']);
         }
         resolved_includes.push(incPath);
       }
-
-      if (missing){ skip++; log(`SKIP (missing-include) ${f}`); continue; }
+      if (missing) { skip++; log(`SKIP (missing-include) ${f}`); continue; }
     }
 
-    // async flag handling
-    if (/flags:\s*\[.*async.*\]/.test(meta)){
+    // Async flag handling
+    if (/flags:\s*\[.*async.*\]/.test(meta)) {
       const done = HARNESS_INDEX['doneprintHandle.js'];
       const asyncHelpers = HARNESS_INDEX['asyncHelpers.js'];
-      if (done && !resolved_includes.find(p=>path.basename(p)===path.basename(done))) resolved_includes.unshift(done);
-      if (asyncHelpers && !resolved_includes.find(p=>path.basename(p)===path.basename(asyncHelpers))) resolved_includes.unshift(asyncHelpers);
+      if (done && !resolved_includes.find(p => path.basename(p) === path.basename(done))) {
+        resolved_includes.unshift(done);
+      }
+      if (asyncHelpers && !resolved_includes.find(p => path.basename(p) === path.basename(asyncHelpers))) {
+        resolved_includes.unshift(asyncHelpers);
+      }
     }
 
     // Compose test
-    // Only force a strict wrapper if the test explicitly requests it via the Test262
-    // metadata flag 'onlyStrict'. For legacy tests that expect sloppy semantics, do
-    // not inject a global "use strict" which can change eval semantics.
     const isModule = hasFlag(meta, 'module');
     const needStrict = !isModule && hasFlag(meta, 'onlyStrict');
-    const {testToRun, tmpPath, cleanupTmp} = composeTest({
+    const { testToRun, tmpPath, cleanupTmp } = composeTest({
       testPath: f,
       repoDir: TEST262_ROOT_DIR,
       harnessIndex: HARNESS_INDEX,
@@ -624,9 +627,6 @@ async function runAll(){
       expectedNegative
     });
 
-    // Set cwd to the directory of the composed test file so that relative
-    // module specifiers (e.g. './import-value_FIXTURE.js' in ShadowRealm
-    // importValue tests) resolve correctly.
     const testCwd = path.dirname(tmpPath);
 
     const p = runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative)
@@ -644,12 +644,10 @@ async function runAll(){
   }
 
   log(`Ran ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);
-  log(`Executed ${pass+fail} tests (pass+fail).`);
+  log(`Executed ${pass + fail} tests (pass+fail).`);
   console.log(`\nRan ${n} candidates: pass=${pass} fail=${fail} skip=${skip}`);
-  console.log(`Executed ${pass+fail} tests (pass+fail).`);
-  // Show location of verbose results file
+  console.log(`Executed ${pass + fail} tests (pass+fail).`);
   console.log(`Details in ${RESULTS_FILE}`);
-  // Exit non-zero if any tests failed (default behavior)
   if (fail > 0) {
     console.log('One or more tests failed; exiting with status 1');
     process.exit(1);

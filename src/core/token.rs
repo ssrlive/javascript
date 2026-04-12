@@ -633,7 +633,22 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             terminated = true;
                             break;
                         }
-                        if chars[i] == '\n' {
+                        if chars[i] == '\r' {
+                            tokens.push(TokenData {
+                                token: Token::LineTerminator,
+                                line,
+                                column,
+                                byte_offset: start_byte,
+                            });
+                            line += 1;
+                            column = 1;
+                            i += 1;
+                            if i < chars.len() && chars[i] == '\n' {
+                                i += 1;
+                            }
+                            continue;
+                        }
+                        if matches!(chars[i], '\n' | '\u{2028}' | '\u{2029}') {
                             tokens.push(TokenData {
                                 token: Token::LineTerminator,
                                 line,

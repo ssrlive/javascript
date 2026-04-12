@@ -79,23 +79,27 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
         tokens.pop();
     }
 
-    let mut index = 0;
-    if !run_as_module {
-        let enable_top_level_await = !script_declares_await_identifier(script);
-        if enable_top_level_await {
+    crate::core::parser::with_parse_source(script, || {
+        let mut index = 0;
+        let result = if !run_as_module {
+            let enable_top_level_await = !script_declares_await_identifier(script);
+            if enable_top_level_await {
+                crate::core::parser::push_await_context();
+                let res = parse_statements(&tokens, &mut index);
+                crate::core::parser::pop_await_context();
+                res
+            } else {
+                parse_statements(&tokens, &mut index)
+            }
+        } else {
             crate::core::parser::push_await_context();
             let res = parse_statements(&tokens, &mut index);
             crate::core::parser::pop_await_context();
             res
-        } else {
-            parse_statements(&tokens, &mut index)
-        }
-    } else {
-        crate::core::parser::push_await_context();
-        let res = parse_statements(&tokens, &mut index);
-        crate::core::parser::pop_await_context();
-        res
-    }
+        }?;
+        validate_early_errors(&result)?;
+        Ok(result)
+    })
 }
 
 /// Read a script file from disk and decode it into a UTF-8 Rust `String`.
@@ -246,6 +250,1687 @@ fn collect_destr_binding_names(elem: &crate::core::statement::DestructuringEleme
         }
         DestructuringElement::Empty => {}
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatementListKind {
+    ScriptOrFunction,
+    Block,
+}
+
+fn push_unique_or_throw(names: &mut std::collections::HashSet<String>, name: &str) -> Result<(), JSError> {
+    if names.insert(name.to_string()) {
+        Ok(())
+    } else {
+        Err(crate::raise_syntax_error!(format!(
+            "Identifier '{}' has already been declared",
+            name
+        )))
+    }
+}
+
+fn is_reserved_identifier_name(name: &str) -> bool {
+    matches!(
+        name,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "let"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+            | "implements"
+            | "interface"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+    )
+}
+
+fn validate_pattern_identifier_name(name: &str, reject_eval_arguments: bool) -> Result<(), JSError> {
+    if is_reserved_identifier_name(name) {
+        return Err(crate::raise_syntax_error!(format!("Unexpected reserved word '{}'", name)));
+    }
+    if reject_eval_arguments && matches!(name, "eval" | "arguments") {
+        return Err(crate::raise_syntax_error!(format!("Invalid assignment target '{}'", name)));
+    }
+    Ok(())
+}
+
+fn validate_destructuring_elements(
+    elems: &[crate::core::statement::DestructuringElement],
+    reject_eval_arguments: bool,
+) -> Result<(), JSError> {
+    use crate::core::statement::DestructuringElement;
+
+    for (index, elem) in elems.iter().enumerate() {
+        if matches!(elem, DestructuringElement::Rest(_) | DestructuringElement::RestPattern(_)) && index + 1 != elems.len() {
+            return Err(crate::raise_syntax_error!("Rest element must be last"));
+        }
+        validate_destructuring_element(elem, reject_eval_arguments)?;
+    }
+    Ok(())
+}
+
+fn validate_destructuring_element(elem: &crate::core::statement::DestructuringElement, reject_eval_arguments: bool) -> Result<(), JSError> {
+    use crate::core::statement::DestructuringElement;
+
+    match elem {
+        DestructuringElement::Variable(name, default_expr) => {
+            validate_pattern_identifier_name(name, reject_eval_arguments)?;
+            if let Some(default_expr) = default_expr {
+                validate_expression(default_expr)?;
+            }
+        }
+        DestructuringElement::Property(_, inner) => {
+            validate_destructuring_element(inner, reject_eval_arguments)?;
+        }
+        DestructuringElement::ComputedProperty(expr, inner) => {
+            validate_expression(expr)?;
+            validate_destructuring_element(inner, reject_eval_arguments)?;
+        }
+        DestructuringElement::Rest(name) => {
+            validate_pattern_identifier_name(name, reject_eval_arguments)?;
+        }
+        DestructuringElement::RestPattern(inner) => {
+            validate_destructuring_element(inner, reject_eval_arguments)?;
+        }
+        DestructuringElement::NestedArray(elems, default_expr) => {
+            validate_destructuring_elements(elems, reject_eval_arguments)?;
+            if let Some(default_expr) = default_expr {
+                validate_expression(default_expr)?;
+            }
+        }
+        DestructuringElement::NestedObject(elems, default_expr) => {
+            validate_destructuring_elements(elems, reject_eval_arguments)?;
+            if let Some(default_expr) = default_expr {
+                validate_expression(default_expr)?;
+            }
+        }
+        DestructuringElement::Empty => {}
+    }
+
+    Ok(())
+}
+
+fn validate_formal_parameters(params: &[crate::core::statement::DestructuringElement]) -> Result<(), JSError> {
+    let mut names = std::collections::HashSet::new();
+    for param in params {
+        validate_destructuring_element(param, true)?;
+        let mut binding_names = Vec::new();
+        collect_destr_binding_names(param, &mut binding_names);
+        for binding_name in binding_names {
+            validate_pattern_identifier_name(&binding_name, true)?;
+            push_unique_or_throw(&mut names, &binding_name)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_param_binding_names(params: &[crate::core::statement::DestructuringElement]) -> Vec<String> {
+    let mut names = Vec::new();
+    for param in params {
+        collect_destr_binding_names(param, &mut names);
+    }
+    names
+}
+
+fn has_non_simple_parameters(params: &[crate::core::statement::DestructuringElement]) -> bool {
+    use crate::core::statement::DestructuringElement;
+
+    params.iter().any(|param| !matches!(param, DestructuringElement::Variable(_, None)))
+}
+
+fn body_contains_use_strict_directive(body: &[Statement]) -> bool {
+    for statement in body {
+        match &*statement.kind {
+            StatementKind::Expr(Expr::StringLit(value)) => {
+                if crate::unicode::utf16_to_utf8(value) == "use strict" {
+                    return true;
+                }
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+fn expr_contains_await(expr: &Expr) -> bool {
+    match expr {
+        Expr::Await(_) => true,
+        Expr::Assign(lhs, rhs)
+        | Expr::Binary(lhs, _, rhs)
+        | Expr::LogicalAnd(lhs, rhs)
+        | Expr::LogicalOr(lhs, rhs)
+        | Expr::NullishCoalescing(lhs, rhs)
+        | Expr::Mod(lhs, rhs)
+        | Expr::Pow(lhs, rhs)
+        | Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs)
+        | Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs)
+        | Expr::Index(lhs, rhs)
+        | Expr::OptionalIndex(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => expr_contains_await(lhs) || expr_contains_await(rhs),
+        Expr::Conditional(test, consequent, alternate) => {
+            expr_contains_await(test) || expr_contains_await(consequent) || expr_contains_await(alternate)
+        }
+        Expr::Property(expr, _)
+        | Expr::OptionalProperty(expr, _)
+        | Expr::PrivateMember(expr, _)
+        | Expr::OptionalPrivateMember(expr, _)
+        | Expr::SuperComputedProperty(expr)
+        | Expr::TypeOf(expr)
+        | Expr::Delete(expr)
+        | Expr::Void(expr)
+        | Expr::LogicalNot(expr)
+        | Expr::UnaryNeg(expr)
+        | Expr::UnaryPlus(expr)
+        | Expr::BitNot(expr)
+        | Expr::Increment(expr)
+        | Expr::Decrement(expr)
+        | Expr::Spread(expr)
+        | Expr::PostIncrement(expr)
+        | Expr::PostDecrement(expr)
+        | Expr::Getter(expr)
+        | Expr::Setter(expr)
+        | Expr::YieldStar(expr) => expr_contains_await(expr),
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            expr_contains_await(callee) || args.iter().any(expr_contains_await)
+        }
+        Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(expr_contains_await),
+        Expr::SuperComputedMethod(prop, args) => expr_contains_await(prop) || args.iter().any(expr_contains_await),
+        Expr::Object(entries) => entries
+            .iter()
+            .any(|(key, value, _, _)| expr_contains_await(key) || expr_contains_await(value)),
+        Expr::Array(elements) => elements.iter().flatten().any(expr_contains_await),
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => expr_contains_await(tag) || exprs.iter().any(expr_contains_await),
+        Expr::DynamicImport(specifier, options) => {
+            expr_contains_await(specifier) || options.as_ref().map(|expr| expr_contains_await(expr)).unwrap_or(false)
+        }
+        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(statement_contains_await),
+        Expr::Function(..)
+        | Expr::GeneratorFunction(..)
+        | Expr::AsyncFunction(..)
+        | Expr::AsyncGeneratorFunction(..)
+        | Expr::Class(_)
+        | Expr::TemplateString(_)
+        | Expr::Regex(_, _)
+        | Expr::Number(_)
+        | Expr::StringLit(_)
+        | Expr::Boolean(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::Var(_, _, _)
+        | Expr::BigInt(_)
+        | Expr::PrivateName(_)
+        | Expr::This
+        | Expr::NewTarget
+        | Expr::SuperProperty(_)
+        | Expr::Super
+        | Expr::Yield(_)
+        | Expr::ValuePlaceholder => false,
+    }
+}
+
+fn expr_contains_yield(expr: &Expr) -> bool {
+    match expr {
+        Expr::Yield(_) | Expr::YieldStar(_) => true,
+        Expr::Assign(lhs, rhs)
+        | Expr::Binary(lhs, _, rhs)
+        | Expr::LogicalAnd(lhs, rhs)
+        | Expr::LogicalOr(lhs, rhs)
+        | Expr::NullishCoalescing(lhs, rhs)
+        | Expr::Mod(lhs, rhs)
+        | Expr::Pow(lhs, rhs)
+        | Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs)
+        | Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs)
+        | Expr::Index(lhs, rhs)
+        | Expr::OptionalIndex(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => expr_contains_yield(lhs) || expr_contains_yield(rhs),
+        Expr::Conditional(test, consequent, alternate) => {
+            expr_contains_yield(test) || expr_contains_yield(consequent) || expr_contains_yield(alternate)
+        }
+        Expr::Property(expr, _)
+        | Expr::OptionalProperty(expr, _)
+        | Expr::PrivateMember(expr, _)
+        | Expr::OptionalPrivateMember(expr, _)
+        | Expr::SuperComputedProperty(expr)
+        | Expr::TypeOf(expr)
+        | Expr::Delete(expr)
+        | Expr::Void(expr)
+        | Expr::Await(expr)
+        | Expr::LogicalNot(expr)
+        | Expr::UnaryNeg(expr)
+        | Expr::UnaryPlus(expr)
+        | Expr::BitNot(expr)
+        | Expr::Increment(expr)
+        | Expr::Decrement(expr)
+        | Expr::Spread(expr)
+        | Expr::PostIncrement(expr)
+        | Expr::PostDecrement(expr)
+        | Expr::Getter(expr)
+        | Expr::Setter(expr) => expr_contains_yield(expr),
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            expr_contains_yield(callee) || args.iter().any(expr_contains_yield)
+        }
+        Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(expr_contains_yield),
+        Expr::SuperComputedMethod(prop, args) => expr_contains_yield(prop) || args.iter().any(expr_contains_yield),
+        Expr::Object(entries) => entries
+            .iter()
+            .any(|(key, value, _, _)| expr_contains_yield(key) || expr_contains_yield(value)),
+        Expr::Array(elements) => elements.iter().flatten().any(expr_contains_yield),
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => expr_contains_yield(tag) || exprs.iter().any(expr_contains_yield),
+        Expr::DynamicImport(specifier, options) => {
+            expr_contains_yield(specifier) || options.as_ref().map(|expr| expr_contains_yield(expr)).unwrap_or(false)
+        }
+        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(statement_contains_yield),
+        Expr::Function(..)
+        | Expr::GeneratorFunction(..)
+        | Expr::AsyncFunction(..)
+        | Expr::AsyncGeneratorFunction(..)
+        | Expr::Class(_)
+        | Expr::TemplateString(_)
+        | Expr::Regex(_, _)
+        | Expr::Number(_)
+        | Expr::StringLit(_)
+        | Expr::Boolean(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::Var(_, _, _)
+        | Expr::BigInt(_)
+        | Expr::PrivateName(_)
+        | Expr::This
+        | Expr::NewTarget
+        | Expr::SuperProperty(_)
+        | Expr::Super
+        | Expr::ValuePlaceholder => false,
+    }
+}
+
+fn destructuring_element_contains_yield(elem: &crate::core::statement::DestructuringElement) -> bool {
+    use crate::core::statement::DestructuringElement;
+
+    match elem {
+        DestructuringElement::Variable(_, default_expr) => default_expr.as_ref().map(|expr| expr_contains_yield(expr)).unwrap_or(false),
+        DestructuringElement::Property(_, inner) => destructuring_element_contains_yield(inner),
+        DestructuringElement::ComputedProperty(expr, inner) => expr_contains_yield(expr) || destructuring_element_contains_yield(inner),
+        DestructuringElement::Rest(_) => false,
+        DestructuringElement::RestPattern(inner) => destructuring_element_contains_yield(inner),
+        DestructuringElement::NestedArray(elems, default_expr) | DestructuringElement::NestedObject(elems, default_expr) => {
+            elems.iter().any(destructuring_element_contains_yield)
+                || default_expr.as_ref().map(|expr| expr_contains_yield(expr)).unwrap_or(false)
+        }
+        DestructuringElement::Empty => false,
+    }
+}
+
+fn destructuring_element_contains_yield_in_list(params: &[crate::core::statement::DestructuringElement]) -> bool {
+    params.iter().any(destructuring_element_contains_yield)
+}
+
+fn destructuring_element_contains_await(elem: &crate::core::statement::DestructuringElement) -> bool {
+    use crate::core::statement::DestructuringElement;
+
+    match elem {
+        DestructuringElement::Variable(_, default_expr) => default_expr.as_ref().map(|expr| expr_contains_await(expr)).unwrap_or(false),
+        DestructuringElement::Property(_, inner) => destructuring_element_contains_await(inner),
+        DestructuringElement::ComputedProperty(expr, inner) => expr_contains_await(expr) || destructuring_element_contains_await(inner),
+        DestructuringElement::Rest(_) => false,
+        DestructuringElement::RestPattern(inner) => destructuring_element_contains_await(inner),
+        DestructuringElement::NestedArray(elems, default_expr) | DestructuringElement::NestedObject(elems, default_expr) => {
+            elems.iter().any(destructuring_element_contains_await)
+                || default_expr.as_ref().map(|expr| expr_contains_await(expr)).unwrap_or(false)
+        }
+        DestructuringElement::Empty => false,
+    }
+}
+
+fn destructuring_element_uses_identifier(elem: &crate::core::statement::DestructuringElement, ident: &str) -> bool {
+    use crate::core::statement::DestructuringElement;
+
+    match elem {
+        DestructuringElement::Variable(name, default_expr) => {
+            name == ident || default_expr.as_ref().map(|expr| expr_uses_identifier(expr, ident)).unwrap_or(false)
+        }
+        DestructuringElement::Property(_, inner) => destructuring_element_uses_identifier(inner, ident),
+        DestructuringElement::ComputedProperty(expr, inner) => {
+            expr_uses_identifier(expr, ident) || destructuring_element_uses_identifier(inner, ident)
+        }
+        DestructuringElement::Rest(name) => name == ident,
+        DestructuringElement::RestPattern(inner) => destructuring_element_uses_identifier(inner, ident),
+        DestructuringElement::NestedArray(elems, default_expr) | DestructuringElement::NestedObject(elems, default_expr) => {
+            elems.iter().any(|elem| destructuring_element_uses_identifier(elem, ident))
+                || default_expr.as_ref().map(|expr| expr_uses_identifier(expr, ident)).unwrap_or(false)
+        }
+        DestructuringElement::Empty => false,
+    }
+}
+
+fn params_use_identifier(params: &[crate::core::statement::DestructuringElement], ident: &str) -> bool {
+    params.iter().any(|param| destructuring_element_uses_identifier(param, ident))
+}
+
+fn scan_expr_mask(expr: &Expr, mask: u8) -> u8 {
+    let statement = Statement::from(StatementKind::Return(Some(expr.clone())));
+    eval_ast_scan(&[statement], mask)
+}
+
+fn destructuring_element_scan_mask(elem: &crate::core::statement::DestructuringElement, mask: u8) -> u8 {
+    use crate::core::statement::DestructuringElement;
+
+    match elem {
+        DestructuringElement::Variable(_, default_expr) => default_expr.as_ref().map(|expr| scan_expr_mask(expr, mask)).unwrap_or(0),
+        DestructuringElement::Property(_, inner) => destructuring_element_scan_mask(inner, mask),
+        DestructuringElement::ComputedProperty(expr, inner) => scan_expr_mask(expr, mask) | destructuring_element_scan_mask(inner, mask),
+        DestructuringElement::Rest(_) => 0,
+        DestructuringElement::RestPattern(inner) => destructuring_element_scan_mask(inner, mask),
+        DestructuringElement::NestedArray(elems, default_expr) | DestructuringElement::NestedObject(elems, default_expr) => {
+            elems
+                .iter()
+                .fold(0, |found, elem| found | destructuring_element_scan_mask(elem, mask))
+                | default_expr.as_ref().map(|expr| scan_expr_mask(expr, mask)).unwrap_or(0)
+        }
+        DestructuringElement::Empty => 0,
+    }
+}
+
+fn params_scan_mask(params: &[crate::core::statement::DestructuringElement], mask: u8) -> u8 {
+    params
+        .iter()
+        .fold(0, |found, param| found | destructuring_element_scan_mask(param, mask))
+}
+
+fn statement_contains_yield(statement: &Statement) -> bool {
+    match &*statement.kind {
+        StatementKind::Expr(expr) | StatementKind::Throw(expr) => expr_contains_yield(expr),
+        StatementKind::Return(expr) => expr.as_ref().map(expr_contains_yield).unwrap_or(false),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .any(|(_, init)| init.as_ref().map(expr_contains_yield).unwrap_or(false)),
+        StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            decls.iter().any(|(_, init)| expr_contains_yield(init))
+        }
+        StatementKind::Assign(_, expr)
+        | StatementKind::LetDestructuringArray(_, expr)
+        | StatementKind::VarDestructuringArray(_, expr)
+        | StatementKind::ConstDestructuringArray(_, expr)
+        | StatementKind::LetDestructuringObject(_, expr)
+        | StatementKind::VarDestructuringObject(_, expr)
+        | StatementKind::ConstDestructuringObject(_, expr) => expr_contains_yield(expr),
+        StatementKind::Block(statements) => statements.iter().any(statement_contains_yield),
+        StatementKind::If(if_stmt) => {
+            expr_contains_yield(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(statement_contains_yield)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_yield))
+                    .unwrap_or(false)
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt.init.as_ref().map(|stmt| statement_contains_yield(stmt)).unwrap_or(false)
+                || for_stmt.test.as_ref().map(expr_contains_yield).unwrap_or(false)
+                || for_stmt.update.as_ref().map(|stmt| statement_contains_yield(stmt)).unwrap_or(false)
+                || for_stmt.body.iter().any(statement_contains_yield)
+        }
+        StatementKind::ForOf(_, _, expr, body)
+        | StatementKind::ForAwaitOf(_, _, expr, body)
+        | StatementKind::ForIn(_, _, expr, body)
+        | StatementKind::ForInDestructuringObject(_, _, expr, body)
+        | StatementKind::ForInDestructuringArray(_, _, expr, body)
+        | StatementKind::ForOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForOfDestructuringArray(_, _, expr, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, expr, body)
+        | StatementKind::While(expr, body) => expr_contains_yield(expr) || body.iter().any(statement_contains_yield),
+        StatementKind::ForOfExpr(lhs, expr, body)
+        | StatementKind::ForAwaitOfExpr(lhs, expr, body)
+        | StatementKind::ForInExpr(lhs, expr, body) => {
+            expr_contains_yield(lhs) || expr_contains_yield(expr) || body.iter().any(statement_contains_yield)
+        }
+        StatementKind::DoWhile(body, expr) => expr_contains_yield(expr) || body.iter().any(statement_contains_yield),
+        StatementKind::With(expr, body) => expr_contains_yield(expr) || body.iter().any(statement_contains_yield),
+        StatementKind::Switch(switch_stmt) => {
+            expr_contains_yield(&switch_stmt.expr)
+                || switch_stmt.cases.iter().any(|case| match case {
+                    crate::core::SwitchCase::Case(expr, body) => expr_contains_yield(expr) || body.iter().any(statement_contains_yield),
+                    crate::core::SwitchCase::Default(body) => body.iter().any(statement_contains_yield),
+                })
+        }
+        StatementKind::TryCatch(try_stmt) => {
+            try_stmt.try_body.iter().any(statement_contains_yield)
+                || try_stmt
+                    .catch_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_yield))
+                    .unwrap_or(false)
+                || try_stmt
+                    .finally_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_yield))
+                    .unwrap_or(false)
+        }
+        StatementKind::Label(_, inner) => statement_contains_yield(inner),
+        StatementKind::FunctionDeclaration(..) | StatementKind::Class(..) => false,
+        StatementKind::Import(..)
+        | StatementKind::Export(..)
+        | StatementKind::Break(_)
+        | StatementKind::Continue(_)
+        | StatementKind::Debugger => false,
+    }
+}
+
+fn statement_contains_await(statement: &Statement) -> bool {
+    match &*statement.kind {
+        StatementKind::Expr(expr) | StatementKind::Throw(expr) => expr_contains_await(expr),
+        StatementKind::Return(expr) => expr.as_ref().map(expr_contains_await).unwrap_or(false),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .any(|(_, init)| init.as_ref().map(expr_contains_await).unwrap_or(false)),
+        StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            decls.iter().any(|(_, init)| expr_contains_await(init))
+        }
+        StatementKind::Assign(_, expr)
+        | StatementKind::LetDestructuringArray(_, expr)
+        | StatementKind::VarDestructuringArray(_, expr)
+        | StatementKind::ConstDestructuringArray(_, expr)
+        | StatementKind::LetDestructuringObject(_, expr)
+        | StatementKind::VarDestructuringObject(_, expr)
+        | StatementKind::ConstDestructuringObject(_, expr) => expr_contains_await(expr),
+        StatementKind::Block(statements) => statements.iter().any(statement_contains_await),
+        StatementKind::If(if_stmt) => {
+            expr_contains_await(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(statement_contains_await)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_await))
+                    .unwrap_or(false)
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt.init.as_ref().map(|stmt| statement_contains_await(stmt)).unwrap_or(false)
+                || for_stmt.test.as_ref().map(expr_contains_await).unwrap_or(false)
+                || for_stmt.update.as_ref().map(|stmt| statement_contains_await(stmt)).unwrap_or(false)
+                || for_stmt.body.iter().any(statement_contains_await)
+        }
+        StatementKind::ForOf(_, _, expr, body)
+        | StatementKind::ForAwaitOf(_, _, expr, body)
+        | StatementKind::ForIn(_, _, expr, body)
+        | StatementKind::ForInDestructuringObject(_, _, expr, body)
+        | StatementKind::ForInDestructuringArray(_, _, expr, body)
+        | StatementKind::ForOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForOfDestructuringArray(_, _, expr, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, expr, body)
+        | StatementKind::While(expr, body) => expr_contains_await(expr) || body.iter().any(statement_contains_await),
+        StatementKind::ForOfExpr(lhs, expr, body)
+        | StatementKind::ForAwaitOfExpr(lhs, expr, body)
+        | StatementKind::ForInExpr(lhs, expr, body) => {
+            expr_contains_await(lhs) || expr_contains_await(expr) || body.iter().any(statement_contains_await)
+        }
+        StatementKind::DoWhile(body, expr) => expr_contains_await(expr) || body.iter().any(statement_contains_await),
+        StatementKind::With(expr, body) => expr_contains_await(expr) || body.iter().any(statement_contains_await),
+        StatementKind::Switch(switch_stmt) => {
+            expr_contains_await(&switch_stmt.expr)
+                || switch_stmt.cases.iter().any(|case| match case {
+                    crate::core::SwitchCase::Case(expr, body) => expr_contains_await(expr) || body.iter().any(statement_contains_await),
+                    crate::core::SwitchCase::Default(body) => body.iter().any(statement_contains_await),
+                })
+        }
+        StatementKind::TryCatch(try_stmt) => {
+            try_stmt.try_body.iter().any(statement_contains_await)
+                || try_stmt
+                    .catch_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_await))
+                    .unwrap_or(false)
+                || try_stmt
+                    .finally_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_await))
+                    .unwrap_or(false)
+        }
+        StatementKind::Label(_, inner) => statement_contains_await(inner),
+        StatementKind::FunctionDeclaration(..) | StatementKind::Class(..) => false,
+        StatementKind::Import(..)
+        | StatementKind::Export(..)
+        | StatementKind::Break(_)
+        | StatementKind::Continue(_)
+        | StatementKind::Debugger => false,
+    }
+}
+
+fn expr_uses_identifier(expr: &Expr, ident: &str) -> bool {
+    match expr {
+        Expr::Var(name, _, _) => name == ident,
+        Expr::Assign(lhs, rhs)
+        | Expr::Binary(lhs, _, rhs)
+        | Expr::LogicalAnd(lhs, rhs)
+        | Expr::LogicalOr(lhs, rhs)
+        | Expr::NullishCoalescing(lhs, rhs)
+        | Expr::Mod(lhs, rhs)
+        | Expr::Pow(lhs, rhs)
+        | Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs)
+        | Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs)
+        | Expr::Index(lhs, rhs)
+        | Expr::OptionalIndex(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => expr_uses_identifier(lhs, ident) || expr_uses_identifier(rhs, ident),
+        Expr::Conditional(test, consequent, alternate) => {
+            expr_uses_identifier(test, ident) || expr_uses_identifier(consequent, ident) || expr_uses_identifier(alternate, ident)
+        }
+        Expr::Property(expr, _)
+        | Expr::OptionalProperty(expr, _)
+        | Expr::PrivateMember(expr, _)
+        | Expr::OptionalPrivateMember(expr, _)
+        | Expr::SuperComputedProperty(expr)
+        | Expr::TypeOf(expr)
+        | Expr::Delete(expr)
+        | Expr::Void(expr)
+        | Expr::Await(expr)
+        | Expr::LogicalNot(expr)
+        | Expr::UnaryNeg(expr)
+        | Expr::UnaryPlus(expr)
+        | Expr::BitNot(expr)
+        | Expr::Increment(expr)
+        | Expr::Decrement(expr)
+        | Expr::Spread(expr)
+        | Expr::PostIncrement(expr)
+        | Expr::PostDecrement(expr)
+        | Expr::Getter(expr)
+        | Expr::Setter(expr)
+        | Expr::Yield(Some(expr))
+        | Expr::YieldStar(expr) => expr_uses_identifier(expr, ident),
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            expr_uses_identifier(callee, ident) || args.iter().any(|arg| expr_uses_identifier(arg, ident))
+        }
+        Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(|arg| expr_uses_identifier(arg, ident)),
+        Expr::SuperComputedMethod(prop, args) => {
+            expr_uses_identifier(prop, ident) || args.iter().any(|arg| expr_uses_identifier(arg, ident))
+        }
+        Expr::Object(entries) => entries
+            .iter()
+            .any(|(key, value, _, _)| expr_uses_identifier(key, ident) || expr_uses_identifier(value, ident)),
+        Expr::Array(elements) => elements.iter().flatten().any(|expr| expr_uses_identifier(expr, ident)),
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => {
+            expr_uses_identifier(tag, ident) || exprs.iter().any(|expr| expr_uses_identifier(expr, ident))
+        }
+        Expr::DynamicImport(specifier, options) => {
+            expr_uses_identifier(specifier, ident) || options.as_ref().map(|expr| expr_uses_identifier(expr, ident)).unwrap_or(false)
+        }
+        Expr::ArrowFunction(params, body) | Expr::AsyncArrowFunction(params, body) => {
+            params_use_identifier(params, ident) || statement_list_uses_identifier(body, ident)
+        }
+        Expr::Function(..)
+        | Expr::GeneratorFunction(..)
+        | Expr::AsyncFunction(..)
+        | Expr::AsyncGeneratorFunction(..)
+        | Expr::Class(_)
+        | Expr::TemplateString(_)
+        | Expr::Regex(_, _)
+        | Expr::Yield(None)
+        | Expr::Number(_)
+        | Expr::StringLit(_)
+        | Expr::Boolean(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::BigInt(_)
+        | Expr::PrivateName(_)
+        | Expr::This
+        | Expr::NewTarget
+        | Expr::SuperProperty(_)
+        | Expr::Super
+        | Expr::ValuePlaceholder => false,
+    }
+}
+
+fn catch_param_uses_identifier(param: &crate::core::statement::CatchParamPattern, ident: &str) -> bool {
+    match param {
+        crate::core::statement::CatchParamPattern::Identifier(name) => name == ident,
+        crate::core::statement::CatchParamPattern::Array(params) | crate::core::statement::CatchParamPattern::Object(params) => {
+            params_use_identifier(params, ident)
+        }
+    }
+}
+
+fn statement_uses_identifier(statement: &Statement, ident: &str) -> bool {
+    match &*statement.kind {
+        StatementKind::Expr(expr) | StatementKind::Throw(expr) => expr_uses_identifier(expr, ident),
+        StatementKind::Return(expr) => expr.as_ref().map(|expr| expr_uses_identifier(expr, ident)).unwrap_or(false),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .any(|(name, init)| name == ident || init.as_ref().map(|expr| expr_uses_identifier(expr, ident)).unwrap_or(false)),
+        StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            decls.iter().any(|(name, init)| name == ident || expr_uses_identifier(init, ident))
+        }
+        StatementKind::Assign(name, expr) => name == ident || expr_uses_identifier(expr, ident),
+        StatementKind::LetDestructuringArray(params, expr)
+        | StatementKind::VarDestructuringArray(params, expr)
+        | StatementKind::ConstDestructuringArray(params, expr) => params_use_identifier(params, ident) || expr_uses_identifier(expr, ident),
+        StatementKind::LetDestructuringObject(params, expr)
+        | StatementKind::VarDestructuringObject(params, expr)
+        | StatementKind::ConstDestructuringObject(params, expr) => {
+            params.iter().any(|param| match param {
+                crate::core::statement::ObjectDestructuringElement::Property { key, value } => {
+                    key == ident || destructuring_element_uses_identifier(value, ident)
+                }
+                crate::core::statement::ObjectDestructuringElement::ComputedProperty { key, value } => {
+                    expr_uses_identifier(key, ident) || destructuring_element_uses_identifier(value, ident)
+                }
+                crate::core::statement::ObjectDestructuringElement::Rest(name) => name == ident,
+            }) || expr_uses_identifier(expr, ident)
+        }
+        StatementKind::Block(statements) => statement_list_uses_identifier(statements, ident),
+        StatementKind::If(if_stmt) => {
+            expr_uses_identifier(&if_stmt.condition, ident)
+                || statement_list_uses_identifier(&if_stmt.then_body, ident)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .map(|body| statement_list_uses_identifier(body, ident))
+                    .unwrap_or(false)
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt
+                .init
+                .as_ref()
+                .map(|stmt| statement_uses_identifier(stmt, ident))
+                .unwrap_or(false)
+                || for_stmt
+                    .test
+                    .as_ref()
+                    .map(|expr| expr_uses_identifier(expr, ident))
+                    .unwrap_or(false)
+                || for_stmt
+                    .update
+                    .as_ref()
+                    .map(|stmt| statement_uses_identifier(stmt, ident))
+                    .unwrap_or(false)
+                || statement_list_uses_identifier(&for_stmt.body, ident)
+        }
+        StatementKind::ForOf(_, name, expr, body)
+        | StatementKind::ForAwaitOf(_, name, expr, body)
+        | StatementKind::ForIn(_, name, expr, body) => {
+            name == ident || expr_uses_identifier(expr, ident) || statement_list_uses_identifier(body, ident)
+        }
+        StatementKind::ForOfExpr(lhs, expr, body)
+        | StatementKind::ForAwaitOfExpr(lhs, expr, body)
+        | StatementKind::ForInExpr(lhs, expr, body) => {
+            expr_uses_identifier(lhs, ident) || expr_uses_identifier(expr, ident) || statement_list_uses_identifier(body, ident)
+        }
+        StatementKind::ForInDestructuringObject(_, params, expr, body)
+        | StatementKind::ForOfDestructuringObject(_, params, expr, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, params, expr, body) => {
+            params.iter().any(|param| match param {
+                crate::core::statement::ObjectDestructuringElement::Property { key, value } => {
+                    key == ident || destructuring_element_uses_identifier(value, ident)
+                }
+                crate::core::statement::ObjectDestructuringElement::ComputedProperty { key, value } => {
+                    expr_uses_identifier(key, ident) || destructuring_element_uses_identifier(value, ident)
+                }
+                crate::core::statement::ObjectDestructuringElement::Rest(name) => name == ident,
+            }) || expr_uses_identifier(expr, ident)
+                || statement_list_uses_identifier(body, ident)
+        }
+        StatementKind::ForInDestructuringArray(_, params, expr, body)
+        | StatementKind::ForOfDestructuringArray(_, params, expr, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, params, expr, body) => {
+            params_use_identifier(params, ident) || expr_uses_identifier(expr, ident) || statement_list_uses_identifier(body, ident)
+        }
+        StatementKind::While(expr, body) => expr_uses_identifier(expr, ident) || statement_list_uses_identifier(body, ident),
+        StatementKind::With(expr, body) => expr_uses_identifier(expr, ident) || statement_list_uses_identifier(body, ident),
+        StatementKind::DoWhile(body, expr) => statement_list_uses_identifier(body, ident) || expr_uses_identifier(expr, ident),
+        StatementKind::Switch(switch_stmt) => {
+            expr_uses_identifier(&switch_stmt.expr, ident)
+                || switch_stmt.cases.iter().any(|case| match case {
+                    crate::core::SwitchCase::Case(expr, body) => {
+                        expr_uses_identifier(expr, ident) || statement_list_uses_identifier(body, ident)
+                    }
+                    crate::core::SwitchCase::Default(body) => statement_list_uses_identifier(body, ident),
+                })
+        }
+        StatementKind::TryCatch(try_stmt) => {
+            statement_list_uses_identifier(&try_stmt.try_body, ident)
+                || try_stmt
+                    .catch_param
+                    .as_ref()
+                    .map(|param| catch_param_uses_identifier(param, ident))
+                    .unwrap_or(false)
+                || try_stmt
+                    .catch_body
+                    .as_ref()
+                    .map(|body| statement_list_uses_identifier(body, ident))
+                    .unwrap_or(false)
+                || try_stmt
+                    .finally_body
+                    .as_ref()
+                    .map(|body| statement_list_uses_identifier(body, ident))
+                    .unwrap_or(false)
+        }
+        StatementKind::Label(name, inner) => name == ident || statement_uses_identifier(inner, ident),
+        StatementKind::Export(_, Some(inner), _) => statement_uses_identifier(inner, ident),
+        StatementKind::FunctionDeclaration(name, ..) => name == ident,
+        StatementKind::Class(class_def) => class_def.name == ident,
+        StatementKind::Import(..)
+        | StatementKind::Export(..)
+        | StatementKind::Break(_)
+        | StatementKind::Continue(_)
+        | StatementKind::Debugger => false,
+    }
+}
+
+fn statement_list_uses_identifier(statements: &[Statement], ident: &str) -> bool {
+    statements.iter().any(|statement| statement_uses_identifier(statement, ident))
+}
+
+fn expr_contains_arrow_params_with_await(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrowFunction(params, body) | Expr::AsyncArrowFunction(params, body) => {
+            params_use_identifier(params, "await")
+                || params.iter().any(destructuring_element_contains_await)
+                || body.iter().any(statement_contains_arrow_params_with_await)
+        }
+        Expr::Assign(lhs, rhs)
+        | Expr::Binary(lhs, _, rhs)
+        | Expr::LogicalAnd(lhs, rhs)
+        | Expr::LogicalOr(lhs, rhs)
+        | Expr::NullishCoalescing(lhs, rhs)
+        | Expr::Mod(lhs, rhs)
+        | Expr::Pow(lhs, rhs)
+        | Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs)
+        | Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs)
+        | Expr::Index(lhs, rhs)
+        | Expr::OptionalIndex(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => expr_contains_arrow_params_with_await(lhs) || expr_contains_arrow_params_with_await(rhs),
+        Expr::Conditional(test, consequent, alternate) => {
+            expr_contains_arrow_params_with_await(test)
+                || expr_contains_arrow_params_with_await(consequent)
+                || expr_contains_arrow_params_with_await(alternate)
+        }
+        Expr::Property(expr, _)
+        | Expr::OptionalProperty(expr, _)
+        | Expr::PrivateMember(expr, _)
+        | Expr::OptionalPrivateMember(expr, _)
+        | Expr::SuperComputedProperty(expr)
+        | Expr::TypeOf(expr)
+        | Expr::Delete(expr)
+        | Expr::Void(expr)
+        | Expr::Await(expr)
+        | Expr::LogicalNot(expr)
+        | Expr::UnaryNeg(expr)
+        | Expr::UnaryPlus(expr)
+        | Expr::BitNot(expr)
+        | Expr::Increment(expr)
+        | Expr::Decrement(expr)
+        | Expr::Spread(expr)
+        | Expr::PostIncrement(expr)
+        | Expr::PostDecrement(expr)
+        | Expr::Getter(expr)
+        | Expr::Setter(expr)
+        | Expr::Yield(Some(expr))
+        | Expr::YieldStar(expr) => expr_contains_arrow_params_with_await(expr),
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            expr_contains_arrow_params_with_await(callee) || args.iter().any(expr_contains_arrow_params_with_await)
+        }
+        Expr::SuperCall(args) | Expr::SuperMethod(_, args) => args.iter().any(expr_contains_arrow_params_with_await),
+        Expr::SuperComputedMethod(prop, args) => {
+            expr_contains_arrow_params_with_await(prop) || args.iter().any(expr_contains_arrow_params_with_await)
+        }
+        Expr::Object(entries) => entries
+            .iter()
+            .any(|(key, value, _, _)| expr_contains_arrow_params_with_await(key) || expr_contains_arrow_params_with_await(value)),
+        Expr::Array(elements) => elements.iter().flatten().any(expr_contains_arrow_params_with_await),
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => {
+            expr_contains_arrow_params_with_await(tag) || exprs.iter().any(expr_contains_arrow_params_with_await)
+        }
+        Expr::DynamicImport(specifier, options) => {
+            expr_contains_arrow_params_with_await(specifier)
+                || options
+                    .as_ref()
+                    .map(|expr| expr_contains_arrow_params_with_await(expr))
+                    .unwrap_or(false)
+        }
+        Expr::Function(..)
+        | Expr::GeneratorFunction(..)
+        | Expr::AsyncFunction(..)
+        | Expr::AsyncGeneratorFunction(..)
+        | Expr::Class(_)
+        | Expr::TemplateString(_)
+        | Expr::Regex(_, _)
+        | Expr::Yield(None)
+        | Expr::Number(_)
+        | Expr::StringLit(_)
+        | Expr::Boolean(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::Var(_, _, _)
+        | Expr::BigInt(_)
+        | Expr::PrivateName(_)
+        | Expr::This
+        | Expr::NewTarget
+        | Expr::SuperProperty(_)
+        | Expr::Super
+        | Expr::ValuePlaceholder => false,
+    }
+}
+
+fn statement_contains_arrow_params_with_await(statement: &Statement) -> bool {
+    match &*statement.kind {
+        StatementKind::Expr(expr) | StatementKind::Throw(expr) => expr_contains_arrow_params_with_await(expr),
+        StatementKind::Return(expr) => expr.as_ref().map(expr_contains_arrow_params_with_await).unwrap_or(false),
+        StatementKind::Let(decls) | StatementKind::Var(decls) => decls
+            .iter()
+            .any(|(_, init)| init.as_ref().map(expr_contains_arrow_params_with_await).unwrap_or(false)),
+        StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            decls.iter().any(|(_, init)| expr_contains_arrow_params_with_await(init))
+        }
+        StatementKind::Assign(_, expr)
+        | StatementKind::LetDestructuringArray(_, expr)
+        | StatementKind::VarDestructuringArray(_, expr)
+        | StatementKind::ConstDestructuringArray(_, expr)
+        | StatementKind::LetDestructuringObject(_, expr)
+        | StatementKind::VarDestructuringObject(_, expr)
+        | StatementKind::ConstDestructuringObject(_, expr) => expr_contains_arrow_params_with_await(expr),
+        StatementKind::Block(statements) => statements.iter().any(statement_contains_arrow_params_with_await),
+        StatementKind::If(if_stmt) => {
+            expr_contains_arrow_params_with_await(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(statement_contains_arrow_params_with_await)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_arrow_params_with_await))
+                    .unwrap_or(false)
+        }
+        StatementKind::For(for_stmt) => {
+            for_stmt
+                .init
+                .as_ref()
+                .map(|stmt| statement_contains_arrow_params_with_await(stmt))
+                .unwrap_or(false)
+                || for_stmt.test.as_ref().map(expr_contains_arrow_params_with_await).unwrap_or(false)
+                || for_stmt
+                    .update
+                    .as_ref()
+                    .map(|stmt| statement_contains_arrow_params_with_await(stmt))
+                    .unwrap_or(false)
+                || for_stmt.body.iter().any(statement_contains_arrow_params_with_await)
+        }
+        StatementKind::ForOf(_, _, expr, body)
+        | StatementKind::ForAwaitOf(_, _, expr, body)
+        | StatementKind::ForIn(_, _, expr, body)
+        | StatementKind::ForInDestructuringObject(_, _, expr, body)
+        | StatementKind::ForInDestructuringArray(_, _, expr, body)
+        | StatementKind::ForOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForOfDestructuringArray(_, _, expr, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, expr, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, expr, body)
+        | StatementKind::While(expr, body) => {
+            expr_contains_arrow_params_with_await(expr) || body.iter().any(statement_contains_arrow_params_with_await)
+        }
+        StatementKind::ForOfExpr(lhs, expr, body)
+        | StatementKind::ForAwaitOfExpr(lhs, expr, body)
+        | StatementKind::ForInExpr(lhs, expr, body) => {
+            expr_contains_arrow_params_with_await(lhs)
+                || expr_contains_arrow_params_with_await(expr)
+                || body.iter().any(statement_contains_arrow_params_with_await)
+        }
+        StatementKind::DoWhile(body, expr) => {
+            expr_contains_arrow_params_with_await(expr) || body.iter().any(statement_contains_arrow_params_with_await)
+        }
+        StatementKind::With(expr, body) => {
+            expr_contains_arrow_params_with_await(expr) || body.iter().any(statement_contains_arrow_params_with_await)
+        }
+        StatementKind::Switch(switch_stmt) => {
+            expr_contains_arrow_params_with_await(&switch_stmt.expr)
+                || switch_stmt.cases.iter().any(|case| match case {
+                    crate::core::SwitchCase::Case(expr, body) => {
+                        expr_contains_arrow_params_with_await(expr) || body.iter().any(statement_contains_arrow_params_with_await)
+                    }
+                    crate::core::SwitchCase::Default(body) => body.iter().any(statement_contains_arrow_params_with_await),
+                })
+        }
+        StatementKind::TryCatch(try_stmt) => {
+            try_stmt.try_body.iter().any(statement_contains_arrow_params_with_await)
+                || try_stmt
+                    .catch_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_arrow_params_with_await))
+                    .unwrap_or(false)
+                || try_stmt
+                    .finally_body
+                    .as_ref()
+                    .map(|body| body.iter().any(statement_contains_arrow_params_with_await))
+                    .unwrap_or(false)
+        }
+        StatementKind::Label(_, inner) => statement_contains_arrow_params_with_await(inner),
+        StatementKind::FunctionDeclaration(..)
+        | StatementKind::Class(..)
+        | StatementKind::Import(..)
+        | StatementKind::Export(..)
+        | StatementKind::Break(_)
+        | StatementKind::Continue(_)
+        | StatementKind::Debugger => false,
+    }
+}
+
+fn collect_statement_list_lexical_names(statements: &[Statement]) -> Result<std::collections::HashSet<String>, JSError> {
+    let mut names = std::collections::HashSet::new();
+    for statement in statements {
+        collect_direct_lexical_names(statement, StatementListKind::ScriptOrFunction, &mut names)?;
+    }
+    Ok(names)
+}
+
+fn validate_function_like(
+    name: Option<&str>,
+    params: &[crate::core::statement::DestructuringElement],
+    body: &[Statement],
+    is_async: bool,
+    is_generator: bool,
+) -> Result<(), JSError> {
+    validate_formal_parameters(params)?;
+
+    if has_non_simple_parameters(params) && body_contains_use_strict_directive(body) {
+        return Err(crate::raise_syntax_error!(
+            "Illegal 'use strict' directive in function with non-simple parameter list"
+        ));
+    }
+
+    let param_names = collect_param_binding_names(params);
+    let lexical_names = collect_statement_list_lexical_names(body)?;
+    for param_name in &param_names {
+        if lexical_names.contains(param_name) {
+            return Err(crate::raise_syntax_error!(format!(
+                "Identifier '{}' has already been declared",
+                param_name
+            )));
+        }
+    }
+
+    if let Some(name) = name
+        && matches!(name, "eval" | "arguments")
+    {
+        return Err(crate::raise_syntax_error!(format!(
+            "'{}' can't be defined or assigned to in strict mode code",
+            name
+        )));
+    }
+
+    if is_async {
+        if params_use_identifier(params, "await") || params.iter().any(destructuring_element_contains_await) {
+            return Err(crate::raise_syntax_error!("Unexpected await"));
+        }
+        if statement_list_uses_identifier(body, "await") {
+            return Err(crate::raise_syntax_error!("Unexpected await"));
+        }
+        let super_mask = SCAN_SUPER_CALL | SCAN_SUPER_PROP;
+        if (params_scan_mask(params, super_mask) & super_mask) != 0 || (eval_ast_scan(body, super_mask) & super_mask) != 0 {
+            return Err(crate::raise_syntax_error!("super is not allowed here"));
+        }
+        if body.iter().any(statement_contains_arrow_params_with_await) {
+            return Err(crate::raise_syntax_error!("Unexpected await"));
+        }
+    }
+
+    if is_generator {
+        if params_use_identifier(params, "yield") || destructuring_element_contains_yield_in_list(params) {
+            return Err(crate::raise_syntax_error!("Unexpected yield"));
+        }
+        if statement_list_uses_identifier(body, "yield") {
+            return Err(crate::raise_syntax_error!("Unexpected yield"));
+        }
+    }
+
+    validate_statement_list(body, StatementListKind::ScriptOrFunction)
+}
+
+fn validate_assignment_target_expr(expr: &Expr, allow_pattern: bool) -> Result<(), JSError> {
+    match expr {
+        Expr::Assign(lhs, rhs) if allow_pattern => {
+            validate_assignment_target_expr(lhs, true)?;
+            validate_expression(rhs)
+        }
+        Expr::Var(name, _, _) => validate_pattern_identifier_name(name, true),
+        Expr::Property(base, prop) if prop == "meta" && matches!(&**base, Expr::Var(name, _, _) if name == "import") => {
+            Err(crate::raise_syntax_error!("Invalid assignment target"))
+        }
+        Expr::Property(base, _) | Expr::PrivateMember(base, _) | Expr::SuperComputedProperty(base) => validate_expression(base),
+        Expr::Index(base, index) => {
+            validate_expression(base)?;
+            validate_expression(index)
+        }
+        Expr::SuperProperty(_) => Ok(()),
+        Expr::Array(elems) if allow_pattern => {
+            for (index, elem) in elems.iter().enumerate() {
+                let Some(elem) = elem else {
+                    continue;
+                };
+                if let Expr::Spread(rest_target) = elem {
+                    if index + 1 != elems.len() {
+                        return Err(crate::raise_syntax_error!("Rest element must be last"));
+                    }
+                    match &**rest_target {
+                        Expr::Assign(_, _) => {
+                            return Err(crate::raise_syntax_error!("Rest element cannot have an initializer"));
+                        }
+                        other => validate_assignment_target_expr(other, true)?,
+                    }
+                } else {
+                    validate_assignment_target_expr(elem, true)?;
+                }
+            }
+            Ok(())
+        }
+        Expr::Object(entries) if allow_pattern => {
+            for (index, (key, value, _, _)) in entries.iter().enumerate() {
+                validate_expression(key)?;
+                if let Expr::Spread(rest_target) = value {
+                    if index + 1 != entries.len() {
+                        return Err(crate::raise_syntax_error!("Rest property must be last"));
+                    }
+                    match &**rest_target {
+                        Expr::Assign(_, _) => {
+                            return Err(crate::raise_syntax_error!("Rest property cannot have an initializer"));
+                        }
+                        other => validate_assignment_target_expr(other, true)?,
+                    }
+                } else {
+                    validate_assignment_target_expr(value, true)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Err(crate::raise_syntax_error!("Invalid assignment target")),
+    }
+}
+
+fn validate_expression(expr: &Expr) -> Result<(), JSError> {
+    match expr {
+        Expr::Assign(lhs, rhs) => {
+            validate_assignment_target_expr(lhs, true)?;
+            validate_expression(rhs)?;
+        }
+        Expr::LogicalAndAssign(lhs, rhs)
+        | Expr::LogicalOrAssign(lhs, rhs)
+        | Expr::NullishAssign(lhs, rhs)
+        | Expr::AddAssign(lhs, rhs)
+        | Expr::SubAssign(lhs, rhs)
+        | Expr::PowAssign(lhs, rhs)
+        | Expr::MulAssign(lhs, rhs)
+        | Expr::DivAssign(lhs, rhs)
+        | Expr::ModAssign(lhs, rhs)
+        | Expr::BitXorAssign(lhs, rhs)
+        | Expr::BitAndAssign(lhs, rhs)
+        | Expr::BitOrAssign(lhs, rhs)
+        | Expr::LeftShiftAssign(lhs, rhs)
+        | Expr::RightShiftAssign(lhs, rhs)
+        | Expr::UnsignedRightShiftAssign(lhs, rhs) => {
+            validate_assignment_target_expr(lhs, false)?;
+            validate_expression(rhs)?;
+        }
+        Expr::Binary(lhs, _, rhs)
+        | Expr::LogicalAnd(lhs, rhs)
+        | Expr::LogicalOr(lhs, rhs)
+        | Expr::NullishCoalescing(lhs, rhs)
+        | Expr::Mod(lhs, rhs)
+        | Expr::Pow(lhs, rhs)
+        | Expr::Index(lhs, rhs)
+        | Expr::OptionalIndex(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => {
+            validate_expression(lhs)?;
+            validate_expression(rhs)?;
+        }
+        Expr::Conditional(test, consequent, alternate) => {
+            validate_expression(test)?;
+            validate_expression(consequent)?;
+            validate_expression(alternate)?;
+        }
+        Expr::Property(expr, _)
+        | Expr::OptionalProperty(expr, _)
+        | Expr::PrivateMember(expr, _)
+        | Expr::OptionalPrivateMember(expr, _)
+        | Expr::SuperComputedProperty(expr)
+        | Expr::TypeOf(expr)
+        | Expr::Delete(expr)
+        | Expr::Void(expr)
+        | Expr::Await(expr)
+        | Expr::LogicalNot(expr)
+        | Expr::UnaryNeg(expr)
+        | Expr::UnaryPlus(expr)
+        | Expr::BitNot(expr)
+        | Expr::Getter(expr)
+        | Expr::Setter(expr)
+        | Expr::YieldStar(expr) => {
+            validate_expression(expr)?;
+        }
+        Expr::Spread(_) => {
+            return Err(crate::raise_syntax_error!("Unexpected spread element"));
+        }
+        Expr::Increment(expr) | Expr::Decrement(expr) | Expr::PostIncrement(expr) | Expr::PostDecrement(expr) => {
+            validate_assignment_target_expr(expr, false)?;
+        }
+        Expr::Yield(Some(expr)) => {
+            validate_expression(expr)?;
+        }
+        Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
+            validate_expression(callee)?;
+            for arg in args {
+                if let Expr::Spread(inner) = arg {
+                    validate_expression(inner)?;
+                } else {
+                    validate_expression(arg)?;
+                }
+            }
+        }
+        Expr::SuperCall(args) | Expr::SuperMethod(_, args) => {
+            for arg in args {
+                if let Expr::Spread(inner) = arg {
+                    validate_expression(inner)?;
+                } else {
+                    validate_expression(arg)?;
+                }
+            }
+        }
+        Expr::SuperComputedMethod(prop, args) => {
+            validate_expression(prop)?;
+            for arg in args {
+                if let Expr::Spread(inner) = arg {
+                    validate_expression(inner)?;
+                } else {
+                    validate_expression(arg)?;
+                }
+            }
+        }
+        Expr::Object(entries) => {
+            for (key, value, _, _) in entries {
+                validate_expression(key)?;
+                if let Expr::Spread(inner) = value {
+                    validate_expression(inner)?;
+                } else {
+                    validate_expression(value)?;
+                }
+            }
+        }
+        Expr::Array(elements) => {
+            for expr in elements.iter().flatten() {
+                if let Expr::Spread(inner) = expr {
+                    validate_expression(inner)?;
+                } else {
+                    validate_expression(expr)?;
+                }
+            }
+        }
+        Expr::ArrowFunction(params, body) => {
+            validate_function_like(None, params, body, false, false)?;
+            if destructuring_element_contains_yield_in_list(params) {
+                return Err(crate::raise_syntax_error!("Arrow parameters may not contain yield expressions"));
+            }
+        }
+        Expr::AsyncArrowFunction(params, body) => {
+            validate_function_like(None, params, body, true, false)?;
+            if destructuring_element_contains_yield_in_list(params) {
+                return Err(crate::raise_syntax_error!("Arrow parameters may not contain yield expressions"));
+            }
+        }
+        Expr::Function(name, params, body, _) => {
+            validate_function_like(name.as_deref(), params, body, false, false)?;
+        }
+        Expr::GeneratorFunction(name, params, body, _) => {
+            validate_function_like(name.as_deref(), params, body, false, true)?;
+        }
+        Expr::AsyncFunction(name, params, body, _) => {
+            validate_function_like(name.as_deref(), params, body, true, false)?;
+        }
+        Expr::AsyncGeneratorFunction(name, params, body, _) => {
+            validate_function_like(name.as_deref(), params, body, true, true)?;
+        }
+        Expr::TaggedTemplate(tag, _, _, _, exprs) => {
+            validate_expression(tag)?;
+            for expr in exprs {
+                validate_expression(expr)?;
+            }
+        }
+        Expr::DynamicImport(specifier, options) => {
+            validate_expression(specifier)?;
+            if let Some(options) = options {
+                validate_expression(options)?;
+            }
+        }
+        Expr::Class(class_def) => {
+            if let Some(extends) = &class_def.extends {
+                validate_expression(extends)?;
+            }
+        }
+        Expr::Yield(None)
+        | Expr::Number(_)
+        | Expr::StringLit(_)
+        | Expr::Boolean(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::Var(_, _, _)
+        | Expr::BigInt(_)
+        | Expr::PrivateName(_)
+        | Expr::This
+        | Expr::NewTarget
+        | Expr::SuperProperty(_)
+        | Expr::Super
+        | Expr::TemplateString(_)
+        | Expr::Regex(_, _)
+        | Expr::ValuePlaceholder => {}
+    }
+    Ok(())
+}
+
+fn collect_direct_lexical_names(
+    stmt: &Statement,
+    list_kind: StatementListKind,
+    names: &mut std::collections::HashSet<String>,
+) -> Result<(), JSError> {
+    match &*stmt.kind {
+        StatementKind::Let(decls) => {
+            for (name, _) in decls {
+                push_unique_or_throw(names, name)?;
+            }
+        }
+        StatementKind::Const(decls) => {
+            for (name, _) in decls {
+                push_unique_or_throw(names, name)?;
+            }
+        }
+        StatementKind::LetDestructuringArray(elems, _) | StatementKind::ConstDestructuringArray(elems, _) => {
+            for name in collect_array_destr_binding_names(elems) {
+                push_unique_or_throw(names, &name)?;
+            }
+        }
+        StatementKind::LetDestructuringObject(elems, _) | StatementKind::ConstDestructuringObject(elems, _) => {
+            for name in collect_object_destr_binding_names(elems) {
+                push_unique_or_throw(names, &name)?;
+            }
+        }
+        StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            for (name, _) in decls {
+                push_unique_or_throw(names, name)?;
+            }
+        }
+        StatementKind::Class(class_def) => {
+            if !class_def.name.is_empty() {
+                push_unique_or_throw(names, &class_def.name)?;
+            }
+        }
+        StatementKind::FunctionDeclaration(name, ..) if list_kind == StatementListKind::Block => {
+            push_unique_or_throw(names, name)?;
+        }
+        StatementKind::Export(_, Some(inner), _) => {
+            collect_direct_lexical_names(inner, list_kind, names)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_var_declared_names(stmt: &Statement, list_kind: StatementListKind, names: &mut Vec<String>) {
+    match &*stmt.kind {
+        StatementKind::Var(decls) => {
+            for (name, _) in decls {
+                names.push(name.clone());
+            }
+        }
+        StatementKind::VarDestructuringArray(elems, _) => {
+            names.extend(collect_array_destr_binding_names(elems));
+        }
+        StatementKind::VarDestructuringObject(elems, _) => {
+            names.extend(collect_object_destr_binding_names(elems));
+        }
+        StatementKind::FunctionDeclaration(name, ..) if list_kind == StatementListKind::ScriptOrFunction => {
+            names.push(name.clone());
+        }
+        StatementKind::Block(statements) => {
+            for statement in statements {
+                collect_var_declared_names(statement, StatementListKind::Block, names);
+            }
+        }
+        StatementKind::If(if_stmt) => {
+            for statement in &if_stmt.then_body {
+                collect_var_declared_names(statement, list_kind, names);
+            }
+            if let Some(else_body) = &if_stmt.else_body {
+                for statement in else_body {
+                    collect_var_declared_names(statement, list_kind, names);
+                }
+            }
+        }
+        StatementKind::For(for_stmt) => {
+            if let Some(init) = &for_stmt.init {
+                collect_var_declared_names(init, list_kind, names);
+            }
+            for statement in &for_stmt.body {
+                collect_var_declared_names(statement, list_kind, names);
+            }
+        }
+        StatementKind::ForOf(_, _, _, body)
+        | StatementKind::ForOfExpr(_, _, body)
+        | StatementKind::ForAwaitOf(_, _, _, body)
+        | StatementKind::ForAwaitOfExpr(_, _, body)
+        | StatementKind::ForIn(_, _, _, body)
+        | StatementKind::ForInExpr(_, _, body)
+        | StatementKind::ForInDestructuringObject(_, _, _, body)
+        | StatementKind::ForInDestructuringArray(_, _, _, body)
+        | StatementKind::ForOfDestructuringObject(_, _, _, body)
+        | StatementKind::ForOfDestructuringArray(_, _, _, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
+        | StatementKind::While(_, body)
+        | StatementKind::DoWhile(body, _) => {
+            for statement in body {
+                collect_var_declared_names(statement, list_kind, names);
+            }
+        }
+        StatementKind::Switch(switch_stmt) => {
+            for case in &switch_stmt.cases {
+                match case {
+                    crate::core::SwitchCase::Case(_, statements) | crate::core::SwitchCase::Default(statements) => {
+                        for statement in statements {
+                            collect_var_declared_names(statement, StatementListKind::Block, names);
+                        }
+                    }
+                }
+            }
+        }
+        StatementKind::TryCatch(try_stmt) => {
+            for statement in &try_stmt.try_body {
+                collect_var_declared_names(statement, StatementListKind::Block, names);
+            }
+            if let Some(catch_body) = &try_stmt.catch_body {
+                for statement in catch_body {
+                    collect_var_declared_names(statement, StatementListKind::Block, names);
+                }
+            }
+            if let Some(finally_body) = &try_stmt.finally_body {
+                for statement in finally_body {
+                    collect_var_declared_names(statement, StatementListKind::Block, names);
+                }
+            }
+        }
+        StatementKind::Label(_, inner) => {
+            collect_var_declared_names(inner, list_kind, names);
+        }
+        StatementKind::With(_, body) => {
+            for statement in body {
+                collect_var_declared_names(statement, list_kind, names);
+            }
+        }
+        StatementKind::Export(_, Some(inner), _) => {
+            collect_var_declared_names(inner, list_kind, names);
+        }
+        _ => {}
+    }
+}
+
+fn validate_non_block_body(statement: &Statement) -> Result<(), JSError> {
+    if matches!(&*statement.kind, StatementKind::FunctionDeclaration(..)) {
+        return Err(crate::raise_syntax_error!(
+            "Function declarations are only allowed inside blocks in strict mode"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_statement_list(statements: &[Statement], list_kind: StatementListKind) -> Result<(), JSError> {
+    let mut lexical_names = std::collections::HashSet::new();
+    for statement in statements {
+        collect_direct_lexical_names(statement, list_kind, &mut lexical_names)?;
+    }
+
+    let mut var_names = Vec::new();
+    for statement in statements {
+        collect_var_declared_names(statement, list_kind, &mut var_names);
+    }
+
+    for lexical_name in &lexical_names {
+        if var_names.iter().any(|var_name| var_name == lexical_name) {
+            return Err(crate::raise_syntax_error!(format!(
+                "Identifier '{}' has already been declared",
+                lexical_name
+            )));
+        }
+    }
+
+    for statement in statements {
+        validate_statement(statement)?;
+    }
+    Ok(())
+}
+
+fn validate_statement(statement: &Statement) -> Result<(), JSError> {
+    match &*statement.kind {
+        StatementKind::Expr(expr) | StatementKind::Throw(expr) => {
+            validate_expression(expr)?;
+        }
+        StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            for (_, init) in decls {
+                if let Some(init) = init {
+                    validate_expression(init)?;
+                }
+            }
+        }
+        StatementKind::Const(decls) => {
+            for (_, init) in decls {
+                validate_expression(init)?;
+            }
+        }
+        StatementKind::Return(Some(expr)) => {
+            validate_expression(expr)?;
+        }
+        StatementKind::Return(None) => {}
+        StatementKind::Assign(name, expr) => {
+            validate_pattern_identifier_name(name, true)?;
+            validate_expression(expr)?;
+        }
+        StatementKind::LetDestructuringArray(_, expr)
+        | StatementKind::VarDestructuringArray(_, expr)
+        | StatementKind::ConstDestructuringArray(_, expr)
+        | StatementKind::LetDestructuringObject(_, expr)
+        | StatementKind::VarDestructuringObject(_, expr)
+        | StatementKind::ConstDestructuringObject(_, expr) => {
+            validate_expression(expr)?;
+        }
+        StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+            for (_, expr) in decls {
+                validate_expression(expr)?;
+            }
+        }
+        StatementKind::Block(statements) => validate_statement_list(statements, StatementListKind::Block)?,
+        StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) => {
+            validate_function_like(Some(name), params, body, *is_async, *is_generator)?;
+        }
+        StatementKind::If(if_stmt) => {
+            validate_expression(&if_stmt.condition)?;
+            for statement in &if_stmt.then_body {
+                validate_non_block_body(statement)?;
+                validate_statement(statement)?;
+            }
+            if let Some(else_body) = &if_stmt.else_body {
+                for statement in else_body {
+                    validate_non_block_body(statement)?;
+                    validate_statement(statement)?;
+                }
+            }
+        }
+        StatementKind::For(for_stmt) => {
+            if let Some(init) = &for_stmt.init {
+                validate_statement(init)?;
+            }
+            if let Some(test) = &for_stmt.test {
+                validate_expression(test)?;
+            }
+            if let Some(update) = &for_stmt.update {
+                validate_statement(update)?;
+            }
+            for statement in &for_stmt.body {
+                validate_non_block_body(statement)?;
+                validate_statement(statement)?;
+            }
+        }
+        StatementKind::ForOf(_, _, iter, body)
+        | StatementKind::ForAwaitOf(_, _, iter, body)
+        | StatementKind::ForIn(_, _, iter, body)
+        | StatementKind::ForInDestructuringObject(_, _, iter, body)
+        | StatementKind::ForInDestructuringArray(_, _, iter, body)
+        | StatementKind::ForOfDestructuringObject(_, _, iter, body)
+        | StatementKind::ForOfDestructuringArray(_, _, iter, body)
+        | StatementKind::ForAwaitOfDestructuringObject(_, _, iter, body)
+        | StatementKind::ForAwaitOfDestructuringArray(_, _, iter, body)
+        | StatementKind::While(iter, body) => {
+            validate_expression(iter)?;
+            for statement in body {
+                validate_non_block_body(statement)?;
+                validate_statement(statement)?;
+            }
+        }
+        StatementKind::With(expr, body) => {
+            validate_expression(expr)?;
+            for statement in body {
+                validate_non_block_body(statement)?;
+                validate_statement(statement)?;
+            }
+        }
+        StatementKind::ForOfExpr(lhs, iter, body)
+        | StatementKind::ForAwaitOfExpr(lhs, iter, body)
+        | StatementKind::ForInExpr(lhs, iter, body) => {
+            validate_expression(lhs)?;
+            validate_expression(iter)?;
+            for statement in body {
+                validate_non_block_body(statement)?;
+                validate_statement(statement)?;
+            }
+        }
+        StatementKind::DoWhile(body, condition) => {
+            validate_expression(condition)?;
+            for statement in body {
+                validate_non_block_body(statement)?;
+                validate_statement(statement)?;
+            }
+        }
+        StatementKind::Switch(switch_stmt) => {
+            validate_expression(&switch_stmt.expr)?;
+            for case in &switch_stmt.cases {
+                match case {
+                    crate::core::SwitchCase::Case(expr, statements) => {
+                        validate_expression(expr)?;
+                        validate_statement_list(statements, StatementListKind::Block)?;
+                    }
+                    crate::core::SwitchCase::Default(statements) => {
+                        validate_statement_list(statements, StatementListKind::Block)?;
+                    }
+                }
+            }
+        }
+        StatementKind::TryCatch(try_stmt) => {
+            validate_statement_list(&try_stmt.try_body, StatementListKind::Block)?;
+            if let Some(catch_body) = &try_stmt.catch_body {
+                validate_statement_list(catch_body, StatementListKind::Block)?;
+            }
+            if let Some(finally_body) = &try_stmt.finally_body {
+                validate_statement_list(finally_body, StatementListKind::Block)?;
+            }
+        }
+        StatementKind::Label(_, inner) => {
+            validate_non_block_body(inner)?;
+            validate_statement(inner)?;
+        }
+        StatementKind::Export(_, Some(inner), _) => {
+            validate_statement(inner)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_early_errors(statements: &[Statement]) -> Result<(), JSError> {
+    validate_statement_list(statements, StatementListKind::ScriptOrFunction)
 }
 
 /// Collect export info from parsed AST statements.

@@ -128,6 +128,178 @@ fn parse_rejects_outside_private_access() {
 }
 
 #[test]
+fn parse_rejects_same_line_expression_statements_without_semicolon() {
+    let res = evaluate_script("{ 1 2 } 3", false, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected parse to fail for missing statement boundary");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn parse_rejects_block_lexical_var_redeclaration() {
+    let res = evaluate_script("{ let f; var f; }", false, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected parse to fail for block redeclaration");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn parse_rejects_function_declaration_in_single_statement_position() {
+    let res = evaluate_script("while (false) function g() {}", false, None::<&std::path::Path>);
+    assert!(
+        res.is_err(),
+        "Expected parse to fail for function declaration in statement position"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn module_parse_rejects_escaped_export_keywords() {
+    for script in [
+        "export d\\u0065fault 0;",
+        "export {} \\u0066rom './mod.js';",
+        "export var a = 0; export {a \\u0061s b} from './mod.js';",
+    ] {
+        let res = evaluate_script(script, true, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected module parse to fail for escaped export keyword: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_duplicate_arrow_parameters_with_default() {
+    let res = evaluate_script("(a, a = 0) => {}", false, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected parse to fail for duplicate arrow parameters");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn parse_rejects_reserved_word_in_arrow_destructuring_parameter() {
+    let res = evaluate_script("({ cl\\u0061ss }) => {}", false, None::<&std::path::Path>);
+    assert!(
+        res.is_err(),
+        "Expected parse to fail for reserved word in arrow destructuring parameter"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn parse_rejects_invalid_assignment_pattern_rest_targets() {
+    for script in ["([ ...x = 1 ] = [])", "({ default } = {})"] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for invalid assignment pattern: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_escaped_async_keyword_positions() {
+    for script in [
+        "\\u0061sync () => {}",
+        "void \\u0061sync function f(){}",
+        "void \\u0061sync function* f(){}",
+    ] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for escaped async keyword: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_async_function_await_and_super_early_errors() {
+    for script in [
+        "async () => { var await; }",
+        "(async function foo(a = super.prop) {})",
+        "(async function await() {})",
+    ] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for async early error: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_import_meta_assignment_target() {
+    let res = evaluate_script("import.meta = 1", false, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected parse to fail for import.meta assignment");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn parse_rejects_empty_object_assignment_targets() {
+    for script in ["({}) = 1", "() => ({}) = 1", "async () => ({}) = 1"] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        assert!(res.is_err(), "Expected parse to fail for invalid assignment target: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn parse_rejects_void_yield_without_parentheses() {
+    let res = evaluate_script("(async function*(){ void yield; })", false, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected parse to fail for void yield");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
 fn parse_addition_object_plus_function_expression() {
     // Reproducer for c2.js CHECK#1: ensure parser accepts ({} + function(){...})
     let script = r#"

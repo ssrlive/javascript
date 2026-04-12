@@ -7942,13 +7942,62 @@ impl<'gc> VM<'gc> {
                 Value::from(&crate::unicode::utf16_to_utf8(&result))
             }
             "iterator.self" => receiver.unwrap_or(&Value::Undefined).clone(),
+            "iterator.constructor" => {
+                if let Some(new_target) = self.new_target_stack.last().cloned() {
+                    let iterator_ctor = self.globals.get("Iterator").cloned().unwrap_or(Value::Undefined);
+                    if !self.same_constructor_identity(&new_target, &iterator_ctor) {
+                        return match self.iterator_instance_from_constructor(ctx, &new_target) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                Value::Undefined
+                            }
+                        };
+                    }
+                }
+                self.throw_type_error(ctx, "Iterator constructor cannot be called directly");
+                Value::Undefined
+            }
+            "iterator.get_constructor" => self.globals.get("Iterator").cloned().unwrap_or(Value::Undefined),
+            "iterator.set_constructor" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.iterator_setter_ignoring_prototype(ctx, &recv, "constructor", value);
+                Value::Undefined
+            }
+            "iterator.get_toStringTag" => Value::from("Iterator"),
+            "iterator.set_toStringTag" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.iterator_setter_ignoring_prototype(ctx, &recv, "@@sym:4", value);
+                Value::Undefined
+            }
             "iterator.from" => {
                 let source = args.first().cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&source) && !matches!(source, Value::String(_)) {
+                    self.throw_type_error(ctx, "Iterator.from requires an object or string");
+                    return Value::Undefined;
+                }
                 let iter_fn = self.read_named_property(ctx, &source, "@@sym:1");
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                if self.is_value_callable(&iter_fn) {
+                let is_source_object = Self::is_iterator_object_like(&source);
+                let (iterator, next_fn, needs_wrap) = if matches!(iter_fn, Value::Undefined | Value::Null) {
+                    if !is_source_object {
+                        self.throw_type_error(ctx, "Iterator.from requires an iterable");
+                        return Value::Undefined;
+                    }
+                    let next = self.read_named_property(ctx, &source, "next");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    (source, next, true)
+                } else {
+                    if !self.is_value_callable(&iter_fn) {
+                        self.throw_type_error(ctx, "Iterator.from requires an iterable");
+                        return Value::Undefined;
+                    }
                     let iterator = match self.vm_call_function_value(ctx, &iter_fn, &source, &[]) {
                         Ok(v) => v,
                         Err(err) => {
@@ -7956,72 +8005,386 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     };
-                    if matches!(
-                        iterator,
-                        Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-                    ) {
-                        let next_fn = self.read_named_property(ctx, &iterator, "next");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if !self.is_value_callable(&next_fn) {
-                            let mut obj = IndexMap::new();
-                            obj.insert("__wrapped_iterator__".to_string(), iterator);
-                            if let Some(proto) = self.globals.get("__WrapForValidIteratorPrototype__").cloned() {
-                                obj.insert("__proto__".to_string(), proto);
-                            }
-                            return Value::VmObject(new_gc_cell_ptr(ctx, obj));
-                        }
+                    if !Self::is_iterator_object_like(&iterator) {
+                        self.throw_type_error(ctx, "Iterator.from iterator must be an object");
+                        return Value::Undefined;
                     }
-                }
-                let values = self.call_host_fn(ctx, "global.__forOfValues", None, std::slice::from_ref(&source));
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                if let Value::VmArray(arr) = values {
-                    self.make_iterator_helper(ctx, arr, 0)
+                    let next = self.read_named_property(ctx, &iterator, "next");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let needs_wrap = !self.value_has_iterator_prototype(&iterator);
+                    (iterator, next, needs_wrap)
+                };
+                if needs_wrap {
+                    self.make_wrap_for_valid_iterator(ctx, iterator, next_fn)
                 } else {
-                    self.throw_type_error(ctx, "Iterator.from requires an iterable");
-                    Value::Undefined
+                    iterator
                 }
+            }
+            "iterator.wrap_next" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                self.iterator_wrap_next(ctx, &recv)
+            }
+            "iterator.wrap_return" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                self.iterator_wrap_return(ctx, &recv)
+            }
+            "iterator.helper_return" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                self.iterator_helper_return(ctx, &recv)
             }
             "iterator.drop" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
-                let count_num = args.first().map(to_number).unwrap_or(0.0);
-                let count = if !count_num.is_finite() || count_num <= 0.0 {
-                    0
-                } else {
-                    count_num.trunc().min(usize::MAX as f64) as usize
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.drop called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let limit = match self.validate_iterator_helper_limit(ctx, args.first()) {
+                    Ok(limit) => limit,
+                    Err(original) => {
+                        self.iterator_close_preserving_error(ctx, &recv, original);
+                        return Value::Undefined;
+                    }
                 };
-
-                if let Value::VmObject(obj) = &recv {
-                    let (items, base_index) = {
-                        let borrow = obj.borrow();
-                        let items = match borrow.get("__items__") {
-                            Some(Value::VmArray(arr)) => Some(*arr),
-                            _ => None,
-                        };
-                        let base_index = match borrow.get("__index__") {
-                            Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as usize,
-                            _ => 0,
-                        };
-                        (items, base_index)
-                    };
-                    if let Some(items) = items {
-                        return self.make_iterator_helper(ctx, items, base_index.saturating_add(count));
+                match self.create_lazy_iterator_helper(ctx, &recv, "drop", None, Some(limit)) {
+                    Some(value) => value,
+                    None => Value::Undefined,
+                }
+            }
+            "iterator.map" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.map called on incompatible receiver");
+                    Value::Undefined
+                } else {
+                    let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                    if !self.is_value_callable(&callback) {
+                        let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                        self.iterator_close_preserving_error(ctx, &recv, original);
+                        return Value::Undefined;
+                    }
+                    match self.create_lazy_iterator_helper(ctx, &recv, "map", Some(callback), None) {
+                        Some(value) => value,
+                        None => Value::Undefined,
                     }
                 }
-
-                let values = self.call_host_fn(ctx, "global.__forOfValues", None, std::slice::from_ref(&recv));
+            }
+            "iterator.filter" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.filter called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                match self.create_lazy_iterator_helper(ctx, &recv, "filter", Some(callback), None) {
+                    Some(value) => value,
+                    None => Value::Undefined,
+                }
+            }
+            "iterator.take" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.take called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let limit = match self.validate_iterator_helper_limit(ctx, args.first()) {
+                    Ok(limit) => limit,
+                    Err(original) => {
+                        self.iterator_close_preserving_error(ctx, &recv, original);
+                        return Value::Undefined;
+                    }
+                };
+                match self.create_lazy_iterator_helper(ctx, &recv, "take", None, Some(limit)) {
+                    Some(value) => value,
+                    None => Value::Undefined,
+                }
+            }
+            "iterator.flatMap" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.flatMap called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                match self.create_lazy_iterator_helper(ctx, &recv, "flatMap", Some(callback), None) {
+                    Some(value) => value,
+                    None => Value::Undefined,
+                }
+            }
+            "iterator.reduce" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.reduce called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                let next_method = self.read_named_property(ctx, &recv, "next");
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = values {
-                    self.make_iterator_helper(ctx, arr, count)
+                let mut counter = 0.0;
+                let mut accumulator = if let Some(initial) = args.get(1).cloned() {
+                    initial
                 } else {
-                    self.throw_type_error(ctx, "Iterator.prototype.drop called on incompatible receiver");
-                    Value::Undefined
+                    match self.iterator_step_value(ctx, &recv, &next_method) {
+                        Some(Some(first)) => {
+                            counter = 1.0;
+                            first
+                        }
+                        Some(None) => {
+                            self.throw_type_error(ctx, "Reduce of empty iterator with no initial value");
+                            return Value::Undefined;
+                        }
+                        None => return Value::Undefined,
+                    }
+                };
+                loop {
+                    let next_value = match self.iterator_step_value(ctx, &recv, &next_method) {
+                        Some(Some(value)) => value,
+                        Some(None) => break,
+                        None => return Value::Undefined,
+                    };
+                    match self.vm_call_function_value(
+                        ctx,
+                        &callback,
+                        &Value::Undefined,
+                        &[accumulator, next_value, Value::Number(counter)],
+                    ) {
+                        Ok(next_acc) => accumulator = next_acc,
+                        Err(err) => {
+                            let original = self.vm_value_from_error(ctx, &err);
+                            self.iterator_close_preserving_error(ctx, &recv, original);
+                            return Value::Undefined;
+                        }
+                    }
+                    counter += 1.0;
                 }
+                accumulator
+            }
+            "iterator.toArray" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                let Some(values) =
+                    self.collect_iterator_helper_values(ctx, &recv, None, "Iterator.prototype.toArray called on incompatible receiver")
+                else {
+                    return Value::Undefined;
+                };
+                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
+            }
+            "iterator.forEach" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.forEach called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                let next_method = self.read_named_property(ctx, &recv, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut counter = 0.0;
+                loop {
+                    let next_value = match self.iterator_step_value(ctx, &recv, &next_method) {
+                        Some(Some(value)) => value,
+                        Some(None) => break,
+                        None => return Value::Undefined,
+                    };
+                    if let Err(err) = self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[next_value, Value::Number(counter)])
+                    {
+                        let original = self.vm_value_from_error(ctx, &err);
+                        self.iterator_close_preserving_error(ctx, &recv, original);
+                        return Value::Undefined;
+                    }
+                    counter += 1.0;
+                }
+                Value::Undefined
+            }
+            "iterator.some" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.some called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                let next_method = self.read_named_property(ctx, &recv, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut counter = 0.0;
+                loop {
+                    let next_value = match self.iterator_step_value(ctx, &recv, &next_method) {
+                        Some(Some(value)) => value,
+                        Some(None) => return Value::Boolean(false),
+                        None => return Value::Undefined,
+                    };
+                    let selected =
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[next_value, Value::Number(counter)]) {
+                            Ok(selected) => selected,
+                            Err(err) => {
+                                let original = self.vm_value_from_error(ctx, &err);
+                                self.iterator_close_preserving_error(ctx, &recv, original);
+                                return Value::Undefined;
+                            }
+                        };
+                    counter += 1.0;
+                    if Self::value_is_truthy(&selected) {
+                        if !self.iterator_close_normal(ctx, &recv) {
+                            return Value::Undefined;
+                        }
+                        return Value::Boolean(true);
+                    }
+                }
+            }
+            "iterator.every" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.every called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                let next_method = self.read_named_property(ctx, &recv, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut counter = 0.0;
+                loop {
+                    let next_value = match self.iterator_step_value(ctx, &recv, &next_method) {
+                        Some(Some(value)) => value,
+                        Some(None) => return Value::Boolean(true),
+                        None => return Value::Undefined,
+                    };
+                    let selected =
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[next_value, Value::Number(counter)]) {
+                            Ok(selected) => selected,
+                            Err(err) => {
+                                let original = self.vm_value_from_error(ctx, &err);
+                                self.iterator_close_preserving_error(ctx, &recv, original);
+                                return Value::Undefined;
+                            }
+                        };
+                    counter += 1.0;
+                    if !Self::value_is_truthy(&selected) {
+                        if !self.iterator_close_normal(ctx, &recv) {
+                            return Value::Undefined;
+                        }
+                        return Value::Boolean(false);
+                    }
+                }
+            }
+            "iterator.find" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Iterator.prototype.find called on incompatible receiver");
+                    return Value::Undefined;
+                }
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&callback) {
+                    let original = self.make_type_error_object(ctx, "callbackfn is not callable");
+                    self.iterator_close_preserving_error(ctx, &recv, original);
+                    return Value::Undefined;
+                }
+                let next_method = self.read_named_property(ctx, &recv, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut counter = 0.0;
+                loop {
+                    let next_value = match self.iterator_step_value(ctx, &recv, &next_method) {
+                        Some(Some(value)) => value,
+                        Some(None) => return Value::Undefined,
+                        None => return Value::Undefined,
+                    };
+                    let candidate = next_value.clone();
+                    let selected =
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[next_value, Value::Number(counter)]) {
+                            Ok(selected) => selected,
+                            Err(err) => {
+                                let original = self.vm_value_from_error(ctx, &err);
+                                self.iterator_close_preserving_error(ctx, &recv, original);
+                                return Value::Undefined;
+                            }
+                        };
+                    counter += 1.0;
+                    if Self::value_is_truthy(&selected) {
+                        if !self.iterator_close_normal(ctx, &recv) {
+                            return Value::Undefined;
+                        }
+                        return candidate;
+                    }
+                }
+            }
+            "iterator.concat" => {
+                let mut items = Vec::new();
+                let mut methods = Vec::new();
+                for iterable in args {
+                    if !Self::is_iterator_object_like(iterable) {
+                        self.throw_type_error(ctx, "Iterator.concat requires object arguments");
+                        return Value::Undefined;
+                    }
+                    let method = self.read_named_property(ctx, iterable, "@@sym:1");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if matches!(method, Value::Undefined | Value::Null) {
+                        self.throw_type_error(ctx, "Iterator.concat requires iterable arguments");
+                        return Value::Undefined;
+                    }
+                    if !self.is_value_callable(&method) {
+                        self.throw_type_error(ctx, "Iterator.concat iterator method is not callable");
+                        return Value::Undefined;
+                    }
+                    items.push(iterable.clone());
+                    methods.push(method);
+                }
+                let mut obj = IndexMap::new();
+                obj.insert("__helper_kind__".to_string(), Value::from("concat"));
+                obj.insert("__helper_done__".to_string(), Value::Boolean(false));
+                obj.insert("__helper_executing__".to_string(), Value::Boolean(false));
+                obj.insert("__concat_index__".to_string(), Value::Number(0.0));
+                obj.insert(
+                    "__concat_items__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(items))),
+                );
+                obj.insert(
+                    "__concat_methods__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(methods))),
+                );
+                obj.insert("__concat_current_iterator__".to_string(), Value::Undefined);
+                obj.insert("__concat_current_next__".to_string(), Value::Undefined);
+                if let Some(proto) = self.globals.get("__IteratorHelperPrototype__").cloned() {
+                    obj.insert("__proto__".to_string(), proto);
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, obj))
             }
             "global.__getIterator" => {
                 let iterable = args.first().cloned().unwrap_or(Value::Undefined);
@@ -17116,6 +17479,25 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "iterator.self", "[Symbol.iterator]", 0.0, false),
         );
         mark_nonenumerable(&mut iterator_proto, "@@sym:1");
+        for (name, host_name, length) in [
+            ("map", "iterator.map", 1.0),
+            ("filter", "iterator.filter", 1.0),
+            ("take", "iterator.take", 1.0),
+            ("drop", "iterator.drop", 1.0),
+            ("flatMap", "iterator.flatMap", 1.0),
+            ("reduce", "iterator.reduce", 1.0),
+            ("toArray", "iterator.toArray", 0.0),
+            ("forEach", "iterator.forEach", 1.0),
+            ("some", "iterator.some", 1.0),
+            ("every", "iterator.every", 1.0),
+            ("find", "iterator.find", 1.0),
+        ] {
+            iterator_proto.insert(
+                name.to_string(),
+                Self::make_host_fn_with_name_len(ctx, host_name, name, length, false),
+            );
+            mark_nonenumerable(&mut iterator_proto, name);
+        }
         let iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_proto));
         self.globals.insert("__IteratorPrototype__".to_string(), iterator_proto_val.clone());
 
@@ -17127,10 +17509,10 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut iterator_helper_proto, "next");
         iterator_helper_proto.insert(
-            "drop".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "iterator.drop", "drop", 1.0, false),
+            "return".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.helper_return", "return", 0.0, false),
         );
-        mark_nonenumerable(&mut iterator_helper_proto, "drop");
+        mark_nonenumerable(&mut iterator_helper_proto, "return");
         iterator_helper_proto.insert("@@sym:4".to_string(), Value::from("Iterator Helper"));
         write_attrs_to_legacy_map(&mut iterator_helper_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         let iterator_helper_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_helper_proto));
@@ -17139,11 +17521,21 @@ impl<'gc> VM<'gc> {
 
         let mut wrap_for_valid_iterator_proto = IndexMap::new();
         wrap_for_valid_iterator_proto.insert("__proto__".to_string(), iterator_proto_val.clone());
+        wrap_for_valid_iterator_proto.insert(
+            "next".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.wrap_next", "next", 0.0, false),
+        );
+        mark_nonenumerable(&mut wrap_for_valid_iterator_proto, "next");
+        wrap_for_valid_iterator_proto.insert(
+            "return".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.wrap_return", "return", 0.0, false),
+        );
+        mark_nonenumerable(&mut wrap_for_valid_iterator_proto, "return");
         let wrap_for_valid_iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, wrap_for_valid_iterator_proto));
         self.globals
             .insert("__WrapForValidIteratorPrototype__".to_string(), wrap_for_valid_iterator_proto_val);
 
-        let iterator_ctor = Self::make_host_fn_with_name_len(ctx, "iterator.constructor", "Iterator", 0.0, false);
+        let iterator_ctor = Self::make_host_fn_with_name_len(ctx, "iterator.constructor", "Iterator", 0.0, true);
         if let Value::VmObject(iterator_ctor_obj) = &iterator_ctor {
             let mut ctor = iterator_ctor_obj.borrow_mut(ctx);
             ctor.insert(
@@ -17151,8 +17543,38 @@ impl<'gc> VM<'gc> {
                 Self::make_host_fn_with_name_len(ctx, "iterator.from", "from", 1.0, false),
             );
             mark_nonenumerable(&mut ctor, "from");
+            ctor.insert(
+                "concat".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "iterator.concat", "concat", 0.0, false),
+            );
+            mark_nonenumerable(&mut ctor, "concat");
             ctor.insert("prototype".to_string(), iterator_proto_val.clone());
             write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+        }
+        if let Value::VmObject(iterator_proto_obj) = &iterator_proto_val {
+            let mut borrow = iterator_proto_obj.borrow_mut(ctx);
+            set_getter(
+                &mut borrow,
+                "constructor",
+                Self::make_host_fn_with_name_len(ctx, "iterator.get_constructor", "get constructor", 0.0, false),
+            );
+            set_setter(
+                &mut borrow,
+                "constructor",
+                Self::make_host_fn_with_name_len(ctx, "iterator.set_constructor", "set constructor", 1.0, false),
+            );
+            mark_nonenumerable(&mut borrow, "constructor");
+            set_getter(
+                &mut borrow,
+                "@@sym:4",
+                Self::make_host_fn_with_name_len(ctx, "iterator.get_toStringTag", "get [Symbol.toStringTag]", 0.0, false),
+            );
+            set_setter(
+                &mut borrow,
+                "@@sym:4",
+                Self::make_host_fn_with_name_len(ctx, "iterator.set_toStringTag", "set [Symbol.toStringTag]", 1.0, false),
+            );
+            mark_nonenumerable(&mut borrow, "@@sym:4");
         }
         if let Value::VmObject(helper_proto_obj) = &iterator_helper_proto_val {
             helper_proto_obj
@@ -31159,6 +31581,13 @@ impl<'gc> VM<'gc> {
             return self.regexp_string_iterator_next(ctx, obj);
         }
 
+        if let Value::VmObject(obj) = receiver
+            && id == BUILTIN_ITERATOR_NEXT
+            && obj.borrow().contains_key("__helper_kind__")
+        {
+            return self.iterator_helper_next(ctx, &Value::VmObject(*obj));
+        }
+
         // Iterator next() on VmObject with __iter_target__ (live) or __items__ (snapshot)
         if let Value::VmObject(obj) = receiver
             && id == BUILTIN_ITERATOR_NEXT
@@ -32265,14 +32694,765 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, obj))
     }
 
-    fn make_iterator_helper(&self, ctx: &GcContext<'gc>, items: VmArrayHandle<'gc>, index: usize) -> Value<'gc> {
+    fn make_wrap_for_valid_iterator(&self, ctx: &GcContext<'gc>, iterator: Value<'gc>, next_method: Value<'gc>) -> Value<'gc> {
         let mut obj = IndexMap::new();
-        obj.insert("__items__".to_string(), Value::VmArray(items));
-        obj.insert("__index__".to_string(), Value::Number(index as f64));
-        if let Some(proto) = self.globals.get("__IteratorHelperPrototype__").cloned() {
+        obj.insert("__wrapped_iterator__".to_string(), iterator);
+        obj.insert("__wrapped_iterator_next__".to_string(), next_method);
+        obj.insert("__wrapped_iterator_done__".to_string(), Value::Boolean(false));
+        if let Some(proto) = self.globals.get("__WrapForValidIteratorPrototype__").cloned() {
             obj.insert("__proto__".to_string(), proto);
         }
         Value::VmObject(new_gc_cell_ptr(ctx, obj))
+    }
+
+    fn materialize_vmarray_values(&mut self, ctx: &GcContext<'gc>, arr: VmArrayHandle<'gc>) -> Option<Vec<Value<'gc>>> {
+        let len = arr.borrow().len();
+        let arr_value = Value::VmArray(arr);
+        let mut out = Vec::with_capacity(len);
+        for index in 0..len {
+            let value = self.read_named_property(ctx, &arr_value, &index.to_string());
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            out.push(value);
+        }
+        Some(out)
+    }
+
+    fn collect_iterator_helper_values(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        source: &Value<'gc>,
+        max_items: Option<usize>,
+        incompatible_message: &str,
+    ) -> Option<Vec<Value<'gc>>> {
+        let mut collect_args = vec![source.clone()];
+        if let Some(limit) = max_items {
+            collect_args.push(Value::Number(limit as f64));
+        }
+        let values = self.call_host_fn(ctx, "global.__forOfValues", None, &collect_args);
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let Value::VmArray(arr) = values else {
+            self.throw_type_error(ctx, incompatible_message);
+            return None;
+        };
+        self.materialize_vmarray_values(ctx, arr)
+    }
+
+    fn is_iterator_object_like(value: &Value<'gc>) -> bool {
+        matches!(
+            value,
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+        ) && !value.is_symbol_value()
+    }
+
+    fn direct_prototype_value(&self, value: &Value<'gc>) -> Option<Value<'gc>> {
+        match value {
+            Value::VmObject(map) => map.borrow().get("__proto__").cloned(),
+            Value::VmArray(arr) => arr.borrow().props.get("__proto__").cloned(),
+            _ => None,
+        }
+    }
+
+    fn value_has_iterator_prototype(&self, value: &Value<'gc>) -> bool {
+        let Some(iterator_proto) = self.globals.get("__IteratorPrototype__").cloned() else {
+            return false;
+        };
+        let mut current = Some(value.clone());
+        let mut steps = 0usize;
+        while let Some(candidate) = current {
+            if self.values_same(&candidate, &iterator_proto) {
+                return true;
+            }
+            if steps > 64 {
+                break;
+            }
+            current = self.direct_prototype_value(&candidate);
+            steps += 1;
+        }
+        false
+    }
+
+    fn iterator_setter_ignoring_prototype(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, key: &str, value: Value<'gc>) {
+        if !Self::is_iterator_object_like(receiver) {
+            self.throw_type_error(ctx, "Iterator prototype setter called on non-object");
+            return;
+        }
+        let Some(home) = self.globals.get("__IteratorPrototype__").cloned() else {
+            self.throw_type_error(ctx, "Iterator prototype is missing");
+            return;
+        };
+        if self.values_same(receiver, &home) {
+            self.throw_type_error(ctx, "Cannot assign to Iterator.prototype intrinsic accessor");
+            return;
+        }
+        let has_own = match receiver {
+            Value::VmObject(obj) => {
+                let borrow = obj.borrow();
+                borrow.contains_key(key) || has_getter(&borrow, key) || has_setter(&borrow, key)
+            }
+            Value::VmArray(arr) => {
+                let borrow = arr.borrow();
+                borrow.props.contains_key(key) || has_getter(&borrow.props, key) || has_setter(&borrow.props, key)
+            }
+            _ => true,
+        };
+        if !has_own {
+            if let Err(err) = self.create_data_property_or_throw(ctx, receiver, key, &value) {
+                self.set_pending_throw_from_error(&err);
+            }
+            return;
+        }
+        if let Err(err) = self.assign_named_property(ctx, receiver, key, &value, Some(receiver)) {
+            self.set_pending_throw_from_error(&err);
+        }
+    }
+
+    fn iterator_wrap_next(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
+        let Value::VmObject(obj) = receiver else {
+            self.throw_type_error(ctx, "WrapForValidIteratorPrototype.next called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let (iterator, next_method, done) = {
+            let borrow = obj.borrow();
+            let Some(iterator) = borrow.get("__wrapped_iterator__").cloned() else {
+                self.throw_type_error(ctx, "WrapForValidIteratorPrototype.next called on incompatible receiver");
+                return Value::Undefined;
+            };
+            let next_method = borrow.get("__wrapped_iterator_next__").cloned().unwrap_or(Value::Undefined);
+            let done = matches!(borrow.get("__wrapped_iterator_done__"), Some(Value::Boolean(true)));
+            (iterator, next_method, done)
+        };
+        if done {
+            let mut result = IndexMap::new();
+            result.insert("value".to_string(), Value::Undefined);
+            result.insert("done".to_string(), Value::Boolean(true));
+            return Value::VmObject(new_gc_cell_ptr(ctx, result));
+        }
+        if !self.is_value_callable(&next_method) {
+            self.throw_type_error(ctx, "iterator.next is not callable");
+            return Value::Undefined;
+        }
+        let next_result = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+            Ok(v) => v,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return Value::Undefined;
+            }
+        };
+        if !Self::is_iterator_object_like(&next_result) {
+            self.throw_type_error(ctx, "iterator.next() must return an object");
+            return Value::Undefined;
+        }
+        let done_value = self.read_named_property(ctx, &next_result, "done");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        if Self::value_is_truthy(&done_value) {
+            obj.borrow_mut(ctx)
+                .insert("__wrapped_iterator_done__".to_string(), Value::Boolean(true));
+        }
+        next_result
+    }
+
+    fn iterator_wrap_return(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
+        let Value::VmObject(obj) = receiver else {
+            self.throw_type_error(ctx, "WrapForValidIteratorPrototype.return called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let (iterator, done) = {
+            let borrow = obj.borrow();
+            let Some(iterator) = borrow.get("__wrapped_iterator__").cloned() else {
+                self.throw_type_error(ctx, "WrapForValidIteratorPrototype.return called on incompatible receiver");
+                return Value::Undefined;
+            };
+            let done = matches!(borrow.get("__wrapped_iterator_done__"), Some(Value::Boolean(true)));
+            (iterator, done)
+        };
+        if done {
+            let mut result = IndexMap::new();
+            result.insert("value".to_string(), Value::Undefined);
+            result.insert("done".to_string(), Value::Boolean(true));
+            return Value::VmObject(new_gc_cell_ptr(ctx, result));
+        }
+        let return_method = self.read_named_property(ctx, &iterator, "return");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        obj.borrow_mut(ctx)
+            .insert("__wrapped_iterator_done__".to_string(), Value::Boolean(true));
+        if matches!(return_method, Value::Undefined | Value::Null) {
+            let mut result = IndexMap::new();
+            result.insert("value".to_string(), Value::Undefined);
+            result.insert("done".to_string(), Value::Boolean(true));
+            return Value::VmObject(new_gc_cell_ptr(ctx, result));
+        }
+        if !self.is_value_callable(&return_method) {
+            self.throw_type_error(ctx, "Iterator return is not callable");
+            return Value::Undefined;
+        }
+        match self.vm_call_function_value(ctx, &return_method, &iterator, &[]) {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                Value::Undefined
+            }
+        }
+    }
+
+    fn create_iterator_result_object(&self, ctx: &GcContext<'gc>, value: Value<'gc>, done: bool) -> Value<'gc> {
+        let mut result = IndexMap::new();
+        result.insert("value".to_string(), value);
+        result.insert("done".to_string(), Value::Boolean(done));
+        Value::VmObject(new_gc_cell_ptr(ctx, result))
+    }
+
+    fn iterator_next_result(&mut self, ctx: &GcContext<'gc>, iterator: &Value<'gc>, next_method: &Value<'gc>) -> Option<Value<'gc>> {
+        if !self.is_value_callable(next_method) {
+            self.throw_type_error(ctx, "iterator.next is not callable");
+            return None;
+        }
+        let next_result = match self.vm_call_function_value(ctx, next_method, iterator, &[]) {
+            Ok(v) => v,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return None;
+            }
+        };
+        if !Self::is_iterator_object_like(&next_result) {
+            self.throw_type_error(ctx, "iterator.next() must return an object");
+            return None;
+        }
+        Some(next_result)
+    }
+
+    fn iterator_step_value(&mut self, ctx: &GcContext<'gc>, iterator: &Value<'gc>, next_method: &Value<'gc>) -> Option<Option<Value<'gc>>> {
+        let next_result = self.iterator_next_result(ctx, iterator, next_method)?;
+        let done = self.read_named_property(ctx, &next_result, "done");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if Self::value_is_truthy(&done) {
+            return Some(None);
+        }
+        let value = self.read_named_property(ctx, &next_result, "value");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        Some(Some(value))
+    }
+
+    fn iterator_close_preserving_error(&mut self, ctx: &GcContext<'gc>, iterator: &Value<'gc>, original_error: Value<'gc>) {
+        let _ = self.pending_throw.take();
+        let return_method = self.read_named_property(ctx, iterator, "return");
+        let _ = self.pending_throw.take();
+        if !matches!(return_method, Value::Undefined | Value::Null) && self.is_value_callable(&return_method) {
+            let _ = self.vm_call_function_value(ctx, &return_method, iterator, &[]);
+            let _ = self.pending_throw.take();
+        }
+        self.pending_throw = Some(original_error);
+    }
+
+    fn iterator_close_normal(&mut self, ctx: &GcContext<'gc>, iterator: &Value<'gc>) -> bool {
+        let return_method = self.read_named_property(ctx, iterator, "return");
+        if self.pending_throw.is_some() {
+            return false;
+        }
+        if matches!(return_method, Value::Undefined | Value::Null) {
+            return true;
+        }
+        if !self.is_value_callable(&return_method) {
+            self.throw_type_error(ctx, "Iterator return is not callable");
+            return false;
+        }
+        if let Err(err) = self.vm_call_function_value(ctx, &return_method, iterator, &[]) {
+            self.set_pending_throw_from_error(&err);
+            return false;
+        }
+        self.pending_throw.is_none()
+    }
+
+    fn validate_iterator_helper_limit(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<f64, Value<'gc>> {
+        let limit = value.map(|v| self.vm_coerce_to_number(ctx, v)).unwrap_or(f64::NAN);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if limit.is_nan() {
+            return Err(self.make_range_error_object(ctx, "Invalid iterator helper limit"));
+        }
+        let integer_limit = if limit.is_infinite() { limit } else { limit.trunc() };
+        if integer_limit < 0.0 {
+            return Err(self.make_range_error_object(ctx, "Invalid iterator helper limit"));
+        }
+        Ok(integer_limit)
+    }
+
+    fn create_lazy_iterator_helper(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: &Value<'gc>,
+        kind: &str,
+        callback: Option<Value<'gc>>,
+        remaining: Option<f64>,
+    ) -> Option<Value<'gc>> {
+        let next_method = self.read_named_property(ctx, receiver, "next");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        let mut obj = IndexMap::new();
+        obj.insert("__helper_kind__".to_string(), Value::from(kind));
+        obj.insert("__helper_iterator__".to_string(), receiver.clone());
+        obj.insert("__helper_next__".to_string(), next_method);
+        obj.insert("__helper_done__".to_string(), Value::Boolean(false));
+        obj.insert("__helper_executing__".to_string(), Value::Boolean(false));
+        obj.insert("__helper_counter__".to_string(), Value::Number(0.0));
+        if let Some(callback) = callback {
+            obj.insert("__helper_callback__".to_string(), callback);
+        }
+        if let Some(remaining) = remaining {
+            obj.insert("__helper_remaining__".to_string(), Value::Number(remaining));
+        }
+        obj.insert("__helper_inner_iterator__".to_string(), Value::Undefined);
+        obj.insert("__helper_inner_next__".to_string(), Value::Undefined);
+        if let Some(proto) = self.globals.get("__IteratorHelperPrototype__").cloned() {
+            obj.insert("__proto__".to_string(), proto);
+        }
+        Some(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
+    }
+
+    fn iterator_helper_next(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
+        let Value::VmObject(obj) = receiver else {
+            self.throw_type_error(ctx, "Iterator helper next called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let kind = {
+            let borrow = obj.borrow();
+            match borrow.get("__helper_kind__") {
+                Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                _ => {
+                    self.throw_type_error(ctx, "Iterator helper next called on incompatible receiver");
+                    return Value::Undefined;
+                }
+            }
+        };
+        if matches!(obj.borrow().get("__helper_executing__"), Some(Value::Boolean(true))) {
+            self.throw_type_error(ctx, "Generator is already executing");
+            return Value::Undefined;
+        }
+        let done = matches!(obj.borrow().get("__helper_done__"), Some(Value::Boolean(true)));
+        if done {
+            return self.create_iterator_result_object(ctx, Value::Undefined, true);
+        }
+        obj.borrow_mut(ctx).insert("__helper_executing__".to_string(), Value::Boolean(true));
+
+        let result = (|| match kind.as_str() {
+            "drop" => {
+                loop {
+                    let (iterator, next_method, remaining) = {
+                        let borrow = obj.borrow();
+                        (
+                            borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                            borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                            borrow
+                                .get("__helper_remaining__")
+                                .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                                .unwrap_or(0.0),
+                        )
+                    };
+                    if remaining.is_finite() && remaining <= 0.0 {
+                        break;
+                    }
+                    match self.iterator_step_value(ctx, &iterator, &next_method) {
+                        Some(Some(_)) => {
+                            if remaining.is_finite() {
+                                obj.borrow_mut(ctx)
+                                    .insert("__helper_remaining__".to_string(), Value::Number((remaining - 1.0).max(0.0)));
+                            }
+                        }
+                        Some(None) => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                        }
+                        None => return Value::Undefined,
+                    }
+                }
+                let (iterator, next_method) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                    )
+                };
+                match self.iterator_step_value(ctx, &iterator, &next_method) {
+                    Some(Some(value)) => self.create_iterator_result_object(ctx, value, false),
+                    Some(None) => {
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        self.create_iterator_result_object(ctx, Value::Undefined, true)
+                    }
+                    None => Value::Undefined,
+                }
+            }
+            "take" => {
+                let (iterator, next_method, remaining) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__helper_remaining__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                            .unwrap_or(0.0),
+                    )
+                };
+                if remaining.is_finite() && remaining <= 0.0 {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    if !self.iterator_close_normal(ctx, &iterator) {
+                        return Value::Undefined;
+                    }
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                }
+                match self.iterator_step_value(ctx, &iterator, &next_method) {
+                    Some(Some(value)) => {
+                        if remaining.is_finite() {
+                            obj.borrow_mut(ctx)
+                                .insert("__helper_remaining__".to_string(), Value::Number((remaining - 1.0).max(0.0)));
+                        }
+                        self.create_iterator_result_object(ctx, value, false)
+                    }
+                    Some(None) => {
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        self.create_iterator_result_object(ctx, Value::Undefined, true)
+                    }
+                    None => Value::Undefined,
+                }
+            }
+            "map" => {
+                let (iterator, next_method, callback, counter) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_callback__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__helper_counter__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                            .unwrap_or(0.0),
+                    )
+                };
+                match self.iterator_step_value(ctx, &iterator, &next_method) {
+                    Some(Some(value)) => {
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[value, Value::Number(counter)]) {
+                            Ok(mapped) => {
+                                obj.borrow_mut(ctx)
+                                    .insert("__helper_counter__".to_string(), Value::Number(counter + 1.0));
+                                self.create_iterator_result_object(ctx, mapped, false)
+                            }
+                            Err(err) => {
+                                obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                let original = self.vm_value_from_error(ctx, &err);
+                                self.iterator_close_preserving_error(ctx, &iterator, original);
+                                Value::Undefined
+                            }
+                        }
+                    }
+                    Some(None) => {
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        self.create_iterator_result_object(ctx, Value::Undefined, true)
+                    }
+                    None => Value::Undefined,
+                }
+            }
+            "filter" => loop {
+                let (iterator, next_method, callback, counter) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_callback__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__helper_counter__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                            .unwrap_or(0.0),
+                    )
+                };
+                match self.iterator_step_value(ctx, &iterator, &next_method) {
+                    Some(Some(value)) => {
+                        let candidate = value.clone();
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[value, Value::Number(counter)]) {
+                            Ok(selected) => {
+                                obj.borrow_mut(ctx)
+                                    .insert("__helper_counter__".to_string(), Value::Number(counter + 1.0));
+                                if Self::value_is_truthy(&selected) {
+                                    return self.create_iterator_result_object(ctx, candidate, false);
+                                }
+                            }
+                            Err(err) => {
+                                obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                let original = self.vm_value_from_error(ctx, &err);
+                                self.iterator_close_preserving_error(ctx, &iterator, original);
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    Some(None) => {
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                    }
+                    None => return Value::Undefined,
+                }
+            },
+            "flatMap" => loop {
+                let (inner_iterator, inner_next) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_inner_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_inner_next__").cloned().unwrap_or(Value::Undefined),
+                    )
+                };
+                if !matches!(inner_iterator, Value::Undefined | Value::Null) {
+                    match self.iterator_step_value(ctx, &inner_iterator, &inner_next) {
+                        Some(Some(value)) => return self.create_iterator_result_object(ctx, value, false),
+                        Some(None) => {
+                            let mut borrow = obj.borrow_mut(ctx);
+                            borrow.insert("__helper_inner_iterator__".to_string(), Value::Undefined);
+                            borrow.insert("__helper_inner_next__".to_string(), Value::Undefined);
+                            continue;
+                        }
+                        None => return Value::Undefined,
+                    }
+                }
+
+                let (iterator, next_method, callback, counter) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_callback__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__helper_counter__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n) } else { None })
+                            .unwrap_or(0.0),
+                    )
+                };
+                let mapped = match self.iterator_step_value(ctx, &iterator, &next_method) {
+                    Some(Some(value)) => {
+                        match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[value, Value::Number(counter)]) {
+                            Ok(mapped) => {
+                                obj.borrow_mut(ctx)
+                                    .insert("__helper_counter__".to_string(), Value::Number(counter + 1.0));
+                                mapped
+                            }
+                            Err(err) => {
+                                obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                let original = self.vm_value_from_error(ctx, &err);
+                                self.iterator_close_preserving_error(ctx, &iterator, original);
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                    Some(None) => {
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                    }
+                    None => return Value::Undefined,
+                };
+                if !Self::is_iterator_object_like(&mapped) {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    let original = self.make_type_error_object(ctx, "Iterator.prototype.flatMap mapper must return an object");
+                    self.iterator_close_preserving_error(ctx, &iterator, original);
+                    return Value::Undefined;
+                }
+                let iter_method = self.read_named_property(ctx, &mapped, "@@sym:1");
+                if let Some(original) = self.pending_throw.take() {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    self.iterator_close_preserving_error(ctx, &iterator, original);
+                    return Value::Undefined;
+                }
+                let inner_iter = if matches!(iter_method, Value::Undefined | Value::Null) {
+                    mapped
+                } else {
+                    if !self.is_value_callable(&iter_method) {
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        let original = self.make_type_error_object(ctx, "Iterator.prototype.flatMap mapper must return an iterable");
+                        self.iterator_close_preserving_error(ctx, &iterator, original);
+                        return Value::Undefined;
+                    }
+                    match self.vm_call_function_value(ctx, &iter_method, &mapped, &[]) {
+                        Ok(inner) if Self::is_iterator_object_like(&inner) => inner,
+                        Ok(_) => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            let original = self.make_type_error_object(ctx, "Iterator.prototype.flatMap mapper iterator must be an object");
+                            self.iterator_close_preserving_error(ctx, &iterator, original);
+                            return Value::Undefined;
+                        }
+                        Err(err) => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            let original = self.vm_value_from_error(ctx, &err);
+                            self.iterator_close_preserving_error(ctx, &iterator, original);
+                            return Value::Undefined;
+                        }
+                    }
+                };
+                let inner_next = self.read_named_property(ctx, &inner_iter, "next");
+                if let Some(original) = self.pending_throw.take() {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    self.iterator_close_preserving_error(ctx, &iterator, original);
+                    return Value::Undefined;
+                }
+                let mut borrow = obj.borrow_mut(ctx);
+                borrow.insert("__helper_inner_iterator__".to_string(), inner_iter);
+                borrow.insert("__helper_inner_next__".to_string(), inner_next);
+            },
+            "concat" => loop {
+                let (current_iterator, current_next, index, items, methods) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__concat_current_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__concat_current_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__concat_index__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                            .unwrap_or(0),
+                        borrow.get("__concat_items__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__concat_methods__").cloned().unwrap_or(Value::Undefined),
+                    )
+                };
+                if !matches!(current_iterator, Value::Undefined | Value::Null) {
+                    match self.iterator_step_value(ctx, &current_iterator, &current_next) {
+                        Some(Some(value)) => return self.create_iterator_result_object(ctx, value, false),
+                        Some(None) => {
+                            let mut borrow = obj.borrow_mut(ctx);
+                            borrow.insert("__concat_current_iterator__".to_string(), Value::Undefined);
+                            borrow.insert("__concat_current_next__".to_string(), Value::Undefined);
+                            borrow.insert("__concat_index__".to_string(), Value::Number((index + 1) as f64));
+                            continue;
+                        }
+                        None => return Value::Undefined,
+                    }
+                }
+                let (Value::VmArray(items_arr), Value::VmArray(methods_arr)) = (items, methods) else {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                };
+                if index >= items_arr.borrow().len() {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                }
+                let item = items_arr.borrow().get(index).cloned().unwrap_or(Value::Undefined);
+                let method = methods_arr.borrow().get(index).cloned().unwrap_or(Value::Undefined);
+                let opened = match self.vm_call_function_value(ctx, &method, &item, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                if !Self::is_iterator_object_like(&opened) {
+                    self.throw_type_error(ctx, "Iterator.concat iterator must be an object");
+                    return Value::Undefined;
+                }
+                let next = self.read_named_property(ctx, &opened, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut borrow = obj.borrow_mut(ctx);
+                borrow.insert("__concat_current_iterator__".to_string(), opened);
+                borrow.insert("__concat_current_next__".to_string(), next);
+            },
+            _ => {
+                self.throw_type_error(ctx, "Unknown iterator helper kind");
+                Value::Undefined
+            }
+        })();
+        obj.borrow_mut(ctx)
+            .insert("__helper_executing__".to_string(), Value::Boolean(false));
+        result
+    }
+
+    fn iterator_helper_return(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
+        let Value::VmObject(obj) = receiver else {
+            self.throw_type_error(ctx, "Iterator helper return called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let kind = {
+            let borrow = obj.borrow();
+            match borrow.get("__helper_kind__") {
+                Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                _ => {
+                    self.throw_type_error(ctx, "Iterator helper return called on incompatible receiver");
+                    return Value::Undefined;
+                }
+            }
+        };
+        if matches!(obj.borrow().get("__helper_executing__"), Some(Value::Boolean(true))) {
+            self.throw_type_error(ctx, "Generator is already executing");
+            return Value::Undefined;
+        }
+        let already_done = matches!(obj.borrow().get("__helper_done__"), Some(Value::Boolean(true)));
+        if already_done {
+            return self.create_iterator_result_object(ctx, Value::Undefined, true);
+        }
+        obj.borrow_mut(ctx).insert("__helper_executing__".to_string(), Value::Boolean(true));
+        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+
+        let result = (|| {
+            if kind == "concat" {
+                let current_iterator = obj.borrow().get("__concat_current_iterator__").cloned().unwrap_or(Value::Undefined);
+                if matches!(current_iterator, Value::Undefined | Value::Null) {
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                }
+                let return_method = self.read_named_property(ctx, &current_iterator, "return");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(return_method, Value::Undefined | Value::Null) {
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                }
+                if !self.is_value_callable(&return_method) {
+                    self.throw_type_error(ctx, "Iterator return is not callable");
+                    return Value::Undefined;
+                }
+                return match self.vm_call_function_value(ctx, &return_method, &current_iterator, &[]) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        Value::Undefined
+                    }
+                };
+            }
+
+            if kind == "flatMap" {
+                let inner_iterator = obj.borrow().get("__helper_inner_iterator__").cloned().unwrap_or(Value::Undefined);
+                if !matches!(inner_iterator, Value::Undefined | Value::Null) && !self.iterator_close_normal(ctx, &inner_iterator) {
+                    return Value::Undefined;
+                }
+            }
+
+            let iterator = obj.borrow().get("__helper_iterator__").cloned().unwrap_or(Value::Undefined);
+            let return_method = self.read_named_property(ctx, &iterator, "return");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            if matches!(return_method, Value::Undefined | Value::Null) {
+                return self.create_iterator_result_object(ctx, Value::Undefined, true);
+            }
+            if !self.is_value_callable(&return_method) {
+                self.throw_type_error(ctx, "Iterator return is not callable");
+                return Value::Undefined;
+            }
+            match self.vm_call_function_value(ctx, &return_method, &iterator, &[]) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    Value::Undefined
+                }
+            }
+        })();
+        obj.borrow_mut(ctx)
+            .insert("__helper_executing__".to_string(), Value::Boolean(false));
+        result
     }
 
     fn make_dynamic_intl_placeholder(&self, ctx: &GcContext<'gc>) -> Value<'gc> {
@@ -35572,7 +36752,17 @@ impl<'gc> VM<'gc> {
                         _ => {
                             return if let Some(Value::String(host_name_u16)) = map.borrow().get("__host_fn__") {
                                 let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
-                                if host_name == "error.aggregate" {
+                                if host_name == "iterator.constructor" {
+                                    match new_target {
+                                        Some(nt) if !self.same_constructor_identity(nt, target) => {
+                                            self.iterator_instance_from_constructor(ctx, nt)
+                                        }
+                                        _ => {
+                                            let err = self.make_type_error_object(ctx, "Iterator constructor cannot be called directly");
+                                            Err(self.vm_error_to_js_error(ctx, &err))
+                                        }
+                                    }
+                                } else if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(ctx, args, new_target)
                                 } else if host_name == "intl.segmenter.ctor" {
                                     let (proto, segments_proto, segment_iter_proto) = {
@@ -36316,6 +37506,15 @@ impl<'gc> VM<'gc> {
             }
         }
         Value::VmObject(new_gc_cell_ptr(ctx, obj))
+    }
+
+    fn iterator_instance_from_constructor(&mut self, ctx: &GcContext<'gc>, new_target: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+        let proto = self.get_prototype_from_constructor_with_intrinsic(ctx, new_target, "Iterator")?;
+        let mut obj = IndexMap::new();
+        if let Some(proto) = proto {
+            obj.insert("__proto__".to_string(), proto);
+        }
+        Ok(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
     }
 
     fn array_from_create_target(

@@ -176,17 +176,47 @@ fn iterator_prototype_symbol_iterator_has_standard_metadata() {
 }
 
 #[test]
-fn iterator_global_exposes_helper_intrinsic_without_full_helpers_probe() {
+fn iterator_helpers_are_exposed_and_smoke_test_basic_behavior() {
     let script = r#"
         let iter = Iterator.from([1, 2, 3]);
-        let dropped = iter.drop(1);
-        let step = dropped.next();
+        let dropped = Iterator.from([1, 2, 3]).drop(1);
+        let mapped = Iterator.from([1, 2, 3]).map(v => v * 2);
+        let filtered = Iterator.from([1, 2, 3]).filter(v => v > 1);
+        let taken = Iterator.from([1, 2, 3]).take(2);
+        let flatMapped = Iterator.from([1, 2]).flatMap(v => [v, v * 10]);
+        let reduced = Iterator.from([1, 2, 3]).reduce((acc, v) => acc + v, 0);
+        let seen = [];
+        Iterator.from([7, 8]).forEach(v => seen.push(v));
+        let concat = Iterator.concat([4], new Set([5]));
+        let arrayIter = [1, 2, 3][Symbol.iterator]();
         typeof Iterator === "function" &&
         typeof Iterator.from === "function" &&
-        typeof iter.map === "undefined" &&
-        Object.getPrototypeOf(dropped) === Object.getPrototypeOf(iter) &&
-        step.value === 2 &&
-        step.done === false
+        typeof Iterator.concat === "function" &&
+        typeof iter.map === "function" &&
+        typeof iter.filter === "function" &&
+        typeof iter.take === "function" &&
+        typeof iter.drop === "function" &&
+        typeof iter.flatMap === "function" &&
+        typeof iter.reduce === "function" &&
+        typeof iter.toArray === "function" &&
+        typeof iter.forEach === "function" &&
+        typeof iter.some === "function" &&
+        typeof iter.every === "function" &&
+        typeof iter.find === "function" &&
+        typeof arrayIter.map === "function" &&
+        typeof dropped.next === "function" &&
+        dropped.next().value === 2 &&
+        dropped.next().done === false &&
+        mapped.toArray().join(",") === "2,4,6" &&
+        filtered.toArray().join(",") === "2,3" &&
+        taken.toArray().join(",") === "1,2" &&
+        flatMapped.toArray().join(",") === "1,10,2,20" &&
+        reduced === 6 &&
+        seen.join(",") === "7,8" &&
+        Iterator.from([2, 4]).every(v => v % 2 === 0) === true &&
+        Iterator.from([1, 3, 4]).some(v => v % 2 === 0) === true &&
+        Iterator.from([1, 3, 4]).find(v => v % 2 === 0) === 4 &&
+        concat.toArray().join(",") === "4,5"
     "#;
 
     let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

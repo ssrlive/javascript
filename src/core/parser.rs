@@ -193,6 +193,10 @@ thread_local! {
     /// super() is allowed when this is >0.
     static CONSTRUCTOR_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
     static CONSTRUCTOR_CONTEXT_STACK: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// Whether the current class being parsed has an extends clause (heritage).
+    /// Stacked to support nested classes.
+    static CLASS_HAS_HERITAGE: RefCell<bool> = const { RefCell::new(false) };
+    static CLASS_HAS_HERITAGE_STACK: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
 }
 fn forbid_in() -> bool {
     FORBID_IN.with(|c| *c.borrow() > 0)
@@ -239,6 +243,20 @@ fn push_constructor_context() {
 }
 fn pop_constructor_context() {
     CONSTRUCTOR_CONTEXT.with(|c| *c.borrow_mut() -= 1);
+}
+fn class_has_heritage() -> bool {
+    CLASS_HAS_HERITAGE.with(|c| *c.borrow())
+}
+fn push_class_heritage(has: bool) {
+    CLASS_HAS_HERITAGE_STACK.with(|s| {
+        s.borrow_mut().push(CLASS_HAS_HERITAGE.with(|c| *c.borrow()));
+    });
+    CLASS_HAS_HERITAGE.with(|c| *c.borrow_mut() = has);
+}
+fn pop_class_heritage() {
+    if let Some(prev) = CLASS_HAS_HERITAGE_STACK.with(|s| s.borrow_mut().pop()) {
+        CLASS_HAS_HERITAGE.with(|c| *c.borrow_mut() = prev);
+    }
 }
 fn in_function_context() -> bool {
     FUNCTION_CONTEXT.with(|c| *c.borrow() > 0)
@@ -488,7 +506,9 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
     } else {
         None
     };
+    push_class_heritage(extends.is_some());
     let members = parse_class_body(t, index)?;
+    pop_class_heritage();
     let class_def = crate::core::ClassDefinition { name, extends, members };
     Ok(Statement {
         kind: Box::new(StatementKind::Class(Box::new(class_def))),
@@ -3822,6 +3842,20 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 pos += 1;
                 continue;
             }
+            // Skip computed property brackets — names inside are usages, not declarations
+            if matches!(t[pos].token, Token::LBracket) {
+                let mut depth = 1usize;
+                pos += 1;
+                while pos < t.len() && depth > 0 {
+                    if matches!(t[pos].token, Token::LBracket) {
+                        depth += 1;
+                    } else if matches!(t[pos].token, Token::RBracket) {
+                        depth -= 1;
+                    }
+                    pos += 1;
+                }
+                continue;
+            }
             if matches!(t[pos].token, Token::Static) {
                 pos += 1;
                 if pos < t.len() && matches!(t[pos].token, Token::LBrace) {
@@ -4208,6 +4242,17 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1;
         }
+        // It is a Syntax Error if PropName of MethodDefinition is "constructor" and SpecialMethod is true.
+        if computed_key_expr.is_none()
+            && !is_static
+            && !is_private
+            && name_str_opt.as_deref() == Some("constructor")
+            && (is_generator || is_async_member)
+        {
+            return Err(raise_parse_error!(
+                "SyntaxError: Class constructor may not be an async method or a generator"
+            ));
+        }
         if computed_key_expr.is_none()
             && !is_static
             && !is_private
@@ -4340,7 +4385,11 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
         } else if *index < t.len() && matches!(t[*index].token, Token::Assign) {
             *index += 1;
+            // Field initializers have an implicit [[HomeObject]], so super property
+            // access is valid inside arrow functions in field initializers.
+            push_method_context();
             let value = parse_expression(t, index)?;
+            pop_method_context();
             if *index < t.len() {
                 match t[*index].token {
                     Token::Semicolon | Token::LineTerminator => *index += 1,
@@ -4549,7 +4598,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             } else {
                 None
             };
+            push_class_heritage(extends.is_some());
             let members = parse_class_body(tokens, index)?;
+            pop_class_heritage();
             let class_def = crate::core::ClassDefinition { name, extends, members };
             Expr::Class(Box::new(class_def))
         }
@@ -4796,6 +4847,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     return Err(raise_parse_error_with_token!(
                         tokens[*index - 1],
                         "'super()' is only valid inside a class constructor"
+                    ));
+                }
+                if !class_has_heritage() {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index - 1],
+                        "'super()' is only valid in a derived class constructor"
                     ));
                 }
                 *index += 1;

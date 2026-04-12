@@ -1668,7 +1668,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
                                     Some(ch) => {
                                         // Validate decoded char is valid in identifier
-                                        if ident.is_empty() {
+                                        // For private names (#foo), the char after # must be ID_Start
+                                        if ident.is_empty() || ident == "#" {
                                             if !(is_id_start(ch) || other_id_start_contains(ch) || ch == '_' || ch == '$') {
                                                 return Err(raise_tokenize_error!(
                                                     "Invalid character from unicode escape in identifier",
@@ -1709,7 +1710,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
                                     Some(ch) => {
                                         // Validate decoded char is valid in identifier
-                                        if ident.is_empty() {
+                                        // For private names (#foo), the char after # must be ID_Start
+                                        if ident.is_empty() || ident == "#" {
                                             if !(is_id_start(ch) || other_id_start_contains(ch) || ch == '_' || ch == '$') {
                                                 return Err(raise_tokenize_error!(
                                                     "Invalid character from unicode escape in identifier",

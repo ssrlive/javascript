@@ -951,6 +951,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             } else if let Some(expr) = init_expr {
                 match expr {
                     Expr::Property(_, _) | Expr::Index(_, _) | Expr::PrivateMember(_, _) | Expr::Array(_) | Expr::Object(_) => {
+                        check_destructuring_expr_strict(&expr)?;
                         if is_for_await {
                             StatementKind::ForAwaitOfExpr(expr, iterable, body_stmts)
                         } else {
@@ -1119,6 +1120,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 | Expr::Var(_, _, _)
                 | Expr::Array(_)
                 | Expr::Object(_) => {
+                    check_destructuring_expr_strict(&expr)?;
                     return Ok(Statement {
                         kind: Box::new(StatementKind::ForInExpr(expr, rhs, body_stmts)),
                         line,
@@ -3624,6 +3626,36 @@ fn parse_logical_and(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JS
         Ok(left)
     }
 }
+/// Check if an expression used as a for-of/for-in destructuring target contains
+/// `eval` or `arguments` as simple assignment targets (strict mode restriction).
+fn check_destructuring_expr_strict(expr: &Expr) -> Result<(), JSError> {
+    if !strict_binding_checks() {
+        return Ok(());
+    }
+    match expr {
+        Expr::Var(name, _, _) if name == "eval" || name == "arguments" => Err(raise_parse_error!(&format!(
+            "'{}' can't be defined or assigned to in strict mode code",
+            name
+        ))),
+        Expr::Array(elements) => {
+            for inner in elements.iter().flatten() {
+                match inner {
+                    Expr::Spread(s) => check_destructuring_expr_strict(s)?,
+                    Expr::Assign(lhs, _) => check_destructuring_expr_strict(lhs)?,
+                    other => check_destructuring_expr_strict(other)?,
+                }
+            }
+            Ok(())
+        }
+        Expr::Object(pairs) => {
+            for (_, val, _, _) in pairs {
+                check_destructuring_expr_strict(val)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
 fn parse_logical_or(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     let left = parse_logical_and(tokens, index)?;
     let mut look = *index;
@@ -3644,8 +3676,8 @@ fn parse_logical_or(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSE
 /// Check if tokens in range [start..end) contain || or && at paren depth 0.
 fn has_bare_logical_in_range(tokens: &[TokenData], start: usize, end: usize) -> bool {
     let mut depth = 0usize;
-    for i in start..end {
-        match &tokens[i].token {
+    for td in tokens.iter().take(end).skip(start) {
+        match &td.token {
             Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
             Token::RParen | Token::RBracket | Token::RBrace => {
                 depth = depth.saturating_sub(1);
@@ -4400,13 +4432,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 let msg = format!("Private field '{prop_name}' cannot be deleted");
                 return Err(raise_parse_error_with_token!(token_data, msg));
             }
-            if let Expr::Var(..) = &inner {
-                if strict_binding_checks() {
-                    return Err(raise_parse_error_with_token!(
-                        token_data,
-                        "Delete of an unqualified identifier in strict mode"
-                    ));
-                }
+            if let Expr::Var(..) = &inner
+                && strict_binding_checks()
+            {
+                return Err(raise_parse_error_with_token!(
+                    token_data,
+                    "Delete of an unqualified identifier in strict mode"
+                ));
             }
             Expr::Delete(Box::new(inner))
         }
@@ -6425,6 +6457,12 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
         if *index < tokens.len() && matches!(tokens[*index].token, Token::Spread) {
             *index += 1;
             if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+                if strict_binding_checks() && (name == "eval" || name == "arguments") {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index],
+                        format!("'{}' can't be defined or assigned to in strict mode code", name)
+                    ));
+                }
                 *index += 1;
                 pattern.push(DestructuringElement::Rest(name));
             } else if *index < tokens.len()
@@ -6503,6 +6541,12 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
             }
             pattern.push(DestructuringElement::NestedObject(nested_pattern, default_expr));
         } else if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+            if strict_binding_checks() && (name == "eval" || name == "arguments") {
+                return Err(raise_parse_error_with_token!(
+                    tokens[*index],
+                    format!("'{}' can't be defined or assigned to in strict mode code", name)
+                ));
+            }
             *index += 1;
             let mut default_expr: Option<Box<Expr>> = None;
             if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
@@ -6614,6 +6658,12 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
         if *index < tokens.len() && matches!(tokens[*index].token, Token::Spread) {
             *index += 1;
             if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+                if strict_binding_checks() && (name == "eval" || name == "arguments") {
+                    return Err(raise_parse_error_with_token!(
+                        tokens[*index],
+                        format!("'{}' can't be defined or assigned to in strict mode code", name)
+                    ));
+                }
                 *index += 1;
                 pattern.push(DestructuringElement::Rest(name));
             } else {
@@ -6747,6 +6797,12 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                     }
                     DestructuringElement::NestedObject(nested, nested_default)
                 } else if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+                    if strict_binding_checks() && (name == "eval" || name == "arguments") {
+                        return Err(raise_parse_error_with_token!(
+                            tokens[*index],
+                            format!("'{}' can't be defined or assigned to in strict mode code", name)
+                        ));
+                    }
                     *index += 1;
                     let mut default_expr: Option<Box<Expr>> = None;
                     if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {
@@ -6817,6 +6873,13 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
             } else {
                 if !is_identifier_key {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
+                let key = key_name.clone().unwrap_or_default();
+                if strict_binding_checks() && (key == "eval" || key == "arguments") {
+                    return Err(raise_parse_error!(&format!(
+                        "'{}' can't be defined or assigned to in strict mode code",
+                        key
+                    )));
                 }
                 let mut init_tokens: Vec<TokenData> = Vec::new();
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {

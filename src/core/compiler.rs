@@ -1290,7 +1290,9 @@ impl<'gc> Compiler<'gc> {
                     // Collect block-scoped names (let/const/class/strict-mode function decls)
                     for s in statements.iter() {
                         match &*s.kind {
-                            StatementKind::FunctionDeclaration(name, ..) if self.current_strict => {
+                            StatementKind::FunctionDeclaration(name, _, _, is_gen, is_async)
+                                if self.current_strict || *is_gen || *is_async =>
+                            {
                                 if !block_local_names.contains(name) {
                                     block_local_names.push(name.clone());
                                 }
@@ -3876,7 +3878,9 @@ impl<'gc> Compiler<'gc> {
                         };
                         for s in body_stmts {
                             match &*s.kind {
-                                StatementKind::FunctionDeclaration(name, ..) if self.current_strict => {
+                                StatementKind::FunctionDeclaration(name, _, _, is_gen, is_async)
+                                    if self.current_strict || *is_gen || *is_async =>
+                                {
                                     if !block_aliases.contains_key(name) {
                                         let alias = format!("__top_block_alias_{}__", self.forin_counter);
                                         self.forin_counter = self.forin_counter.saturating_add(1);

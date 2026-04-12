@@ -140,12 +140,27 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             let label_name_opt = match &start_token.token {
                 Token::Identifier(name) => Some(name.clone()),
                 Token::Await => Some("await".to_string()),
+                Token::Yield => Some("yield".to_string()),
                 _ => None,
             };
             if let Some(label_name) = label_name_opt
                 && *index + 1 < t.len()
                 && matches!(t[*index + 1].token, Token::Colon)
             {
+                // await cannot be a label in module code or static blocks
+                if label_name == "await" && forbid_await_identifier() {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        "'await' cannot be used as a label in this context"
+                    ));
+                }
+                // yield cannot be a label in generator context or strict mode
+                if label_name == "yield" {
+                    return Err(raise_parse_error_with_token!(
+                        t[*index],
+                        "'yield' cannot be used as a label in strict mode"
+                    ));
+                }
                 *index += 2;
                 let stmt = parse_statement_item(t, index)?;
                 // Labeled statements: only FunctionDeclaration is allowed as
@@ -1636,6 +1651,7 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     }
     *index += 1;
     let mut cases: Vec<crate::core::SwitchCase> = Vec::new();
+    let mut has_default = false;
     while *index < t.len() && !matches!(t[*index].token, Token::RBrace) {
         if matches!(t[*index].token, Token::Case) {
             *index += 1;
@@ -1656,6 +1672,10 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             }
             cases.push(crate::core::SwitchCase::Case(case_expr, stmts));
         } else if matches!(t[*index].token, Token::Default) {
+            if has_default {
+                return Err(raise_parse_error_at!(t.get(*index)));
+            }
+            has_default = true;
             *index += 1;
             if !matches!(t[*index].token, Token::Colon) {
                 return Err(raise_parse_error_at!(t.get(*index)));
@@ -2039,9 +2059,7 @@ fn parse_let_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
     }
     let decls = parse_variable_declaration_list(t, index)?;
-    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
-        *index += 1;
-    }
+    finish_statement_without_semicolon(t, index)?;
     Ok(Statement {
         kind: Box::new(StatementKind::Let(decls)),
         line: t[start].line,
@@ -2118,9 +2136,7 @@ fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
             return Err(raise_parse_error!("Missing initializer in const declaration"));
         }
     }
-    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
-        *index += 1;
-    }
+    finish_statement_without_semicolon(t, index)?;
     Ok(Statement {
         kind: Box::new(StatementKind::Const(const_decls)),
         line: t[start].line,
@@ -7150,6 +7166,9 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                         "'{}' can't be defined or assigned to in strict mode code",
                         key
                     )));
+                }
+                if key == "await" && forbid_await_identifier() {
+                    return Err(raise_parse_error!("'await' is not allowed as a binding identifier in this context"));
                 }
                 let mut init_tokens: Vec<TokenData> = Vec::new();
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Assign) {

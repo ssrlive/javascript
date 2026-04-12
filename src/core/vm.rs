@@ -13998,14 +13998,18 @@ impl<'gc> VM<'gc> {
                     .as_ref()
                     .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
                     .is_some();
-            let setter = own_prop_setter
-                .or_else(|| borrow.get(&setter_key).cloned())
-                .or(proto_prop_setter)
-                .or_else(|| {
-                    proto_for_lookup
-                        .as_ref()
-                        .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
-                });
+            let setter = if own_is_data {
+                None
+            } else {
+                own_prop_setter
+                    .or_else(|| borrow.get(&setter_key).cloned())
+                    .or(proto_prop_setter)
+                    .or_else(|| {
+                        proto_for_lookup
+                            .as_ref()
+                            .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
+                    })
+            };
             let proto_readonly = !is_readonly && !key_exists && self.has_readonly_in_proto_chain(proto_for_lookup.as_ref(), key);
             drop(borrow);
             let accessor_without_setter = (own_prop_is_accessor || proto_prop_is_accessor || has_getter) && setter.is_none();

@@ -71,8 +71,19 @@ fn map_iterator_prototype_exposes_next_and_tostringtag() {
     let script = r#"
         let iterator = new Map([[1, 11]]).values();
         let proto = Object.getPrototypeOf(iterator);
+        let before = proto[Symbol.toStringTag];
+        let threw = (() => {
+            try {
+                proto[Symbol.toStringTag] = "changed";
+                return false;
+            } catch (err) {
+                return err instanceof TypeError;
+            }
+        })();
         proto.next.name === "next" &&
         proto.next.length === 0 &&
+        before === "Map Iterator" &&
+        threw === true &&
         proto[Symbol.toStringTag] === "Map Iterator" &&
         !Object.prototype.hasOwnProperty.call(iterator, "next")
     "#;
@@ -86,8 +97,19 @@ fn set_iterator_prototype_exposes_next_and_tostringtag() {
     let script = r#"
         let iterator = new Set([1, 2]).values();
         let proto = Object.getPrototypeOf(iterator);
+        let before = proto[Symbol.toStringTag];
+        let threw = (() => {
+            try {
+                proto[Symbol.toStringTag] = "changed";
+                return false;
+            } catch (err) {
+                return err instanceof TypeError;
+            }
+        })();
         proto.next.name === "next" &&
         proto.next.length === 0 &&
+        before === "Set Iterator" &&
+        threw === true &&
         proto[Symbol.toStringTag] === "Set Iterator" &&
         !Object.prototype.hasOwnProperty.call(iterator, "next")
     "#;

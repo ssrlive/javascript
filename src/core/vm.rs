@@ -20126,10 +20126,25 @@ impl<'gc> VM<'gc> {
         }
         obj.insert("__aggregate_ctor__".to_string(), aggregate_ctor);
         // InstallErrorCause (ES2022) — options is the 3rd argument
-        if let Some(Value::VmObject(opts_obj)) = args.get(2)
-            && let Some(cause) = opts_obj.borrow().get("cause").cloned()
-        {
-            Self::insert_property_with_attributes(&mut obj, "cause", &cause, true, false, true);
+        if let Some(opts) = args.get(2).filter(|v| matches!(v, Value::VmObject(_))) {
+            let has_cause = match self.try_proxy_has(ctx, opts, "cause") {
+                Ok(Some(b)) => b,
+                Ok(None) => self.has_property_in_chain(ctx, opts, "cause"),
+                Err(e) => {
+                    self.set_pending_throw_from_error(&e);
+                    return Ok(Value::Undefined);
+                }
+            };
+            if self.pending_throw.is_some() {
+                return Ok(Value::Undefined);
+            }
+            if has_cause {
+                let cause = self.read_named_property(ctx, opts, "cause");
+                if self.pending_throw.is_some() {
+                    return Ok(Value::Undefined);
+                }
+                Self::insert_property_with_attributes(&mut obj, "cause", &cause, true, false, true);
+            }
         }
         if !matches!(selected_proto, Value::Undefined) {
             obj.insert("__proto__".to_string(), selected_proto);
@@ -22680,55 +22695,6 @@ impl<'gc> VM<'gc> {
                 // Handled in string method dispatch (call_method_builtin)
                 Value::Undefined
             }
-            BUILTIN_PROMISE_WITHRESOLVERS => {
-                let mut map = IndexMap::new();
-                map.insert("__type__".to_string(), Value::from("Promise"));
-                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
-                    && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
-                {
-                    map.insert("__proto__".to_string(), proto);
-                }
-                let promise_obj = Value::VmObject(new_gc_cell_ptr(ctx, map));
-                let resolve = Self::make_promise_settle_host_fn(ctx, "promise.__resolve", &promise_obj, "", 1.0);
-                let reject = Self::make_promise_settle_host_fn(ctx, "promise.__reject", &promise_obj, "", 1.0);
-                let mut out = IndexMap::new();
-                out.insert("promise".to_string(), promise_obj);
-                out.insert("resolve".to_string(), resolve);
-                out.insert("reject".to_string(), reject);
-                Value::VmObject(new_gc_cell_ptr(ctx, out))
-            }
-            BUILTIN_PROMISE_TRY => {
-                let callback = args.first().cloned().unwrap_or(Value::Undefined);
-                let cb_args = if args.len() > 1 { &args[1..] } else { &[] };
-
-                let mut map = IndexMap::new();
-                map.insert("__type__".to_string(), Value::from("Promise"));
-                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
-                    && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
-                {
-                    map.insert("__proto__".to_string(), proto);
-                }
-                let promise_obj = Value::VmObject(new_gc_cell_ptr(ctx, map));
-
-                if !self.is_value_callable(&callback) {
-                    let err_obj = self.make_type_error_object(ctx, "callbackfn is not a function");
-                    self.settle_promise(ctx, &promise_obj, &err_obj, true);
-                } else {
-                    let saved_try_stack = std::mem::take(&mut self.try_stack);
-                    let call_result = self.vm_call_function_value(ctx, &callback, &Value::Undefined, cb_args);
-                    self.try_stack = saved_try_stack;
-                    match call_result {
-                        Ok(value) => self.resolve_promise_value(ctx, &promise_obj, &value),
-                        Err(err) => {
-                            let msg = err.message();
-                            let err_str = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
-                            let err_val = Value::from(err_str);
-                            self.settle_promise(ctx, &promise_obj, &err_val, true);
-                        }
-                    }
-                }
-                promise_obj
-            }
             BUILTIN_ERROR_ISERROR => {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
                 if let Value::VmObject(obj) = &arg {
@@ -24833,11 +24799,14 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     let cp = num as u32;
-                    if let Some(ch) = char::from_u32(cp) {
-                        result.extend(ch.encode_utf16(&mut [0u16; 2]).iter().copied());
+                    if cp <= 0xFFFF {
+                        // BMP: includes surrogates (0xD800-0xDFFF) per spec
+                        result.push(cp as u16);
                     } else {
-                        self.throw_range_error_object(ctx, "Invalid code point");
-                        return Value::Undefined;
+                        // Supplementary plane: encode as surrogate pair
+                        let adjusted = cp - 0x10000;
+                        result.push((0xD800 + (adjusted >> 10)) as u16);
+                        result.push((0xDC00 + (adjusted & 0x3FF)) as u16);
                     }
                 }
                 Value::String(result)
@@ -25000,10 +24969,25 @@ impl<'gc> VM<'gc> {
                     Self::insert_property_with_attributes(&mut map, "message", &Value::from(msg.as_str()), true, false, true);
                 }
                 // InstallErrorCause (ES2022)
-                if let Some(Value::VmObject(opts_obj)) = args.get(1)
-                    && let Some(cause) = opts_obj.borrow().get("cause").cloned()
-                {
-                    Self::insert_property_with_attributes(&mut map, "cause", &cause, true, false, true);
+                if let Some(opts) = args.get(1).filter(|v| matches!(v, Value::VmObject(_))) {
+                    let has_cause = match self.try_proxy_has(ctx, opts, "cause") {
+                        Ok(Some(b)) => b,
+                        Ok(None) => self.has_property_in_chain(ctx, opts, "cause"),
+                        Err(e) => {
+                            self.set_pending_throw_from_error(&e);
+                            return Value::Undefined;
+                        }
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if has_cause {
+                        let cause = self.read_named_property(ctx, opts, "cause");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        Self::insert_property_with_attributes(&mut map, "cause", &cause, true, false, true);
+                    }
                 }
                 // Set constructor and __proto__ from the global constructor object
                 if let Some(ctor) = self.globals.get(type_name.as_str()).cloned() {
@@ -27890,11 +27874,20 @@ impl<'gc> VM<'gc> {
                         drop(borrow);
                     }
                     // InstallErrorCause (ES2022): if options has "cause", set it on the error
-                    if let Some(Value::VmObject(opts_obj)) = args.get(1) {
-                        let opts_val = Value::VmObject(*opts_obj);
-                        let has_cause = opts_obj.borrow().contains_key("cause") || self.has_property_in_chain(ctx, &opts_val, "cause");
+                    if let Some(opts) = args.get(1).filter(|v| matches!(v, Value::VmObject(_))) {
+                        let has_cause = match self.try_proxy_has(ctx, opts, "cause") {
+                            Ok(Some(b)) => b,
+                            Ok(None) => self.has_property_in_chain(ctx, opts, "cause"),
+                            Err(e) => {
+                                self.set_pending_throw_from_error(&e);
+                                return Value::Undefined;
+                            }
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         if has_cause {
-                            let cause = self.read_named_property(ctx, &opts_val, "cause");
+                            let cause = self.read_named_property(ctx, opts, "cause");
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
@@ -28040,6 +28033,78 @@ impl<'gc> VM<'gc> {
                 self.this_stack.pop();
                 return out;
             }
+            BUILTIN_PROMISE_WITHRESOLVERS => {
+                // Step 1: Let C be the this value.
+                // Step 2: Let promiseCapability be ? NewPromiseCapability(C).
+                if !matches!(
+                    receiver,
+                    Value::VmObject(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                ) || receiver.is_symbol_value()
+                {
+                    self.throw_type_error(ctx, "Promise.withResolvers called on non-object");
+                    return Value::Undefined;
+                }
+                let (promise_obj, resolve, reject) = match self.new_promise_capability(ctx, receiver) {
+                    Ok(cap) => cap,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut out = IndexMap::new();
+                out.insert("promise".to_string(), promise_obj);
+                out.insert("resolve".to_string(), resolve);
+                out.insert("reject".to_string(), reject);
+                return Value::VmObject(new_gc_cell_ptr(ctx, out));
+            }
+            BUILTIN_PROMISE_TRY => {
+                // Step 1: Let C be the this value.
+                // Step 2: If C is not an Object, throw a TypeError.
+                if !matches!(
+                    receiver,
+                    Value::VmObject(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                ) || receiver.is_symbol_value()
+                {
+                    self.throw_type_error(ctx, "Promise.try called on non-object");
+                    return Value::Undefined;
+                }
+                // Step 3: Let promiseCapability be ? NewPromiseCapability(C).
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let cb_args = if args.len() > 1 { &args[1..] } else { &[] };
+
+                let (promise_obj, resolve_fn, reject_fn) = match self.new_promise_capability(ctx, receiver) {
+                    Ok(cap) => cap,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                if !self.is_value_callable(&callback) {
+                    let err_obj = self.make_type_error_object(ctx, "callbackfn is not a function");
+                    let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_obj]);
+                } else {
+                    let saved_try_stack = std::mem::take(&mut self.try_stack);
+                    let call_result = self.vm_call_function_value(ctx, &callback, &Value::Undefined, cb_args);
+                    self.try_stack = saved_try_stack;
+                    match call_result {
+                        Ok(value) => {
+                            let _ = self.vm_call_function_value(ctx, &resolve_fn, &Value::Undefined, &[value]);
+                        }
+                        Err(err) => {
+                            let err_val = self.vm_value_from_error(ctx, &err);
+                            let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        }
+                    }
+                }
+                return promise_obj;
+            }
             BUILTIN_JSON_STRINGIFY
             | BUILTIN_JSON_PARSE
             | BUILTIN_ARRAY_ISARRAY
@@ -28122,8 +28187,6 @@ impl<'gc> VM<'gc> {
             | BUILTIN_ATOMICS_WAITASYNC
             | BUILTIN_PROMISE_RESOLVE
             | BUILTIN_PROMISE_ALL
-            | BUILTIN_PROMISE_WITHRESOLVERS
-            | BUILTIN_PROMISE_TRY
             | BUILTIN_REFLECT_APPLY
             | BUILTIN_SYMBOL_FOR
             | BUILTIN_SYMBOL_KEYFOR
@@ -35603,7 +35666,8 @@ impl<'gc> VM<'gc> {
             let list = if matches!(b.props.get("__out_of_bounds__"), Some(Value::Boolean(true))) {
                 Vec::new()
             } else {
-                b.iter().cloned().collect()
+                let logical_len = self.array_length_u64(&b) as usize;
+                b.elements.iter().take(logical_len).cloned().collect()
             };
             return Some(list);
         }

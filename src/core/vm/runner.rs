@@ -8157,11 +8157,31 @@ impl<'gc> VM<'gc> {
                                 };
                                 Self::insert_property_with_attributes(&mut m, "message", &Value::from(msg.as_str()), true, false, true);
                             }
-                            // InstallErrorCause (ES2022)
-                            if let Some(Value::VmObject(opts_obj)) = args.get(1) {
-                                let b = opts_obj.borrow();
-                                if let Some(cause) = b.get("cause").cloned() {
-                                    drop(b);
+                            // InstallErrorCause (ES2022) — proxy-aware HasProperty + Get
+                            if let Some(opts) = args.get(1).filter(|v| matches!(v, Value::VmObject(_))) {
+                                let has_cause = match self.try_proxy_has(ctx, opts, "cause") {
+                                    Ok(Some(b)) => b,
+                                    Ok(None) => self.has_property_in_chain(ctx, opts, "cause"),
+                                    Err(e) => {
+                                        let thrown = self.vm_value_from_error(ctx, &e);
+                                        self.handle_throw(ctx, &thrown)?;
+                                        return Ok(OpcodeAction::Continue);
+                                    }
+                                };
+                                if self.pending_throw.is_some() {
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        self.handle_throw(ctx, &thrown)?;
+                                    }
+                                    return Ok(OpcodeAction::Continue);
+                                }
+                                if has_cause {
+                                    let cause = self.read_named_property(ctx, opts, "cause");
+                                    if self.pending_throw.is_some() {
+                                        if let Some(thrown) = self.pending_throw.take() {
+                                            self.handle_throw(ctx, &thrown)?;
+                                        }
+                                        return Ok(OpcodeAction::Continue);
+                                    }
                                     Self::insert_property_with_attributes(&mut m, "cause", &cause, true, false, true);
                                 }
                             }

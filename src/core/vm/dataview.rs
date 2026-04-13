@@ -315,6 +315,41 @@ impl<'gc> VM<'gc> {
                 }
                 Value::Undefined
             }
+            "dataview.getFloat16" => {
+                let (base, _byte_len, buffer) = match self.dataview_validate_get(ctx, receiver, args, 2) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
+                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                    let b = bytes.borrow();
+                    let arr: [u8; 2] = [
+                        to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
+                        to_number(b.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8,
+                    ];
+                    let v = if little { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) };
+                    return Value::Number(f16_bits_to_f64(v));
+                }
+                Value::Number(0.0)
+            }
+            "dataview.setFloat16" => {
+                let (base, _byte_len, buffer, coerced_val) = match self.dataview_validate_set(ctx, receiver, args, 2) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
+                let bits = f64_to_f16_bits(coerced_val);
+                let bs = if little { bits.to_le_bytes() } else { bits.to_be_bytes() };
+                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                    let mut bm = bytes.borrow_mut(ctx);
+                    for (i, &b) in bs.iter().enumerate() {
+                        if base + i < bm.elements.len() {
+                            bm.elements[base + i] = Value::Number(b as f64);
+                        }
+                    }
+                }
+                Value::Undefined
+            }
             "dataview.getFloat32" => {
                 let (base, _byte_len, buffer) = match self.dataview_validate_get(ctx, receiver, args, 4) {
                     Some(v) => v,
@@ -574,6 +609,7 @@ impl<'gc> VM<'gc> {
             ("getUint16", "dataview.getUint16", 1.0),
             ("getInt32", "dataview.getInt32", 1.0),
             ("getUint32", "dataview.getUint32", 1.0),
+            ("getFloat16", "dataview.getFloat16", 1.0),
             ("getFloat32", "dataview.getFloat32", 1.0),
             ("getFloat64", "dataview.getFloat64", 1.0),
             ("getBigInt64", "dataview.getBigInt64", 1.0),
@@ -584,6 +620,7 @@ impl<'gc> VM<'gc> {
             ("setUint16", "dataview.setUint16", 2.0),
             ("setInt32", "dataview.setInt32", 2.0),
             ("setUint32", "dataview.setUint32", 2.0),
+            ("setFloat16", "dataview.setFloat16", 2.0),
             ("setFloat32", "dataview.setFloat32", 2.0),
             ("setFloat64", "dataview.setFloat64", 2.0),
             ("setBigInt64", "dataview.setBigInt64", 2.0),

@@ -25,6 +25,7 @@ pub(crate) use bigint::{compare_bigint_number, parse_bigint_string};
 pub(crate) use regexp::get_or_compile_regex;
 use typedarray::coerce_typed_array_value;
 use typedarray::{coerce_bigint_for_ta, is_bigint_typed_array};
+use typedarray::{f16_bits_to_f64, f16round, f64_to_f16_bits};
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -3693,6 +3694,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_MATH_LOG1P => "log1p",
             BUILTIN_MATH_LOG2 => "log2",
             BUILTIN_MATH_FROUND => "fround",
+            BUILTIN_MATH_F16ROUND => "f16round",
             BUILTIN_MATH_TRUNC => "trunc",
             BUILTIN_MATH_CBRT => "cbrt",
             BUILTIN_MATH_HYPOT => "hypot",
@@ -4091,6 +4093,7 @@ impl<'gc> VM<'gc> {
                     | BUILTIN_CTOR_UINT16ARRAY
                     | BUILTIN_CTOR_INT32ARRAY
                     | BUILTIN_CTOR_UINT32ARRAY
+                    | BUILTIN_CTOR_FLOAT16ARRAY
                     | BUILTIN_CTOR_FLOAT32ARRAY
                     | BUILTIN_CTOR_FLOAT64ARRAY
                     | BUILTIN_CTOR_BIGINT64ARRAY
@@ -5000,6 +5003,7 @@ impl<'gc> VM<'gc> {
                             | BUILTIN_CTOR_UINT16ARRAY
                             | BUILTIN_CTOR_INT32ARRAY
                             | BUILTIN_CTOR_UINT32ARRAY
+                            | BUILTIN_CTOR_FLOAT16ARRAY
                             | BUILTIN_CTOR_FLOAT32ARRAY
                             | BUILTIN_CTOR_FLOAT64ARRAY
                             | BUILTIN_CTOR_BIGINT64ARRAY
@@ -5016,6 +5020,7 @@ impl<'gc> VM<'gc> {
                                         | BUILTIN_CTOR_UINT16ARRAY
                                         | BUILTIN_CTOR_INT32ARRAY
                                         | BUILTIN_CTOR_UINT32ARRAY
+                                        | BUILTIN_CTOR_FLOAT16ARRAY
                                         | BUILTIN_CTOR_FLOAT32ARRAY
                                         | BUILTIN_CTOR_FLOAT64ARRAY
                                         | BUILTIN_CTOR_BIGINT64ARRAY
@@ -16840,6 +16845,7 @@ impl<'gc> VM<'gc> {
         math_map.insert("log1p".to_string(), Value::VmNativeFunction(BUILTIN_MATH_LOG1P));
         math_map.insert("log2".to_string(), Value::VmNativeFunction(BUILTIN_MATH_LOG2));
         math_map.insert("fround".to_string(), Value::VmNativeFunction(BUILTIN_MATH_FROUND));
+        math_map.insert("f16round".to_string(), Value::VmNativeFunction(BUILTIN_MATH_F16ROUND));
         math_map.insert("trunc".to_string(), Value::VmNativeFunction(BUILTIN_MATH_TRUNC));
         math_map.insert("cbrt".to_string(), Value::VmNativeFunction(BUILTIN_MATH_CBRT));
         math_map.insert("hypot".to_string(), Value::VmNativeFunction(BUILTIN_MATH_HYPOT));
@@ -23312,6 +23318,7 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_UINT16ARRAY
             | BUILTIN_CTOR_INT32ARRAY
             | BUILTIN_CTOR_UINT32ARRAY
+            | BUILTIN_CTOR_FLOAT16ARRAY
             | BUILTIN_CTOR_FLOAT32ARRAY
             | BUILTIN_CTOR_FLOAT64ARRAY
             | BUILTIN_CTOR_BIGINT64ARRAY
@@ -23491,6 +23498,10 @@ impl<'gc> VM<'gc> {
             BUILTIN_MATH_FROUND => {
                 let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
                 Value::Number((n as f32) as f64)
+            }
+            BUILTIN_MATH_F16ROUND => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(f16round(n))
             }
             BUILTIN_MATH_TRUNC => {
                 let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
@@ -28822,6 +28833,7 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_UINT16ARRAY
             | BUILTIN_CTOR_INT32ARRAY
             | BUILTIN_CTOR_UINT32ARRAY
+            | BUILTIN_CTOR_FLOAT16ARRAY
             | BUILTIN_CTOR_FLOAT32ARRAY
             | BUILTIN_CTOR_FLOAT64ARRAY
             | BUILTIN_CTOR_BIGINT64ARRAY
@@ -28955,6 +28967,7 @@ impl<'gc> VM<'gc> {
             | BUILTIN_MATH_LOG1P
             | BUILTIN_MATH_LOG2
             | BUILTIN_MATH_FROUND
+            | BUILTIN_MATH_F16ROUND
             | BUILTIN_MATH_TRUNC
             | BUILTIN_MATH_CBRT
             | BUILTIN_MATH_HYPOT
@@ -40193,6 +40206,7 @@ impl<'gc> VM<'gc> {
                     BUILTIN_CTOR_UINT16ARRAY => "Uint16Array",
                     BUILTIN_CTOR_INT32ARRAY => "Int32Array",
                     BUILTIN_CTOR_UINT32ARRAY => "Uint32Array",
+                    BUILTIN_CTOR_FLOAT16ARRAY => "Float16Array",
                     BUILTIN_CTOR_FLOAT32ARRAY => "Float32Array",
                     BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
                     BUILTIN_CTOR_BIGINT64ARRAY => "BigInt64Array",
@@ -40239,6 +40253,7 @@ impl<'gc> VM<'gc> {
                         | BUILTIN_CTOR_UINT16ARRAY
                         | BUILTIN_CTOR_INT32ARRAY
                         | BUILTIN_CTOR_UINT32ARRAY
+                        | BUILTIN_CTOR_FLOAT16ARRAY
                         | BUILTIN_CTOR_FLOAT32ARRAY
                         | BUILTIN_CTOR_FLOAT64ARRAY
                         | BUILTIN_CTOR_BIGINT64ARRAY
@@ -40374,6 +40389,7 @@ impl<'gc> VM<'gc> {
                         | BUILTIN_CTOR_UINT16ARRAY
                         | BUILTIN_CTOR_INT32ARRAY
                         | BUILTIN_CTOR_UINT32ARRAY
+                        | BUILTIN_CTOR_FLOAT16ARRAY
                         | BUILTIN_CTOR_FLOAT32ARRAY
                         | BUILTIN_CTOR_FLOAT64ARRAY
                         | BUILTIN_CTOR_BIGINT64ARRAY

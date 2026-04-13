@@ -34,11 +34,129 @@ pub(crate) fn coerce_bigint_for_ta(bi: &num_bigint::BigInt, ta_name: &str) -> nu
     }
 }
 
+// ── IEEE 754 half-precision (float16) conversion ────────────────────
+/// Convert an f64 to IEEE 754 binary16 (half-precision) bits.
+/// Rounds to nearest, ties to even.
+pub(crate) fn f64_to_f16_bits(val: f64) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 63) & 1) as u16;
+    let exp = ((bits >> 52) & 0x7FF) as i32;
+    let frac = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    // Infinity or NaN
+    if exp == 0x7FF {
+        if frac == 0 {
+            return (sign << 15) | 0x7C00; // ±Infinity
+        }
+        // NaN — quiet NaN with at least one mantissa bit set
+        let f16_frac = (frac >> 42) as u16 & 0x03FF;
+        return (sign << 15) | 0x7C00 | f16_frac.max(1);
+    }
+
+    // Zero
+    if exp == 0 && frac == 0 {
+        return sign << 15; // ±0
+    }
+
+    let unbiased = exp - 1023; // f64 bias=1023
+
+    // Overflow → ±Infinity
+    if unbiased > 15 {
+        return (sign << 15) | 0x7C00;
+    }
+
+    // Subnormal f16 range
+    if unbiased < -14 {
+        if unbiased < -24 {
+            // Too small — round to ±0
+            // But check the round bit for ties (halfway cases)
+            if unbiased == -25 {
+                let implicit = frac | 0x0010_0000_0000_0000;
+                // The entire mantissa is a "round" bit at this shift
+                // Round up only if sticky bits exist or mantissa LSB=1
+                if implicit > 0x0010_0000_0000_0000 {
+                    return (sign << 15) | 1; // smallest subnormal
+                }
+            }
+            return sign << 15;
+        }
+        // Subnormal: shift = how many positions to shift mantissa right
+        let shift = (-14 - unbiased) as u32; // 1..10
+        let implicit = frac | 0x0010_0000_0000_0000; // add implicit 1 bit
+        let total_shift = 42 + shift; // shift from f64 mantissa to f16 mantissa
+        let mantissa = (implicit >> total_shift) as u16;
+        let round_bit = (implicit >> (total_shift - 1)) & 1;
+        let sticky_mask = if total_shift > 1 { (1u64 << (total_shift - 1)) - 1 } else { 0 };
+        let sticky = implicit & sticky_mask;
+        let mut result = (sign << 15) | mantissa;
+        // Round to nearest even
+        if round_bit != 0 && (sticky != 0 || (mantissa & 1) != 0) {
+            result += 1;
+        }
+        return result;
+    }
+
+    // Normal f16
+    let f16_exp = (unbiased + 15) as u16; // re-bias for f16 (bias=15)
+    let mantissa = (frac >> 42) as u16; // top 10 bits of f64 mantissa
+    let round_bit = (frac >> 41) & 1;
+    let sticky = frac & ((1u64 << 41) - 1);
+    let mut result = (sign << 15) | (f16_exp << 10) | mantissa;
+    // Round to nearest even
+    if round_bit != 0 && (sticky != 0 || (mantissa & 1) != 0) {
+        result += 1;
+    }
+    result
+}
+
+/// Convert IEEE 754 binary16 (half-precision) bits to f64.
+pub(crate) fn f16_bits_to_f64(bits: u16) -> f64 {
+    let sign = ((bits >> 15) & 1) as u64;
+    let exp = (bits >> 10) & 0x1F;
+    let frac = (bits & 0x03FF) as u64;
+
+    if exp == 0x1F {
+        if frac == 0 {
+            return f64::from_bits(sign << 63 | 0x7FF0_0000_0000_0000); // ±Infinity
+        }
+        // NaN — propagate sign and mantissa bits
+        return f64::from_bits(sign << 63 | 0x7FF8_0000_0000_0000 | (frac << 42));
+    }
+
+    if exp == 0 {
+        if frac == 0 {
+            return f64::from_bits(sign << 63); // ±0
+        }
+        // Subnormal f16: value = (-1)^sign × 2^(-14) × (frac/1024)
+        let val = frac as f64 * 2.0f64.powi(-24);
+        return if sign == 1 { -val } else { val };
+    }
+
+    // Normal: value = (-1)^sign × 2^(exp-15) × (1 + frac/1024)
+    let f64_exp = ((exp as u64) - 15 + 1023) & 0x7FF; // re-bias for f64
+    f64::from_bits(sign << 63 | f64_exp << 52 | frac << 42)
+}
+
+/// Round a f64 to the nearest IEEE 754 binary16 value, returned as f64.
+/// This is the semantics of Math.f16round().
+pub(crate) fn f16round(val: f64) -> f64 {
+    if val.is_nan() {
+        return f64::NAN;
+    }
+    f16_bits_to_f64(f64_to_f16_bits(val))
+}
+
 /// Coerce a numeric value according to the TypedArray element type.
 pub(crate) fn coerce_typed_array_value(n: f64, ta_name: &str) -> f64 {
     if n.is_nan() || !n.is_finite() || n == 0.0 {
         match ta_name {
-            "Float32Array" | "Float64Array" => return if ta_name == "Float64Array" { n } else { (n as f32) as f64 },
+            "Float16Array" | "Float32Array" | "Float64Array" => {
+                return match ta_name {
+                    "Float16Array" => f16round(n),
+                    "Float32Array" => (n as f32) as f64,
+                    _ => n,
+                };
+            }
             "Uint8ClampedArray" => {
                 if n.is_nan() || n <= 0.0 {
                     return 0.0;
@@ -97,6 +215,7 @@ pub(crate) fn coerce_typed_array_value(n: f64, ta_name: &str) -> f64 {
             let iv = n.trunc() as i128;
             (iv.rem_euclid(4294967296)) as f64
         }
+        "Float16Array" => f16round(n),
         "Float32Array" => (n as f32) as f64,
         _ => n,
     }
@@ -2568,6 +2687,7 @@ impl<'gc> VM<'gc> {
             "Uint32Array" => BUILTIN_CTOR_UINT32ARRAY,
             "Float32Array" => BUILTIN_CTOR_FLOAT32ARRAY,
             "Float64Array" => BUILTIN_CTOR_FLOAT64ARRAY,
+            "Float16Array" => BUILTIN_CTOR_FLOAT16ARRAY,
             _ => return result.clone(),
         };
         // Extract elements from result
@@ -2725,6 +2845,14 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            "Float16Array" => {
+                let b = f64_to_f16_bits(num).to_ne_bytes();
+                for (j, &byte) in b.iter().enumerate() {
+                    if base + j < bytes.len() {
+                        bytes[base + j] = Value::Number(byte as f64);
+                    }
+                }
+            }
             "Float32Array" => {
                 let b = (num as f32).to_ne_bytes();
                 for (j, &byte) in b.iter().enumerate() {
@@ -2791,6 +2919,11 @@ impl<'gc> VM<'gc> {
             "Int32Array" => {
                 let arr4: [u8; 4] = core::array::from_fn(|j| to_number(bytes.get(base + j).unwrap_or(&Value::Number(0.0))) as u8);
                 Value::Number(i32::from_ne_bytes(arr4) as f64)
+            }
+            "Float16Array" => {
+                let b0 = to_number(bytes.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                let b1 = to_number(bytes.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                Value::Number(f16_bits_to_f64(u16::from_ne_bytes([b0, b1])))
             }
             "Float32Array" => {
                 let arr4: [u8; 4] = core::array::from_fn(|j| to_number(bytes.get(base + j).unwrap_or(&Value::Number(0.0))) as u8);
@@ -2886,6 +3019,14 @@ impl<'gc> VM<'gc> {
                     } else {
                         Self::to_uint32_typed(new_num).to_ne_bytes()
                     };
+                    for (j, b) in bytes.iter().enumerate() {
+                        if base + j < bb.elements.len() {
+                            bb.elements[base + j] = Value::Number(*b as f64);
+                        }
+                    }
+                }
+                "Float16Array" => {
+                    let bytes = f64_to_f16_bits(new_num).to_ne_bytes();
                     for (j, b) in bytes.iter().enumerate() {
                         if base + j < bb.elements.len() {
                             bb.elements[base + j] = Value::Number(*b as f64);
@@ -3133,8 +3274,8 @@ impl<'gc> VM<'gc> {
     /// Convert a numeric value to the type-specific element value for a TypedArray.
     pub(super) fn typed_array_coerce_value(num: f64, ta_name: &str) -> f64 {
         match ta_name {
+            "Float16Array" => return f16round(num),
             "Float32Array" => return (num as f32) as f64,
-            "Float64Array" => return num,
             _ => {}
         }
         if num.is_nan() || num == 0.0 || !num.is_finite() {
@@ -3183,6 +3324,7 @@ impl<'gc> VM<'gc> {
                 let m = int_val.rem_euclid(4294967296);
                 if m >= 2147483648 { (m - 4294967296) as f64 } else { m as f64 }
             }
+            "Float16Array" => f16round(num),
             "Float32Array" => (num as f32) as f64,
             "Float64Array" => num,
             _ => {
@@ -3200,7 +3342,7 @@ impl<'gc> VM<'gc> {
         }
 
         let bytes_per_element = match id {
-            BUILTIN_CTOR_INT16ARRAY | BUILTIN_CTOR_UINT16ARRAY => 2usize,
+            BUILTIN_CTOR_INT16ARRAY | BUILTIN_CTOR_UINT16ARRAY | BUILTIN_CTOR_FLOAT16ARRAY => 2usize,
             BUILTIN_CTOR_INT32ARRAY | BUILTIN_CTOR_UINT32ARRAY | BUILTIN_CTOR_FLOAT32ARRAY => 4usize,
             BUILTIN_CTOR_FLOAT64ARRAY | BUILTIN_CTOR_BIGINT64ARRAY | BUILTIN_CTOR_BIGUINT64ARRAY => 8usize,
             _ => 1usize,
@@ -3213,6 +3355,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_UINT16ARRAY => "Uint16Array",
             BUILTIN_CTOR_INT32ARRAY => "Int32Array",
             BUILTIN_CTOR_UINT32ARRAY => "Uint32Array",
+            BUILTIN_CTOR_FLOAT16ARRAY => "Float16Array",
             BUILTIN_CTOR_FLOAT32ARRAY => "Float32Array",
             BUILTIN_CTOR_FLOAT64ARRAY => "Float64Array",
             BUILTIN_CTOR_BIGINT64ARRAY => "BigInt64Array",
@@ -4200,6 +4343,7 @@ impl<'gc> VM<'gc> {
             ("Uint16Array", BUILTIN_CTOR_UINT16ARRAY, 2.0),
             ("Int32Array", BUILTIN_CTOR_INT32ARRAY, 4.0),
             ("Uint32Array", BUILTIN_CTOR_UINT32ARRAY, 4.0),
+            ("Float16Array", BUILTIN_CTOR_FLOAT16ARRAY, 2.0),
             ("Float32Array", BUILTIN_CTOR_FLOAT32ARRAY, 4.0),
             ("Float64Array", BUILTIN_CTOR_FLOAT64ARRAY, 8.0),
             ("BigInt64Array", BUILTIN_CTOR_BIGINT64ARRAY, 8.0),

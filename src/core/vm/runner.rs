@@ -5302,6 +5302,11 @@ impl<'gc> VM<'gc> {
                                             });
                                             Value::Number(i32::from_ne_bytes(arr4) as f64)
                                         }
+                                        "Float16Array" => {
+                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(f16_bits_to_f64(u16::from_ne_bytes([b0, b1])))
+                                        }
                                         "Float32Array" => {
                                             let arr4: [u8; 4] = core::array::from_fn(|j| {
                                                 to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
@@ -5397,6 +5402,11 @@ impl<'gc> VM<'gc> {
                                                 to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
                                             });
                                             Value::Number(i32::from_ne_bytes(arr4) as f64)
+                                        }
+                                        "Float16Array" => {
+                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
+                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
+                                            Value::Number(f16_bits_to_f64(u16::from_ne_bytes([b0, b1])))
                                         }
                                         "Float32Array" => {
                                             let arr4: [u8; 4] = core::array::from_fn(|j| {

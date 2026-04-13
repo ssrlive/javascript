@@ -3601,6 +3601,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_TYPEDARRAY_TOREVERSED => "toReversed",
             BUILTIN_TYPEDARRAY_TOSORTED => "toSorted",
             BUILTIN_TYPEDARRAY_WITH => "with",
+            BUILTIN_FN_HASINSTANCE => "[Symbol.hasInstance]",
             BUILTIN_OBJ_HASOWNPROPERTY => "hasOwnProperty",
             BUILTIN_OBJ_TOSTRING => "toString",
             BUILTIN_OBJECT_CREATE => "create",
@@ -3820,6 +3821,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_TYPEDARRAY_TOREVERSED => 0.0,
             BUILTIN_TYPEDARRAY_TOSORTED => 1.0,
             BUILTIN_TYPEDARRAY_WITH => 2.0,
+            BUILTIN_FN_HASINSTANCE => 1.0,
             BUILTIN_OBJECT_GETOWNPROPDESC => 2.0,
             BUILTIN_OBJ_TOSTRING => 0.0,
             BUILTIN_OBJ_HASOWNPROPERTY => 1.0,
@@ -18948,6 +18950,10 @@ impl<'gc> VM<'gc> {
         }
         fn_proto_obj.borrow_mut(ctx).insert("constructor".to_string(), function_val.clone());
         mark_nonenumerable(&mut fn_proto_obj.borrow_mut(ctx), "constructor");
+        // Function.prototype[@@hasInstance] — non-writable, non-configurable
+        fn_proto_obj.borrow_mut(ctx).insert("@@sym:2".to_string(), Value::VmNativeFunction(BUILTIN_FN_HASINSTANCE));
+        mark_nonenumerable(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2");
+        write_attrs_to_legacy_map(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2", PropAttrs::empty());
         self.globals.insert("Function".to_string(), function_val.clone());
         self.global_this.borrow_mut(ctx).insert("Function".to_string(), function_val);
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "Function");
@@ -26572,6 +26578,13 @@ impl<'gc> VM<'gc> {
                                                         return Value::Undefined;
                                                     }
                                                 }
+                                                // §10.5.6 step 20c: non-configurable + writable target → cannot set writable to false
+                                                if target_writable {
+                                                    if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
+                                                        self.throw_type_error(ctx, "'defineProperty' on proxy: trap returned truish for setting writable to false on a non-configurable, writable property");
+                                                        return Value::Undefined;
+                                                    }
+                                                }
                                             }
                                             // If both are accessors: cannot change get/set
                                             if desc_is_accessor && target_is_accessor {
@@ -30509,10 +30522,28 @@ impl<'gc> VM<'gc> {
             items.extend(args.iter().cloned());
 
             for item in items {
-                let spreadable = matches!(
-                    self.call_builtin(ctx, BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&item)),
-                    Value::Boolean(true)
-                );
+                // IsConcatSpreadable(item) per §23.1.3.1.1
+                let spreadable = {
+                    let is_obj = match &item {
+                        Value::VmObject(o) => !o.borrow().contains_key("__vm_symbol__"),
+                        Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
+                        _ => false,
+                    };
+                    if is_obj {
+                        let sym_val = self.read_named_property(ctx, &item, "@@sym:15");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if !matches!(sym_val, Value::Undefined) {
+                            sym_val.to_truthy()
+                        } else {
+                            matches!(
+                                self.call_builtin(ctx, BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(&item)),
+                                Value::Boolean(true)
+                            )
+                        }
+                    } else {
+                        false
+                    }
+                };
                 if spreadable {
                     let Some(len_u64) = self.array_like_length_u64(ctx, &item) else {
                         return Value::Undefined;
@@ -31285,10 +31316,64 @@ impl<'gc> VM<'gc> {
                     return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(sliced)));
                 }
                 BUILTIN_ARRAY_CONCAT => {
-                    let mut result = arr.borrow().clone();
+                    // Check if receiver itself has @@isConcatSpreadable = false
+                    let receiver_val = Value::VmArray(*arr);
+                    let self_sym = self.read_named_property(ctx, &receiver_val, "@@sym:15");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    let self_spreadable = if !matches!(self_sym, Value::Undefined) {
+                        self_sym.to_truthy()
+                    } else {
+                        true // Arrays are spreadable by default
+                    };
+
+                    let mut result_vec: Vec<Value<'gc>> = Vec::new();
+                    if self_spreadable {
+                        result_vec.extend(arr.borrow().iter().cloned());
+                    } else {
+                        result_vec.push(receiver_val.clone());
+                    }
+
                     for arg in args {
-                        if let Value::VmArray(other) = arg {
-                            result.extend(other.borrow().iter().cloned());
+                        // IsConcatSpreadable check
+                        let is_obj = match arg {
+                            Value::VmObject(o) => !o.borrow().contains_key("__vm_symbol__"),
+                            Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
+                            _ => false,
+                        };
+                        let spreadable = if is_obj {
+                            let sym_val = self.read_named_property(ctx, arg, "@@sym:15");
+                            if self.pending_throw.is_some() { return Value::Undefined; }
+                            if !matches!(sym_val, Value::Undefined) {
+                                sym_val.to_truthy()
+                            } else if let Value::VmArray(_) = arg {
+                                true
+                            } else {
+                                matches!(
+                                    self.call_builtin(ctx, BUILTIN_ARRAY_ISARRAY, std::slice::from_ref(arg)),
+                                    Value::Boolean(true)
+                                )
+                            }
+                        } else {
+                            false
+                        };
+
+                        if spreadable {
+                            if let Value::VmArray(other) = arg {
+                                result_vec.extend(other.borrow().iter().cloned());
+                            } else {
+                                // Generic array-like spreadable object
+                                let len = self.read_named_property(ctx, arg, "length");
+                                if self.pending_throw.is_some() { return Value::Undefined; }
+                                let len_u = match &len {
+                                    Value::Number(n) => *n as usize,
+                                    _ => 0,
+                                };
+                                for i in 0..len_u {
+                                    let val = self.read_named_property(ctx, arg, &i.to_string());
+                                    if self.pending_throw.is_some() { return Value::Undefined; }
+                                    result_vec.push(val);
+                                }
+                            }
                         } else if let Value::VmObject(obj) = arg {
                             let borrow = obj.borrow();
                             if borrow.contains_key("__proxy_target__")
@@ -31299,12 +31384,12 @@ impl<'gc> VM<'gc> {
                                 return Value::Undefined;
                             }
                             drop(borrow);
-                            result.push(arg.clone());
+                            result_vec.push(arg.clone());
                         } else {
-                            result.push(arg.clone());
+                            result_vec.push(arg.clone());
                         }
                     }
-                    return Value::VmArray(new_gc_cell_ptr(ctx, result));
+                    return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(result_vec)));
                 }
                 BUILTIN_ARRAY_MAP => {
                     let callback = args.first().cloned().unwrap_or(Value::Undefined);
@@ -34796,6 +34881,73 @@ impl<'gc> VM<'gc> {
                 return Value::from(&format!("function {fn_name}() {{ [ native code ] }}"));
             }
             return Value::from("function () { [ native code ] }");
+        }
+
+        // Function.prototype[@@hasInstance](V) — OrdinaryHasInstance(this, V)
+        if id == BUILTIN_FN_HASINSTANCE {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            // §7.3.21 OrdinaryHasInstance
+            // Step 1: If C is not callable, return false
+            if !self.is_value_callable(receiver) {
+                return Value::Boolean(false);
+            }
+            // Step 2: If C has [[BoundTargetFunction]], delegate to it
+            if let Value::VmObject(obj) = receiver {
+                if let Some(bound_target) = obj.borrow().get("__bound_target__").cloned() {
+                    // InstanceofOperator(V, BC) — recursively check via the underlying instanceof
+                    // which will call @@hasInstance on the bound target
+                    return self.call_method_builtin(ctx, BUILTIN_FN_HASINSTANCE, &bound_target, std::slice::from_ref(&v));
+                }
+            }
+            // Step 3: If Type(O) is not Object, return false
+            // Note: Symbols are VmObjects with __vm_symbol__ but are NOT objects per spec
+            let v_is_object = match &v {
+                Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
+                Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
+                _ => false,
+            };
+            if !v_is_object {
+                return Value::Boolean(false);
+            }
+            // Step 4: Let P be ? Get(C, "prototype")
+            let rhs_proto = self.read_named_property(ctx, receiver, "prototype");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            // Step 5: If Type(P) is not Object, throw TypeError
+            // Note: Symbols are VmObjects with __vm_symbol__ but are NOT objects per spec
+            let proto_is_object = match &rhs_proto {
+                Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
+                Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
+                _ => false,
+            };
+            if !proto_is_object {
+                self.throw_type_error(ctx, "Function has non-object prototype in instanceof check");
+                return Value::Undefined;
+            }
+            // Walk prototype chain of V looking for P using [[GetPrototypeOf]]
+            let mut current_obj = v.clone();
+            let mut depth = 0;
+            loop {
+                if depth > 100 { break; }
+                depth += 1;
+                let proto = self.call_host_fn(ctx, "reflect.getPrototypeOf", None, std::slice::from_ref(&current_obj));
+                if self.pending_throw.is_some() { return Value::Undefined; }
+                if matches!(proto, Value::Null | Value::Undefined) {
+                    break;
+                }
+                let matched = match (&proto, &rhs_proto) {
+                    (Value::VmObject(a), Value::VmObject(b)) => Gc::ptr_eq(*a, *b),
+                    (Value::VmArray(a), Value::VmArray(b)) => Gc::ptr_eq(*a, *b),
+                    _ => false,
+                };
+                if matched {
+                    return Value::Boolean(true);
+                }
+                current_obj = proto;
+                if self.pending_throw.is_some() { return Value::Undefined; }
+            }
+            return Value::Boolean(false);
         }
 
         // Object.prototype.toString()

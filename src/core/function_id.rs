@@ -382,4 +382,6 @@ pub(crate) const BUILTIN_TYPEDARRAY_TOREVERSED: FunctionID = 590;
 pub(crate) const BUILTIN_TYPEDARRAY_TOSORTED: FunctionID = 591;
 pub(crate) const BUILTIN_TYPEDARRAY_TOSPLICED: FunctionID = 592;
 pub(crate) const BUILTIN_TYPEDARRAY_WITH: FunctionID = 593;
-// Next available group: 600
+// ── Function.prototype[@@hasInstance] (600) ──────────────────────────
+pub(crate) const BUILTIN_FN_HASINSTANCE: FunctionID = 600;
+// Next available group: 610

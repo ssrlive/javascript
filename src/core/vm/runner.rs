@@ -7210,19 +7210,13 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
 
-        // Check Symbol.hasInstance (@@sym:2) on rhs first
-        let has_instance_fn = match &rhs {
-            Value::VmObject(map) => map.borrow().get("@@sym:2").cloned(),
-            Value::VmFunction(ip, arity) | Value::VmClosure(ip, arity, _) => {
-                let fn_props = self
-                    .get_fn_props_for_value(ctx, &rhs)
-                    .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity));
-                fn_props.borrow().get("@@sym:2").cloned()
-            }
-            _ => None,
-        };
-        if let Some(hi_fn) = has_instance_fn {
-            let result = match hi_fn {
+        // Check Symbol.hasInstance (@@sym:2) on rhs via prototype chain (GetMethod)
+        let has_instance_fn = self.read_named_property(ctx, &rhs, "@@sym:2");
+        if self.pending_throw.is_some() {
+            return Ok(OpcodeAction::Continue);
+        }
+        if !matches!(has_instance_fn, Value::Undefined | Value::Null) {
+            let result = match has_instance_fn {
                 Value::VmFunction(ip, _) => {
                     self.this_stack.push(rhs.clone());
                     let r = self.call_vm_function_result(ctx, ip, std::slice::from_ref(&lhs), None, &[]);

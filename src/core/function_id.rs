@@ -334,4 +334,22 @@ pub(crate) const BUILTIN_ATOMICS_WAITASYNC: FunctionID = 498;
 // ── AbstractModuleSource (510–514) ──────────────────────────────────
 pub(crate) const BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE: FunctionID = 510;
 pub(crate) const BUILTIN_ABSTRACT_MODULE_SOURCE_TOSTRINGTAG_GET: FunctionID = 511;
-// Next available group: 520
+// ── DisposableStack (520–529) ───────────────────────────────────────
+pub(crate) const BUILTIN_CTOR_DISPOSABLESTACK: FunctionID = 520;
+pub(crate) const BUILTIN_DISPOSABLESTACK_DISPOSE: FunctionID = 521;
+pub(crate) const BUILTIN_DISPOSABLESTACK_USE: FunctionID = 522;
+pub(crate) const BUILTIN_DISPOSABLESTACK_ADOPT: FunctionID = 523;
+pub(crate) const BUILTIN_DISPOSABLESTACK_DEFER: FunctionID = 524;
+pub(crate) const BUILTIN_DISPOSABLESTACK_DISPOSED_GET: FunctionID = 525;
+pub(crate) const BUILTIN_DISPOSABLESTACK_MOVE: FunctionID = 526;
+// ── AsyncDisposableStack (530–539) ──────────────────────────────────
+pub(crate) const BUILTIN_CTOR_ASYNCDISPOSABLESTACK: FunctionID = 530;
+pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_DISPOSEASYNC: FunctionID = 531;
+pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_USE: FunctionID = 532;
+pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_ADOPT: FunctionID = 533;
+pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_DEFER: FunctionID = 534;
+pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_DISPOSED_GET: FunctionID = 535;
+pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_MOVE: FunctionID = 536;
+// ── Iterator dispose (540) ──────────────────────────────────────────
+pub(crate) const BUILTIN_ITERATOR_PROTOTYPE_DISPOSE: FunctionID = 540;
+// Next available group: 550

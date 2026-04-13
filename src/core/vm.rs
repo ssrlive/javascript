@@ -3764,6 +3764,21 @@ impl<'gc> VM<'gc> {
             BUILTIN_SYMBOL => "Symbol",
             BUILTIN_SYMBOL_FOR => "for",
             BUILTIN_SYMBOL_KEYFOR => "keyFor",
+            BUILTIN_CTOR_DISPOSABLESTACK => "DisposableStack",
+            BUILTIN_DISPOSABLESTACK_DISPOSE => "dispose",
+            BUILTIN_DISPOSABLESTACK_USE => "use",
+            BUILTIN_DISPOSABLESTACK_ADOPT => "adopt",
+            BUILTIN_DISPOSABLESTACK_DEFER => "defer",
+            BUILTIN_DISPOSABLESTACK_DISPOSED_GET => "get disposed",
+            BUILTIN_DISPOSABLESTACK_MOVE => "move",
+            BUILTIN_CTOR_ASYNCDISPOSABLESTACK => "AsyncDisposableStack",
+            BUILTIN_ASYNCDISPOSABLESTACK_DISPOSEASYNC => "disposeAsync",
+            BUILTIN_ASYNCDISPOSABLESTACK_USE => "use",
+            BUILTIN_ASYNCDISPOSABLESTACK_ADOPT => "adopt",
+            BUILTIN_ASYNCDISPOSABLESTACK_DEFER => "defer",
+            BUILTIN_ASYNCDISPOSABLESTACK_DISPOSED_GET => "get disposed",
+            BUILTIN_ASYNCDISPOSABLESTACK_MOVE => "move",
+            BUILTIN_ITERATOR_PROTOTYPE_DISPOSE => "[Symbol.dispose]",
             _ => "",
         }
     }
@@ -3893,6 +3908,16 @@ impl<'gc> VM<'gc> {
             BUILTIN_FR_REGISTER => 2.0,
             BUILTIN_FR_UNREGISTER => 1.0,
             BUILTIN_WEAKREF_DEREF | BUILTIN_SYMBOL => 0.0,
+            BUILTIN_CTOR_DISPOSABLESTACK | BUILTIN_CTOR_ASYNCDISPOSABLESTACK => 0.0,
+            BUILTIN_DISPOSABLESTACK_DISPOSE | BUILTIN_DISPOSABLESTACK_MOVE
+            | BUILTIN_DISPOSABLESTACK_DISPOSED_GET => 0.0,
+            BUILTIN_DISPOSABLESTACK_USE | BUILTIN_DISPOSABLESTACK_DEFER => 1.0,
+            BUILTIN_DISPOSABLESTACK_ADOPT => 2.0,
+            BUILTIN_ASYNCDISPOSABLESTACK_DISPOSEASYNC | BUILTIN_ASYNCDISPOSABLESTACK_MOVE
+            | BUILTIN_ASYNCDISPOSABLESTACK_DISPOSED_GET => 0.0,
+            BUILTIN_ASYNCDISPOSABLESTACK_USE | BUILTIN_ASYNCDISPOSABLESTACK_DEFER => 1.0,
+            BUILTIN_ASYNCDISPOSABLESTACK_ADOPT => 2.0,
+            BUILTIN_ITERATOR_PROTOTYPE_DISPOSE => 0.0,
             _ => 1.0,
         }
     }
@@ -8026,6 +8051,75 @@ impl<'gc> VM<'gc> {
             "iterator.helper_return" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
                 self.iterator_helper_return(ctx, &recv)
+            }
+            "iterator.dispose" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                let return_fn = self.read_named_property(ctx, &recv, "return");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if self.is_value_callable(&return_fn) {
+                    match self.vm_call_function_value(ctx, &return_fn, &recv, &[]) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                            return Value::Undefined;
+                        }
+                    }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                }
+                Value::Undefined
+            }
+            "iterator.asyncDispose" => {
+                // %AsyncIteratorPrototype%[@@asyncDispose]()
+                // Returns a Promise. Calls this.return() if it exists, wraps result.
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+                let (promise, resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                };
+                let return_fn = self.read_named_property(ctx, &recv, "return");
+                if let Some(thrown) = self.pending_throw.take() {
+                    let _ = self.vm_call_function_value(ctx, &reject, &Value::Undefined, &[thrown]);
+                    self.pending_throw = None;
+                    return promise;
+                }
+                if !self.is_value_callable(&return_fn) {
+                    let _ = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, &[Value::Undefined]);
+                    self.pending_throw = None;
+                    return promise;
+                }
+                match self.vm_call_function_value(ctx, &return_fn, &recv, &[Value::Undefined]) {
+                    Ok(result) => {
+                        if let Some(thrown) = self.pending_throw.take() {
+                            let _ = self.vm_call_function_value(ctx, &reject, &Value::Undefined, &[thrown]);
+                            self.pending_throw = None;
+                            return promise;
+                        }
+                        // PromiseResolve(%Promise%, result) then resolve with undefined
+                        let wrapper = self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[result]);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            let _ = self.vm_call_function_value(ctx, &reject, &Value::Undefined, &[thrown]);
+                            self.pending_throw = None;
+                            return promise;
+                        }
+                        // .then(() => undefined) — resolve the capability with undefined
+                        let _ = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, &[Value::Undefined]);
+                        self.pending_throw = None;
+                    }
+                    Err(err) => {
+                        let err_val = self.vm_value_from_error(ctx, &err);
+                        let _ = self.vm_call_function_value(ctx, &reject, &Value::Undefined, &[err_val]);
+                        self.pending_throw = None;
+                    }
+                }
+                promise
             }
             "iterator.drop" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
@@ -13025,6 +13119,13 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 }
             },
+            "error.suppressed" => match self.vm_construct_suppressed_error(ctx, args, None) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                    Value::Undefined
+                }
+            },
             "std.sprintf" => match crate::js_std::sprintf::handle_sprintf_call(args) {
                 Ok(v) => v,
                 Err(_) => Value::Undefined,
@@ -13035,6 +13136,8 @@ impl<'gc> VM<'gc> {
                 crate::js_std::tmpfile::vm_dispatch_file_method(name, receiver, args)
             }
             _ if name.starts_with("typedarray.") => self.typedarray_handle_host_fn(ctx, name, receiver, args),
+            _ if name.starts_with("disposableStack.") => self.disposable_stack_dispatch(ctx, name, receiver, args, false),
+            _ if name.starts_with("asyncDisposableStack.") => self.disposable_stack_dispatch(ctx, name, receiver, args, true),
             _ => Value::Undefined,
         }
     }
@@ -13077,6 +13180,8 @@ impl<'gc> VM<'gc> {
             || name.starts_with("species.")
             || name.starts_with("sharedArrayBuffer.")
             || name.starts_with("async.")
+            || name.starts_with("disposableStack.")
+            || name.starts_with("asyncDisposableStack.")
         {
             return self.call_host_fn(ctx, name, receiver, args);
         }
@@ -16578,6 +16683,8 @@ impl<'gc> VM<'gc> {
         let sym_search = make_well_known_symbol(9, "search");
         let sym_split = make_well_known_symbol(10, "split");
         let sym_match_all = make_well_known_symbol(11, "matchAll");
+        let sym_dispose = make_well_known_symbol(12, "dispose");
+        let sym_async_dispose = make_well_known_symbol(13, "asyncDispose");
         self.cache_symbol_value(1, &sym_iterator);
         self.cache_symbol_value(2, &sym_has_instance);
         self.cache_symbol_value(3, &sym_to_primitive);
@@ -16589,7 +16696,9 @@ impl<'gc> VM<'gc> {
         self.cache_symbol_value(9, &sym_search);
         self.cache_symbol_value(10, &sym_split);
         self.cache_symbol_value(11, &sym_match_all);
-        self.symbol_counter = 11; // user symbols start from 12+
+        self.cache_symbol_value(12, &sym_dispose);
+        self.cache_symbol_value(13, &sym_async_dispose);
+        self.symbol_counter = 13; // user symbols start from 14+
 
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
@@ -16604,6 +16713,8 @@ impl<'gc> VM<'gc> {
         sym_obj.insert("search".to_string(), sym_search);
         sym_obj.insert("split".to_string(), sym_split);
         sym_obj.insert("matchAll".to_string(), sym_match_all);
+        sym_obj.insert("dispose".to_string(), sym_dispose);
+        sym_obj.insert("asyncDispose".to_string(), sym_async_dispose);
         for key in [
             "iterator",
             "hasInstance",
@@ -16616,6 +16727,8 @@ impl<'gc> VM<'gc> {
             "search",
             "split",
             "matchAll",
+            "dispose",
+            "asyncDispose",
         ] {
             write_attrs_to_legacy_map(&mut sym_obj, key, PropAttrs::empty());
         }
@@ -17303,6 +17416,210 @@ impl<'gc> VM<'gc> {
             .insert("AggregateError".to_string(), aggregate_error_ctor_obj);
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "AggregateError");
 
+        // SuppressedError
+        let mut suppressed_error_proto = IndexMap::new();
+        suppressed_error_proto.insert("__type__".to_string(), Value::from("SuppressedError"));
+        suppressed_error_proto.insert("name".to_string(), Value::from("SuppressedError"));
+        suppressed_error_proto.insert("message".to_string(), Value::from(""));
+        suppressed_error_proto.insert("hasOwnProperty".to_string(), Value::VmNativeFunction(BUILTIN_OBJ_HASOWNPROPERTY));
+        mark_nonenumerable(&mut suppressed_error_proto, "name");
+        mark_nonenumerable(&mut suppressed_error_proto, "message");
+        mark_nonenumerable(&mut suppressed_error_proto, "hasOwnProperty");
+        let error_proto_for_suppressed =
+            self.read_named_property(ctx, &self.globals.get("Error").cloned().unwrap_or(Value::Undefined), "prototype");
+        suppressed_error_proto.insert("__proto__".to_string(), error_proto_for_suppressed);
+        let suppressed_error_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, suppressed_error_proto));
+
+        let mut suppressed_error_ctor = IndexMap::new();
+        suppressed_error_ctor.insert("__host_fn__".to_string(), Value::from("error.suppressed"));
+        suppressed_error_ctor.insert("__constructible__".to_string(), Value::Boolean(true));
+        suppressed_error_ctor.insert("name".to_string(), Value::from("SuppressedError"));
+        suppressed_error_ctor.insert("length".to_string(), Value::Number(3.0));
+        suppressed_error_ctor.insert("prototype".to_string(), suppressed_error_proto_obj.clone());
+        suppressed_error_ctor.insert(
+            "__proto__".to_string(),
+            self.globals.get("Error").cloned().unwrap_or(Value::Undefined),
+        );
+        write_attrs_to_legacy_map(&mut suppressed_error_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut suppressed_error_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_legacy_map(&mut suppressed_error_ctor, "prototype", PropAttrs::empty());
+
+        let suppressed_error_ctor_obj = Value::VmObject(new_gc_cell_ptr(ctx, suppressed_error_ctor));
+        if let Value::VmObject(proto) = &suppressed_error_proto_obj {
+            proto
+                .borrow_mut(ctx)
+                .insert("constructor".to_string(), suppressed_error_ctor_obj.clone());
+            mark_nonenumerable(&mut proto.borrow_mut(ctx), "constructor");
+        }
+
+        self.globals
+            .insert("SuppressedError".to_string(), suppressed_error_ctor_obj.clone());
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("SuppressedError".to_string(), suppressed_error_ctor_obj);
+        mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "SuppressedError");
+
+        // ── DisposableStack ────────────────────────────────────────────
+        {
+            let obj_proto = self.read_named_property(
+                ctx,
+                &self.globals.get("Object").cloned().unwrap_or(Value::Undefined),
+                "prototype",
+            );
+
+            let mut proto = IndexMap::new();
+            proto.insert("__type__".to_string(), Value::from("DisposableStack"));
+            proto.insert("__proto__".to_string(), obj_proto.clone());
+
+            let dispose_fn = Self::make_host_fn_with_name_len(ctx, "disposableStack.dispose", "dispose", 0.0, false);
+            proto.insert("dispose".to_string(), dispose_fn.clone());
+            mark_nonenumerable(&mut proto, "dispose");
+            // Symbol.dispose points to the same function as dispose()
+            proto.insert("@@sym:12".to_string(), dispose_fn);
+            mark_nonenumerable(&mut proto, "@@sym:12");
+
+            proto.insert(
+                "use".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "disposableStack.use", "use", 1.0, false),
+            );
+            mark_nonenumerable(&mut proto, "use");
+            proto.insert(
+                "adopt".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "disposableStack.adopt", "adopt", 2.0, false),
+            );
+            mark_nonenumerable(&mut proto, "adopt");
+            proto.insert(
+                "defer".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "disposableStack.defer", "defer", 1.0, false),
+            );
+            mark_nonenumerable(&mut proto, "defer");
+            proto.insert(
+                "move".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "disposableStack.move", "move", 0.0, false),
+            );
+            mark_nonenumerable(&mut proto, "move");
+
+            let disposed_getter =
+                Self::make_host_fn_with_name_len(ctx, "disposableStack.getDisposed", "get disposed", 0.0, false);
+            Self::insert_getter_property_with_attributes(&mut proto, "disposed", &disposed_getter, false, true);
+
+            proto.insert("@@sym:4".to_string(), Value::from("DisposableStack"));
+            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+
+            let proto_val = Value::VmObject(new_gc_cell_ptr(ctx, proto));
+
+            let mut ctor = IndexMap::new();
+            ctor.insert("__host_fn__".to_string(), Value::from("disposableStack.constructor"));
+            ctor.insert("__constructible__".to_string(), Value::Boolean(true));
+            ctor.insert("name".to_string(), Value::from("DisposableStack"));
+            ctor.insert("length".to_string(), Value::Number(0.0));
+            ctor.insert("prototype".to_string(), proto_val.clone());
+            if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+            {
+                ctor.insert("__proto__".to_string(), fn_proto);
+            }
+            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+
+            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor));
+            if let Value::VmObject(p) = &proto_val {
+                p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
+                mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
+            }
+            self.globals.insert("DisposableStack".to_string(), ctor_val.clone());
+            self.global_this.borrow_mut(ctx).insert("DisposableStack".to_string(), ctor_val);
+            mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "DisposableStack");
+        }
+
+        // ── AsyncDisposableStack ───────────────────────────────────────
+        {
+            let obj_proto = self.read_named_property(
+                ctx,
+                &self.globals.get("Object").cloned().unwrap_or(Value::Undefined),
+                "prototype",
+            );
+
+            let mut proto = IndexMap::new();
+            proto.insert("__type__".to_string(), Value::from("AsyncDisposableStack"));
+            proto.insert("__proto__".to_string(), obj_proto.clone());
+
+            let dispose_async_fn = Self::make_host_fn_with_name_len(
+                ctx,
+                "asyncDisposableStack.disposeAsync",
+                "disposeAsync",
+                0.0,
+                false,
+            );
+            proto.insert("disposeAsync".to_string(), dispose_async_fn.clone());
+            mark_nonenumerable(&mut proto, "disposeAsync");
+            // Symbol.asyncDispose points to the same function as disposeAsync()
+            proto.insert("@@sym:13".to_string(), dispose_async_fn);
+            mark_nonenumerable(&mut proto, "@@sym:13");
+
+            proto.insert(
+                "use".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "asyncDisposableStack.use", "use", 1.0, false),
+            );
+            mark_nonenumerable(&mut proto, "use");
+            proto.insert(
+                "adopt".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "asyncDisposableStack.adopt", "adopt", 2.0, false),
+            );
+            mark_nonenumerable(&mut proto, "adopt");
+            proto.insert(
+                "defer".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "asyncDisposableStack.defer", "defer", 1.0, false),
+            );
+            mark_nonenumerable(&mut proto, "defer");
+            proto.insert(
+                "move".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "asyncDisposableStack.move", "move", 0.0, false),
+            );
+            mark_nonenumerable(&mut proto, "move");
+
+            let disposed_getter = Self::make_host_fn_with_name_len(
+                ctx,
+                "asyncDisposableStack.getDisposed",
+                "get disposed",
+                0.0,
+                false,
+            );
+            Self::insert_getter_property_with_attributes(&mut proto, "disposed", &disposed_getter, false, true);
+
+            proto.insert("@@sym:4".to_string(), Value::from("AsyncDisposableStack"));
+            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+
+            let proto_val = Value::VmObject(new_gc_cell_ptr(ctx, proto));
+
+            let mut ctor = IndexMap::new();
+            ctor.insert("__host_fn__".to_string(), Value::from("asyncDisposableStack.constructor"));
+            ctor.insert("__constructible__".to_string(), Value::Boolean(true));
+            ctor.insert("name".to_string(), Value::from("AsyncDisposableStack"));
+            ctor.insert("length".to_string(), Value::Number(0.0));
+            ctor.insert("prototype".to_string(), proto_val.clone());
+            if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+            {
+                ctor.insert("__proto__".to_string(), fn_proto);
+            }
+            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+
+            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor));
+            if let Value::VmObject(p) = &proto_val {
+                p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
+                mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
+            }
+            self.globals.insert("AsyncDisposableStack".to_string(), ctor_val.clone());
+            self.global_this
+                .borrow_mut(ctx)
+                .insert("AsyncDisposableStack".to_string(), ctor_val);
+            mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "AsyncDisposableStack");
+        }
+
         self.globals
             .insert("__await__".to_string(), Self::make_host_fn(ctx, "promise.await"));
         self.globals
@@ -17487,6 +17804,19 @@ impl<'gc> VM<'gc> {
         Self::insert_constructor_backref(ctx, &object_proto, &object_val.clone());
         self.globals.insert("Object".to_string(), object_val.clone());
         self.global_this.borrow_mut(ctx).insert("Object".to_string(), object_val);
+
+        // Fix up __proto__ for DisposableStack/AsyncDisposableStack prototypes
+        // (they were created before Object was available)
+        for ctor_name in ["DisposableStack", "AsyncDisposableStack"] {
+            if let Some(Value::VmObject(ctor_obj)) = self.globals.get(ctor_name) {
+                if let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype") {
+                    proto_obj
+                        .borrow_mut(ctx)
+                        .insert("__proto__".to_string(), Value::VmObject(object_proto));
+                }
+            }
+        }
+
         let mut iterator_proto = IndexMap::new();
         iterator_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
         iterator_proto.insert(
@@ -17513,6 +17843,12 @@ impl<'gc> VM<'gc> {
             );
             mark_nonenumerable(&mut iterator_proto, name);
         }
+        // Iterator.prototype[Symbol.dispose] — calls this.return() if it exists
+        iterator_proto.insert(
+            "@@sym:12".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.dispose", "[Symbol.dispose]", 0.0, false),
+        );
+        mark_nonenumerable(&mut iterator_proto, "@@sym:12");
         let iterator_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iterator_proto));
         self.globals.insert("__IteratorPrototype__".to_string(), iterator_proto_val.clone());
 
@@ -18475,6 +18811,12 @@ impl<'gc> VM<'gc> {
         let mut async_iterator_proto = IndexMap::new();
         async_iterator_proto.insert(async_iterator_key.clone(), async_iterator_method);
         mark_nonenumerable(&mut async_iterator_proto, &async_iterator_key);
+        // AsyncIteratorPrototype[Symbol.asyncDispose] — calls this.return() and wraps in Promise
+        async_iterator_proto.insert(
+            "@@sym:13".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "iterator.asyncDispose", "[Symbol.asyncDispose]", 0.0, false),
+        );
+        mark_nonenumerable(&mut async_iterator_proto, "@@sym:13");
         if let Some(Value::VmObject(object_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
         {
@@ -18738,7 +19080,15 @@ impl<'gc> VM<'gc> {
     fn is_error_type_name(name: &str) -> bool {
         matches!(
             name,
-            "Error" | "TypeError" | "SyntaxError" | "RangeError" | "ReferenceError" | "EvalError" | "URIError" | "AggregateError"
+            "Error"
+                | "TypeError"
+                | "SyntaxError"
+                | "RangeError"
+                | "ReferenceError"
+                | "EvalError"
+                | "URIError"
+                | "AggregateError"
+                | "SuppressedError"
         )
     }
 
@@ -19683,6 +20033,527 @@ impl<'gc> VM<'gc> {
         }
 
         Ok(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
+    }
+
+    /// Construct a SuppressedError object: SuppressedError(error, suppressed, message?)
+    fn vm_construct_suppressed_error(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        args: &[Value<'gc>],
+        new_target: Option<&Value<'gc>>,
+    ) -> Result<Value<'gc>, JSError> {
+        let suppressed_ctor = self.globals.get("SuppressedError").cloned().unwrap_or(Value::Undefined);
+        let proto_source = new_target.unwrap_or(&suppressed_ctor);
+        let selected_proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, proto_source, "SuppressedError")? {
+            Some(p) => p,
+            None => {
+                if let Value::VmObject(ctor) = &suppressed_ctor {
+                    ctor.borrow().get("prototype").cloned().unwrap_or(Value::Undefined)
+                } else {
+                    Value::Undefined
+                }
+            }
+        };
+
+        let error_val = args.first().cloned().unwrap_or(Value::Undefined);
+        let suppressed_val = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let message = if let Some(msg_val) = args.get(2) {
+            if matches!(msg_val, Value::Undefined) {
+                None
+            } else {
+                Some(self.vm_to_string_like_spec(ctx, msg_val)?)
+            }
+        } else {
+            None
+        };
+
+        let mut obj = IndexMap::new();
+        obj.insert("__type__".to_string(), Value::from("SuppressedError"));
+        obj.insert("name".to_string(), Value::from("SuppressedError"));
+        // Spec order: message (if present) → error → suppressed
+        if let Some(msg) = message {
+            obj.insert("message".to_string(), Value::from(&msg));
+            mark_nonenumerable(&mut obj, "message");
+        }
+        obj.insert("error".to_string(), error_val);
+        mark_nonenumerable(&mut obj, "error");
+        obj.insert("suppressed".to_string(), suppressed_val);
+        mark_nonenumerable(&mut obj, "suppressed");
+        if !matches!(selected_proto, Value::Undefined) {
+            obj.insert("__proto__".to_string(), selected_proto);
+        }
+
+        Ok(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
+    }
+
+    // ── DisposableStack / AsyncDisposableStack helpers ──────────────
+
+    /// Construct a new DisposableStack or AsyncDisposableStack instance.
+    fn vm_construct_disposable_stack(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_map: crate::core::VmObjectHandle<'gc>,
+        is_async: bool,
+        new_target: Option<&Value<'gc>>,
+    ) -> Result<Value<'gc>, JSError> {
+        let type_name = if is_async { "AsyncDisposableStack" } else { "DisposableStack" };
+        let ctor_val = self.globals.get(type_name).cloned().unwrap_or(Value::Undefined);
+        let proto_source = new_target.unwrap_or(&ctor_val);
+        let selected_proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, proto_source, type_name)? {
+            Some(p) => p,
+            None => ctor_map.borrow().get("prototype").cloned().unwrap_or(Value::Undefined),
+        };
+        let mut obj = IndexMap::new();
+        obj.insert("__type__".to_string(), Value::from(type_name));
+        obj.insert("__disposable_state__".to_string(), Value::from("pending"));
+        obj.insert(
+            "__dispose_stack__".to_string(),
+            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![]))),
+        );
+        if !matches!(selected_proto, Value::Undefined) {
+            obj.insert("__proto__".to_string(), selected_proto);
+        }
+        Ok(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
+    }
+
+    /// Validate that `receiver` is a DisposableStack (or AsyncDisposableStack) object.
+    /// Returns the object handle on success, or sets pending_throw and returns None.
+    fn disposable_stack_validate_this<'a>(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&'a Value<'gc>>,
+        expected_type: &str,
+        method_name: &str,
+    ) -> Option<crate::core::VmObjectHandle<'gc>> {
+        let Value::VmObject(obj) = receiver.unwrap_or(&Value::Undefined) else {
+            self.throw_type_error(ctx, &format!("{method_name} called on incompatible receiver"));
+            return None;
+        };
+        let is_valid = matches!(
+            obj.borrow().get("__type__"),
+            Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == expected_type
+        ) && obj.borrow().contains_key("__disposable_state__");
+        if !is_valid {
+            self.throw_type_error(ctx, &format!("{method_name} called on incompatible receiver"));
+            return None;
+        }
+        Some(*obj)
+    }
+
+    /// Check if the disposable stack is already disposed; if so, set pending_throw with
+    /// ReferenceError and return true.
+    fn disposable_stack_check_disposed(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        obj: &crate::core::VmObjectHandle<'gc>,
+        method_name: &str,
+    ) -> bool {
+        let state = obj.borrow().get("__disposable_state__").cloned();
+        if let Some(Value::String(s)) = state {
+            if crate::unicode::utf16_to_utf8(&s) == "disposed" {
+                self.pending_throw = Some(self.make_reference_error(
+                    ctx,
+                    &format!("{method_name} called on a disposed stack"),
+                ));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Execute the sync dispose algorithm: iterate the stack in reverse order, calling
+    /// each dispose method, and aggregate errors via SuppressedError.
+    fn disposable_stack_perform_dispose(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        obj: &crate::core::VmObjectHandle<'gc>,
+    ) -> Value<'gc> {
+        // Mark as disposed
+        obj.borrow_mut(ctx).insert(
+            "__disposable_state__".to_string(),
+            Value::from("disposed"),
+        );
+        // Take the stack
+        let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
+            Some(Value::VmArray(arr)) => arr,
+            _ => return Value::Undefined,
+        };
+        let entries: Vec<Value<'gc>> = stack_arr.borrow().iter().cloned().collect();
+        // Clear the stack in the object
+        stack_arr.borrow_mut(ctx).clear();
+
+        let mut completion_error: Option<Value<'gc>> = None;
+
+        // Iterate in REVERSE order
+        for entry in entries.iter().rev() {
+            let Value::VmObject(entry_obj) = entry else { continue };
+            let method = entry_obj.borrow().get("__dispose_method__").cloned().unwrap_or(Value::Undefined);
+            let value = entry_obj.borrow().get("__dispose_value__").cloned().unwrap_or(Value::Undefined);
+            let is_adopt = entry_obj.borrow().contains_key("__adopt_callback__");
+
+            let call_result = if is_adopt {
+                let callback = entry_obj.borrow().get("__adopt_callback__").cloned().unwrap_or(Value::Undefined);
+                let adopt_value = entry_obj.borrow().get("__adopt_value__").cloned().unwrap_or(Value::Undefined);
+                self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[adopt_value])
+            } else {
+                self.vm_call_function_value(ctx, &method, &value, &[])
+            };
+
+            // Check for errors from the call or from pending_throw
+            let err_val = match call_result {
+                Err(err) => Some(self.vm_value_from_error(ctx, &err)),
+                Ok(_) => self.pending_throw.take(),
+            };
+
+            if let Some(new_err) = err_val {
+                completion_error = Some(match completion_error {
+                    Some(prev_err) => {
+                        // SuppressedError(new_err, prev_err)
+                        match self.vm_construct_suppressed_error(ctx, &[new_err, prev_err], None) {
+                            Ok(v) => v,
+                            Err(e) => self.vm_value_from_error(ctx, &e),
+                        }
+                    }
+                    None => new_err,
+                });
+            }
+        }
+
+        if let Some(err) = completion_error {
+            self.pending_throw = Some(err);
+        }
+        Value::Undefined
+    }
+
+    /// Execute the async dispose algorithm: iterate the stack in reverse order, calling
+    /// each dispose method (possibly awaiting), and aggregate errors via SuppressedError.
+    /// Returns a Promise that resolves to undefined or rejects with the aggregated error.
+    fn disposable_stack_perform_dispose_async(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        obj: &crate::core::VmObjectHandle<'gc>,
+    ) -> Value<'gc> {
+        // Mark as disposed
+        obj.borrow_mut(ctx).insert(
+            "__disposable_state__".to_string(),
+            Value::from("disposed"),
+        );
+        // Take the stack
+        let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
+            Some(Value::VmArray(arr)) => arr,
+            _ => {
+                // Return Promise.resolve(undefined)
+                let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+                return self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[Value::Undefined]);
+            }
+        };
+        let entries: Vec<Value<'gc>> = stack_arr.borrow().iter().cloned().collect();
+        stack_arr.borrow_mut(ctx).clear();
+
+        let mut completion_error: Option<Value<'gc>> = None;
+
+        // Iterate in REVERSE order
+        for entry in entries.iter().rev() {
+            let Value::VmObject(entry_obj) = entry else { continue };
+            let method = entry_obj.borrow().get("__dispose_method__").cloned().unwrap_or(Value::Undefined);
+            let value = entry_obj.borrow().get("__dispose_value__").cloned().unwrap_or(Value::Undefined);
+            let is_adopt = entry_obj.borrow().contains_key("__adopt_callback__");
+
+            let call_result = if is_adopt {
+                let callback = entry_obj.borrow().get("__adopt_callback__").cloned().unwrap_or(Value::Undefined);
+                let adopt_value = entry_obj.borrow().get("__adopt_value__").cloned().unwrap_or(Value::Undefined);
+                self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[adopt_value])
+            } else {
+                self.vm_call_function_value(ctx, &method, &value, &[])
+            };
+
+            let intermediate = match call_result {
+                Err(err) => {
+                    let err_val = self.vm_value_from_error(ctx, &err);
+                    completion_error = Some(match completion_error {
+                        Some(prev) => match self.vm_construct_suppressed_error(ctx, &[err_val, prev], None) {
+                            Ok(v) => v,
+                            Err(e) => self.vm_value_from_error(ctx, &e),
+                        },
+                        None => err_val,
+                    });
+                    continue;
+                }
+                Ok(v) => {
+                    if let Some(thrown) = self.pending_throw.take() {
+                        completion_error = Some(match completion_error {
+                            Some(prev) => match self.vm_construct_suppressed_error(ctx, &[thrown, prev], None) {
+                                Ok(v) => v,
+                                Err(e) => self.vm_value_from_error(ctx, &e),
+                            },
+                            None => thrown,
+                        });
+                        continue;
+                    }
+                    v
+                }
+            };
+
+            // Await the result
+            let _awaited = self.call_host_fn(ctx, "promise.await", None, std::slice::from_ref(&intermediate));
+            if let Some(thrown) = self.pending_throw.take() {
+                completion_error = Some(match completion_error {
+                    Some(prev) => match self.vm_construct_suppressed_error(ctx, &[thrown, prev], None) {
+                        Ok(v) => v,
+                        Err(e) => self.vm_value_from_error(ctx, &e),
+                    },
+                    None => thrown,
+                });
+            }
+        }
+
+        let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+        if let Some(err) = completion_error {
+            // Return a rejected promise
+            // Create a resolved promise and reject it via throw
+            let (promise, _resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                    return Value::Undefined;
+                }
+            };
+            let _ = self.vm_call_function_value(ctx, &reject, &Value::Undefined, &[err]);
+            self.pending_throw = None;
+            return promise;
+        }
+        self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[Value::Undefined])
+    }
+
+    /// Dispatch host function calls for DisposableStack / AsyncDisposableStack methods.
+    fn disposable_stack_dispatch(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        name: &str,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+        is_async: bool,
+    ) -> Value<'gc> {
+        let type_name = if is_async { "AsyncDisposableStack" } else { "DisposableStack" };
+        let method = if is_async {
+            name.strip_prefix("asyncDisposableStack.").unwrap_or(name)
+        } else {
+            name.strip_prefix("disposableStack.").unwrap_or(name)
+        };
+
+        match method {
+            "constructor" => {
+                // Called via super() — receiver is present from method call
+                // Called directly without new — receiver is None
+                if receiver.is_none() {
+                    self.throw_type_error(ctx, &format!("{type_name} constructor requires 'new'"));
+                    return Value::Undefined;
+                }
+                let ctor_val = self.globals.get(type_name).cloned().unwrap_or(Value::Undefined);
+                let Value::VmObject(ctor_map) = &ctor_val else {
+                    self.throw_type_error(ctx, &format!("{type_name} constructor not found"));
+                    return Value::Undefined;
+                };
+                match self.vm_construct_disposable_stack(ctx, *ctor_map, is_async, None) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        Value::Undefined
+                    }
+                }
+            }
+            "getDisposed" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("get {type_name}.prototype.disposed")) else {
+                    return Value::Undefined;
+                };
+                let state = obj.borrow().get("__disposable_state__").cloned();
+                match state {
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(&s) == "disposed" => Value::Boolean(true),
+                    _ => Value::Boolean(false),
+                }
+            }
+            "dispose" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.dispose")) else {
+                    return Value::Undefined;
+                };
+                // If already disposed, return undefined
+                let state = obj.borrow().get("__disposable_state__").cloned();
+                if let Some(Value::String(s)) = state {
+                    if crate::unicode::utf16_to_utf8(&s) == "disposed" {
+                        return Value::Undefined;
+                    }
+                }
+                self.disposable_stack_perform_dispose(ctx, &obj)
+            }
+            "disposeAsync" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.disposeAsync")) else {
+                    return Value::Undefined;
+                };
+                let state = obj.borrow().get("__disposable_state__").cloned();
+                if let Some(Value::String(s)) = state {
+                    if crate::unicode::utf16_to_utf8(&s) == "disposed" {
+                        // Return Promise.resolve(undefined)
+                        let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+                        return self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[Value::Undefined]);
+                    }
+                }
+                self.disposable_stack_perform_dispose_async(ctx, &obj)
+            }
+            "use" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.use")) else {
+                    return Value::Undefined;
+                };
+                if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.use")) {
+                    return Value::Undefined;
+                }
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                // null/undefined → no-op, return value
+                if matches!(value, Value::Null | Value::Undefined) {
+                    return value;
+                }
+                // Must be an object
+                if !matches!(value, Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)) {
+                    self.throw_type_error(ctx, &format!("{type_name}.prototype.use: value must be an object or null/undefined"));
+                    return Value::Undefined;
+                }
+                // For async, try Symbol.asyncDispose first, then fall back to Symbol.dispose
+                let dispose_method = if is_async {
+                    let async_method = self.read_named_property(ctx, &value, "@@sym:13");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if matches!(async_method, Value::Undefined | Value::Null) {
+                        let sync_method = self.read_named_property(ctx, &value, "@@sym:12");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if matches!(sync_method, Value::Undefined | Value::Null) {
+                            self.throw_type_error(ctx, &format!("{type_name}.prototype.use: value does not have a Symbol.asyncDispose or Symbol.dispose method"));
+                            return Value::Undefined;
+                        }
+                        if !self.is_value_callable(&sync_method) {
+                            self.throw_type_error(ctx, &format!("{type_name}.prototype.use: Symbol.dispose method is not callable"));
+                            return Value::Undefined;
+                        }
+                        sync_method
+                    } else {
+                        if !self.is_value_callable(&async_method) {
+                            self.throw_type_error(ctx, &format!("{type_name}.prototype.use: Symbol.asyncDispose method is not callable"));
+                            return Value::Undefined;
+                        }
+                        async_method
+                    }
+                } else {
+                    let method = self.read_named_property(ctx, &value, "@@sym:12");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if matches!(method, Value::Undefined | Value::Null) {
+                        self.throw_type_error(ctx, &format!("{type_name}.prototype.use: value does not have a Symbol.dispose method"));
+                        return Value::Undefined;
+                    }
+                    if !self.is_value_callable(&method) {
+                        self.throw_type_error(ctx, &format!("{type_name}.prototype.use: Symbol.dispose method is not callable"));
+                        return Value::Undefined;
+                    }
+                    method
+                };
+
+                // Push {__dispose_value__: value, __dispose_method__: method} to stack
+                let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
+                    Some(Value::VmArray(arr)) => arr,
+                    _ => return Value::Undefined,
+                };
+                let mut entry = IndexMap::new();
+                entry.insert("__dispose_value__".to_string(), value.clone());
+                entry.insert("__dispose_method__".to_string(), dispose_method);
+                stack_arr.borrow_mut(ctx).push(Value::VmObject(new_gc_cell_ptr(ctx, entry)));
+                value
+            }
+            "adopt" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.adopt")) else {
+                    return Value::Undefined;
+                };
+                if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.adopt")) {
+                    return Value::Undefined;
+                }
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                let on_dispose = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&on_dispose) {
+                    self.throw_type_error(ctx, &format!("{type_name}.prototype.adopt: onDispose must be callable"));
+                    return Value::Undefined;
+                }
+                let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
+                    Some(Value::VmArray(arr)) => arr,
+                    _ => return Value::Undefined,
+                };
+                let mut entry = IndexMap::new();
+                entry.insert("__dispose_value__".to_string(), Value::Undefined);
+                entry.insert("__dispose_method__".to_string(), Value::Undefined);
+                entry.insert("__adopt_value__".to_string(), value.clone());
+                entry.insert("__adopt_callback__".to_string(), on_dispose);
+                stack_arr.borrow_mut(ctx).push(Value::VmObject(new_gc_cell_ptr(ctx, entry)));
+                value
+            }
+            "defer" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.defer")) else {
+                    return Value::Undefined;
+                };
+                if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.defer")) {
+                    return Value::Undefined;
+                }
+                let on_dispose = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_value_callable(&on_dispose) {
+                    self.throw_type_error(ctx, &format!("{type_name}.prototype.defer: onDispose must be callable"));
+                    return Value::Undefined;
+                }
+                let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
+                    Some(Value::VmArray(arr)) => arr,
+                    _ => return Value::Undefined,
+                };
+                let mut entry = IndexMap::new();
+                entry.insert("__dispose_value__".to_string(), Value::Undefined);
+                entry.insert("__dispose_method__".to_string(), on_dispose);
+                stack_arr.borrow_mut(ctx).push(Value::VmObject(new_gc_cell_ptr(ctx, entry)));
+                Value::Undefined
+            }
+            "move" => {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.move")) else {
+                    return Value::Undefined;
+                };
+                if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.move")) {
+                    return Value::Undefined;
+                }
+
+                let ctor_name = type_name;
+                let ctor = self.globals.get(ctor_name).cloned().unwrap_or(Value::Undefined);
+                let Value::VmObject(ctor_map) = &ctor else {
+                    self.throw_type_error(ctx, &format!("{ctor_name} constructor not found"));
+                    return Value::Undefined;
+                };
+                let new_instance = match self.vm_construct_disposable_stack(ctx, *ctor_map, is_async, None) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                        return Value::Undefined;
+                    }
+                };
+
+                // Transfer the stack
+                let old_stack = obj.borrow().get("__dispose_stack__").cloned();
+                if let Value::VmObject(new_obj) = &new_instance {
+                    if let Some(stack_val) = old_stack {
+                        new_obj.borrow_mut(ctx).insert("__dispose_stack__".to_string(), stack_val);
+                    }
+                }
+
+                // Set current object to disposed with empty stack
+                obj.borrow_mut(ctx).insert(
+                    "__disposable_state__".to_string(),
+                    Value::from("disposed"),
+                );
+                obj.borrow_mut(ctx).insert(
+                    "__dispose_stack__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![]))),
+                );
+                new_instance
+            }
+            _ => Value::Undefined,
+        }
     }
 
     /// Display a value for console.log (uses inspect-style format for arrays/objects)
@@ -37215,6 +38086,12 @@ impl<'gc> VM<'gc> {
                                     }
                                 } else if host_name == "error.aggregate" {
                                     self.vm_construct_aggregate_error(ctx, args, new_target)
+                                } else if host_name == "error.suppressed" {
+                                    self.vm_construct_suppressed_error(ctx, args, new_target)
+                                } else if host_name == "disposableStack.constructor" {
+                                    self.vm_construct_disposable_stack(ctx, map, false, new_target)
+                                } else if host_name == "asyncDisposableStack.constructor" {
+                                    self.vm_construct_disposable_stack(ctx, map, true, new_target)
                                 } else if host_name == "intl.segmenter.ctor" {
                                     let (proto, segments_proto, segment_iter_proto) = {
                                         let borrow = map.borrow();

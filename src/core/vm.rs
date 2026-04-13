@@ -3574,6 +3574,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_ARRAY_ITERATOR => "keys",
             BUILTIN_ARRAY_OF => "of",
             BUILTIN_ARRAY_FROM => "from",
+            BUILTIN_ARRAY_FROMASYNC => "fromAsync",
             BUILTIN_ARRAY_SHIFT => "shift",
             BUILTIN_ARRAY_UNSHIFT => "unshift",
             BUILTIN_ARRAY_SPLICE => "splice",
@@ -3796,6 +3797,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_ARRAY_ITERATOR => 0.0,
             BUILTIN_ARRAY_OF => 0.0,
             BUILTIN_ARRAY_FROM => 1.0,
+            BUILTIN_ARRAY_FROMASYNC => 1.0,
             BUILTIN_ARRAY_SHIFT => 0.0,
             BUILTIN_ARRAY_UNSHIFT => 1.0,
             BUILTIN_ARRAY_SPLICE => 2.0,
@@ -17146,6 +17148,7 @@ impl<'gc> VM<'gc> {
         array_obj.insert("isArray".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_ISARRAY));
         array_obj.insert("of".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_OF));
         array_obj.insert("from".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FROM));
+        array_obj.insert("fromAsync".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_FROMASYNC));
         array_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAY as f64));
         array_obj.insert("name".to_string(), Value::from("Array"));
         array_obj.insert("length".to_string(), Value::Number(1.0));
@@ -17154,6 +17157,7 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut array_obj, "isArray");
         mark_nonenumerable(&mut array_obj, "of");
         mark_nonenumerable(&mut array_obj, "from");
+        mark_nonenumerable(&mut array_obj, "fromAsync");
         Self::insert_species_getter(&mut array_obj, ctx);
         // Create Array.prototype with iterator method
         let mut arr_proto = VmArrayData::new(Vec::new());
@@ -23931,6 +23935,280 @@ impl<'gc> VM<'gc> {
                 }
                 target
             }
+            BUILTIN_ARRAY_FROMASYNC => {
+                // Array.fromAsync(asyncItems[, mapFn[, thisArg]])
+                let async_items = args.first().cloned().unwrap_or(Value::Undefined);
+                let map_fn = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let mapping = !matches!(map_fn, Value::Undefined);
+                if mapping && !self.is_value_callable(&map_fn) {
+                    self.throw_type_error(ctx, "Array.fromAsync map function must be callable");
+                    return Value::Undefined;
+                }
+
+                let ctor_this = self.this_stack.last().cloned();
+
+                let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+                let (promise_obj, resolve_fn, reject_fn) = match self.new_promise_capability(ctx, &promise_ctor) {
+                    Ok(triple) => triple,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+
+                // Macro for rejecting with pending_throw
+                macro_rules! reject_pending {
+                    ($self:ident, $ctx:ident, $reject_fn:ident, $promise_obj:ident) => {
+                        if $self.pending_throw.is_some() {
+                            let err = $self.pending_throw.take().unwrap();
+                            let _ = $self.vm_call_function_value($ctx, &$reject_fn, &Value::Undefined, &[err]);
+                            return $promise_obj;
+                        }
+                    };
+                }
+
+                // Convert to object
+                let items_obj = match &async_items {
+                    Value::Undefined | Value::Null => {
+                        let err_val = self.make_type_error_object(ctx, "Cannot convert undefined or null to object");
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        return promise_obj;
+                    }
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
+                        async_items.clone()
+                    }
+                    _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&async_items)),
+                };
+
+                // Check @@asyncIterator
+                let async_iter_method = self.read_named_property(ctx, &items_obj, "@@sym:8");
+                reject_pending!(self, ctx, reject_fn, promise_obj);
+                let use_async = !matches!(async_iter_method, Value::Undefined | Value::Null);
+
+                // If @@asyncIterator present but not callable, reject
+                if use_async && !self.is_value_callable(&async_iter_method) {
+                    let err_val = self.make_type_error_object(ctx, "Symbol.asyncIterator is not a function");
+                    let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                    return promise_obj;
+                }
+
+                let sync_iter_method = if !use_async {
+                    let m = self.read_named_property(ctx, &items_obj, "@@sym:1");
+                    reject_pending!(self, ctx, reject_fn, promise_obj);
+                    m
+                } else {
+                    Value::Undefined
+                };
+                let use_sync = !use_async && !matches!(sync_iter_method, Value::Undefined | Value::Null);
+
+                if use_async || use_sync {
+                    // ── Iterable path ──
+                    let iter_method = if use_async { &async_iter_method } else { &sync_iter_method };
+                    let iterator = match self.vm_call_function_value(ctx, iter_method, &items_obj, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            let err_val = self.vm_value_from_error(ctx, &err);
+                            let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                            return promise_obj;
+                        }
+                    };
+                    let next_method = self.read_named_property(ctx, &iterator, "next");
+                    reject_pending!(self, ctx, reject_fn, promise_obj);
+
+                    // Create target: use custom constructor if available, else plain array
+                    let target = match self.array_from_create_target(ctx, ctor_this.as_ref(), None) {
+                        Some(t) => t,
+                        None => {
+                            if let Some(err) = self.pending_throw.take() {
+                                let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err]);
+                            }
+                            return promise_obj;
+                        }
+                    };
+
+                    // Helper closure for closing iterator on error
+                    let close_iterator = |vm: &mut Self, ctx: &GcContext<'gc>, iterator: &Value<'gc>| {
+                        let ret_method = vm.read_named_property(ctx, iterator, "return");
+                        if vm.pending_throw.is_some() { vm.pending_throw = None; return; }
+                        if vm.is_value_callable(&ret_method) {
+                            let _ = vm.vm_call_function_value(ctx, &ret_method, iterator, &[]);
+                            vm.pending_throw = None; // ignore errors from return()
+                        }
+                    };
+
+                    let mut index: u64 = 0;
+                    let mut error_val: Option<Value<'gc>> = None;
+                    loop {
+                        let next_result = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                error_val = Some(self.vm_value_from_error(ctx, &err));
+                                break;
+                            }
+                        };
+                        // For async iterators, await the next result
+                        let next_result = if use_async {
+                            match self.await_promise_sync(ctx, &next_result) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    error_val = Some(self.vm_value_from_error(ctx, &err));
+                                    break;
+                                }
+                            }
+                        } else {
+                            next_result
+                        };
+
+                        let done = self.read_named_property(ctx, &next_result, "done");
+                        if done.to_truthy() { break; }
+                        let value = self.read_named_property(ctx, &next_result, "value");
+
+                        // For sync iterators, await each value; for async iterators, don't
+                        let value = if !use_async {
+                            match self.await_promise_sync(ctx, &value) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    error_val = Some(self.vm_value_from_error(ctx, &err));
+                                    break;
+                                }
+                            }
+                        } else {
+                            value
+                        };
+
+                        // Apply mapFn if present
+                        let mapped = if mapping {
+                            match self.vm_call_function_value(ctx, &map_fn, &this_arg, &[value, Value::Number(index as f64)]) {
+                                Ok(v) => {
+                                    match self.await_promise_sync(ctx, &v) {
+                                        Ok(v2) => v2,
+                                        Err(err) => {
+                                            error_val = Some(self.vm_value_from_error(ctx, &err));
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    close_iterator(self, ctx, &iterator);
+                                    error_val = Some(self.vm_value_from_error(ctx, &err));
+                                    break;
+                                }
+                            }
+                        } else {
+                            value
+                        };
+
+                        // CreateDataPropertyOrThrow - close iterator on failure
+                        if let Err(err) = self.create_data_property_or_throw(ctx, &target, &index.to_string(), &mapped) {
+                            close_iterator(self, ctx, &iterator);
+                            error_val = Some(self.vm_value_from_error(ctx, &err));
+                            break;
+                        }
+                        index += 1;
+                    }
+
+                    if let Some(err) = error_val {
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err]);
+                        return promise_obj;
+                    }
+
+                    // Set length
+                    if let Err(err) = self.assign_named_property(ctx, &target, "length", &Value::Number(index as f64), None) {
+                        let err_val = self.vm_value_from_error(ctx, &err);
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        return promise_obj;
+                    }
+                    let _ = self.vm_call_function_value(ctx, &resolve_fn, &Value::Undefined, &[target]);
+                } else {
+                    // ── Array-like path ──
+                    let len_val = self.read_named_property(ctx, &items_obj, "length");
+                    reject_pending!(self, ctx, reject_fn, promise_obj);
+
+                    // Length coercion - handle BigInt TypeError
+                    if matches!(len_val, Value::BigInt(_)) {
+                        let err_val = self.make_type_error_object(ctx, "Cannot convert a BigInt value to a number");
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        return promise_obj;
+                    }
+                    let len_num = to_number(&len_val);
+                    let len = if len_num.is_nan() || len_num <= 0.0 {
+                        0usize
+                    } else if len_num >= 9_007_199_254_740_992.0 {
+                        let err_val = self.make_range_error_object(ctx, "Invalid array length");
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        return promise_obj;
+                    } else {
+                        len_num as usize
+                    };
+
+                    // Check if C is a constructor - if not, ArrayCreate limit is 2^32-1
+                    let c_is_ctor = ctor_this.as_ref().map_or(false, |c| self.is_constructor_value(c));
+                    if !c_is_ctor && len_num >= 4_294_967_296.0 {
+                        let err_val = self.make_range_error_object(ctx, "Invalid array length");
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        return promise_obj;
+                    }
+
+                    // Create target using constructor or ArrayCreate
+                    let target = match self.array_from_create_target(ctx, ctor_this.as_ref(), Some(len as u64)) {
+                        Some(t) => t,
+                        None => {
+                            if let Some(err) = self.pending_throw.take() {
+                                let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err]);
+                            }
+                            return promise_obj;
+                        }
+                    };
+
+                    for i in 0..len {
+                        let key = i.to_string();
+                        let value = self.read_named_property(ctx, &items_obj, &key);
+                        reject_pending!(self, ctx, reject_fn, promise_obj);
+                        let awaited = match self.await_promise_sync(ctx, &value) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                let err_val = self.vm_value_from_error(ctx, &err);
+                                let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                                return promise_obj;
+                            }
+                        };
+                        let mapped = if mapping {
+                            match self.vm_call_function_value(ctx, &map_fn, &this_arg, &[awaited, Value::Number(i as f64)]) {
+                                Ok(v) => match self.await_promise_sync(ctx, &v) {
+                                    Ok(v2) => v2,
+                                    Err(err) => {
+                                        let err_val = self.vm_value_from_error(ctx, &err);
+                                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                                        return promise_obj;
+                                    }
+                                },
+                                Err(err) => {
+                                    let err_val = self.vm_value_from_error(ctx, &err);
+                                    let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                                    return promise_obj;
+                                }
+                            }
+                        } else {
+                            awaited
+                        };
+                        if let Err(err) = self.create_data_property_or_throw(ctx, &target, &key, &mapped) {
+                            let err_val = self.vm_value_from_error(ctx, &err);
+                            let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                            return promise_obj;
+                        }
+                    }
+                    // Set length
+                    if let Err(err) = self.assign_named_property(ctx, &target, "length", &Value::Number(len as f64), None) {
+                        let err_val = self.vm_value_from_error(ctx, &err);
+                        let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                        return promise_obj;
+                    }
+                    let _ = self.vm_call_function_value(ctx, &resolve_fn, &Value::Undefined, &[target]);
+                }
+
+                promise_obj
+            }
             BUILTIN_JSON_STRINGIFY => {
                 let gap = match self.json_gap_from_space(ctx, args.get(2)) {
                     Some(gap) => gap,
@@ -28518,7 +28796,7 @@ impl<'gc> VM<'gc> {
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
                 return self.call_builtin(ctx, id, args);
             }
-            BUILTIN_ARRAY_OF | BUILTIN_ARRAY_FROM => {
+            BUILTIN_ARRAY_OF | BUILTIN_ARRAY_FROM | BUILTIN_ARRAY_FROMASYNC => {
                 self.this_stack.push(receiver.clone());
                 let out = self.call_builtin(ctx, id, args);
                 self.this_stack.pop();
@@ -42923,6 +43201,33 @@ impl<'gc> VM<'gc> {
             for task in batch {
                 self.run_then_microtask(ctx, task);
             }
+        }
+    }
+
+    /// Synchronously resolve a value that may be a promise.
+    /// If the value is a settled promise, returns its value.
+    /// If not a promise, returns the value as-is.
+    fn await_promise_sync(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+        match value {
+            Value::VmObject(obj) => {
+                let b = obj.borrow();
+                let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                if !is_promise {
+                    return Ok(value.clone());
+                }
+                let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                let pv = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
+                drop(b);
+                // Drain microtasks to ensure promise is settled
+                self.drain_microtasks(ctx);
+                if rejected {
+                    let msg = crate::core::value::value_to_string(&pv);
+                    return Err(crate::raise_type_error!(msg));
+                }
+                // The resolved value might itself be a promise — unwrap recursively
+                self.await_promise_sync(ctx, &pv)
+            }
+            _ => Ok(value.clone()),
         }
     }
 

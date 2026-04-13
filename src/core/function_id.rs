@@ -98,6 +98,7 @@ pub(crate) const BUILTIN_ARRAY_LASTINDEXOF: FunctionID = 89;
 pub(crate) const BUILTIN_ARRAY_FINDLAST: FunctionID = 90;
 pub(crate) const BUILTIN_ARRAY_FINDLASTINDEX: FunctionID = 91;
 pub(crate) const BUILTIN_ARRAY_ITERATOR: FunctionID = 92;
+pub(crate) const BUILTIN_ARRAY_FROMASYNC: FunctionID = 93;
 // ── String (110–159) ────────────────────────────────────────────────
 pub(crate) const BUILTIN_STRING_SPLIT: FunctionID = 110;
 pub(crate) const BUILTIN_STRING_INDEXOF: FunctionID = 111;

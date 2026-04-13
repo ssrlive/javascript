@@ -5279,6 +5279,11 @@ impl<'gc> VM<'gc> {
                     self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot resize a detached ArrayBuffer"));
                     return Value::Undefined;
                 }
+                if matches!(b.get("__immutable__"), Some(Value::Boolean(true))) {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot resize an immutable ArrayBuffer"));
+                    return Value::Undefined;
+                }
                 let max_byte_len = b
                     .get("__maxByteLength__")
                     .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
@@ -5323,7 +5328,30 @@ impl<'gc> VM<'gc> {
                 let detached = matches!(b.get("__detached__"), Some(Value::Boolean(true)));
                 Value::Boolean(detached)
             }
-            "arrayBuffer.transfer" | "arrayBuffer.transferToFixedLength" => {
+            "arrayBuffer.getImmutable" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined);
+                let Value::VmObject(buf_obj) = this_val else {
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get ArrayBuffer.prototype.immutable called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                };
+                let b = buf_obj.borrow();
+                let is_ab = matches!(b.get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
+                if !is_ab {
+                    drop(b);
+                    self.pending_throw = Some(self.make_type_error_object(
+                        ctx,
+                        "Method get ArrayBuffer.prototype.immutable called on incompatible receiver",
+                    ));
+                    return Value::Undefined;
+                }
+                let immutable = matches!(b.get("__immutable__"), Some(Value::Boolean(true)));
+                Value::Boolean(immutable)
+            }
+            "arrayBuffer.transfer" | "arrayBuffer.transferToFixedLength" | "arrayBuffer.transferToImmutable" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
                     self.pending_throw = Some(self.make_type_error_object(
@@ -5343,11 +5371,6 @@ impl<'gc> VM<'gc> {
                     ));
                     return Value::Undefined;
                 }
-                if matches!(b.get("__detached__"), Some(Value::Boolean(true))) {
-                    drop(b);
-                    self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot transfer a detached ArrayBuffer"));
-                    return Value::Undefined;
-                }
                 let old_len = b.get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
                 let old_resizable = matches!(b.get("__resizable__"), Some(Value::Boolean(true)));
                 let old_max = b
@@ -5357,7 +5380,7 @@ impl<'gc> VM<'gc> {
                 let old_bytes = b.get("__buffer_bytes__").cloned();
                 drop(b);
 
-                // Determine new length via ToIntegerOrInfinity
+                // Step 3-4: Determine new length via ToIndex (before detach/immutable checks)
                 let new_len = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
                     old_len
                 } else {
@@ -5375,6 +5398,17 @@ impl<'gc> VM<'gc> {
                     }
                     n as usize
                 };
+
+                // Step 5: IsDetachedBuffer check (after argument coercion)
+                if matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))) {
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot transfer a detached ArrayBuffer"));
+                    return Value::Undefined;
+                }
+                // Step 6: IsImmutableBuffer check
+                if matches!(buf_obj.borrow().get("__immutable__"), Some(Value::Boolean(true))) {
+                    self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot transfer an immutable ArrayBuffer"));
+                    return Value::Undefined;
+                }
 
                 // Copy bytes
                 let mut new_bytes = vec![Value::Number(0.0); new_len];
@@ -5399,8 +5433,9 @@ impl<'gc> VM<'gc> {
 
                 // Build new ArrayBuffer
                 let is_transfer_to_fixed = name == "arrayBuffer.transferToFixedLength";
-                let new_resizable = if is_transfer_to_fixed { false } else { old_resizable };
-                let new_max = if is_transfer_to_fixed {
+                let is_transfer_to_immutable = name == "arrayBuffer.transferToImmutable";
+                let new_resizable = if is_transfer_to_fixed || is_transfer_to_immutable { false } else { old_resizable };
+                let new_max = if is_transfer_to_fixed || is_transfer_to_immutable {
                     new_len
                 } else if old_resizable {
                     old_max.max(new_len)
@@ -5413,6 +5448,9 @@ impl<'gc> VM<'gc> {
                 new_map.insert("byteLength".to_string(), Value::Number(new_len as f64));
                 new_map.insert("__buffer_bytes__".to_string(), new_bytes_arr);
                 new_map.insert("__detached__".to_string(), Value::Boolean(false));
+                if is_transfer_to_immutable {
+                    new_map.insert("__immutable__".to_string(), Value::Boolean(true));
+                }
                 if new_resizable {
                     new_map.insert("__resizable__".to_string(), Value::Boolean(true));
                     new_map.insert("__maxByteLength__".to_string(), Value::Number(new_max as f64));
@@ -14744,6 +14782,10 @@ impl<'gc> VM<'gc> {
                     if let Some((Value::VmObject(buf_obj), byte_offset, bpe, ta_name)) = buffer_write_info
                         && let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
                     {
+                        // Immutable buffer: silently ignore writes (per spec, IntegerIndexedElementSet returns false)
+                        if matches!(buf_obj.borrow().get("__immutable__"), Some(Value::Boolean(true))) {
+                            return Ok(val.clone());
+                        }
                         let base = byte_offset + idx * bpe;
                         let n = to_number(&store_val);
                         let mut bb = buf_bytes.borrow_mut(ctx);
@@ -17392,6 +17434,12 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getDetached", "get detached", 0.0, false),
         );
         mark_nonenumerable(&mut array_buffer_proto, "detached");
+        set_getter(
+            &mut array_buffer_proto,
+            "immutable",
+            Self::make_host_fn_with_name_len(ctx, "arrayBuffer.getImmutable", "get immutable", 0.0, false),
+        );
+        mark_nonenumerable(&mut array_buffer_proto, "immutable");
         array_buffer_proto.insert(
             "transfer".to_string(),
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.transfer", "transfer", 0.0, false),
@@ -17402,6 +17450,11 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.transferToFixedLength", "transferToFixedLength", 0.0, false),
         );
         mark_nonenumerable(&mut array_buffer_proto, "transferToFixedLength");
+        array_buffer_proto.insert(
+            "transferToImmutable".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "arrayBuffer.transferToImmutable", "transferToImmutable", 0.0, false),
+        );
+        mark_nonenumerable(&mut array_buffer_proto, "transferToImmutable");
         array_buffer_proto.insert("@@sym:4".to_string(), Value::from("ArrayBuffer"));
         write_attrs_to_legacy_map(&mut array_buffer_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         let array_buffer_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, array_buffer_proto));

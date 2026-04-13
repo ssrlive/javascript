@@ -978,6 +978,14 @@ impl<'gc> VM<'gc> {
                 self.throw_type_error(ctx, "Method called on incompatible receiver");
                 return None;
             }
+            // Check immutability before argument coercion (spec step 3)
+            if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__") {
+                if matches!(GcCell::borrow(buf).get("__immutable__"), Some(Value::Boolean(true))) {
+                    drop(b);
+                    self.throw_type_error(ctx, "Cannot modify an immutable ArrayBuffer");
+                    return None;
+                }
+            }
         }
         let offset_arg = args.first().cloned().unwrap_or(Value::Undefined);
         let get_index = self.dataview_to_index(ctx, &offset_arg)?;

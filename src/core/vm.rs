@@ -11,6 +11,7 @@ use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use indexmap::IndexMap;
+use std::fmt::Write as _;
 
 mod bigint;
 mod dataview;
@@ -16651,6 +16652,10 @@ impl<'gc> VM<'gc> {
         math_map.insert("random".to_string(), Value::VmNativeFunction(BUILTIN_MATH_RANDOM));
         math_map.insert("clz32".to_string(), Value::VmNativeFunction(BUILTIN_MATH_CLZ32));
         math_map.insert("imul".to_string(), Value::VmNativeFunction(BUILTIN_MATH_IMUL));
+        math_map.insert(
+            "sumPrecise".to_string(),
+            Self::make_native_fn(ctx, BUILTIN_MATH_SUMPRECISE, "sumPrecise", 1.0),
+        );
         math_map.insert("PI".to_string(), Value::Number(std::f64::consts::PI));
         math_map.insert("E".to_string(), Value::Number(std::f64::consts::E));
         math_map.insert("LN2".to_string(), Value::Number(std::f64::consts::LN_2));
@@ -16721,6 +16726,8 @@ impl<'gc> VM<'gc> {
         let sym_match_all = make_well_known_symbol(11, "matchAll");
         let sym_dispose = make_well_known_symbol(12, "dispose");
         let sym_async_dispose = make_well_known_symbol(13, "asyncDispose");
+        let sym_unscopables = make_well_known_symbol(14, "unscopables");
+        let sym_is_concat_spreadable = make_well_known_symbol(15, "isConcatSpreadable");
         self.cache_symbol_value(1, &sym_iterator);
         self.cache_symbol_value(2, &sym_has_instance);
         self.cache_symbol_value(3, &sym_to_primitive);
@@ -16734,7 +16741,9 @@ impl<'gc> VM<'gc> {
         self.cache_symbol_value(11, &sym_match_all);
         self.cache_symbol_value(12, &sym_dispose);
         self.cache_symbol_value(13, &sym_async_dispose);
-        self.symbol_counter = 13; // user symbols start from 14+
+        self.cache_symbol_value(14, &sym_unscopables);
+        self.cache_symbol_value(15, &sym_is_concat_spreadable);
+        self.symbol_counter = 15; // user symbols start from 16+
 
         let mut sym_obj = IndexMap::new();
         sym_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_SYMBOL as f64));
@@ -16751,6 +16760,8 @@ impl<'gc> VM<'gc> {
         sym_obj.insert("matchAll".to_string(), sym_match_all);
         sym_obj.insert("dispose".to_string(), sym_dispose);
         sym_obj.insert("asyncDispose".to_string(), sym_async_dispose);
+        sym_obj.insert("unscopables".to_string(), sym_unscopables);
+        sym_obj.insert("isConcatSpreadable".to_string(), sym_is_concat_spreadable);
         for key in [
             "iterator",
             "hasInstance",
@@ -16765,6 +16776,8 @@ impl<'gc> VM<'gc> {
             "matchAll",
             "dispose",
             "asyncDispose",
+            "unscopables",
+            "isConcatSpreadable",
         ] {
             write_attrs_to_legacy_map(&mut sym_obj, key, PropAttrs::empty());
         }
@@ -17036,6 +17049,36 @@ impl<'gc> VM<'gc> {
         arr_proto
             .props
             .insert("reduceRight".to_string(), Value::VmNativeFunction(BUILTIN_ARRAY_REDUCERIGHT));
+        // Array.prototype[@@unscopables]: null-prototype object
+        {
+            let mut unscopables = IndexMap::new();
+            unscopables.insert("__proto__".to_string(), Value::Null);
+            for key in [
+                "at",
+                "copyWithin",
+                "entries",
+                "fill",
+                "find",
+                "findIndex",
+                "findLast",
+                "findLastIndex",
+                "flat",
+                "flatMap",
+                "groupBy",
+                "includes",
+                "keys",
+                "toReversed",
+                "toSorted",
+                "toSpliced",
+                "values",
+            ] {
+                unscopables.insert(key.to_string(), Value::Boolean(true));
+            }
+            let unscopables_obj = Value::VmObject(new_gc_cell_ptr(ctx, unscopables));
+            arr_proto.props.insert("@@sym:14".to_string(), unscopables_obj);
+            // writable: false, enumerable: false, configurable: true
+            write_attrs_to_legacy_map(&mut arr_proto.props, "@@sym:14", PropAttrs::CONFIGURABLE);
+        }
         for key in [
             "@@sym:1",
             "values",
@@ -17130,6 +17173,11 @@ impl<'gc> VM<'gc> {
                 if let Value::VmObject(p) = &sub_proto {
                     p.borrow_mut(ctx).insert("__proto__".to_string(), error_proto.clone());
                 }
+            }
+            // Add Error.isError static method to Error constructor only
+            if let Some(Value::VmObject(error_ctor)) = self.globals.get("Error") {
+                let is_error_fn = Self::make_native_fn(ctx, BUILTIN_ERROR_ISERROR, "isError", 1.0);
+                Self::insert_property_with_attributes(&mut error_ctor.borrow_mut(ctx), "isError", &is_error_fn, true, false, true);
             }
         }
 
@@ -17316,6 +17364,8 @@ impl<'gc> VM<'gc> {
         let wait_async_fn = Self::make_host_fn_with_name_len(ctx, "atomics.waitAsync", "waitAsync", 4.0, false);
         atomics_map.insert("waitAsync".to_string(), wait_async_fn);
         mark_nonenumerable(&mut atomics_map, "waitAsync");
+        atomics_map.insert("pause".to_string(), Self::make_native_fn(ctx, BUILTIN_ATOMICS_PAUSE, "pause", 0.0));
+        mark_nonenumerable(&mut atomics_map, "pause");
         let atomics_obj = Value::VmObject(new_gc_cell_ptr(ctx, atomics_map));
         self.globals.insert("Atomics".to_string(), atomics_obj.clone());
         self.global_this.borrow_mut(ctx).insert("Atomics".to_string(), atomics_obj);
@@ -17400,6 +17450,22 @@ impl<'gc> VM<'gc> {
             &mut promise_map,
             "reject",
             &Self::make_host_fn_with_name_len(ctx, "promise.reject", "reject", 1.0, false),
+            true,
+            false,
+            true,
+        );
+        Self::insert_property_with_attributes(
+            &mut promise_map,
+            "withResolvers",
+            &Self::make_native_fn(ctx, BUILTIN_PROMISE_WITHRESOLVERS, "withResolvers", 0.0),
+            true,
+            false,
+            true,
+        );
+        Self::insert_property_with_attributes(
+            &mut promise_map,
+            "try",
+            &Self::make_native_fn(ctx, BUILTIN_PROMISE_TRY, "try", 1.0),
             true,
             false,
             true,
@@ -17778,6 +17844,10 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "object.isFrozen", "isFrozen", 1.0, false),
         );
         object_map.insert("groupBy".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_GROUPBY));
+        object_map.insert(
+            "fromEntries".to_string(),
+            Self::make_native_fn(ctx, BUILTIN_OBJECT_FROMENTRIES, "fromEntries", 1.0),
+        );
         object_map.insert("defineProperty".to_string(), Value::VmNativeFunction(BUILTIN_OBJECT_DEFINEPROP));
         object_map.insert(
             "getOwnPropertyDescriptor".to_string(),
@@ -17813,6 +17883,7 @@ impl<'gc> VM<'gc> {
             "isSealed",
             "isFrozen",
             "groupBy",
+            "fromEntries",
             "defineProperty",
             "getOwnPropertyDescriptor",
             "setPrototypeOf",
@@ -18192,6 +18263,9 @@ impl<'gc> VM<'gc> {
             ("codePointAt", BUILTIN_STRING_CODEPOINTAT, 1.0),
             ("normalize", BUILTIN_STRING_NORMALIZE, 0.0),
             ("matchAll", BUILTIN_STRING_MATCHALL, 1.0),
+            ("at", BUILTIN_STRING_AT, 1.0),
+            ("isWellFormed", BUILTIN_STRING_ISWELLFORMED, 0.0),
+            ("toWellFormed", BUILTIN_STRING_TOWELLFORMED, 0.0),
         ] {
             string_proto.insert(name.to_string(), Self::make_native_fn(ctx, builtin_id, name, length));
             mark_nonenumerable(&mut string_proto, name);
@@ -22515,6 +22589,487 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, map))
             }
+            // ── Tier-2 feature builtins ─────────────────────────────────
+            BUILTIN_OBJECT_FROMENTRIES => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                    return Value::Undefined;
+                }
+                let mut result = IndexMap::new();
+
+                // Helper macro: convert key Value to property key string
+                macro_rules! to_prop_key {
+                    ($self:expr, $ctx:expr, $key:expr) => {
+                        if let Some(sk) = $self.symbol_key_string($key) {
+                            Ok(sk)
+                        } else {
+                            $self.vm_to_string_like_spec($ctx, $key)
+                        }
+                    };
+                }
+
+                // General iterable path (works for arrays too via @@iterator)
+                let iter_fn = self.read_named_property(ctx, &iterable, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(iter_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&iter_fn) {
+                    self.throw_type_error(ctx, "object is not iterable");
+                    return Value::Undefined;
+                }
+                let iterator = match self.vm_call_function_value(ctx, &iter_fn, &iterable, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                let next_method = self.read_named_property(ctx, &iterator, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if !self.is_value_callable(&next_method) {
+                    self.throw_type_error(ctx, "iterator.next is not a function");
+                    return Value::Undefined;
+                }
+                loop {
+                    let next = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    let done = self.read_named_property(ctx, &next, "done");
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+                    let entry = self.read_named_property(ctx, &next, "value");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if !matches!(entry, Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_)) {
+                        self.iterator_close(ctx, &iterator);
+                        self.throw_type_error(ctx, "Iterator value is not an entry-like object");
+                        return Value::Undefined;
+                    }
+                    let key = self.read_named_property(ctx, &entry, "0");
+                    if self.pending_throw.is_some() {
+                        self.iterator_close(ctx, &iterator);
+                        return Value::Undefined;
+                    }
+                    let val = self.read_named_property(ctx, &entry, "1");
+                    if self.pending_throw.is_some() {
+                        self.iterator_close(ctx, &iterator);
+                        return Value::Undefined;
+                    }
+                    let key_str = match to_prop_key!(self, ctx, &key) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.iterator_close(ctx, &iterator);
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    result.insert(key_str, val);
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, result))
+            }
+            BUILTIN_STRING_AT | BUILTIN_STRING_ISWELLFORMED | BUILTIN_STRING_TOWELLFORMED => {
+                // Handled in string method dispatch (call_method_builtin)
+                Value::Undefined
+            }
+            BUILTIN_PROMISE_WITHRESOLVERS => {
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::from("Promise"));
+                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                    && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
+                let promise_obj = Value::VmObject(new_gc_cell_ptr(ctx, map));
+                let resolve = Self::make_promise_settle_host_fn(ctx, "promise.__resolve", &promise_obj, "", 1.0);
+                let reject = Self::make_promise_settle_host_fn(ctx, "promise.__reject", &promise_obj, "", 1.0);
+                let mut out = IndexMap::new();
+                out.insert("promise".to_string(), promise_obj);
+                out.insert("resolve".to_string(), resolve);
+                out.insert("reject".to_string(), reject);
+                Value::VmObject(new_gc_cell_ptr(ctx, out))
+            }
+            BUILTIN_PROMISE_TRY => {
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let cb_args = if args.len() > 1 { &args[1..] } else { &[] };
+
+                let mut map = IndexMap::new();
+                map.insert("__type__".to_string(), Value::from("Promise"));
+                if let Some(Value::VmObject(promise_ctor)) = self.globals.get("Promise")
+                    && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
+                {
+                    map.insert("__proto__".to_string(), proto);
+                }
+                let promise_obj = Value::VmObject(new_gc_cell_ptr(ctx, map));
+
+                if !self.is_value_callable(&callback) {
+                    let err_obj = self.make_type_error_object(ctx, "callbackfn is not a function");
+                    self.settle_promise(ctx, &promise_obj, &err_obj, true);
+                } else {
+                    let saved_try_stack = std::mem::take(&mut self.try_stack);
+                    let call_result = self.vm_call_function_value(ctx, &callback, &Value::Undefined, cb_args);
+                    self.try_stack = saved_try_stack;
+                    match call_result {
+                        Ok(value) => self.resolve_promise_value(ctx, &promise_obj, &value),
+                        Err(err) => {
+                            let msg = err.message();
+                            let err_str = msg.strip_prefix("SyntaxError: Uncaught: ").unwrap_or(&msg);
+                            let err_val = Value::from(err_str);
+                            self.settle_promise(ctx, &promise_obj, &err_val, true);
+                        }
+                    }
+                }
+                promise_obj
+            }
+            BUILTIN_ERROR_ISERROR => {
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Value::VmObject(obj) = &arg {
+                    let borrow = obj.borrow();
+                    if let Some(Value::String(t)) = borrow.get("__type__") {
+                        let name = crate::unicode::utf16_to_utf8(t);
+                        return Value::Boolean(Self::is_error_type_name(&name));
+                    }
+                }
+                Value::Boolean(false)
+            }
+            BUILTIN_MATH_SUMPRECISE => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(iterable, Value::Undefined | Value::Null) {
+                    self.throw_type_error(ctx, "object is not iterable");
+                    return Value::Undefined;
+                }
+                let iter_fn = self.read_named_property(ctx, &iterable, "@@sym:1");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(iter_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&iter_fn) {
+                    self.throw_type_error(ctx, "object is not iterable");
+                    return Value::Undefined;
+                }
+                let iterator = match self.vm_call_function_value(ctx, &iter_fn, &iterable, &[]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                let next_method = self.read_named_property(ctx, &iterator, "next");
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let mut numbers: Vec<f64> = Vec::new();
+                loop {
+                    let next = match self.vm_call_function_value(ctx, &next_method, &iterator, &[]) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    };
+                    let done = self.read_named_property(ctx, &next, "done");
+                    if Self::value_is_truthy(&done) {
+                        break;
+                    }
+                    let value = self.read_named_property(ctx, &next, "value");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    match &value {
+                        Value::Number(n) => numbers.push(*n),
+                        _ => {
+                            self.iterator_close(ctx, &iterator);
+                            self.throw_type_error(ctx, "value is not a Number");
+                            return Value::Undefined;
+                        }
+                    }
+                }
+                if numbers.is_empty() {
+                    return Value::Number(-0.0);
+                }
+                let mut has_pos_inf = false;
+                let mut has_neg_inf = false;
+                for &n in &numbers {
+                    if n.is_nan() {
+                        return Value::Number(f64::NAN);
+                    }
+                    if n == f64::INFINITY {
+                        has_pos_inf = true;
+                    }
+                    if n == f64::NEG_INFINITY {
+                        has_neg_inf = true;
+                    }
+                }
+                if has_pos_inf && has_neg_inf {
+                    return Value::Number(f64::NAN);
+                }
+                if has_pos_inf {
+                    return Value::Number(f64::INFINITY);
+                }
+                if has_neg_inf {
+                    return Value::Number(f64::NEG_INFINITY);
+                }
+                // Precise summation using scaled Shewchuk expansion.
+                // Scale all values by 2^(-K) to prevent overflow during
+                // intermediate two_sum operations, run Shewchuk, then scale
+                // back by 2^K. Power-of-2 scaling is exact in IEEE 754, so
+                // this preserves correctness (round(S/2^K)*2^K == round(S)).
+                fn two_sum(a: f64, b: f64) -> (f64, f64) {
+                    let s = a + b;
+                    let v = s - a;
+                    let e = (a - (s - v)) + (b - v);
+                    (s, e)
+                }
+
+                let n = numbers.len();
+                // K = ceil(log2(2*N)) ensures intermediate sums stay < MAX.
+                let k = if n <= 1 { 0u32 } else { ((2 * n) as f64).log2().ceil() as u32 };
+                let scale_down = if k == 0 { 1.0 } else { (0.5_f64).powi(k as i32) };
+                let scale_up = if k == 0 { 1.0 } else { (2.0_f64).powi(k as i32) };
+
+                // Sort by ascending absolute value for Shewchuk
+                // grow-expansion precision (small values first).
+                numbers.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
+
+                let mut expansion: Vec<f64> = vec![0.0];
+                for &val in numbers.iter() {
+                    let scaled = val * scale_down;
+                    let mut q = scaled;
+                    let mut new_e = Vec::with_capacity(expansion.len() + 1);
+                    for &ei in expansion.iter() {
+                        let (nq, ne) = two_sum(q, ei);
+                        if ne != 0.0 {
+                            new_e.push(ne);
+                        }
+                        q = nq;
+                    }
+                    if q != 0.0 || new_e.is_empty() {
+                        new_e.push(q);
+                    }
+                    expansion = new_e;
+                }
+
+                let n_exp = expansion.len();
+                if n_exp == 0 {
+                    Value::Number(-0.0)
+                } else if n_exp == 1 {
+                    let r = expansion[0] * scale_up;
+                    if r == 0.0 && !r.is_sign_negative() && numbers.iter().all(|v| *v == 0.0 && v.is_sign_negative()) {
+                        Value::Number(-0.0)
+                    } else {
+                        Value::Number(r)
+                    }
+                } else {
+                    let hi = expansion[n_exp - 1];
+                    let lo = expansion[n_exp - 2];
+                    let candidate = hi + lo;
+                    let residual = (hi - candidate) + lo;
+
+                    let mut rest_sign = 0i8;
+                    for i in (0..n_exp.saturating_sub(2)).rev() {
+                        if expansion[i] > 0.0 {
+                            rest_sign = 1;
+                            break;
+                        } else if expansion[i] < 0.0 {
+                            rest_sign = -1;
+                            break;
+                        }
+                    }
+
+                    let result = candidate * scale_up;
+
+                    // At the ±MAX/±Infinity overflow boundary, the scaling
+                    // property round(S/2^K)*2^K == round(S) can break.
+                    // Use the expansion residual to decide correctly.
+                    if result.is_infinite() || result.abs() == f64::MAX {
+                        let max_scaled = f64::MAX * scale_down;
+                        let half_ulp_max_scaled = (2.0_f64).powi(970 - k as i32);
+
+                        if candidate > 0.0 {
+                            let effective = (candidate - max_scaled) + residual;
+                            if effective > half_ulp_max_scaled || (effective == half_ulp_max_scaled && rest_sign >= 0) {
+                                Value::Number(f64::INFINITY)
+                            } else {
+                                Value::Number(f64::MAX)
+                            }
+                        } else {
+                            let effective = (candidate + max_scaled) + residual;
+                            if effective < -half_ulp_max_scaled || (effective == -half_ulp_max_scaled && rest_sign <= 0) {
+                                Value::Number(f64::NEG_INFINITY)
+                            } else {
+                                Value::Number(-f64::MAX)
+                            }
+                        }
+                    } else if residual == 0.0 {
+                        if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|v| *v == 0.0 && v.is_sign_negative()) {
+                            Value::Number(-0.0)
+                        } else {
+                            Value::Number(result)
+                        }
+                    } else {
+                        // Tie-breaking: adjust when rest pushes past
+                        // an exact tie (|residual| == ULP(candidate)/2).
+                        let needs_adjust = if residual > 0.0 { rest_sign > 0 } else { rest_sign < 0 };
+                        if needs_adjust && candidate.is_finite() {
+                            let bits = candidate.to_bits();
+                            let adjusted_scaled = if (residual > 0.0 && candidate >= 0.0) || (residual < 0.0 && candidate < 0.0) {
+                                f64::from_bits(bits + 1)
+                            } else if candidate == 0.0 && residual < 0.0 {
+                                -f64::MIN_POSITIVE
+                            } else {
+                                f64::from_bits(bits - 1)
+                            };
+                            Value::Number(adjusted_scaled * scale_up)
+                        } else if result == 0.0 && !result.is_sign_negative() && numbers.iter().all(|v| *v == 0.0 && v.is_sign_negative()) {
+                            Value::Number(-0.0)
+                        } else {
+                            Value::Number(result)
+                        }
+                    }
+                }
+            }
+            BUILTIN_REGEXP_ESCAPE => {
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                // Step 1: Must be a string (no coercion)
+                let units = match &arg {
+                    Value::String(u16s) => u16s.clone(),
+                    _ => {
+                        self.throw_type_error(ctx, "argument is not a string");
+                        return Value::Undefined;
+                    }
+                };
+                if units.is_empty() {
+                    return Value::from("");
+                }
+                let mut out = String::with_capacity(units.len() * 2);
+                // Decode UTF-16 to code points
+                let mut idx = 0;
+                let mut first = true;
+                while idx < units.len() {
+                    let cu = units[idx];
+                    let (cp, advance) =
+                        if (0xD800..=0xDBFF).contains(&cu) && idx + 1 < units.len() && (0xDC00..=0xDFFF).contains(&units[idx + 1]) {
+                            // surrogate pair → code point
+                            let hi = cu as u32;
+                            let lo = units[idx + 1] as u32;
+                            ((hi - 0xD800) * 0x400 + (lo - 0xDC00) + 0x10000, 2)
+                        } else {
+                            (cu as u32, 1)
+                        };
+                    idx += advance;
+
+                    // Step 4a: escape initial DecimalDigit or AsciiLetter
+                    if first {
+                        first = false;
+                        if (cp < 128) && (char::from(cp as u8).is_ascii_digit() || char::from(cp as u8).is_ascii_alphabetic()) {
+                            write!(out, "\\x{:02x}", cp).unwrap();
+                            continue;
+                        }
+                    }
+
+                    // EncodeForRegExpEscape(c)
+                    // Step 1: SyntaxCharacter or SOLIDUS
+                    if matches!(
+                        cp,
+                        0x5E | 0x24 | 0x5C | 0x2E | 0x2A | 0x2B | 0x3F | 0x28 | 0x29 | 0x5B | 0x5D | 0x7B | 0x7D | 0x7C | 0x2F
+                    ) {
+                        out.push('\\');
+                        out.push(char::from_u32(cp).unwrap());
+                        continue;
+                    }
+                    // Step 2: ControlEscape table
+                    match cp {
+                        0x09 => {
+                            out.push_str("\\t");
+                            continue;
+                        }
+                        0x0A => {
+                            out.push_str("\\n");
+                            continue;
+                        }
+                        0x0B => {
+                            out.push_str("\\v");
+                            continue;
+                        }
+                        0x0C => {
+                            out.push_str("\\f");
+                            continue;
+                        }
+                        0x0D => {
+                            out.push_str("\\r");
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    // Step 3-5: otherPunctuators, WhiteSpace, LineTerminator, surrogates
+                    let is_other_punct = matches!(
+                        cp,
+                        0x2C | 0x2D | 0x3D | 0x3C | 0x3E | 0x23 | 0x26 | 0x21 | 0x25 | 0x3A | 0x3B | 0x40 | 0x7E | 0x27 | 0x60 | 0x22
+                    );
+                    let is_whitespace = matches!(
+                        cp,
+                        0x0009 | 0x000B | 0x000C | 0xFEFF | 0x0020 | 0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
+                    );
+                    let is_line_terminator = matches!(cp, 0x000A | 0x000D | 0x2028 | 0x2029);
+                    let is_surrogate = (0xD800..=0xDFFF).contains(&cp);
+                    if is_other_punct || is_whitespace || is_line_terminator || is_surrogate {
+                        if cp <= 0xFF {
+                            write!(out, "\\x{:02x}", cp).unwrap();
+                        } else {
+                            // UTF16EncodeCodePoint then UnicodeEscape each unit
+                            if let Some(ch) = char::from_u32(cp) {
+                                let mut buf = [0u16; 2];
+                                let enc = ch.encode_utf16(&mut buf);
+                                for u in enc.iter() {
+                                    write!(out, "\\u{:04x}", u).unwrap();
+                                }
+                            } else {
+                                // lone surrogate
+                                write!(out, "\\u{:04x}", cp).unwrap();
+                            }
+                        }
+                    } else {
+                        // Step 6: not escaped
+                        if let Some(ch) = char::from_u32(cp) {
+                            out.push(ch);
+                        } else {
+                            write!(out, "\\u{:04x}", cp).unwrap();
+                        }
+                    }
+                }
+                Value::from(&out)
+            }
+            BUILTIN_ATOMICS_PAUSE => {
+                let arg = args.first().cloned().unwrap_or(Value::Undefined);
+                if !matches!(arg, Value::Undefined) {
+                    match &arg {
+                        Value::Number(n) => {
+                            let n = *n;
+                            if n.is_nan() || n.is_infinite() || n != n.trunc() {
+                                self.throw_type_error(ctx, "Atomics.pause requires an integral number");
+                                return Value::Undefined;
+                            }
+                            if n < 0.0 {
+                                self.throw_range_error_object(ctx, "iterationNumber must be non-negative");
+                                return Value::Undefined;
+                            }
+                        }
+                        _ => {
+                            self.throw_type_error(ctx, "Atomics.pause requires an integral number");
+                            return Value::Undefined;
+                        }
+                    }
+                }
+                Value::Undefined
+            }
+            // ── End Tier-2 ──────────────────────────────────────────────
             BUILTIN_CTOR_DATAVIEW => self.dataview_call_builtin(ctx, args),
             BUILTIN_CTOR_INT8ARRAY
             | BUILTIN_CTOR_UINT8ARRAY
@@ -27567,9 +28122,17 @@ impl<'gc> VM<'gc> {
             | BUILTIN_ATOMICS_WAITASYNC
             | BUILTIN_PROMISE_RESOLVE
             | BUILTIN_PROMISE_ALL
+            | BUILTIN_PROMISE_WITHRESOLVERS
+            | BUILTIN_PROMISE_TRY
             | BUILTIN_REFLECT_APPLY
             | BUILTIN_SYMBOL_FOR
-            | BUILTIN_SYMBOL_KEYFOR => {
+            | BUILTIN_SYMBOL_KEYFOR
+            | BUILTIN_OBJECT_FROMENTRIES
+            | BUILTIN_STRING_FROMCODEPOINT
+            | BUILTIN_ERROR_ISERROR
+            | BUILTIN_MATH_SUMPRECISE
+            | BUILTIN_REGEXP_ESCAPE
+            | BUILTIN_ATOMICS_PAUSE => {
                 return self.call_builtin(ctx, id, args);
             }
             _ => {}
@@ -31225,7 +31788,8 @@ impl<'gc> VM<'gc> {
         // String methods — RequireObjectCoercible(this) + ToString(this)
         let is_string_value_method = matches!(id, BUILTIN_STRING_TOSTRING | BUILTIN_STRING_VALUEOF);
         let is_string_method = (BUILTIN_STRING_SPLIT..=BUILTIN_STRING_VALUEOF).contains(&id)
-            || (BUILTIN_STRING_CODEPOINTAT..=BUILTIN_STRING_MATCHALL).contains(&id);
+            || (BUILTIN_STRING_CODEPOINTAT..=BUILTIN_STRING_MATCHALL).contains(&id)
+            || matches!(id, BUILTIN_STRING_AT | BUILTIN_STRING_ISWELLFORMED | BUILTIN_STRING_TOWELLFORMED);
         let string_val: Option<Vec<u16>> = match &receiver {
             Value::String(s) => Some(s.clone()),
             Value::VmObject(map) => {
@@ -31952,6 +32516,66 @@ impl<'gc> VM<'gc> {
                     }
                     self.throw_type_error(ctx, "[Symbol.matchAll] is not callable");
                     return Value::Undefined;
+                }
+                BUILTIN_STRING_AT => {
+                    let index_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                    let num_val = self.__to_numeric(ctx, &index_arg);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let n = match num_val {
+                        Ok(Value::Number(n)) => n,
+                        _ => f64::NAN,
+                    };
+                    let idx = if n.is_nan() { 0i64 } else { n as i64 };
+                    let len = s.len() as i64;
+                    let actual = if idx < 0 { len + idx } else { idx };
+                    if actual < 0 || actual >= len {
+                        return Value::Undefined;
+                    }
+                    return Value::String(vec![s[actual as usize]]);
+                }
+                BUILTIN_STRING_ISWELLFORMED => {
+                    let mut i = 0;
+                    while i < s.len() {
+                        let c = s[i];
+                        if (0xD800..=0xDBFF).contains(&c) {
+                            if i + 1 < s.len() && (0xDC00..=0xDFFF).contains(&s[i + 1]) {
+                                i += 2;
+                            } else {
+                                return Value::Boolean(false);
+                            }
+                        } else if (0xDC00..=0xDFFF).contains(&c) {
+                            return Value::Boolean(false);
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    return Value::Boolean(true);
+                }
+                BUILTIN_STRING_TOWELLFORMED => {
+                    let mut out = Vec::with_capacity(s.len());
+                    let mut i = 0;
+                    while i < s.len() {
+                        let c = s[i];
+                        if (0xD800..=0xDBFF).contains(&c) {
+                            if i + 1 < s.len() && (0xDC00..=0xDFFF).contains(&s[i + 1]) {
+                                out.push(c);
+                                out.push(s[i + 1]);
+                                i += 2;
+                            } else {
+                                out.push(0xFFFD);
+                                i += 1;
+                            }
+                        } else if (0xDC00..=0xDFFF).contains(&c) {
+                            out.push(0xFFFD);
+                            i += 1;
+                        } else {
+                            out.push(c);
+                            i += 1;
+                        }
+                    }
+                    return Value::String(out);
                 }
                 _ => {}
             }

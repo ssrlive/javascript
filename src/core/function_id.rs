@@ -57,6 +57,7 @@ pub(crate) const BUILTIN_MATH_POW: FunctionID = 41;
 pub(crate) const BUILTIN_MATH_RANDOM: FunctionID = 42;
 pub(crate) const BUILTIN_MATH_CLZ32: FunctionID = 43;
 pub(crate) const BUILTIN_MATH_IMUL: FunctionID = 44;
+pub(crate) const BUILTIN_MATH_SUMPRECISE: FunctionID = 45;
 // ── Global functions (50–59) ────────────────────────────────────────
 pub(crate) const BUILTIN_ISNAN: FunctionID = 50;
 pub(crate) const BUILTIN_PARSEINT: FunctionID = 51;
@@ -129,6 +130,9 @@ pub(crate) const BUILTIN_STRING_CODEPOINTAT: FunctionID = 137;
 pub(crate) const BUILTIN_STRING_NORMALIZE: FunctionID = 138;
 pub(crate) const BUILTIN_STRING_MATCHALL: FunctionID = 139;
 pub(crate) const BUILTIN_STRING_FROMCODEPOINT: FunctionID = 140;
+pub(crate) const BUILTIN_STRING_AT: FunctionID = 141;
+pub(crate) const BUILTIN_STRING_ISWELLFORMED: FunctionID = 142;
+pub(crate) const BUILTIN_STRING_TOWELLFORMED: FunctionID = 143;
 // ── Number (160–179) ────────────────────────────────────────────────
 pub(crate) const BUILTIN_CTOR_NUMBER: FunctionID = 160;
 pub(crate) const BUILTIN_NUMBER_ISNAN: FunctionID = 161;
@@ -169,6 +173,7 @@ pub(crate) const BUILTIN_OBJECT_GETOWNPROPDESC: FunctionID = 214;
 pub(crate) const BUILTIN_OBJECT_SETPROTOTYPEOF: FunctionID = 215;
 pub(crate) const BUILTIN_OBJECT_GETOWNPROPERTYNAMES: FunctionID = 216;
 pub(crate) const BUILTIN_OBJ_TOSTRING: FunctionID = 217;
+pub(crate) const BUILTIN_OBJECT_FROMENTRIES: FunctionID = 218;
 // ── Function (230–239) ──────────────────────────────────────────────
 pub(crate) const BUILTIN_CTOR_FUNCTION: FunctionID = 230;
 pub(crate) const BUILTIN_FN_CALL: FunctionID = 231;
@@ -182,6 +187,7 @@ pub(crate) const BUILTIN_JSON_PARSE: FunctionID = 241;
 pub(crate) const BUILTIN_CTOR_REGEXP: FunctionID = 250;
 pub(crate) const BUILTIN_REGEX_EXEC: FunctionID = 251;
 pub(crate) const BUILTIN_REGEX_TEST: FunctionID = 252;
+pub(crate) const BUILTIN_REGEXP_ESCAPE: FunctionID = 253;
 // ── Error constructors (260–269) ────────────────────────────────────
 pub(crate) const BUILTIN_CTOR_ERROR: FunctionID = 260;
 pub(crate) const BUILTIN_CTOR_TYPEERROR: FunctionID = 261;
@@ -190,6 +196,7 @@ pub(crate) const BUILTIN_CTOR_RANGEERROR: FunctionID = 263;
 pub(crate) const BUILTIN_CTOR_REFERENCEERROR: FunctionID = 264;
 pub(crate) const BUILTIN_CTOR_EVALERROR: FunctionID = 265;
 pub(crate) const BUILTIN_CTOR_URIERROR: FunctionID = 266;
+pub(crate) const BUILTIN_ERROR_ISERROR: FunctionID = 267;
 // ── Date (270–319) ──────────────────────────────────────────────────
 pub(crate) const BUILTIN_CTOR_DATE: FunctionID = 270;
 pub(crate) const BUILTIN_DATE_NOW: FunctionID = 271;
@@ -297,6 +304,8 @@ pub(crate) const BUILTIN_PROMISE_RESOLVE: FunctionID = 421;
 pub(crate) const BUILTIN_PROMISE_ALL: FunctionID = 422;
 pub(crate) const BUILTIN_PROMISE_THEN: FunctionID = 423;
 pub(crate) const BUILTIN_PROMISE_NOOP: FunctionID = 424;
+pub(crate) const BUILTIN_PROMISE_WITHRESOLVERS: FunctionID = 425;
+pub(crate) const BUILTIN_PROMISE_TRY: FunctionID = 426;
 // ── Proxy (430–434) ─────────────────────────────────────────────────
 pub(crate) const BUILTIN_CTOR_PROXY: FunctionID = 430;
 // ── Reflect (435–439) ───────────────────────────────────────────────
@@ -331,6 +340,7 @@ pub(crate) const BUILTIN_ATOMICS_EXCHANGE: FunctionID = 495;
 pub(crate) const BUILTIN_ATOMICS_WAIT: FunctionID = 496;
 pub(crate) const BUILTIN_ATOMICS_NOTIFY: FunctionID = 497;
 pub(crate) const BUILTIN_ATOMICS_WAITASYNC: FunctionID = 498;
+pub(crate) const BUILTIN_ATOMICS_PAUSE: FunctionID = 499;
 // ── AbstractModuleSource (510–514) ──────────────────────────────────
 pub(crate) const BUILTIN_CTOR_ABSTRACT_MODULE_SOURCE: FunctionID = 510;
 pub(crate) const BUILTIN_ABSTRACT_MODULE_SOURCE_TOSTRINGTAG_GET: FunctionID = 511;

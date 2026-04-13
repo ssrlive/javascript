@@ -887,6 +887,11 @@ impl<'gc> VM<'gc> {
         let mut regexp_ctor = IndexMap::new();
         Self::init_native_ctor_header(&mut regexp_ctor, BUILTIN_CTOR_REGEXP, "RegExp", 2.0);
         Self::insert_species_getter(&mut regexp_ctor, ctx);
+        regexp_ctor.insert(
+            "escape".to_string(),
+            Self::make_native_fn(ctx, BUILTIN_REGEXP_ESCAPE, "escape", 1.0),
+        );
+        Self::set_property_attributes(&mut regexp_ctor, "escape", true, false, true);
         let regexp_ctor_val = Self::finalize_ctor_with_prototype(ctx, regexp_ctor, regexp_proto_obj);
         self.globals.insert("RegExp".to_string(), regexp_ctor_val);
 

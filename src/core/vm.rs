@@ -3626,6 +3626,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_REFLECT_APPLY => "apply",
             BUILTIN_JSON_STRINGIFY => "stringify",
             BUILTIN_JSON_PARSE => "parse",
+            BUILTIN_JSON_RAWJSON => "rawJSON",
+            BUILTIN_JSON_ISRAWJSON => "isRawJSON",
             BUILTIN_DATE_GETTIME => "getTime",
             BUILTIN_DATE_VALUEOF => "valueOf",
             BUILTIN_DATE_TOSTRING => "toString",
@@ -3838,6 +3840,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_REFLECT_APPLY => 3.0,
             BUILTIN_JSON_STRINGIFY => 3.0,
             BUILTIN_JSON_PARSE => 2.0,
+            BUILTIN_JSON_RAWJSON => 1.0,
+            BUILTIN_JSON_ISRAWJSON => 1.0,
             // Date getters: all length 0
             BUILTIN_DATE_GETTIME
             | BUILTIN_DATE_VALUEOF
@@ -17015,9 +17019,13 @@ impl<'gc> VM<'gc> {
         let mut json_map = IndexMap::new();
         json_map.insert("stringify".to_string(), Value::VmNativeFunction(BUILTIN_JSON_STRINGIFY));
         json_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_JSON_PARSE));
+        json_map.insert("rawJSON".to_string(), Value::VmNativeFunction(BUILTIN_JSON_RAWJSON));
+        json_map.insert("isRawJSON".to_string(), Value::VmNativeFunction(BUILTIN_JSON_ISRAWJSON));
         Self::insert_property_with_attributes(&mut json_map, "@@sym:4", &Value::from("JSON"), false, false, true);
         mark_nonenumerable(&mut json_map, "stringify");
         mark_nonenumerable(&mut json_map, "parse");
+        mark_nonenumerable(&mut json_map, "rawJSON");
+        mark_nonenumerable(&mut json_map, "isRawJSON");
         self.globals
             .insert("JSON".to_string(), Value::VmObject(new_gc_cell_ptr(ctx, json_map)));
 
@@ -23967,13 +23975,64 @@ impl<'gc> VM<'gc> {
                     return parsed;
                 }
 
+                // Build source map for json-parse-with-source (reviver context.source)
+                let source_map = Self::json_extract_source_map(&s);
+
                 let mut wrapper = IndexMap::new();
                 if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Object") {
                     wrapper.insert("__proto__".to_string(), proto);
                 }
                 wrapper.insert(String::new(), parsed);
                 let wrapper = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
-                self.json_internalize_property(ctx, &wrapper, "", &reviver)
+                self.json_internalize_property_with_source(ctx, &wrapper, "", &reviver, &source_map, &mut vec![])
+            }
+            BUILTIN_JSON_RAWJSON => {
+                // JSON.rawJSON(string) - creates a raw JSON value object
+                let raw = args.first().cloned().unwrap_or(Value::Undefined);
+                let s = match self.vm_to_string_like_spec(ctx, &raw) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
+                // Validate: must be a valid JSON primitive (not object/array)
+                // Must reject empty strings and strings with leading/trailing whitespace
+                if s.is_empty()
+                    || s.starts_with(|c: char| c.is_ascii_whitespace())
+                    || s.ends_with(|c: char| c.is_ascii_whitespace())
+                {
+                    self.throw_syntax_error(ctx, "JSON.rawJSON: value must be a JSON primitive");
+                    return Value::Undefined;
+                }
+                if s.starts_with('{') || s.starts_with('[') {
+                    self.throw_syntax_error(ctx, "JSON.rawJSON: value must be a JSON primitive");
+                    return Value::Undefined;
+                }
+                // Validate it parses as JSON
+                if serde_json::from_str::<serde_json::Value>(&s).is_err() {
+                    self.throw_syntax_error(ctx, "JSON.rawJSON: invalid JSON");
+                    return Value::Undefined;
+                }
+                let mut raw_obj = IndexMap::new();
+                raw_obj.insert("rawJSON".to_string(), Value::from(s.as_str()));
+                // Mark as raw JSON object (frozen, null prototype)
+                raw_obj.insert("__is_raw_json__".to_string(), Value::Boolean(true));
+                // Set null prototype
+                raw_obj.insert("__proto__".to_string(), Value::Null);
+                let obj = Value::VmObject(new_gc_cell_ptr(ctx, raw_obj));
+                // Freeze the object
+                let _ = self.call_host_fn(ctx, "object.freeze", None, &[obj.clone()]);
+                obj
+            }
+            BUILTIN_JSON_ISRAWJSON => {
+                let val = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Value::VmObject(obj) = &val {
+                    let map = obj.borrow();
+                    Value::Boolean(matches!(map.get("__is_raw_json__"), Some(Value::Boolean(true))))
+                } else {
+                    Value::Boolean(false)
+                }
             }
             BUILTIN_EVAL => {
                 let Some(first_arg) = args.first() else {
@@ -28539,6 +28598,8 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_JSON_STRINGIFY
             | BUILTIN_JSON_PARSE
+            | BUILTIN_JSON_RAWJSON
+            | BUILTIN_JSON_ISRAWJSON
             | BUILTIN_ARRAY_ISARRAY
             | BUILTIN_MATH_FLOOR
             | BUILTIN_MATH_CEIL
@@ -41731,6 +41792,15 @@ impl<'gc> VM<'gc> {
             };
         }
 
+        // Handle raw JSON objects (JSON.rawJSON)
+        if let Value::VmObject(obj) = &value {
+            if matches!(obj.borrow().get("__is_raw_json__"), Some(Value::Boolean(true))) {
+                if let Some(Value::String(raw_str)) = obj.borrow().get("rawJSON") {
+                    return Some(crate::unicode::utf16_to_utf8(raw_str));
+                }
+            }
+        }
+
         let value = self.json_stringify_prepare_value(ctx, value)?;
         match &value {
             Value::Null => Some("null".to_string()),
@@ -42008,7 +42078,162 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn json_internalize_property(&mut self, ctx: &GcContext<'gc>, holder: &Value<'gc>, name: &str, reviver: &Value<'gc>) -> Value<'gc> {
+    fn json_define_data_property(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>, key: &str, value: &Value<'gc>) {
+        let mut desc = IndexMap::new();
+        desc.insert("value".to_string(), value.clone());
+        desc.insert("writable".to_string(), Value::Boolean(true));
+        desc.insert("enumerable".to_string(), Value::Boolean(true));
+        desc.insert("configurable".to_string(), Value::Boolean(true));
+        let desc_obj = self.wrap_descriptor_object(ctx, desc);
+        let _ = self.call_host_fn(ctx, "reflect.defineProperty", None, &[target.clone(), Value::from(key), desc_obj]);
+    }
+
+    /// Extract a mapping from JSON path (Vec<String> serialized as joined path) to raw source text
+    /// for primitive values. Used by json-parse-with-source.
+    fn json_extract_source_map(json_str: &str) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let bytes = json_str.as_bytes();
+        let mut pos = 0;
+        Self::json_source_scan(bytes, &mut pos, &mut vec![], &mut map);
+        map
+    }
+
+    fn json_path_key(path: &[String]) -> String {
+        // Use a null-separated key to avoid ambiguity
+        path.join("\0")
+    }
+
+    fn json_source_scan(
+        bytes: &[u8],
+        pos: &mut usize,
+        path: &mut Vec<String>,
+        map: &mut std::collections::HashMap<String, String>,
+    ) {
+        Self::json_skip_ws(bytes, pos);
+        if *pos >= bytes.len() { return; }
+
+        match bytes[*pos] {
+            b'{' => {
+                *pos += 1;
+                Self::json_skip_ws(bytes, pos);
+                if *pos < bytes.len() && bytes[*pos] == b'}' {
+                    *pos += 1;
+                    return;
+                }
+                loop {
+                    Self::json_skip_ws(bytes, pos);
+                    if *pos >= bytes.len() { return; }
+                    // Parse key (must be a string)
+                    let key = Self::json_scan_string(bytes, pos);
+                    Self::json_skip_ws(bytes, pos);
+                    if *pos < bytes.len() && bytes[*pos] == b':' { *pos += 1; }
+                    path.push(key);
+                    Self::json_source_scan(bytes, pos, path, map);
+                    path.pop();
+                    Self::json_skip_ws(bytes, pos);
+                    if *pos >= bytes.len() || bytes[*pos] != b',' { break; }
+                    *pos += 1;
+                }
+                if *pos < bytes.len() && bytes[*pos] == b'}' { *pos += 1; }
+            }
+            b'[' => {
+                *pos += 1;
+                Self::json_skip_ws(bytes, pos);
+                if *pos < bytes.len() && bytes[*pos] == b']' {
+                    *pos += 1;
+                    return;
+                }
+                let mut idx = 0usize;
+                loop {
+                    path.push(idx.to_string());
+                    Self::json_source_scan(bytes, pos, path, map);
+                    path.pop();
+                    idx += 1;
+                    Self::json_skip_ws(bytes, pos);
+                    if *pos >= bytes.len() || bytes[*pos] != b',' { break; }
+                    *pos += 1;
+                }
+                if *pos < bytes.len() && bytes[*pos] == b']' { *pos += 1; }
+            }
+            b'"' => {
+                let start = *pos;
+                Self::json_scan_string(bytes, pos);
+                let source = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("").to_string();
+                map.insert(Self::json_path_key(path), source);
+            }
+            _ => {
+                // number, true, false, null
+                let start = *pos;
+                while *pos < bytes.len() && !matches!(bytes[*pos], b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') {
+                    *pos += 1;
+                }
+                let source = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("").to_string();
+                map.insert(Self::json_path_key(path), source);
+            }
+        }
+    }
+
+    fn json_skip_ws(bytes: &[u8], pos: &mut usize) {
+        while *pos < bytes.len() && matches!(bytes[*pos], b' ' | b'\t' | b'\n' | b'\r') {
+            *pos += 1;
+        }
+    }
+
+    fn json_scan_string(bytes: &[u8], pos: &mut usize) -> String {
+        if *pos >= bytes.len() || bytes[*pos] != b'"' { return String::new(); }
+        *pos += 1; // skip opening quote
+        let mut result = String::new();
+        while *pos < bytes.len() && bytes[*pos] != b'"' {
+            if bytes[*pos] == b'\\' {
+                *pos += 1;
+                if *pos < bytes.len() {
+                    match bytes[*pos] {
+                        b'u' => {
+                            *pos += 1;
+                            let mut hex = String::new();
+                            for _ in 0..4 {
+                                if *pos < bytes.len() {
+                                    hex.push(bytes[*pos] as char);
+                                    *pos += 1;
+                                }
+                            }
+                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                                if let Some(ch) = char::from_u32(code) {
+                                    result.push(ch);
+                                }
+                            }
+                            continue;
+                        }
+                        b'"' => result.push('"'),
+                        b'\\' => result.push('\\'),
+                        b'/' => result.push('/'),
+                        b'n' => result.push('\n'),
+                        b'r' => result.push('\r'),
+                        b't' => result.push('\t'),
+                        b'b' => result.push('\u{0008}'),
+                        b'f' => result.push('\u{000c}'),
+                        other => result.push(other as char),
+                    }
+                    *pos += 1;
+                }
+            } else {
+                result.push(bytes[*pos] as char);
+                *pos += 1;
+            }
+        }
+        if *pos < bytes.len() && bytes[*pos] == b'"' { *pos += 1; } // skip closing quote
+        result
+    }
+
+    fn json_internalize_property_with_source(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        holder: &Value<'gc>,
+        name: &str,
+        reviver: &Value<'gc>,
+        source_map: &std::collections::HashMap<String, String>,
+        path: &mut Vec<String>,
+    ) -> Value<'gc> {
         let val = self.read_named_property(ctx, holder, name);
         if self.pending_throw.is_some() {
             return Value::Undefined;
@@ -42033,7 +42258,9 @@ impl<'gc> VM<'gc> {
             }
             for idx in 0..len {
                 let key = idx.to_string();
-                let revived = self.json_internalize_property(ctx, &val, &key, reviver);
+                path.push(key.clone());
+                let revived = self.json_internalize_property_with_source(ctx, &val, &key, reviver, source_map, path);
+                path.pop();
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
@@ -42058,7 +42285,9 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             for key in keys {
-                let revived = self.json_internalize_property(ctx, &val, &key, reviver);
+                path.push(key.clone());
+                let revived = self.json_internalize_property_with_source(ctx, &val, &key, reviver, source_map, path);
+                path.pop();
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
@@ -42076,7 +42305,24 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        match self.vm_call_function_value(ctx, reviver, holder, &[Value::from(name), val]) {
+        // Build context object with source property.
+        // Per spec, only include source when the value is a primitive that matches the original parse.
+        let path_key = Self::json_path_key(path);
+        let include_source = if let Some(source_text) = source_map.get(&path_key) {
+            Self::json_value_matches_source(&val, source_text)
+        } else {
+            false
+        };
+        let context = if include_source {
+            let mut ctx_map = IndexMap::new();
+            ctx_map.insert("source".to_string(), Value::from(source_map.get(&path_key).unwrap().as_str()));
+            Value::VmObject(new_gc_cell_ptr(ctx, ctx_map))
+        } else {
+            let ctx_map = IndexMap::new();
+            Value::VmObject(new_gc_cell_ptr(ctx, ctx_map))
+        };
+
+        match self.vm_call_function_value(ctx, reviver, holder, &[Value::from(name), val, context]) {
             Ok(v) => v,
             Err(err) => {
                 self.set_pending_throw_from_error(&err);
@@ -42085,14 +42331,31 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn json_define_data_property(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>, key: &str, value: &Value<'gc>) {
-        let mut desc = IndexMap::new();
-        desc.insert("value".to_string(), value.clone());
-        desc.insert("writable".to_string(), Value::Boolean(true));
-        desc.insert("enumerable".to_string(), Value::Boolean(true));
-        desc.insert("configurable".to_string(), Value::Boolean(true));
-        let desc_obj = self.wrap_descriptor_object(ctx, desc);
-        let _ = self.call_host_fn(ctx, "reflect.defineProperty", None, &[target.clone(), Value::from(key), desc_obj]);
+    /// Check if a Value matches what would be produced by parsing the given JSON source text.
+    fn json_value_matches_source(val: &Value<'gc>, source: &str) -> bool {
+        match val {
+            Value::Null => source == "null",
+            Value::Boolean(true) => source == "true",
+            Value::Boolean(false) => source == "false",
+            Value::Number(n) => {
+                // Parse source as number and compare
+                if let Ok(parsed) = source.parse::<f64>() {
+                    *n == parsed || (n.is_nan() && parsed.is_nan())
+                } else {
+                    false
+                }
+            }
+            Value::String(s) => {
+                // source includes quotes, so parse it as a JSON string
+                if let Ok(serde_json::Value::String(parsed)) = serde_json::from_str(source) {
+                    let utf8 = crate::unicode::utf16_to_utf8(s);
+                    utf8 == parsed
+                } else {
+                    false
+                }
+            }
+            _ => false, // objects/arrays never get source
+        }
     }
 
     fn json_to_length(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> usize {

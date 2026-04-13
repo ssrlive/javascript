@@ -183,6 +183,8 @@ pub(crate) const BUILTIN_FN_TOSTRING: FunctionID = 234;
 // ── JSON (240–249) ──────────────────────────────────────────────────
 pub(crate) const BUILTIN_JSON_STRINGIFY: FunctionID = 240;
 pub(crate) const BUILTIN_JSON_PARSE: FunctionID = 241;
+pub(crate) const BUILTIN_JSON_RAWJSON: FunctionID = 242;
+pub(crate) const BUILTIN_JSON_ISRAWJSON: FunctionID = 243;
 // ── RegExp (250–259) ────────────────────────────────────────────────
 pub(crate) const BUILTIN_CTOR_REGEXP: FunctionID = 250;
 pub(crate) const BUILTIN_REGEX_EXEC: FunctionID = 251;

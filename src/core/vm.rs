@@ -8707,6 +8707,308 @@ impl<'gc> VM<'gc> {
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, obj))
             }
+            "iterator.zip" | "iterator.zipKeyed" => {
+                let is_keyed = name == "iterator.zipKeyed";
+                let iterables_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let options_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+                // Step 1: If iterables is not an Object, throw TypeError (before reading options)
+                if !Self::is_iterator_object_like(&iterables_arg) {
+                    self.throw_type_error(ctx, if is_keyed {
+                        "Iterator.zipKeyed requires an object argument"
+                    } else {
+                        "Iterator.zip requires an iterable argument"
+                    });
+                    return Value::Undefined;
+                }
+
+                // 2. Read options
+                let (mode_str, padding_val) = {
+                    let options = if matches!(options_arg, Value::Undefined) {
+                        Value::Undefined
+                    } else {
+                        options_arg
+                    };
+
+                    let mode_val = if matches!(options, Value::Undefined) {
+                        Value::Undefined
+                    } else {
+                        if !Self::is_iterator_object_like(&options) {
+                            self.throw_type_error(ctx, "options must be an object");
+                            return Value::Undefined;
+                        }
+                        let m = self.read_named_property(ctx, &options, "mode");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        m
+                    };
+
+                    let mode = if matches!(mode_val, Value::Undefined) {
+                        "shortest".to_string()
+                    } else if let Value::String(s) = &mode_val {
+                        crate::unicode::utf16_to_utf8(s)
+                    } else {
+                        self.throw_type_error(ctx, "mode must be a string");
+                        return Value::Undefined;
+                    };
+
+                    if mode != "shortest" && mode != "longest" && mode != "strict" {
+                        self.throw_type_error(ctx, "mode must be \"shortest\", \"longest\", or \"strict\"");
+                        return Value::Undefined;
+                    }
+
+                    let padding = if mode == "longest" && !matches!(options, Value::Undefined) {
+                        let p = self.read_named_property(ctx, &options, "padding");
+                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        p
+                    } else {
+                        Value::Undefined
+                    };
+
+                    if mode == "longest" && !matches!(padding, Value::Undefined) {
+                        if !Self::is_iterator_object_like(&padding) {
+                            self.throw_type_error(ctx, "padding must be an object");
+                            return Value::Undefined;
+                        }
+                    }
+
+                    (mode, padding)
+                };
+
+                // 2. Collect iterators
+                let mut iters: Vec<Value<'gc>> = Vec::new();
+                let mut next_methods: Vec<Value<'gc>> = Vec::new();
+                let mut keys: Vec<Value<'gc>> = Vec::new(); // for zipKeyed
+
+                if is_keyed {
+                    // zipKeyed: iterables is an object, enumerate own properties
+                    if !Self::is_iterator_object_like(&iterables_arg) {
+                        self.throw_type_error(ctx, "Iterator.zipKeyed requires an object argument");
+                        return Value::Undefined;
+                    }
+                    // Get own keys via Reflect.ownKeys logic
+                    let all_keys_val = self.call_host_fn(ctx, "reflect.ownKeys", None, std::slice::from_ref(&iterables_arg));
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    let all_keys = if let Value::VmArray(arr) = &all_keys_val {
+                        arr.borrow().elements.clone()
+                    } else {
+                        Vec::new()
+                    };
+
+                    for key_val in &all_keys {
+                        // GetOwnProperty — check enumerable
+                        let key_str = self.value_to_property_key(ctx, key_val);
+                        if self.pending_throw.is_some() {
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+                        let desc = self.get_own_property_descriptor_for_zip(ctx, &iterables_arg, &key_str);
+                        if self.pending_throw.is_some() {
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+                        if let Some((enumerable, _)) = desc {
+                            if !enumerable { continue; }
+                        } else {
+                            continue;
+                        }
+                        // Get the value
+                        let value = self.read_named_property(ctx, &iterables_arg, &key_str);
+                        if self.pending_throw.is_some() {
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+                        // Skip undefined values (per spec step 11.b.iv.2.b)
+                        if matches!(value, Value::Undefined) { continue; }
+                        // GetIteratorFlattenable(value, reject-strings)
+                        let (iter, next) = match self.get_iterator_flattenable(ctx, &value, false) {
+                            Some(pair) => pair,
+                            None => {
+                                self.close_iterators(ctx, &iters);
+                                return Value::Undefined;
+                            }
+                        };
+                        keys.push(key_val.clone());
+                        iters.push(iter);
+                        next_methods.push(next);
+                    }
+                } else {
+                    // zip: iterables is an iterable, iterate over it
+                    let iter_fn = self.read_named_property(ctx, &iterables_arg, "@@sym:1");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if matches!(iter_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&iter_fn) {
+                        self.throw_type_error(ctx, "Iterator.zip requires an iterable argument");
+                        return Value::Undefined;
+                    }
+                    let input_iterator = match self.vm_call_function_value(ctx, &iter_fn, &iterables_arg, &[]) {
+                        Ok(v) => v,
+                        Err(err) => { self.set_pending_throw_from_error(&err); return Value::Undefined; }
+                    };
+                    if !Self::is_iterator_object_like(&input_iterator) {
+                        self.throw_type_error(ctx, "Iterator.zip requires an iterable argument");
+                        return Value::Undefined;
+                    }
+                    let input_next = self.read_named_property(ctx, &input_iterator, "next");
+                    if self.pending_throw.is_some() { return Value::Undefined; }
+
+                    loop {
+                        match self.iterator_step_value(ctx, &input_iterator, &input_next) {
+                            Some(Some(element)) => {
+                                // GetIteratorFlattenable(element, reject-strings)
+                                let (iter, next) = match self.get_iterator_flattenable(ctx, &element, false) {
+                                    Some(pair) => pair,
+                                    None => {
+                                        // IfAbruptCloseIterators(iter, « inputIter » ++ iters)
+                                        // Build combined list: [inputIter, iters[0], iters[1], ...]
+                                        // IteratorCloseAll closes in reverse: iters[last]..iters[0], inputIter
+                                        let mut all_pairs: Vec<(Value<'gc>, bool)> = Vec::with_capacity(1 + iters.len());
+                                        all_pairs.push((input_iterator.clone(), false));
+                                        for it in iters.iter() {
+                                            all_pairs.push((it.clone(), false));
+                                        }
+                                        // initial_is_throw=true because GetIteratorFlattenable failed
+                                        self.iterator_close_all(ctx, &all_pairs, true);
+                                        return Value::Undefined;
+                                    }
+                                };
+                                iters.push(iter);
+                                next_methods.push(next);
+                            }
+                            Some(None) => break, // input exhausted
+                            None => {
+                                // Error while iterating input
+                                self.close_iterators(ctx, &iters);
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                }
+
+                // 3. Collect padding values (for longest mode)
+                let iter_count = iters.len();
+                let padding_values: Vec<Value<'gc>> = if mode_str == "longest" {
+                    if matches!(padding_val, Value::Undefined) {
+                        // No padding option → all undefined
+                        vec![Value::Undefined; iter_count]
+                    } else if is_keyed {
+                        // zipKeyed: Get(paddingOption, key) for each key
+                        let mut pad_vals = Vec::with_capacity(iter_count);
+                        for key_val in &keys {
+                            let key_str = self.value_to_property_key(ctx, key_val);
+                            if self.pending_throw.is_some() {
+                                self.close_iterators(ctx, &iters);
+                                return Value::Undefined;
+                            }
+                            let val = self.read_named_property(ctx, &padding_val, &key_str);
+                            if self.pending_throw.is_some() {
+                                self.close_iterators(ctx, &iters);
+                                return Value::Undefined;
+                            }
+                            pad_vals.push(val);
+                        }
+                        pad_vals
+                    } else {
+                        // zip: GetIterator(paddingOption, sync) → iterate iterCount times
+                        let piter_fn = self.read_named_property(ctx, &padding_val, "@@sym:1");
+                        if self.pending_throw.is_some() {
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+                        if matches!(piter_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&piter_fn) {
+                            self.throw_type_error(ctx, "padding is not iterable");
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+                        let pi = match self.vm_call_function_value(ctx, &piter_fn, &padding_val, &[]) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                self.close_iterators(ctx, &iters);
+                                return Value::Undefined;
+                            }
+                        };
+                        if !Self::is_iterator_object_like(&pi) {
+                            self.throw_type_error(ctx, "padding iterator must be an object");
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+                        let pn = self.read_named_property(ctx, &pi, "next");
+                        if self.pending_throw.is_some() {
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
+                        }
+
+                        // Iterate padding iterator exactly iterCount times
+                        let mut pad_vals = Vec::with_capacity(iter_count);
+                        let mut using_iterator = true;
+                        for _ in 0..iter_count {
+                            if using_iterator {
+                                match self.iterator_step_value(ctx, &pi, &pn) {
+                                    Some(Some(v)) => pad_vals.push(v),
+                                    Some(None) => {
+                                        using_iterator = false;
+                                        pad_vals.push(Value::Undefined);
+                                    }
+                                    None => {
+                                        // pending_throw already set by iterator_step_value
+                                        self.close_iterators(ctx, &iters);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            } else {
+                                pad_vals.push(Value::Undefined);
+                            }
+                        }
+                        // If padding iterator not exhausted, close it
+                        if using_iterator {
+                            if !self.iterator_close_normal(ctx, &pi) {
+                                // pending_throw already set
+                                self.close_iterators(ctx, &iters);
+                                return Value::Undefined;
+                            }
+                        }
+                        pad_vals
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                // 4. Build the helper object
+                let mut obj = IndexMap::new();
+                obj.insert("__helper_kind__".to_string(), Value::from(if is_keyed { "zipKeyed" } else { "zip" }));
+                obj.insert("__helper_done__".to_string(), Value::Boolean(false));
+                obj.insert("__helper_executing__".to_string(), Value::Boolean(false));
+                obj.insert("__zip_mode__".to_string(), Value::from(mode_str.as_str()));
+                obj.insert("__zip_count__".to_string(), Value::Number(iter_count as f64));
+                obj.insert(
+                    "__zip_iterators__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(iters))),
+                );
+                obj.insert(
+                    "__zip_nexts__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(next_methods))),
+                );
+                // Track which iterators are done (for longest/strict)
+                obj.insert(
+                    "__zip_done_flags__".to_string(),
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::Boolean(false); iter_count]))),
+                );
+                if is_keyed {
+                    obj.insert(
+                        "__zip_keys__".to_string(),
+                        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(keys))),
+                    );
+                }
+                if !padding_values.is_empty() {
+                    obj.insert(
+                        "__zip_padding__".to_string(),
+                        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(padding_values))),
+                    );
+                }
+                if let Some(proto) = self.globals.get("__IteratorHelperPrototype__").cloned() {
+                    obj.insert("__proto__".to_string(), proto);
+                }
+                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+            }
             "global.__getIterator" => {
                 let iterable = args.first().cloned().unwrap_or(Value::Undefined);
                 // Try [Symbol.iterator]() first
@@ -18244,6 +18546,16 @@ impl<'gc> VM<'gc> {
                 Self::make_host_fn_with_name_len(ctx, "iterator.concat", "concat", 0.0, false),
             );
             mark_nonenumerable(&mut ctor, "concat");
+            ctor.insert(
+                "zip".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "iterator.zip", "zip", 1.0, false),
+            );
+            mark_nonenumerable(&mut ctor, "zip");
+            ctor.insert(
+                "zipKeyed".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "iterator.zipKeyed", "zipKeyed", 1.0, false),
+            );
+            mark_nonenumerable(&mut ctor, "zipKeyed");
             ctor.insert("prototype".to_string(), iterator_proto_val.clone());
             write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
         }
@@ -36209,6 +36521,221 @@ impl<'gc> VM<'gc> {
         Some(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
     }
 
+    /// GetIteratorFlattenable(obj, reject-strings / iterate-string-primitives)
+    /// Returns (iterator, next_method) or None on error.
+    fn get_iterator_flattenable(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, allow_strings: bool) -> Option<(Value<'gc>, Value<'gc>)> {
+        if !Self::is_iterator_object_like(obj) {
+            if !allow_strings {
+                self.throw_type_error(ctx, "Iterator.zip requires object arguments");
+                return None;
+            }
+            if !matches!(obj, Value::String(_)) {
+                self.throw_type_error(ctx, "Iterator.zip requires object or string arguments");
+                return None;
+            }
+        }
+        let iter_fn = self.read_named_property(ctx, obj, "@@sym:1");
+        if self.pending_throw.is_some() { return None; }
+
+        if matches!(iter_fn, Value::Undefined | Value::Null) {
+            // No [Symbol.iterator] — use obj itself as an iterator (must be object)
+            if !Self::is_iterator_object_like(obj) {
+                self.throw_type_error(ctx, "value is not iterable");
+                return None;
+            }
+            let next = self.read_named_property(ctx, obj, "next");
+            if self.pending_throw.is_some() { return None; }
+            Some((obj.clone(), next))
+        } else {
+            if !self.is_value_callable(&iter_fn) {
+                self.throw_type_error(ctx, "[Symbol.iterator] is not callable");
+                return None;
+            }
+            let iterator = match self.vm_call_function_value(ctx, &iter_fn, obj, &[]) {
+                Ok(v) => v,
+                Err(err) => { self.set_pending_throw_from_error(&err); return None; }
+            };
+            if !Self::is_iterator_object_like(&iterator) {
+                self.throw_type_error(ctx, "iterator must be an object");
+                return None;
+            }
+            let next = self.read_named_property(ctx, &iterator, "next");
+            if self.pending_throw.is_some() { return None; }
+            Some((iterator, next))
+        }
+    }
+
+    /// IteratorCloseAll per spec: close iterators in reverse, threading completion.
+    /// `iters_with_done` contains (iterator, is_done) pairs.
+    /// `initial_is_throw`: true if the initial completion is a throw (error already in pending_throw).
+    /// After return, any error is in pending_throw; no error means normal completion.
+    fn iterator_close_all(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        iters_with_done: &[(Value<'gc>, bool)],
+        initial_is_throw: bool,
+    ) {
+        let mut completion_is_throw = initial_is_throw;
+        let mut saved_error = if initial_is_throw { self.pending_throw.take() } else { None };
+
+        for (iter, is_done) in iters_with_done.iter().rev() {
+            if *is_done { continue; }
+            let _ = self.pending_throw.take();
+            let return_method = self.read_named_property(ctx, iter, "return");
+            let getmethod_err = self.pending_throw.take();
+            if getmethod_err.is_some() {
+                // GetMethod threw (e.g., getter for .return threw)
+                if completion_is_throw {
+                    // Step 5: completion is throw → ignore GetMethod error
+                } else {
+                    // Step 6: GetMethod error becomes new completion
+                    saved_error = getmethod_err;
+                    completion_is_throw = true;
+                }
+                continue;
+            }
+            if matches!(return_method, Value::Undefined | Value::Null) || !self.is_value_callable(&return_method) {
+                continue;
+            }
+            match self.vm_call_function_value(ctx, &return_method, iter, &[]) {
+                Ok(_) => {}
+                Err(err) => {
+                    let _ = self.pending_throw.take();
+                    if completion_is_throw {
+                        // Step 5: completion is throw → ignore .return() error
+                    } else {
+                        // Step 6: .return() error becomes new completion
+                        self.set_pending_throw_from_error(&err);
+                        saved_error = self.pending_throw.take();
+                        completion_is_throw = true;
+                    }
+                }
+            }
+        }
+        if let Some(err) = saved_error {
+            self.pending_throw = Some(err);
+        }
+    }
+
+    /// Close iterators from GC arrays using IteratorCloseAll spec semantics.
+    fn iterator_close_all_from_gc(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        iters_gc: &VmArrayHandle<'gc>,
+        flags_gc: &VmArrayHandle<'gc>,
+        count: usize,
+        initial_is_throw: bool,
+    ) {
+        let pairs: Vec<(Value<'gc>, bool)> = (0..count).map(|i| {
+            let iter = iters_gc.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+            let is_done = matches!(flags_gc.borrow().get(i), Some(Value::Boolean(true)));
+            (iter, is_done)
+        }).collect();
+        self.iterator_close_all(ctx, &pairs, initial_is_throw);
+    }
+
+    /// Close all iterators in the list with throw completion (preserving original error).
+    /// Used during setup when an error occurs and we need to clean up.
+    fn close_iterators(&mut self, ctx: &GcContext<'gc>, iters: &[Value<'gc>]) {
+        let pairs: Vec<(Value<'gc>, bool)> = iters.iter().map(|i| (i.clone(), false)).collect();
+        self.iterator_close_all(ctx, &pairs, true);
+    }
+
+    /// Close all live (non-done) iterators in a zip helper using IteratorCloseAll semantics.
+    fn close_zip_open_iterators_reverse(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        iters_gc: &VmArrayHandle<'gc>,
+        flags_gc: &VmArrayHandle<'gc>,
+        count: usize,
+    ) {
+        self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, count, true);
+    }
+
+    /// Close all live (non-done) iterators in a zip helper (same as reverse, alias for longest mode).
+    fn close_zip_live_iterators_reverse(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        iters_gc: &VmArrayHandle<'gc>,
+        flags_gc: &VmArrayHandle<'gc>,
+        count: usize,
+    ) {
+        self.close_zip_open_iterators_reverse(ctx, iters_gc, flags_gc, count);
+    }
+
+    /// Build a null-prototype object for zipKeyed results.
+    fn build_zip_keyed_result(&self, ctx: &GcContext<'gc>, keys_arr: &Value<'gc>, results: &[Value<'gc>]) -> Value<'gc> {
+        let mut obj = IndexMap::new();
+        // null prototype
+        obj.insert("__proto__".to_string(), Value::Null);
+        if let Value::VmArray(keys_gc) = keys_arr {
+            let keys = keys_gc.borrow();
+            for (i, val) in results.iter().enumerate() {
+                if let Some(key) = keys.get(i) {
+                    let key_str = match key {
+                        Value::String(s) => crate::unicode::utf16_to_utf8(s),
+                        Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => {
+                            match sym.borrow().get("__symbol_id__") {
+                                Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
+                                _ => continue,
+                            }
+                        }
+                        Value::Number(n) => {
+                            if *n == (*n as u32) as f64 && *n >= 0.0 {
+                                format!("{}", *n as u32)
+                            } else {
+                                format!("{}", n)
+                            }
+                        }
+                        _ => continue,
+                    };
+                    obj.insert(key_str, val.clone());
+                }
+            }
+        }
+        Value::VmObject(new_gc_cell_ptr(ctx, obj))
+    }
+
+    /// Get own property descriptor for zipKeyed — returns Some((enumerable, _)) or None.
+    fn get_own_property_descriptor_for_zip(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, key: &str) -> Option<(bool, bool)> {
+        // Use the full Reflect.getOwnPropertyDescriptor to correctly handle
+        // accessor properties, proxies, and all edge cases
+        let key_val = Value::from(key);
+        let desc_result = self.call_host_fn(ctx, "reflect.getOwnPropertyDescriptor", None, &[obj.clone(), key_val]);
+        if self.pending_throw.is_some() { return None; }
+        if matches!(desc_result, Value::Undefined) { return None; }
+        let enumerable = self.read_named_property(ctx, &desc_result, "enumerable");
+        if self.pending_throw.is_some() { return None; }
+        Some((Self::value_is_truthy(&enumerable), true))
+    }
+
+    /// Convert a value to a string suitable as property key.
+    fn value_to_property_key(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
+        match val {
+            Value::String(s) => crate::unicode::utf16_to_utf8(s),
+            Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => {
+                match sym.borrow().get("__symbol_id__") {
+                    Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
+                    _ => {
+                        let s = self.vm_to_string(ctx, val);
+                        s
+                    }
+                }
+            }
+            Value::Number(n) => {
+                if *n == (*n as u32) as f64 && *n >= 0.0 {
+                    format!("{}", *n as u32)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            _ => {
+                let s = self.vm_to_string(ctx, val);
+                s
+            }
+        }
+    }
+
     fn iterator_helper_next(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Value<'gc> {
         let Value::VmObject(obj) = receiver else {
             self.throw_type_error(ctx, "Iterator helper next called on incompatible receiver");
@@ -36233,6 +36760,7 @@ impl<'gc> VM<'gc> {
             return self.create_iterator_result_object(ctx, Value::Undefined, true);
         }
         obj.borrow_mut(ctx).insert("__helper_executing__".to_string(), Value::Boolean(true));
+        obj.borrow_mut(ctx).insert("__helper_started__".to_string(), Value::Boolean(true));
 
         let result = (|| match kind.as_str() {
             "drop" => {
@@ -36548,6 +37076,196 @@ impl<'gc> VM<'gc> {
                 borrow.insert("__concat_current_iterator__".to_string(), opened);
                 borrow.insert("__concat_current_next__".to_string(), next);
             },
+            "zip" | "zipKeyed" => {
+                let is_keyed = kind == "zipKeyed";
+                let (mode, iter_count, iterators_arr, nexts_arr, done_flags_arr, keys_arr, padding_arr) = {
+                    let borrow = obj.borrow();
+                    let mode = match borrow.get("__zip_mode__") {
+                        Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                        _ => "shortest".to_string(),
+                    };
+                    let iter_count = match borrow.get("__zip_count__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    };
+                    (
+                        mode,
+                        iter_count,
+                        borrow.get("__zip_iterators__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__zip_nexts__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__zip_done_flags__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__zip_keys__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__zip_padding__").cloned().unwrap_or(Value::Undefined),
+                    )
+                };
+                let (Value::VmArray(iters_gc), Value::VmArray(nexts_gc), Value::VmArray(flags_gc)) =
+                    (&iterators_arr, &nexts_arr, &done_flags_arr) else {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                };
+
+                if iter_count == 0 {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                }
+
+                let mut results: Vec<Value<'gc>> = Vec::with_capacity(iter_count);
+                // For strict mode: tracks whether first iterator (i=0) returned done this step
+                let mut all_finished = false;
+
+                'iter_loop: for i in 0..iter_count {
+                    let already_done = matches!(flags_gc.borrow().get(i), Some(Value::Boolean(true)));
+                    if already_done {
+                        if mode == "longest" {
+                            let pad = if let Value::VmArray(pad_gc) = &padding_arr {
+                                pad_gc.borrow().get(i).cloned().unwrap_or(Value::Undefined)
+                            } else {
+                                Value::Undefined
+                            };
+                            results.push(pad);
+                        } else {
+                            results.push(Value::Undefined);
+                        }
+                        continue;
+                    }
+
+                    // For strict mode after first iterator done: use IteratorStep (reads .done only)
+                    if mode == "strict" && all_finished {
+                        let (iterator, next_method) = {
+                            let ib = iters_gc.borrow();
+                            let nb = nexts_gc.borrow();
+                            (
+                                ib.get(i).cloned().unwrap_or(Value::Undefined),
+                                nb.get(i).cloned().unwrap_or(Value::Undefined),
+                            )
+                        };
+                        let next_result = match self.iterator_next_result(ctx, &iterator, &next_method) {
+                            Some(r) => r,
+                            None => {
+                                flags_gc.borrow_mut(ctx).elements[i] = Value::Boolean(true);
+                                self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                                return Value::Undefined;
+                            }
+                        };
+                        let done = self.read_named_property(ctx, &next_result, "done");
+                        if self.pending_throw.is_some() {
+                            flags_gc.borrow_mut(ctx).elements[i] = Value::Boolean(true);
+                            self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                            return Value::Undefined;
+                        }
+                        if Self::value_is_truthy(&done) {
+                            flags_gc.borrow_mut(ctx).elements[i] = Value::Boolean(true);
+                            results.push(Value::Undefined);
+                        } else {
+                            // NOT done but first was → lengths differ → immediate close with TypeError
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            self.throw_type_error(ctx, "Iterators passed to Iterator.zip have different lengths");
+                            self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                            return Value::Undefined;
+                        }
+                        continue 'iter_loop;
+                    }
+
+                    let (iterator, next_method) = {
+                        let ib = iters_gc.borrow();
+                        let nb = nexts_gc.borrow();
+                        (
+                            ib.get(i).cloned().unwrap_or(Value::Undefined),
+                            nb.get(i).cloned().unwrap_or(Value::Undefined),
+                        )
+                    };
+                    match self.iterator_step_value(ctx, &iterator, &next_method) {
+                        Some(Some(value)) => {
+                            if mode == "strict" && all_finished {
+                                // Shouldn't reach here, but safety check
+                                obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                self.throw_type_error(ctx, "Iterators passed to Iterator.zip have different lengths");
+                                self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                                return Value::Undefined;
+                            }
+                            results.push(value);
+                        }
+                        Some(None) => {
+                            // This iterator just became done
+                            flags_gc.borrow_mut(ctx).elements[i] = Value::Boolean(true);
+
+                            match mode.as_str() {
+                                "shortest" => {
+                                    // IteratorCloseAll(openIters, ReturnCompletion(undefined))
+                                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                    self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, false);
+                                    if self.pending_throw.is_some() { return Value::Undefined; }
+                                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                                }
+                                "strict" => {
+                                    if i == 0 {
+                                        // First iterator done — set allFinished, continue checking rest
+                                        all_finished = true;
+                                        results.push(Value::Undefined);
+                                        continue 'iter_loop;
+                                    } else {
+                                        // i > 0 done but first wasn't → IteratorCloseAll with TypeError
+                                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                        self.throw_type_error(ctx, "Iterators passed to Iterator.zip have different lengths");
+                                        self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                                        return Value::Undefined;
+                                    }
+                                }
+                                "longest" => {
+                                    let pad = if let Value::VmArray(pad_gc) = &padding_arr {
+                                        pad_gc.borrow().get(i).cloned().unwrap_or(Value::Undefined)
+                                    } else {
+                                        Value::Undefined
+                                    };
+                                    results.push(pad);
+                                    continue 'iter_loop;
+                                }
+                                _ => {
+                                    results.push(Value::Undefined);
+                                }
+                            }
+                        }
+                        None => {
+                            // Error from IteratorStepValue — close with throw completion
+                            flags_gc.borrow_mut(ctx).elements[i] = Value::Boolean(true);
+                            self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                            return Value::Undefined;
+                        }
+                    }
+                }
+
+                // Post-loop checks
+                let total_done = {
+                    let fb = flags_gc.borrow();
+                    (0..iter_count).all(|i| matches!(fb.get(i), Some(Value::Boolean(true))))
+                };
+
+                if mode == "strict" && all_finished {
+                    if total_done {
+                        // All iterators finished at the same time
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                    } else {
+                        // First done but not all done → should not happen (caught in loop)
+                        obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                        self.throw_type_error(ctx, "Iterators passed to Iterator.zip have different lengths");
+                        self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, true);
+                        return Value::Undefined;
+                    }
+                }
+
+                if mode == "longest" && total_done {
+                    obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                }
+
+                let result = if is_keyed {
+                    self.build_zip_keyed_result(ctx, &keys_arr, &results)
+                } else {
+                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+                };
+                return self.create_iterator_result_object(ctx, result, false);
+            },
             _ => {
                 self.throw_type_error(ctx, "Unknown iterator helper kind");
                 Value::Undefined
@@ -36581,6 +37299,35 @@ impl<'gc> VM<'gc> {
         if already_done {
             return self.create_iterator_result_object(ctx, Value::Undefined, true);
         }
+
+        // Check if this is a suspended-start state (no next() called yet)
+        let is_suspended_start = !matches!(obj.borrow().get("__helper_started__"), Some(Value::Boolean(true)));
+
+        if is_suspended_start && (kind == "zip" || kind == "zipKeyed") {
+            // Spec: suspended-start → set state to "completed" (NOT "executing")
+            // Then call IteratorCloseAll with ReturnCompletion
+            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+
+            let (iterators_arr, done_flags_arr, iter_count) = {
+                let borrow = obj.borrow();
+                (
+                    borrow.get("__zip_iterators__").cloned().unwrap_or(Value::Undefined),
+                    borrow.get("__zip_done_flags__").cloned().unwrap_or(Value::Undefined),
+                    match borrow.get("__zip_count__") {
+                        Some(Value::Number(n)) => *n as usize,
+                        _ => 0,
+                    },
+                )
+            };
+            if let (Value::VmArray(iters_gc), Value::VmArray(flags_gc)) = (&iterators_arr, &done_flags_arr) {
+                self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, false);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+            }
+            return self.create_iterator_result_object(ctx, Value::Undefined, true);
+        }
+
         obj.borrow_mut(ctx).insert("__helper_executing__".to_string(), Value::Boolean(true));
         obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
 
@@ -36608,6 +37355,30 @@ impl<'gc> VM<'gc> {
                         Value::Undefined
                     }
                 };
+            }
+
+            if kind == "zip" || kind == "zipKeyed" {
+                // Close all live iterators using IteratorCloseAll with normal completion
+                let (iterators_arr, done_flags_arr, iter_count) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__zip_iterators__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__zip_done_flags__").cloned().unwrap_or(Value::Undefined),
+                        match borrow.get("__zip_count__") {
+                            Some(Value::Number(n)) => *n as usize,
+                            _ => 0,
+                        },
+                    )
+                };
+                if let (Value::VmArray(iters_gc), Value::VmArray(flags_gc)) = (&iterators_arr, &done_flags_arr) {
+                    // Normal completion (it.return() is not an error initially)
+                    self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, false);
+                    if self.pending_throw.is_some() {
+                        // An error from .return() → propagate it
+                        return Value::Undefined;
+                    }
+                }
+                return self.create_iterator_result_object(ctx, Value::Undefined, true);
             }
 
             if kind == "flatMap" {

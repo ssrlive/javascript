@@ -56,7 +56,7 @@ pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
                 trace_expr(context, b);
             }
         }
-        Expr::DeferredImport(a) => {
+        Expr::DeferredImport(a) | Expr::SourceImport(a) => {
             trace_expr(context, a);
         }
         Expr::Function(_, _, body, _) => {

@@ -12,6 +12,7 @@ pub(crate) const INTERNAL_FOROF_HELPER: &str = "__forOfValues internal";
 pub(crate) const INTERNAL_GETITER_HELPER: &str = "__getIterator internal";
 pub(crate) const INTERNAL_DYNAMIC_IMPORT_HELPER: &str = "__dynamicImport internal";
 pub(crate) const INTERNAL_DEFERRED_IMPORT_HELPER: &str = "__deferredImport internal";
+pub(crate) const INTERNAL_SOURCE_IMPORT_HELPER: &str = "__sourceImport internal";
 
 #[derive(Default)]
 pub struct Compiler<'gc> {
@@ -5122,6 +5123,11 @@ impl<'gc> Compiler<'gc> {
                 self.compile_expr(module_expr)?;
                 self.emit_call_opcode(1, 0);
             }
+            Expr::SourceImport(module_expr) => {
+                self.emit_helper_get(INTERNAL_SOURCE_IMPORT_HELPER);
+                self.compile_expr(module_expr)?;
+                self.emit_call_opcode(1, 0);
+            }
             Expr::This => {
                 self.chunk.write_opcode(Opcode::GetThis);
             }
@@ -9684,7 +9690,7 @@ impl<'gc> Compiler<'gc> {
                 Self::expr_references_any_identifier(spec, names)
                     || attrs.as_ref().is_some_and(|a| Self::expr_references_any_identifier(a, names))
             }
-            Expr::DeferredImport(spec) => Self::expr_references_any_identifier(spec, names),
+            Expr::DeferredImport(spec) | Expr::SourceImport(spec) => Self::expr_references_any_identifier(spec, names),
             Expr::Function(..)
             | Expr::GeneratorFunction(..)
             | Expr::AsyncFunction(..)

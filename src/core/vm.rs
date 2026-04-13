@@ -28,7 +28,6 @@ use typedarray::{coerce_bigint_for_ta, is_bigint_typed_array};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use unicode_normalization::UnicodeNormalization;
 
@@ -1030,71 +1029,6 @@ impl<'gc> VM<'gc> {
         }
         write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
         Some(Value::VmObject(new_gc_cell_ptr(ctx, map)))
-    }
-
-    fn parse_simple_module_namespace(&self, ctx: &GcContext<'gc>, source_text: &str) -> Value<'gc> {
-        let mut map = IndexMap::new();
-
-        for raw_line in source_text.lines() {
-            let line = raw_line.trim();
-
-            if let Some(rest) = line.strip_prefix("export const ") {
-                let mut parts = rest.splitn(2, '=');
-                let name = parts.next().map(str::trim).unwrap_or_default();
-                let rhs = parts.next().map(str::trim).unwrap_or_default().trim_end_matches(';').trim();
-                if name.is_empty() {
-                    continue;
-                }
-
-                let value = if rhs == "true" {
-                    Value::Boolean(true)
-                } else if rhs == "false" {
-                    Value::Boolean(false)
-                } else if (rhs.starts_with('"') && rhs.ends_with('"')) || (rhs.starts_with('\'') && rhs.ends_with('\'')) {
-                    Value::from(&rhs[1..rhs.len().saturating_sub(1)])
-                } else if let Ok(n) = rhs.parse::<f64>() {
-                    Value::Number(n)
-                } else {
-                    Value::Undefined
-                };
-                map.insert(name.to_string(), value);
-                continue;
-            }
-
-            if let Some(rest) = line.strip_prefix("export default ") {
-                let rhs = rest.trim().trim_end_matches(';').trim();
-                let value = if rhs == "true" {
-                    Value::Boolean(true)
-                } else if rhs == "false" {
-                    Value::Boolean(false)
-                } else if (rhs.starts_with('"') && rhs.ends_with('"')) || (rhs.starts_with('\'') && rhs.ends_with('\'')) {
-                    Value::from(&rhs[1..rhs.len().saturating_sub(1)])
-                } else if let Ok(n) = rhs.parse::<f64>() {
-                    Value::Number(n)
-                } else {
-                    Value::Undefined
-                };
-                map.insert("default".to_string(), value);
-            }
-        }
-
-        Value::VmObject(new_gc_cell_ptr(ctx, map))
-    }
-
-    fn resolve_import_specifier_path(&self, specifier: &str) -> PathBuf {
-        let spec_path = Path::new(specifier);
-        if spec_path.is_absolute() {
-            return spec_path.to_path_buf();
-        }
-
-        if (specifier.starts_with("./") || specifier.starts_with("../"))
-            && let Some(script_path) = &self.script_path
-        {
-            let script_parent = Path::new(script_path).parent().unwrap_or_else(|| Path::new("."));
-            return script_parent.join(spec_path);
-        }
-
-        spec_path.to_path_buf()
     }
 
     fn push_dynamic_function_call_new_target(&mut self, callee: &Value<'gc>, id: FunctionID) -> bool {
@@ -4592,6 +4526,89 @@ impl<'gc> VM<'gc> {
         promise
     }
 
+    /// import.source(specifier) → Promise that resolves with the module namespace.
+    fn host_source_import_promise(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        let promise_ctor = if matches!(self.intrinsic_promise_ctor, Value::Undefined) {
+            self.globals.get("Promise").cloned().unwrap_or(Value::Undefined)
+        } else {
+            self.intrinsic_promise_ctor.clone()
+        };
+        let (promise, resolve, reject) = match self.new_promise_capability(ctx, &promise_ctor) {
+            Ok(capability) => capability,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return Value::Undefined;
+            }
+        };
+
+        let reject_with = |vm: &mut Self, value: Value<'gc>| {
+            vm.pending_throw = None;
+            if let Err(err) = vm.vm_call_function_value(ctx, &reject, &Value::Undefined, std::slice::from_ref(&value)) {
+                vm.set_pending_throw_from_error(&err);
+            } else {
+                vm.pending_throw = None;
+            }
+        };
+
+        let specifier = args.first().cloned().unwrap_or(Value::Undefined);
+        let specifier_string = match self.vm_to_string_like_spec(ctx, &specifier) {
+            Ok(s) => s,
+            Err(err) => {
+                let reject_value = self.vm_value_from_error(ctx, &err);
+                reject_with(self, reject_value);
+                return promise;
+            }
+        };
+
+        let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
+            let reject_value = self.make_type_error_object(ctx, "import.source requires an active script or module");
+            reject_with(self, reject_value);
+            return promise;
+        };
+
+        let base_path = std::path::Path::new(&base_source);
+        let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
+        let module_key = resolved_path.to_string_lossy().to_string();
+
+        if !self.loaded_modules.contains_key(&module_key)
+            || self
+                .module_records
+                .get(&module_key)
+                .is_some_and(|record| record.status != ModuleStatus::Evaluated)
+        {
+            let request = crate::core::ModuleRequest {
+                specifier: specifier_string.clone(),
+                phase: crate::core::ModuleRequestPhase::Evaluation,
+            };
+            self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
+            self.fixup_circular_reexports();
+        }
+
+        if let Some(thrown) = self.pending_throw.take() {
+            reject_with(self, thrown);
+            return promise;
+        }
+        if let Some(reject_value) = self.module_load_errors.get(&module_key).cloned() {
+            reject_with(self, reject_value);
+            return promise;
+        }
+
+        let module_ready = self.loaded_module_states.contains_key(&module_key)
+            || (self.is_module_mode && self.current_source_path() == Some(module_key.as_str()));
+        if !module_ready {
+            let reject_value = self.make_type_error_object(ctx, &format!("Failed to source-import '{}'", specifier_string));
+            reject_with(self, reject_value);
+            return promise;
+        }
+
+        self.refresh_module_namespace_object(ctx, &module_key);
+        let namespace = self.module_ns_objects.get(&module_key).cloned().unwrap_or(Value::Undefined);
+        if let Err(err) = self.vm_call_function_value(ctx, &resolve, &Value::Undefined, std::slice::from_ref(&namespace)) {
+            self.set_pending_throw_from_error(&err);
+        }
+        promise
+    }
+
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         match name {
             "Function.prototype.restrictedThrow" => {
@@ -7879,18 +7896,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            "import.source" => {
-                let specifier = args.first().map(value_to_string).unwrap_or_default();
-                let resolved_path = self.resolve_import_specifier_path(&specifier);
-                let namespace = match std::fs::read_to_string(&resolved_path) {
-                    Ok(source_text) => self.parse_simple_module_namespace(ctx, &source_text),
-                    Err(_) => Value::VmObject(new_gc_cell_ptr(ctx, IndexMap::new())),
-                };
-
-                let promise = self.make_pending_promise(ctx);
-                self.settle_promise(ctx, &promise, &namespace, false);
-                promise
-            }
+            "import.source" => self.host_source_import_promise(ctx, args),
             "global.isFinite" => {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
                 match self.extract_number_with_coercion(ctx, &arg) {
@@ -17640,6 +17646,10 @@ impl<'gc> VM<'gc> {
         self.globals.insert(
             crate::core::compiler::INTERNAL_DEFERRED_IMPORT_HELPER.to_string(),
             Self::make_host_fn_with_name_len(ctx, "import.defer", "import.defer", 1.0, false),
+        );
+        self.globals.insert(
+            crate::core::compiler::INTERNAL_SOURCE_IMPORT_HELPER.to_string(),
+            Self::make_host_fn_with_name_len(ctx, "import.source", "import.source", 1.0, false),
         );
         self.intrinsic_promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
 

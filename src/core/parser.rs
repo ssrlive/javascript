@@ -5445,7 +5445,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 // `new import(...)` is a SyntaxError, but `new (import(...))` is valid
                 let bare_import = *index < tokens.len() && matches!(tokens[*index].token, Token::Import);
                 let constructor = parse_primary(tokens, index, false)?;
-                if bare_import && matches!(constructor, Expr::DynamicImport(..) | Expr::DeferredImport(..)) {
+                if bare_import
+                    && matches!(
+                        constructor,
+                        Expr::DynamicImport(..) | Expr::DeferredImport(..) | Expr::SourceImport(..)
+                    )
+                {
                     return Err(raise_parse_error!("Cannot use 'new' with import()"));
                 }
                 let args = if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
@@ -5674,9 +5679,33 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     }
                     *index += 1;
                     Expr::DeferredImport(Box::new(arg))
+                } else if *index < tokens.len()
+                    && let Token::Identifier(id) = &tokens[*index].token
+                    && id == "source"
+                {
+                    *index += 1;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
+                        return Err(raise_parse_error!("Expected '(' after 'import.source'"));
+                    }
+                    *index += 1;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                        return Err(raise_parse_error!("import.source() requires a specifier argument"));
+                    }
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Spread) {
+                        return Err(raise_parse_error!("import.source() does not accept a rest parameter"));
+                    }
+                    let arg = with_allowed_in(|| parse_assignment(tokens, index))?;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+                        *index += 1;
+                    }
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                        return Err(raise_parse_error!("Expected ')' after import.source(...)"));
+                    }
+                    *index += 1;
+                    Expr::SourceImport(Box::new(arg))
                 } else {
                     return Err(raise_parse_error!(
-                        "Only 'import.meta' and 'import.defer' are valid after 'import.'"
+                        "Only 'import.meta', 'import.defer' and 'import.source' are valid after 'import.'"
                     ));
                 }
             } else {

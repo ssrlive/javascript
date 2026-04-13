@@ -213,6 +213,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
     DynamicImport(Box<Expr>, Option<Box<Expr>>),
     DeferredImport(Box<Expr>),
+    SourceImport(Box<Expr>),
     ValuePlaceholder,
 }
 
@@ -694,6 +695,7 @@ fn scan_expr(expr: &Expr, mask: u8, found: &mut u8) {
         | Expr::Setter(e)
         | Expr::YieldStar(e)
         | Expr::DeferredImport(e)
+        | Expr::SourceImport(e)
         | Expr::DynamicImport(e, None) => {
             scan_expr(e, mask, found);
         }

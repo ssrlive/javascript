@@ -20051,6 +20051,12 @@ impl<'gc> VM<'gc> {
             mark_nonenumerable(&mut obj, "message");
         }
         obj.insert("__aggregate_ctor__".to_string(), aggregate_ctor);
+        // InstallErrorCause (ES2022) — options is the 3rd argument
+        if let Some(Value::VmObject(opts_obj)) = args.get(2)
+            && let Some(cause) = opts_obj.borrow().get("cause").cloned()
+        {
+            Self::insert_property_with_attributes(&mut obj, "cause", &cause, true, false, true);
+        }
         if !matches!(selected_proto, Value::Undefined) {
             obj.insert("__proto__".to_string(), selected_proto);
         }
@@ -24438,6 +24444,12 @@ impl<'gc> VM<'gc> {
                     let msg = value_to_string(&prim);
                     Self::insert_property_with_attributes(&mut map, "message", &Value::from(msg.as_str()), true, false, true);
                 }
+                // InstallErrorCause (ES2022)
+                if let Some(Value::VmObject(opts_obj)) = args.get(1)
+                    && let Some(cause) = opts_obj.borrow().get("cause").cloned()
+                {
+                    Self::insert_property_with_attributes(&mut map, "cause", &cause, true, false, true);
+                }
                 // Set constructor and __proto__ from the global constructor object
                 if let Some(ctor) = self.globals.get(type_name.as_str()).cloned() {
                     map.insert("constructor".to_string(), ctor.clone());
@@ -27317,8 +27329,23 @@ impl<'gc> VM<'gc> {
                         let msg = value_to_string(&prim);
                         let mut borrow = obj.borrow_mut(ctx);
                         Self::insert_property_with_attributes(&mut borrow, "message", &Value::from(msg.as_str()), true, false, true);
+                        drop(borrow);
                     } else {
                         borrow.shift_remove("message");
+                        drop(borrow);
+                    }
+                    // InstallErrorCause (ES2022): if options has "cause", set it on the error
+                    if let Some(Value::VmObject(opts_obj)) = args.get(1) {
+                        let opts_val = Value::VmObject(*opts_obj);
+                        let has_cause = opts_obj.borrow().contains_key("cause") || self.has_property_in_chain(ctx, &opts_val, "cause");
+                        if has_cause {
+                            let cause = self.read_named_property(ctx, &opts_val, "cause");
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            let mut borrow = obj.borrow_mut(ctx);
+                            Self::insert_property_with_attributes(&mut borrow, "cause", &cause, true, false, true);
+                        }
                     }
                     return receiver.clone();
                 }

@@ -8157,6 +8157,14 @@ impl<'gc> VM<'gc> {
                                 };
                                 Self::insert_property_with_attributes(&mut m, "message", &Value::from(msg.as_str()), true, false, true);
                             }
+                            // InstallErrorCause (ES2022)
+                            if let Some(Value::VmObject(opts_obj)) = args.get(1) {
+                                let b = opts_obj.borrow();
+                                if let Some(cause) = b.get("cause").cloned() {
+                                    drop(b);
+                                    Self::insert_property_with_attributes(&mut m, "cause", &cause, true, false, true);
+                                }
+                            }
                             if !matches!(instance_proto, Value::Undefined) {
                                 m.insert("__proto__".to_string(), instance_proto);
                             }

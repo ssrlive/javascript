@@ -39995,18 +39995,42 @@ impl<'gc> VM<'gc> {
 
     fn json_stringify_string_units(&self, s: &[u16]) -> String {
         let mut out = String::from("\"");
-        for ch in crate::unicode::utf16_to_utf8(s).chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\u{08}' => out.push_str("\\b"),
-                '\u{09}' => out.push_str("\\t"),
-                '\u{0A}' => out.push_str("\\n"),
-                '\u{0C}' => out.push_str("\\f"),
-                '\u{0D}' => out.push_str("\\r"),
-                c if c <= '\u{1F}' => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
+        let len = s.len();
+        let mut i = 0;
+        while i < len {
+            let cu = s[i];
+            match cu {
+                0x22 => out.push_str("\\\""), // "
+                0x5C => out.push_str("\\\\"), // \
+                0x08 => out.push_str("\\b"),
+                0x09 => out.push_str("\\t"),
+                0x0A => out.push_str("\\n"),
+                0x0C => out.push_str("\\f"),
+                0x0D => out.push_str("\\r"),
+                c if c <= 0x1F => out.push_str(&format!("\\u{:04x}", c)),
+                // Lone surrogates: escape as \uXXXX (well-formed JSON.stringify)
+                c if (0xD800..=0xDBFF).contains(&c) => {
+                    if i + 1 < len && (0xDC00..=0xDFFF).contains(&s[i + 1]) {
+                        // Valid surrogate pair — decode to char
+                        let cp = 0x10000 + ((c as u32 - 0xD800) << 10) + (s[i + 1] as u32 - 0xDC00);
+                        if let Some(ch) = char::from_u32(cp) {
+                            out.push(ch);
+                        }
+                        i += 1;
+                    } else {
+                        out.push_str(&format!("\\u{:04x}", c));
+                    }
+                }
+                c if (0xDC00..=0xDFFF).contains(&c) => {
+                    out.push_str(&format!("\\u{:04x}", c));
+                }
+                c => {
+                    if let Some(ch) = char::from_u32(c as u32) {
+                        out.push(ch);
+                    }
+                }
             }
+            i += 1;
         }
         out.push('"');
         out

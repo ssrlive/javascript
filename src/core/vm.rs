@@ -2577,7 +2577,37 @@ impl<'gc> VM<'gc> {
         if self.pending_throw.is_some() {
             return;
         }
+        // Propagate load errors (e.g. SyntaxError) for all requested modules,
+        // including deferred ones whose evaluation is skipped.
+        for request in requests {
+            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
+                .to_string_lossy()
+                .to_string();
+            if let Some(error) = self.module_load_errors.get(&key).cloned() {
+                self.pending_throw = Some(error);
+                return;
+            }
+        }
         self.evaluate_module_requests(ctx, entry_path, requests);
+    }
+
+    /// Return first module load error (e.g. SyntaxError) for any of the given
+    /// module requests, converting the VM Value into a JSError.
+    pub fn check_module_load_health(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        entry_path: &std::path::Path,
+        requests: &[crate::core::ModuleRequest],
+    ) -> Result<(), JSError> {
+        for request in requests {
+            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
+                .to_string_lossy()
+                .to_string();
+            if let Some(error) = self.module_load_errors.get(&key).cloned() {
+                return Err(self.vm_error_to_js_error(ctx, &error));
+            }
+        }
+        Ok(())
     }
 
     /// Fixup pass for circular re-exports.
@@ -17606,6 +17636,10 @@ impl<'gc> VM<'gc> {
         self.globals.insert(
             crate::core::compiler::INTERNAL_DYNAMIC_IMPORT_HELPER.to_string(),
             Self::make_host_fn_with_name_len(ctx, "module.dynamicImport", "import", 1.0, false),
+        );
+        self.globals.insert(
+            crate::core::compiler::INTERNAL_DEFERRED_IMPORT_HELPER.to_string(),
+            Self::make_host_fn_with_name_len(ctx, "import.defer", "import.defer", 1.0, false),
         );
         self.intrinsic_promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
 

@@ -500,6 +500,7 @@ fn expr_contains_await(expr: &Expr) -> bool {
         Expr::DynamicImport(specifier, options) => {
             expr_contains_await(specifier) || options.as_ref().map(|expr| expr_contains_await(expr)).unwrap_or(false)
         }
+        Expr::DeferredImport(specifier) => expr_contains_await(specifier),
         Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(statement_contains_await),
         Expr::Function(..)
         | Expr::GeneratorFunction(..)
@@ -589,6 +590,7 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         Expr::DynamicImport(specifier, options) => {
             expr_contains_yield(specifier) || options.as_ref().map(|expr| expr_contains_yield(expr)).unwrap_or(false)
         }
+        Expr::DeferredImport(specifier) => expr_contains_yield(specifier),
         Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(statement_contains_yield),
         Expr::Function(..)
         | Expr::GeneratorFunction(..)
@@ -911,6 +913,7 @@ fn expr_uses_identifier(expr: &Expr, ident: &str) -> bool {
         Expr::DynamicImport(specifier, options) => {
             expr_uses_identifier(specifier, ident) || options.as_ref().map(|expr| expr_uses_identifier(expr, ident)).unwrap_or(false)
         }
+        Expr::DeferredImport(specifier) => expr_uses_identifier(specifier, ident),
         Expr::ArrowFunction(params, body) | Expr::AsyncArrowFunction(params, body) => {
             params_use_identifier(params, ident) || statement_list_uses_identifier(body, ident)
         }
@@ -1156,6 +1159,7 @@ fn expr_contains_arrow_params_with_await(expr: &Expr) -> bool {
                     .map(|expr| expr_contains_arrow_params_with_await(expr))
                     .unwrap_or(false)
         }
+        Expr::DeferredImport(specifier) => expr_contains_arrow_params_with_await(specifier),
         Expr::Function(..)
         | Expr::GeneratorFunction(..)
         | Expr::AsyncFunction(..)
@@ -1426,6 +1430,7 @@ fn field_initializer_has_direct_super_call(expr: &Expr) -> bool {
         Expr::DynamicImport(e, opts) => {
             field_initializer_has_direct_super_call(e) || opts.as_ref().is_some_and(|o| field_initializer_has_direct_super_call(o))
         }
+        Expr::DeferredImport(e) => field_initializer_has_direct_super_call(e),
         Expr::Yield(Some(e)) => field_initializer_has_direct_super_call(e),
         Expr::Call(callee, args) | Expr::OptionalCall(callee, args) | Expr::New(callee, args) => {
             field_initializer_has_direct_super_call(callee) || args.iter().any(field_initializer_has_direct_super_call)
@@ -1887,6 +1892,9 @@ fn validate_expression(expr: &Expr) -> Result<(), JSError> {
             if let Some(options) = options {
                 validate_expression(options)?;
             }
+        }
+        Expr::DeferredImport(specifier) => {
+            validate_expression(specifier)?;
         }
         Expr::Class(class_def) => {
             validate_class_definition(class_def)?;
@@ -2692,6 +2700,7 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
             Expr::DynamicImport(spec, attrs) => {
                 expr_has_top_level_await(spec) || attrs.as_ref().is_some_and(|attrs| expr_has_top_level_await(attrs))
             }
+            Expr::DeferredImport(spec) => expr_has_top_level_await(spec),
             Expr::Class(class_def) => {
                 class_def.extends.as_ref().is_some_and(expr_has_top_level_await)
                     || class_def.members.iter().any(|member| match member {
@@ -2985,6 +2994,9 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
             }
             if !requests.is_empty() {
                 vm.load_module_graph(ctx, entry_path, &requests);
+                // Propagate load errors (e.g. SyntaxError) for all dependencies,
+                // including deferred modules whose evaluation is skipped.
+                vm.check_module_load_health(ctx, entry_path, &requests)?;
                 // Fixup circular re-exports
                 vm.fixup_circular_reexports();
                 // Validate module resolution: check that all re-exports and

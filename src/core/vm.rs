@@ -5314,10 +5314,8 @@ impl<'gc> VM<'gc> {
             "arrayBuffer.getDetached" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
-                    self.pending_throw = Some(self.make_type_error_object(
-                        ctx,
-                        "Method get ArrayBuffer.prototype.detached called on incompatible receiver",
-                    ));
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method get ArrayBuffer.prototype.detached called on incompatible receiver"));
                     return Value::Undefined;
                 };
                 let b = buf_obj.borrow();
@@ -5325,10 +5323,8 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
                 if !is_ab {
                     drop(b);
-                    self.pending_throw = Some(self.make_type_error_object(
-                        ctx,
-                        "Method get ArrayBuffer.prototype.detached called on incompatible receiver",
-                    ));
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method get ArrayBuffer.prototype.detached called on incompatible receiver"));
                     return Value::Undefined;
                 }
                 let detached = matches!(b.get("__detached__"), Some(Value::Boolean(true)));
@@ -5337,10 +5333,9 @@ impl<'gc> VM<'gc> {
             "arrayBuffer.getImmutable" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
-                    self.pending_throw = Some(self.make_type_error_object(
-                        ctx,
-                        "Method get ArrayBuffer.prototype.immutable called on incompatible receiver",
-                    ));
+                    self.pending_throw = Some(
+                        self.make_type_error_object(ctx, "Method get ArrayBuffer.prototype.immutable called on incompatible receiver"),
+                    );
                     return Value::Undefined;
                 };
                 let b = buf_obj.borrow();
@@ -5348,10 +5343,9 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
                 if !is_ab {
                     drop(b);
-                    self.pending_throw = Some(self.make_type_error_object(
-                        ctx,
-                        "Method get ArrayBuffer.prototype.immutable called on incompatible receiver",
-                    ));
+                    self.pending_throw = Some(
+                        self.make_type_error_object(ctx, "Method get ArrayBuffer.prototype.immutable called on incompatible receiver"),
+                    );
                     return Value::Undefined;
                 }
                 let immutable = matches!(b.get("__immutable__"), Some(Value::Boolean(true)));
@@ -5360,10 +5354,8 @@ impl<'gc> VM<'gc> {
             "arrayBuffer.transfer" | "arrayBuffer.transferToFixedLength" | "arrayBuffer.transferToImmutable" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::VmObject(buf_obj) = this_val else {
-                    self.pending_throw = Some(self.make_type_error_object(
-                        ctx,
-                        "Method ArrayBuffer.prototype.transfer called on incompatible receiver",
-                    ));
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.transfer called on incompatible receiver"));
                     return Value::Undefined;
                 };
                 let b = buf_obj.borrow();
@@ -5371,18 +5363,13 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ArrayBuffer");
                 if !is_ab {
                     drop(b);
-                    self.pending_throw = Some(self.make_type_error_object(
-                        ctx,
-                        "Method ArrayBuffer.prototype.transfer called on incompatible receiver",
-                    ));
+                    self.pending_throw =
+                        Some(self.make_type_error_object(ctx, "Method ArrayBuffer.prototype.transfer called on incompatible receiver"));
                     return Value::Undefined;
                 }
                 let old_len = b.get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
                 let old_resizable = matches!(b.get("__resizable__"), Some(Value::Boolean(true)));
-                let old_max = b
-                    .get("__maxByteLength__")
-                    .map(to_number)
-                    .unwrap_or(old_len as f64) as usize;
+                let old_max = b.get("__maxByteLength__").map(to_number).unwrap_or(old_len as f64) as usize;
                 let old_bytes = b.get("__buffer_bytes__").cloned();
                 drop(b);
 
@@ -5440,7 +5427,11 @@ impl<'gc> VM<'gc> {
                 // Build new ArrayBuffer
                 let is_transfer_to_fixed = name == "arrayBuffer.transferToFixedLength";
                 let is_transfer_to_immutable = name == "arrayBuffer.transferToImmutable";
-                let new_resizable = if is_transfer_to_fixed || is_transfer_to_immutable { false } else { old_resizable };
+                let new_resizable = if is_transfer_to_fixed || is_transfer_to_immutable {
+                    false
+                } else {
+                    old_resizable
+                };
                 let new_max = if is_transfer_to_fixed || is_transfer_to_immutable {
                     new_len
                 } else if old_resizable {
@@ -18728,8 +18719,16 @@ impl<'gc> VM<'gc> {
                     mark_nonenumerable(&mut proto, "delete");
                     // upsert methods for both Map and WeakMap
                     {
-                        let goi_id = if ctor_id == BUILTIN_CTOR_WEAKMAP { BUILTIN_WEAKMAP_GETORINSERT } else { BUILTIN_MAP_GETORINSERT };
-                        let goic_id = if ctor_id == BUILTIN_CTOR_WEAKMAP { BUILTIN_WEAKMAP_GETORINSERTCOMPUTED } else { BUILTIN_MAP_GETORINSERTCOMPUTED };
+                        let goi_id = if ctor_id == BUILTIN_CTOR_WEAKMAP {
+                            BUILTIN_WEAKMAP_GETORINSERT
+                        } else {
+                            BUILTIN_MAP_GETORINSERT
+                        };
+                        let goic_id = if ctor_id == BUILTIN_CTOR_WEAKMAP {
+                            BUILTIN_WEAKMAP_GETORINSERTCOMPUTED
+                        } else {
+                            BUILTIN_MAP_GETORINSERTCOMPUTED
+                        };
                         proto.insert("getOrInsert".to_string(), Value::VmNativeFunction(goi_id));
                         proto.insert("getOrInsertComputed".to_string(), Value::VmNativeFunction(goic_id));
                         mark_nonenumerable(&mut proto, "getOrInsert");
@@ -19016,7 +19015,9 @@ impl<'gc> VM<'gc> {
         fn_proto_obj.borrow_mut(ctx).insert("constructor".to_string(), function_val.clone());
         mark_nonenumerable(&mut fn_proto_obj.borrow_mut(ctx), "constructor");
         // Function.prototype[@@hasInstance] — non-writable, non-configurable
-        fn_proto_obj.borrow_mut(ctx).insert("@@sym:2".to_string(), Value::VmNativeFunction(BUILTIN_FN_HASINSTANCE));
+        fn_proto_obj
+            .borrow_mut(ctx)
+            .insert("@@sym:2".to_string(), Value::VmNativeFunction(BUILTIN_FN_HASINSTANCE));
         mark_nonenumerable(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2");
         write_attrs_to_legacy_map(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2", PropAttrs::empty());
         self.globals.insert("Function".to_string(), function_val.clone());
@@ -24030,7 +24031,10 @@ impl<'gc> VM<'gc> {
                     // Helper closure for closing iterator on error
                     let close_iterator = |vm: &mut Self, ctx: &GcContext<'gc>, iterator: &Value<'gc>| {
                         let ret_method = vm.read_named_property(ctx, iterator, "return");
-                        if vm.pending_throw.is_some() { vm.pending_throw = None; return; }
+                        if vm.pending_throw.is_some() {
+                            vm.pending_throw = None;
+                            return;
+                        }
                         if vm.is_value_callable(&ret_method) {
                             let _ = vm.vm_call_function_value(ctx, &ret_method, iterator, &[]);
                             vm.pending_throw = None; // ignore errors from return()
@@ -24061,7 +24065,9 @@ impl<'gc> VM<'gc> {
                         };
 
                         let done = self.read_named_property(ctx, &next_result, "done");
-                        if done.to_truthy() { break; }
+                        if done.to_truthy() {
+                            break;
+                        }
                         let value = self.read_named_property(ctx, &next_result, "value");
 
                         // For sync iterators, await each value; for async iterators, don't
@@ -24080,15 +24086,13 @@ impl<'gc> VM<'gc> {
                         // Apply mapFn if present
                         let mapped = if mapping {
                             match self.vm_call_function_value(ctx, &map_fn, &this_arg, &[value, Value::Number(index as f64)]) {
-                                Ok(v) => {
-                                    match self.await_promise_sync(ctx, &v) {
-                                        Ok(v2) => v2,
-                                        Err(err) => {
-                                            error_val = Some(self.vm_value_from_error(ctx, &err));
-                                            break;
-                                        }
+                                Ok(v) => match self.await_promise_sync(ctx, &v) {
+                                    Ok(v2) => v2,
+                                    Err(err) => {
+                                        error_val = Some(self.vm_value_from_error(ctx, &err));
+                                        break;
                                     }
-                                }
+                                },
                                 Err(err) => {
                                     close_iterator(self, ctx, &iterator);
                                     error_val = Some(self.vm_value_from_error(ctx, &err));
@@ -24276,10 +24280,7 @@ impl<'gc> VM<'gc> {
                 };
                 // Validate: must be a valid JSON primitive (not object/array)
                 // Must reject empty strings and strings with leading/trailing whitespace
-                if s.is_empty()
-                    || s.starts_with(|c: char| c.is_ascii_whitespace())
-                    || s.ends_with(|c: char| c.is_ascii_whitespace())
-                {
+                if s.is_empty() || s.starts_with(|c: char| c.is_ascii_whitespace()) || s.ends_with(|c: char| c.is_ascii_whitespace()) {
                     self.throw_syntax_error(ctx, "JSON.rawJSON: value must be a JSON primitive");
                     return Value::Undefined;
                 }
@@ -28323,7 +28324,10 @@ impl<'gc> VM<'gc> {
     /// Execute a method call (receiver.method(args))
     fn call_method_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
         // Generic change-array-by-copy: handle non-array this values
-        if matches!(id, BUILTIN_ARRAY_TOREVERSED | BUILTIN_ARRAY_TOSORTED | BUILTIN_ARRAY_TOSPLICED | BUILTIN_ARRAY_WITH) {
+        if matches!(
+            id,
+            BUILTIN_ARRAY_TOREVERSED | BUILTIN_ARRAY_TOSORTED | BUILTIN_ARRAY_TOSPLICED | BUILTIN_ARRAY_WITH
+        ) {
             if matches!(receiver, Value::Null | Value::Undefined) {
                 self.throw_type_error(ctx, "Cannot convert undefined or null to object");
                 return Value::Undefined;
@@ -28340,12 +28344,20 @@ impl<'gc> VM<'gc> {
             // For non-array objects: coerce to object, read properties by index
             if !matches!(receiver, Value::VmArray(_)) {
                 let obj = self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver));
-                if self.pending_throw.is_some() { return Value::Undefined; }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 let len_val = self.read_named_property(ctx, &obj, "length");
                 let len_f = self.vm_coerce_to_number(ctx, &len_val);
-                if self.pending_throw.is_some() { return Value::Undefined; }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 // ToLength: clamp to [0, 2^53-1]
-                let len_f = if len_f.is_nan() || len_f < 0.0 { 0.0 } else { len_f.trunc().min(9007199254740991.0) };
+                let len_f = if len_f.is_nan() || len_f < 0.0 {
+                    0.0
+                } else {
+                    len_f.trunc().min(9007199254740991.0)
+                };
                 let len = len_f as usize;
                 match id {
                     BUILTIN_ARRAY_TOREVERSED | BUILTIN_ARRAY_TOSORTED | BUILTIN_ARRAY_WITH => {
@@ -28362,7 +28374,9 @@ impl<'gc> VM<'gc> {
                         let mut result = Vec::with_capacity(len);
                         for i in (0..len).rev() {
                             result.push(self.read_named_property(ctx, &obj, &i.to_string()));
-                            if self.pending_throw.is_some() { return Value::Undefined; }
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
                         }
                         return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
                     }
@@ -28371,7 +28385,9 @@ impl<'gc> VM<'gc> {
                         let mut elems: Vec<Value<'gc>> = Vec::with_capacity(len);
                         for i in 0..len {
                             elems.push(self.read_named_property(ctx, &obj, &i.to_string()));
-                            if self.pending_throw.is_some() { return Value::Undefined; }
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
                         }
                         let mut sort_error = false;
                         if let Some(Value::VmFunction(ip, _) | Value::VmClosure(ip, _, _)) = &cmp_fn {
@@ -28394,7 +28410,9 @@ impl<'gc> VM<'gc> {
                                         }
                                         if let Value::Number(n) = result {
                                             n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
-                                        } else { std::cmp::Ordering::Equal }
+                                        } else {
+                                            std::cmp::Ordering::Equal
+                                        }
                                     }
                                     Err(e) => {
                                         sort_error = true;
@@ -28417,26 +28435,38 @@ impl<'gc> VM<'gc> {
                                 }
                                 if let Value::Number(n) = result {
                                     n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
-                                } else { std::cmp::Ordering::Equal }
+                                } else {
+                                    std::cmp::Ordering::Equal
+                                }
                             });
                         } else {
                             elems.sort_by(|a, b| value_to_string(a).cmp(&value_to_string(b)));
                         }
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(elems)));
                     }
                     BUILTIN_ARRAY_TOSPLICED => {
                         let start_raw = args.first().map(|v| to_number(v)).unwrap_or(0.0);
-                        let actual_start = if start_raw.is_nan() || start_raw == 0.0 { 0usize }
-                            else if start_raw < 0.0 { (len as f64 + start_raw).max(0.0) as usize }
-                            else { (start_raw as usize).min(len) };
+                        let actual_start = if start_raw.is_nan() || start_raw == 0.0 {
+                            0usize
+                        } else if start_raw < 0.0 {
+                            (len as f64 + start_raw).max(0.0) as usize
+                        } else {
+                            (start_raw as usize).min(len)
+                        };
                         let actual_delete = if args.is_empty() {
                             0usize
                         } else if args.len() < 2 {
                             len - actual_start
                         } else {
                             let dc = to_number(&args[1]);
-                            if dc.is_nan() || dc < 0.0 { 0usize } else { (dc as usize).min(len - actual_start) }
+                            if dc.is_nan() || dc < 0.0 {
+                                0usize
+                            } else {
+                                (dc as usize).min(len - actual_start)
+                            }
                         };
                         let items = if args.len() > 2 { &args[2..] } else { &[] };
                         let new_len = len - actual_delete + items.len();
@@ -28453,37 +28483,56 @@ impl<'gc> VM<'gc> {
                         let mut result = Vec::new();
                         for i in 0..actual_start {
                             result.push(self.read_named_property(ctx, &obj, &i.to_string()));
-                            if self.pending_throw.is_some() { return Value::Undefined; }
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
                         }
-                        for item in items { result.push(item.clone()); }
+                        for item in items {
+                            result.push(item.clone());
+                        }
                         for i in (actual_start + actual_delete)..len {
                             result.push(self.read_named_property(ctx, &obj, &i.to_string()));
-                            if self.pending_throw.is_some() { return Value::Undefined; }
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
                         }
                         return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
                     }
                     BUILTIN_ARRAY_WITH => {
                         let index_raw = if let Some(v) = args.first() {
                             self.vm_coerce_to_number(ctx, v)
-                        } else { 0.0 };
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        } else {
+                            0.0
+                        };
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         let index_raw = if index_raw.is_nan() { 0.0 } else { index_raw.trunc() };
                         let actual_index = if index_raw < 0.0 {
                             let idx = len as f64 + index_raw;
-                            if idx < 0.0 { self.throw_range_error_object(ctx, "Invalid index"); return Value::Undefined; }
+                            if idx < 0.0 {
+                                self.throw_range_error_object(ctx, "Invalid index");
+                                return Value::Undefined;
+                            }
                             idx as usize
                         } else {
                             let idx = index_raw as usize;
-                            if idx >= len { self.throw_range_error_object(ctx, "Invalid index"); return Value::Undefined; }
+                            if idx >= len {
+                                self.throw_range_error_object(ctx, "Invalid index");
+                                return Value::Undefined;
+                            }
                             idx
                         };
                         let value = args.get(1).cloned().unwrap_or(Value::Undefined);
                         let mut result = Vec::with_capacity(len);
                         for i in 0..len {
-                            if i == actual_index { result.push(value.clone()); }
-                            else {
+                            if i == actual_index {
+                                result.push(value.clone());
+                            } else {
                                 result.push(self.read_named_property(ctx, &obj, &i.to_string()));
-                                if self.pending_throw.is_some() { return Value::Undefined; }
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
                             }
                         }
                         return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
@@ -30923,7 +30972,9 @@ impl<'gc> VM<'gc> {
                     };
                     if is_obj {
                         let sym_val = self.read_named_property(ctx, &item, "@@sym:15");
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         if !matches!(sym_val, Value::Undefined) {
                             sym_val.to_truthy()
                         } else {
@@ -31711,7 +31762,9 @@ impl<'gc> VM<'gc> {
                     // Check if receiver itself has @@isConcatSpreadable = false
                     let receiver_val = Value::VmArray(*arr);
                     let self_sym = self.read_named_property(ctx, &receiver_val, "@@sym:15");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     let self_spreadable = if !matches!(self_sym, Value::Undefined) {
                         self_sym.to_truthy()
                     } else {
@@ -31734,7 +31787,9 @@ impl<'gc> VM<'gc> {
                         };
                         let spreadable = if is_obj {
                             let sym_val = self.read_named_property(ctx, arg, "@@sym:15");
-                            if self.pending_throw.is_some() { return Value::Undefined; }
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
                             if !matches!(sym_val, Value::Undefined) {
                                 sym_val.to_truthy()
                             } else if let Value::VmArray(_) = arg {
@@ -31755,14 +31810,18 @@ impl<'gc> VM<'gc> {
                             } else {
                                 // Generic array-like spreadable object
                                 let len = self.read_named_property(ctx, arg, "length");
-                                if self.pending_throw.is_some() { return Value::Undefined; }
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
                                 let len_u = match &len {
                                     Value::Number(n) => *n as usize,
                                     _ => 0,
                                 };
                                 for i in 0..len_u {
                                     let val = self.read_named_property(ctx, arg, &i.to_string());
-                                    if self.pending_throw.is_some() { return Value::Undefined; }
+                                    if self.pending_throw.is_some() {
+                                        return Value::Undefined;
+                                    }
                                     result_vec.push(val);
                                 }
                             }
@@ -32220,7 +32279,9 @@ impl<'gc> VM<'gc> {
                     let mut elems: Vec<Value<'gc>> = Vec::with_capacity(len);
                     for i in 0..len {
                         elems.push(self.read_named_property(ctx, &arr_val, &i.to_string()));
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                     }
 
                     let cmp_fn = args.first().cloned();
@@ -32237,8 +32298,7 @@ impl<'gc> VM<'gc> {
                                 sort_error = true;
                                 return std::cmp::Ordering::Equal;
                             }
-                            match self
-                                .call_vm_function_result(ctx, ip, &[a.clone(), b.clone()], None, &__cb_uv) {
+                            match self.call_vm_function_result(ctx, ip, &[a.clone(), b.clone()], None, &__cb_uv) {
                                 Ok(result) => {
                                     if self.pending_throw.is_some() {
                                         sort_error = true;
@@ -32282,7 +32342,9 @@ impl<'gc> VM<'gc> {
                             sa.cmp(&sb)
                         });
                     }
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(elems)));
                 }
                 BUILTIN_ARRAY_TOSPLICED => {
@@ -32305,7 +32367,11 @@ impl<'gc> VM<'gc> {
                         len - actual_start
                     } else {
                         let dc = to_number(&args[1]);
-                        if dc.is_nan() || dc < 0.0 { 0usize } else { (dc as usize).min(len - actual_start) }
+                        if dc.is_nan() || dc < 0.0 {
+                            0usize
+                        } else {
+                            (dc as usize).min(len - actual_start)
+                        }
                     };
                     let items = if args.len() > 2 { &args[2..] } else { &[] };
                     let new_len = len - actual_delete + items.len();
@@ -32329,8 +32395,12 @@ impl<'gc> VM<'gc> {
                     let arr_val = Value::VmArray(*arr);
                     let index_raw = if let Some(v) = args.first() {
                         self.vm_coerce_to_number(ctx, v)
-                    } else { 0.0 };
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    } else {
+                        0.0
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     let index_raw = if index_raw.is_nan() { 0.0 } else { index_raw.trunc() };
                     let actual_index = if index_raw < 0.0 {
                         let idx = len as f64 + index_raw;
@@ -33869,8 +33939,12 @@ impl<'gc> VM<'gc> {
         ) && receiver_map_is_weak != Some(false))
             || (matches!(
                 id,
-                BUILTIN_WEAKMAP_SET | BUILTIN_WEAKMAP_GET | BUILTIN_WEAKMAP_HAS | BUILTIN_WEAKMAP_DELETE
-                | BUILTIN_WEAKMAP_GETORINSERT | BUILTIN_WEAKMAP_GETORINSERTCOMPUTED
+                BUILTIN_WEAKMAP_SET
+                    | BUILTIN_WEAKMAP_GET
+                    | BUILTIN_WEAKMAP_HAS
+                    | BUILTIN_WEAKMAP_DELETE
+                    | BUILTIN_WEAKMAP_GETORINSERT
+                    | BUILTIN_WEAKMAP_GETORINSERTCOMPUTED
             ) && receiver_map_is_weak != Some(true))
         {
             let (proto_name, method_name) = match id {
@@ -34026,7 +34100,9 @@ impl<'gc> VM<'gc> {
                     let value = args.get(1).cloned().unwrap_or(Value::Undefined);
                     // CanonicalizeKeyedCollectionKey: -0 → +0
                     if let Value::Number(n) = &key {
-                        if *n == 0.0 { key = Value::Number(0.0); }
+                        if *n == 0.0 {
+                            key = Value::Number(0.0);
+                        }
                     }
                     {
                         let borrow = m.borrow();
@@ -34047,7 +34123,9 @@ impl<'gc> VM<'gc> {
                     }
                     // CanonicalizeKeyedCollectionKey: -0 → +0
                     if let Value::Number(n) = &key {
-                        if *n == 0.0 { key = Value::Number(0.0); }
+                        if *n == 0.0 {
+                            key = Value::Number(0.0);
+                        }
                     }
                     {
                         let borrow = m.borrow();
@@ -35321,10 +35399,14 @@ impl<'gc> VM<'gc> {
             let mut current_obj = v.clone();
             let mut depth = 0;
             loop {
-                if depth > 100 { break; }
+                if depth > 100 {
+                    break;
+                }
                 depth += 1;
                 let proto = self.call_host_fn(ctx, "reflect.getPrototypeOf", None, std::slice::from_ref(&current_obj));
-                if self.pending_throw.is_some() { return Value::Undefined; }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
                 if matches!(proto, Value::Null | Value::Undefined) {
                     break;
                 }
@@ -35337,7 +35419,9 @@ impl<'gc> VM<'gc> {
                     return Value::Boolean(true);
                 }
                 current_obj = proto;
-                if self.pending_throw.is_some() { return Value::Undefined; }
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
             }
             return Value::Boolean(false);
         }
@@ -42381,14 +42465,11 @@ impl<'gc> VM<'gc> {
         path.join("\0")
     }
 
-    fn json_source_scan(
-        bytes: &[u8],
-        pos: &mut usize,
-        path: &mut Vec<String>,
-        map: &mut std::collections::HashMap<String, String>,
-    ) {
+    fn json_source_scan(bytes: &[u8], pos: &mut usize, path: &mut Vec<String>, map: &mut std::collections::HashMap<String, String>) {
         Self::json_skip_ws(bytes, pos);
-        if *pos >= bytes.len() { return; }
+        if *pos >= bytes.len() {
+            return;
+        }
 
         match bytes[*pos] {
             b'{' => {
@@ -42400,19 +42481,27 @@ impl<'gc> VM<'gc> {
                 }
                 loop {
                     Self::json_skip_ws(bytes, pos);
-                    if *pos >= bytes.len() { return; }
+                    if *pos >= bytes.len() {
+                        return;
+                    }
                     // Parse key (must be a string)
                     let key = Self::json_scan_string(bytes, pos);
                     Self::json_skip_ws(bytes, pos);
-                    if *pos < bytes.len() && bytes[*pos] == b':' { *pos += 1; }
+                    if *pos < bytes.len() && bytes[*pos] == b':' {
+                        *pos += 1;
+                    }
                     path.push(key);
                     Self::json_source_scan(bytes, pos, path, map);
                     path.pop();
                     Self::json_skip_ws(bytes, pos);
-                    if *pos >= bytes.len() || bytes[*pos] != b',' { break; }
+                    if *pos >= bytes.len() || bytes[*pos] != b',' {
+                        break;
+                    }
                     *pos += 1;
                 }
-                if *pos < bytes.len() && bytes[*pos] == b'}' { *pos += 1; }
+                if *pos < bytes.len() && bytes[*pos] == b'}' {
+                    *pos += 1;
+                }
             }
             b'[' => {
                 *pos += 1;
@@ -42428,10 +42517,14 @@ impl<'gc> VM<'gc> {
                     path.pop();
                     idx += 1;
                     Self::json_skip_ws(bytes, pos);
-                    if *pos >= bytes.len() || bytes[*pos] != b',' { break; }
+                    if *pos >= bytes.len() || bytes[*pos] != b',' {
+                        break;
+                    }
                     *pos += 1;
                 }
-                if *pos < bytes.len() && bytes[*pos] == b']' { *pos += 1; }
+                if *pos < bytes.len() && bytes[*pos] == b']' {
+                    *pos += 1;
+                }
             }
             b'"' => {
                 let start = *pos;
@@ -42458,7 +42551,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn json_scan_string(bytes: &[u8], pos: &mut usize) -> String {
-        if *pos >= bytes.len() || bytes[*pos] != b'"' { return String::new(); }
+        if *pos >= bytes.len() || bytes[*pos] != b'"' {
+            return String::new();
+        }
         *pos += 1; // skip opening quote
         let mut result = String::new();
         while *pos < bytes.len() && bytes[*pos] != b'"' {
@@ -42499,7 +42594,9 @@ impl<'gc> VM<'gc> {
                 *pos += 1;
             }
         }
-        if *pos < bytes.len() && bytes[*pos] == b'"' { *pos += 1; } // skip closing quote
+        if *pos < bytes.len() && bytes[*pos] == b'"' {
+            *pos += 1;
+        } // skip closing quote
         result
     }
 

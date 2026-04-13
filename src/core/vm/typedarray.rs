@@ -2065,30 +2065,45 @@ impl<'gc> VM<'gc> {
                 if is_bigint_typed_array(&res_ta_name) {
                     let mut bi_elements: Vec<num_bigint::BigInt> = {
                         let a = res_arr.borrow();
-                        a.elements.iter().map(|v| match v {
-                            Value::BigInt(bi) => (**bi).clone(),
-                            _ => num_bigint::BigInt::from(0),
-                        }).collect()
+                        a.elements
+                            .iter()
+                            .map(|v| match v {
+                                Value::BigInt(bi) => (**bi).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            })
+                            .collect()
                     };
                     if has_custom {
                         let cmp_fn = comparefn.unwrap();
                         let mut had_error = false;
                         bi_elements.sort_by(|a, b| {
-                            if had_error { return std::cmp::Ordering::Equal; }
+                            if had_error {
+                                return std::cmp::Ordering::Equal;
+                            }
                             let result = self.vm_call_function_value(
-                                ctx, &cmp_fn, &Value::Undefined,
+                                ctx,
+                                &cmp_fn,
+                                &Value::Undefined,
                                 &[Value::BigInt(Box::new(a.clone())), Value::BigInt(Box::new(b.clone()))],
                             );
                             match result {
                                 Ok(v) => {
                                     let n = match self.extract_number_with_coercion(ctx, &v) {
                                         Some(n) => n,
-                                        None => { had_error = true; return std::cmp::Ordering::Equal; }
+                                        None => {
+                                            had_error = true;
+                                            return std::cmp::Ordering::Equal;
+                                        }
                                     };
-                                    if n.is_nan() { std::cmp::Ordering::Equal }
-                                    else if n < 0.0 { std::cmp::Ordering::Less }
-                                    else if n > 0.0 { std::cmp::Ordering::Greater }
-                                    else { std::cmp::Ordering::Equal }
+                                    if n.is_nan() {
+                                        std::cmp::Ordering::Equal
+                                    } else if n < 0.0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0.0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
                                 }
                                 Err(e) => {
                                     had_error = true;
@@ -2114,21 +2129,29 @@ impl<'gc> VM<'gc> {
                         let cmp_fn = comparefn.unwrap();
                         let mut had_error = false;
                         f64_elements.sort_by(|a, b| {
-                            if had_error { return std::cmp::Ordering::Equal; }
-                            let result = self.vm_call_function_value(
-                                ctx, &cmp_fn, &Value::Undefined,
-                                &[Value::Number(*a), Value::Number(*b)],
-                            );
+                            if had_error {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            let result =
+                                self.vm_call_function_value(ctx, &cmp_fn, &Value::Undefined, &[Value::Number(*a), Value::Number(*b)]);
                             match result {
                                 Ok(v) => {
                                     let n = match self.extract_number_with_coercion(ctx, &v) {
                                         Some(n) => n,
-                                        None => { had_error = true; return std::cmp::Ordering::Equal; }
+                                        None => {
+                                            had_error = true;
+                                            return std::cmp::Ordering::Equal;
+                                        }
                                     };
-                                    if n.is_nan() { std::cmp::Ordering::Equal }
-                                    else if n < 0.0 { std::cmp::Ordering::Less }
-                                    else if n > 0.0 { std::cmp::Ordering::Greater }
-                                    else { std::cmp::Ordering::Equal }
+                                    if n.is_nan() {
+                                        std::cmp::Ordering::Equal
+                                    } else if n < 0.0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0.0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
                                 }
                                 Err(e) => {
                                     had_error = true;
@@ -2140,12 +2163,22 @@ impl<'gc> VM<'gc> {
                     } else {
                         // Default numeric sort for TypedArrays
                         f64_elements.sort_by(|a, b| {
-                            if a.is_nan() && b.is_nan() { return std::cmp::Ordering::Equal; }
-                            if a.is_nan() { return std::cmp::Ordering::Greater; }
-                            if b.is_nan() { return std::cmp::Ordering::Less; }
+                            if a.is_nan() && b.is_nan() {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            if a.is_nan() {
+                                return std::cmp::Ordering::Greater;
+                            }
+                            if b.is_nan() {
+                                return std::cmp::Ordering::Less;
+                            }
                             if *a == 0.0 && *b == 0.0 {
-                                if a.is_sign_negative() && !b.is_sign_negative() { return std::cmp::Ordering::Less; }
-                                if !a.is_sign_negative() && b.is_sign_negative() { return std::cmp::Ordering::Greater; }
+                                if a.is_sign_negative() && !b.is_sign_negative() {
+                                    return std::cmp::Ordering::Less;
+                                }
+                                if !a.is_sign_negative() && b.is_sign_negative() {
+                                    return std::cmp::Ordering::Greater;
+                                }
                                 return std::cmp::Ordering::Equal;
                             }
                             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -2164,7 +2197,10 @@ impl<'gc> VM<'gc> {
 
                 // Sync all result elements to buffer
                 for i in 0..len {
-                    let num = { let a = res_arr.borrow(); to_number(&a.elements[i]) };
+                    let num = {
+                        let a = res_arr.borrow();
+                        to_number(&a.elements[i])
+                    };
                     self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &res_ta_name);
                 }
                 result
@@ -2281,6 +2317,13 @@ impl<'gc> VM<'gc> {
                 }
                 result
             }
+            // ── Uint8Array-specific: base64/hex methods ──
+            "typedarray.toBase64" => self.uint8array_to_base64(ctx, receiver, args),
+            "typedarray.toHex" => self.uint8array_to_hex(ctx, receiver),
+            "typedarray.setFromBase64" => self.uint8array_set_from_base64(ctx, receiver, args),
+            "typedarray.setFromHex" => self.uint8array_set_from_hex(ctx, receiver, args),
+            "typedarray.fromBase64" => self.uint8array_from_base64(ctx, args),
+            "typedarray.fromHex" => self.uint8array_from_hex(ctx, args),
             _ => Value::Undefined,
         }
     }
@@ -4176,6 +4219,28 @@ impl<'gc> VM<'gc> {
             per_proto.insert("__proto__".to_string(), ta_proto.clone());
             per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
             write_attrs_to_legacy_map(&mut per_proto, "BYTES_PER_ELEMENT", PropAttrs::empty());
+            // Uint8Array-specific: base64/hex methods on prototype and constructor
+            if name == "Uint8Array" {
+                for (method, display, len) in [
+                    ("typedarray.toBase64", "toBase64", 0.0),
+                    ("typedarray.toHex", "toHex", 0.0),
+                    ("typedarray.setFromBase64", "setFromBase64", 1.0),
+                    ("typedarray.setFromHex", "setFromHex", 1.0),
+                ] {
+                    per_proto.insert(
+                        display.to_string(),
+                        Self::make_host_fn_with_name_len(ctx, method, display, len, false),
+                    );
+                    mark_nonenumerable(&mut per_proto, display);
+                }
+                for (method, display, len) in [("typedarray.fromBase64", "fromBase64", 1.0), ("typedarray.fromHex", "fromHex", 1.0)] {
+                    ctor_map.insert(
+                        display.to_string(),
+                        Self::make_host_fn_with_name_len(ctx, method, display, len, false),
+                    );
+                    mark_nonenumerable(&mut ctor_map, display);
+                }
+            }
             let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
             ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
             write_attrs_to_legacy_map(&mut ctor_map, "prototype", PropAttrs::empty());
@@ -4191,5 +4256,630 @@ impl<'gc> VM<'gc> {
             self.global_this.borrow_mut(ctx).insert(name.to_string(), ctor_val);
             mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), name);
         }
+    }
+
+    // ── Uint8Array base64/hex helpers ──────────────────────────────────
+
+    const BASE64_CHARS: &'static [u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const BASE64URL_CHARS: &'static [u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    fn base64_decode_char(c: u8, use_url: bool) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' if !use_url => Some(62),
+            b'/' if !use_url => Some(63),
+            b'-' if use_url => Some(62),
+            b'_' if use_url => Some(63),
+            _ => None,
+        }
+    }
+
+    fn read_base64_alphabet_option(&mut self, ctx: &GcContext<'gc>, opts: Option<&Value<'gc>>) -> Option<bool> {
+        let opts = match opts {
+            Some(v) if !matches!(v, Value::Undefined) => v,
+            _ => return Some(false),
+        };
+        let alphabet_val = self.read_named_property(ctx, opts, "alphabet");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if matches!(alphabet_val, Value::Undefined) {
+            return Some(false);
+        }
+        match &alphabet_val {
+            Value::String(s) => {
+                let s = crate::unicode::utf16_to_utf8(s);
+                match s.as_str() {
+                    "base64" => Some(false),
+                    "base64url" => Some(true),
+                    _ => {
+                        self.throw_type_error(ctx, "expected alphabet to be either \"base64\" or \"base64url\"");
+                        None
+                    }
+                }
+            }
+            _ => {
+                self.throw_type_error(ctx, "expected alphabet to be either \"base64\" or \"base64url\"");
+                None
+            }
+        }
+    }
+
+    fn read_last_chunk_handling_option(&mut self, ctx: &GcContext<'gc>, opts: Option<&Value<'gc>>) -> Option<String> {
+        let opts = match opts {
+            Some(v) if !matches!(v, Value::Undefined) => v,
+            _ => return Some("loose".to_string()),
+        };
+        let val = self.read_named_property(ctx, opts, "lastChunkHandling");
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if matches!(val, Value::Undefined) {
+            return Some("loose".to_string());
+        }
+        match &val {
+            Value::String(s) => {
+                let s = crate::unicode::utf16_to_utf8(s);
+                match s.as_str() {
+                    "loose" | "strict" | "stop-before-partial" => Some(s),
+                    _ => {
+                        self.throw_type_error(
+                            ctx,
+                            "expected lastChunkHandling to be either \"loose\", \"strict\", or \"stop-before-partial\"",
+                        );
+                        None
+                    }
+                }
+            }
+            _ => {
+                self.throw_type_error(
+                    ctx,
+                    "expected lastChunkHandling to be either \"loose\", \"strict\", or \"stop-before-partial\"",
+                );
+                None
+            }
+        }
+    }
+
+    /// Core base64 decode per spec's FromBase64.
+    /// Returns (decoded_bytes, chars_read, optional_error_message).
+    /// Bytes/read always reflect valid data decoded so far.
+    /// Caller writes bytes first, then throws error if present.
+    fn base64_decode_core(
+        &self,
+        input: &str,
+        use_url: bool,
+        last_chunk_handling: &str,
+        max_length: Option<usize>,
+    ) -> (Vec<u8>, usize, Option<String>) {
+        let max_len = max_length.unwrap_or(usize::MAX);
+        // Spec step 3: early return for maxLength=0
+        if max_len == 0 {
+            return (Vec::new(), 0, None);
+        }
+        let bytes = input.as_bytes();
+        let len = bytes.len();
+        let mut result: Vec<u8> = Vec::new();
+        let mut chunk: Vec<u8> = Vec::new();
+        let mut i = 0;
+        let mut read = 0; // "handledChunkStart" — past last complete operation
+
+        while i < len {
+            let c = bytes[i];
+            if matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                i += 1;
+                continue;
+            }
+            if c == b'=' {
+                if chunk.len() == 2 {
+                    let mut j = i + 1;
+                    while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                        j += 1;
+                    }
+                    if j >= len || bytes[j] != b'=' {
+                        if last_chunk_handling == "stop-before-partial" {
+                            return (result, read, None);
+                        }
+                        return (result, read, Some("Invalid base64: expected second padding character".into()));
+                    }
+                    // Check trailing content after '==' BEFORE decoding
+                    let mut trail = j + 1;
+                    while trail < len && matches!(bytes[trail], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                        trail += 1;
+                    }
+                    if trail < len {
+                        return (result, read, Some("Invalid base64: trailing content after padding".into()));
+                    }
+                    if last_chunk_handling == "strict" && chunk[1] & 0x0F != 0 {
+                        return (result, read, Some("Invalid base64: non-zero padding bits".into()));
+                    }
+                    let b = (chunk[0] << 2) | (chunk[1] >> 4);
+                    if result.len() + 1 > max_len {
+                        return (result, read, None);
+                    }
+                    result.push(b);
+                    read = j + 1;
+                    chunk.clear();
+                    i = j + 1;
+                    continue;
+                } else if chunk.len() == 3 {
+                    // Check trailing content after '=' BEFORE decoding
+                    let mut trail = i + 1;
+                    while trail < len && matches!(bytes[trail], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                        trail += 1;
+                    }
+                    if trail < len {
+                        return (result, read, Some("Invalid base64: trailing content after padding".into()));
+                    }
+                    if last_chunk_handling == "strict" && chunk[2] & 0x03 != 0 {
+                        return (result, read, Some("Invalid base64: non-zero padding bits".into()));
+                    }
+                    let b0 = (chunk[0] << 2) | (chunk[1] >> 4);
+                    let b1 = ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2);
+                    if result.len() + 2 > max_len {
+                        return (result, read, None);
+                    }
+                    result.push(b0);
+                    result.push(b1);
+                    read = i + 1;
+                    chunk.clear();
+                    i += 1;
+                    continue;
+                } else {
+                    return (result, read, Some("Invalid base64: unexpected padding".into()));
+                }
+            }
+
+            let val = match Self::base64_decode_char(c, use_url) {
+                Some(v) => v,
+                None => {
+                    return (result, read, Some(format!("Invalid base64 character: {}", c as char)));
+                }
+            };
+            chunk.push(val);
+            i += 1;
+
+            if chunk.len() == 4 {
+                let b0 = (chunk[0] << 2) | (chunk[1] >> 4);
+                let b1 = ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2);
+                let b2 = ((chunk[2] & 0x03) << 6) | chunk[3];
+                // All-or-nothing: can't fit all 3 → stop before this chunk
+                if result.len() + 3 > max_len {
+                    return (result, read, None);
+                }
+                result.push(b0);
+                result.push(b1);
+                result.push(b2);
+                read = i;
+                chunk.clear();
+                // Early return when maxLength reached
+                if result.len() >= max_len {
+                    return (result, read, None);
+                }
+            }
+        }
+
+        // Handle remaining partial chunk
+        if !chunk.is_empty() {
+            if chunk.len() == 1 {
+                if last_chunk_handling == "stop-before-partial" {
+                    return (result, read, None);
+                }
+                return (result, read, Some("Invalid base64: incomplete chunk".into()));
+            }
+            if last_chunk_handling == "stop-before-partial" {
+                return (result, read, None);
+            }
+            if last_chunk_handling == "strict" {
+                return (result, read, Some("Invalid base64: missing padding".into()));
+            }
+            // "loose" mode
+            if chunk.len() == 2 {
+                let b = (chunk[0] << 2) | (chunk[1] >> 4);
+                if result.len() + 1 > max_len {
+                    return (result, read, None);
+                }
+                result.push(b);
+                read = i;
+            } else if chunk.len() == 3 {
+                let b0 = (chunk[0] << 2) | (chunk[1] >> 4);
+                let b1 = ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2);
+                if result.len() + 2 > max_len {
+                    return (result, read, None);
+                }
+                result.push(b0);
+                result.push(b1);
+                read = i;
+            }
+        } else {
+            read = i;
+        }
+
+        // Trailing garbage check (only for fromBase64 — no maxLength)
+        if max_length.is_none() {
+            let mut trail = read;
+            while trail < len {
+                let c = bytes[trail];
+                if matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                    trail += 1;
+                    continue;
+                }
+                return (result, read, Some("Invalid base64: trailing garbage".into()));
+            }
+        }
+
+        (result, read, None)
+    }
+
+    /// Hex decode per spec's FromHex.
+    /// Returns (decoded_bytes, chars_read, optional_error_message).
+    fn hex_decode_core(input: &str, max_length: Option<usize>) -> (Vec<u8>, usize, Option<String>) {
+        let bytes_in = input.as_bytes();
+        // Spec step 2: odd length check FIRST (before any decoding)
+        if bytes_in.len() % 2 != 0 {
+            return (Vec::new(), 0, Some("Invalid hex string: odd length".into()));
+        }
+        let max_len = max_length.unwrap_or(usize::MAX);
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i + 1 < bytes_in.len() && result.len() < max_len {
+            let hi = match Self::hex_char(bytes_in[i]) {
+                Some(v) => v,
+                None => {
+                    return (result, i, Some(format!("Invalid hex character: {}", bytes_in[i] as char)));
+                }
+            };
+            let lo = match Self::hex_char(bytes_in[i + 1]) {
+                Some(v) => v,
+                None => {
+                    return (result, i, Some(format!("Invalid hex character: {}", bytes_in[i + 1] as char)));
+                }
+            };
+            result.push((hi << 4) | lo);
+            i += 2;
+        }
+        (result, i, None)
+    }
+
+    fn hex_char(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn validate_uint8array(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, method: &str) -> bool {
+        match val {
+            Value::VmArray(arr) => {
+                let a = arr.borrow();
+                match a.props.get("__typedarray_name__").map(value_to_string) {
+                    Some(ref s) if s == "Uint8Array" => true,
+                    _ => {
+                        drop(a);
+                        self.throw_type_error(ctx, &format!("{} called on non-Uint8Array", method));
+                        false
+                    }
+                }
+            }
+            _ => {
+                self.throw_type_error(ctx, &format!("{} called on non-Uint8Array", method));
+                false
+            }
+        }
+    }
+
+    fn check_uint8array_not_detached(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> bool {
+        if let Value::VmArray(arr) = val {
+            let a = arr.borrow();
+            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__") {
+                if matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true))) {
+                    drop(a);
+                    self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Read raw bytes from a Uint8Array's backing buffer.
+    fn get_uint8array_bytes(&self, val: &Value<'gc>) -> Vec<u8> {
+        if let Value::VmArray(arr) = val {
+            let a = arr.borrow();
+            let byte_offset = match a.props.get("__byte_offset__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            let len = a.elements.len();
+            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__") {
+                let buf_b = buf.borrow();
+                if let Some(Value::VmArray(buf_bytes)) = buf_b.get("__buffer_bytes__") {
+                    let bb = buf_bytes.borrow();
+                    let mut result = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let idx = byte_offset + i;
+                        let b = if idx < bb.elements.len() {
+                            match &bb.elements[idx] {
+                                Value::Number(n) => *n as u8,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        result.push(b);
+                    }
+                    return result;
+                }
+            }
+            // Fallback to elements
+            return a
+                .elements
+                .iter()
+                .map(|v| match v {
+                    Value::Number(n) => *n as u8,
+                    _ => 0,
+                })
+                .collect();
+        }
+        Vec::new()
+    }
+
+    /// Write bytes into a Uint8Array's backing buffer.
+    fn write_bytes_to_uint8array(&self, ctx: &GcContext<'gc>, ta: &Value<'gc>, bytes: &[u8]) {
+        if let Value::VmArray(arr) = ta {
+            let a = arr.borrow();
+            let byte_offset = match a.props.get("__byte_offset__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => 0,
+            };
+            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__").cloned() {
+                let buf_b = buf.borrow();
+                if let Some(Value::VmArray(buf_bytes)) = buf_b.get("__buffer_bytes__").cloned() {
+                    drop(buf_b);
+                    drop(a);
+                    let mut bb = buf_bytes.borrow_mut(ctx);
+                    for (i, b) in bytes.iter().enumerate() {
+                        let idx = byte_offset + i;
+                        if idx < bb.elements.len() {
+                            bb.elements[idx] = Value::Number(*b as f64);
+                        }
+                    }
+                    // Also sync elements array
+                    let mut a = arr.borrow_mut(ctx);
+                    for (i, b) in bytes.iter().enumerate() {
+                        if i < a.elements.len() {
+                            a.elements[i] = Value::Number(*b as f64);
+                        }
+                    }
+                    return;
+                }
+            }
+            // No buffer — write to elements directly
+            drop(a);
+            let mut a = arr.borrow_mut(ctx);
+            for (i, b) in bytes.iter().enumerate() {
+                if i < a.elements.len() {
+                    a.elements[i] = Value::Number(*b as f64);
+                }
+            }
+        }
+    }
+
+    fn create_uint8array_from_bytes(&mut self, ctx: &GcContext<'gc>, bytes: Vec<u8>) -> Value<'gc> {
+        let elements: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
+        let len = elements.len();
+        let mut data = VmArrayData::new(elements);
+        data.props.insert("__typedarray_name__".to_string(), Value::from("Uint8Array"));
+        data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
+        let buf_bytes: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
+        let buffer_obj = self.create_ordinary_array_buffer(ctx, buf_bytes);
+        data.props.insert("buffer".to_string(), buffer_obj.clone());
+        mark_nonenumerable(&mut data.props, "buffer");
+        data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
+        data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
+        data.props.insert("__bytes_per_element__".to_string(), Value::Number(1.0));
+        data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
+        data.props.insert("__length_tracking__".to_string(), Value::Boolean(false));
+        if let Some(Value::VmObject(ctor)) = self.globals.get("Uint8Array")
+            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+        {
+            data.props.insert("__proto__".to_string(), proto);
+        }
+        Value::VmArray(new_gc_cell_ptr(ctx, data))
+    }
+
+    // ── Method implementations ──
+
+    fn uint8array_to_base64(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let this = receiver.unwrap_or(&Value::Undefined);
+        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.toBase64") {
+            return Value::Undefined;
+        }
+        let use_url = match self.read_base64_alphabet_option(ctx, args.first()) {
+            Some(v) => v,
+            None => return Value::Undefined,
+        };
+        let omit_padding = if let Some(opts) = args.first()
+            && !matches!(opts, Value::Undefined)
+        {
+            let val = self.read_named_property(ctx, opts, "omitPadding");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            val.to_truthy()
+        } else {
+            false
+        };
+        // Detached check AFTER option evaluation (per spec)
+        if !self.check_uint8array_not_detached(ctx, this) {
+            return Value::Undefined;
+        }
+
+        let bytes = self.get_uint8array_bytes(this);
+        let alphabet = if use_url { Self::BASE64URL_CHARS } else { Self::BASE64_CHARS };
+        let mut result = String::new();
+        for chunk in bytes.chunks(3) {
+            match chunk.len() {
+                3 => {
+                    let (b0, b1, b2) = (chunk[0] as usize, chunk[1] as usize, chunk[2] as usize);
+                    result.push(alphabet[b0 >> 2] as char);
+                    result.push(alphabet[((b0 & 3) << 4) | (b1 >> 4)] as char);
+                    result.push(alphabet[((b1 & 0xF) << 2) | (b2 >> 6)] as char);
+                    result.push(alphabet[b2 & 0x3F] as char);
+                }
+                2 => {
+                    let (b0, b1) = (chunk[0] as usize, chunk[1] as usize);
+                    result.push(alphabet[b0 >> 2] as char);
+                    result.push(alphabet[((b0 & 3) << 4) | (b1 >> 4)] as char);
+                    result.push(alphabet[(b1 & 0xF) << 2] as char);
+                    if !omit_padding {
+                        result.push('=');
+                    }
+                }
+                1 => {
+                    let b0 = chunk[0] as usize;
+                    result.push(alphabet[b0 >> 2] as char);
+                    result.push(alphabet[(b0 & 3) << 4] as char);
+                    if !omit_padding {
+                        result.push('=');
+                        result.push('=');
+                    }
+                }
+                _ => {}
+            }
+        }
+        Value::from(&result)
+    }
+
+    fn uint8array_to_hex(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let this = receiver.unwrap_or(&Value::Undefined);
+        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.toHex") {
+            return Value::Undefined;
+        }
+        if !self.check_uint8array_not_detached(ctx, this) {
+            return Value::Undefined;
+        }
+        let bytes = self.get_uint8array_bytes(this);
+        let mut result = String::with_capacity(bytes.len() * 2);
+        for b in &bytes {
+            result.push_str(&format!("{:02x}", b));
+        }
+        Value::from(&result)
+    }
+
+    fn uint8array_from_base64(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        let input = args.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(&input, Value::String(_)) {
+            self.throw_type_error(ctx, "Uint8Array.fromBase64: first argument must be a string");
+            return Value::Undefined;
+        }
+        let input_str = value_to_string(&input);
+        let opts = args.get(1);
+        let use_url = match self.read_base64_alphabet_option(ctx, opts) {
+            Some(v) => v,
+            None => return Value::Undefined,
+        };
+        let last_chunk = match self.read_last_chunk_handling_option(ctx, opts) {
+            Some(v) => v,
+            None => return Value::Undefined,
+        };
+        let (bytes, _read, error) = self.base64_decode_core(&input_str, use_url, &last_chunk, None);
+        if let Some(msg) = error {
+            self.throw_syntax_error(ctx, &msg);
+            return Value::Undefined;
+        }
+        self.create_uint8array_from_bytes(ctx, bytes)
+    }
+
+    fn uint8array_from_hex(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        let input = args.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(&input, Value::String(_)) {
+            self.throw_type_error(ctx, "Uint8Array.fromHex: first argument must be a string");
+            return Value::Undefined;
+        }
+        let input_str = value_to_string(&input);
+        let (bytes, _read, error) = Self::hex_decode_core(&input_str, None);
+        if let Some(msg) = error {
+            self.throw_syntax_error(ctx, &msg);
+            return Value::Undefined;
+        }
+        self.create_uint8array_from_bytes(ctx, bytes)
+    }
+
+    fn uint8array_set_from_base64(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let this = receiver.unwrap_or(&Value::Undefined);
+        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.setFromBase64") {
+            return Value::Undefined;
+        }
+        let input = args.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(&input, Value::String(_)) {
+            self.throw_type_error(ctx, "Uint8Array.prototype.setFromBase64: first argument must be a string");
+            return Value::Undefined;
+        }
+        let input_str = value_to_string(&input);
+        let opts = args.get(1);
+        let use_url = match self.read_base64_alphabet_option(ctx, opts) {
+            Some(v) => v,
+            None => return Value::Undefined,
+        };
+        let last_chunk = match self.read_last_chunk_handling_option(ctx, opts) {
+            Some(v) => v,
+            None => return Value::Undefined,
+        };
+        // Detached check AFTER option evaluation
+        if !self.check_uint8array_not_detached(ctx, this) {
+            return Value::Undefined;
+        }
+        let target_len = match this {
+            Value::VmArray(arr) => arr.borrow().elements.len(),
+            _ => 0,
+        };
+        let (bytes, read, error) = self.base64_decode_core(&input_str, use_url, &last_chunk, Some(target_len));
+        let written = bytes.len();
+        self.write_bytes_to_uint8array(ctx, this, &bytes);
+        if let Some(msg) = error {
+            self.throw_syntax_error(ctx, &msg);
+            return Value::Undefined;
+        }
+        let mut result_map = IndexMap::new();
+        result_map.insert("read".to_string(), Value::Number(read as f64));
+        result_map.insert("written".to_string(), Value::Number(written as f64));
+        Value::VmObject(new_gc_cell_ptr(ctx, result_map))
+    }
+
+    fn uint8array_set_from_hex(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let this = receiver.unwrap_or(&Value::Undefined);
+        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.setFromHex") {
+            return Value::Undefined;
+        }
+        let input = args.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(&input, Value::String(_)) {
+            self.throw_type_error(ctx, "Uint8Array.prototype.setFromHex: first argument must be a string");
+            return Value::Undefined;
+        }
+        let input_str = value_to_string(&input);
+        // Detached check AFTER validation
+        if !self.check_uint8array_not_detached(ctx, this) {
+            return Value::Undefined;
+        }
+        let target_len = match this {
+            Value::VmArray(arr) => arr.borrow().elements.len(),
+            _ => 0,
+        };
+        let (bytes, read, error) = Self::hex_decode_core(&input_str, Some(target_len));
+        let written = bytes.len();
+        self.write_bytes_to_uint8array(ctx, this, &bytes);
+        if let Some(msg) = error {
+            self.throw_syntax_error(ctx, &msg);
+            return Value::Undefined;
+        }
+        let mut result_map = IndexMap::new();
+        result_map.insert("read".to_string(), Value::Number(read as f64));
+        result_map.insert("written".to_string(), Value::Number(written as f64));
+        Value::VmObject(new_gc_cell_ptr(ctx, result_map))
     }
 }

@@ -2987,6 +2987,11 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                 vm.load_module_graph(ctx, entry_path, &requests);
                 // Fixup circular re-exports
                 vm.fixup_circular_reexports();
+                // Validate module resolution: check that all re-exports and
+                // import bindings resolve to actual exports in source modules.
+                if let Some((ref mk, _, ref metl, ref mrs, _, _, ref ep)) = main_module_record {
+                    vm.validate_module_resolution(mk, &statements, metl, mrs, ep)?;
+                }
                 // Pass loaded module info to the main compiler
                 for (path, exports) in &vm.loaded_modules {
                     let mut info = HashMap::new();

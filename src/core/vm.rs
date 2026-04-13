@@ -609,6 +609,22 @@ enum ModuleStatus {
     Evaluated,
 }
 
+/// Result of spec-compliant ResolveExport algorithm.
+enum ResolveExportResult {
+    /// Resolved to a concrete binding in (module_key, binding_name)
+    Found(String, String),
+    Null,
+    Ambiguous,
+}
+
+/// Context for module resolution validation (avoids threading many params).
+struct ModuleResolutionContext<'a> {
+    local_exports: &'a std::collections::HashMap<String, std::collections::HashSet<String>>,
+    all_reexport_deps: &'a std::collections::HashMap<String, Vec<(String, Vec<crate::core::ReexportSpec>)>>,
+    import_bindings: &'a std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>>,
+    export_to_local: &'a std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+}
+
 #[derive(Clone)]
 struct StoredModuleRecord {
     source: String,
@@ -2641,6 +2657,295 @@ impl<'gc> VM<'gc> {
         for module_key in module_keys {
             self.ensure_module_export_bindings(&module_key);
         }
+    }
+
+    /// Validate module resolution: check that all indirect export entries and
+    /// import bindings resolve to actual exports in their source modules.
+    /// Per spec §15.2.1.16.4 step 9 (IndirectExportEntries validation).
+    pub fn validate_module_resolution(
+        &self,
+        main_module_key: &str,
+        main_statements: &[crate::core::Statement],
+        main_export_name_to_local: &std::collections::HashMap<String, String>,
+        main_reexport_sources: &[(String, Vec<crate::core::ReexportSpec>)],
+        entry_path: &std::path::Path,
+    ) -> Result<(), JSError> {
+        use crate::core::resolve_module_path;
+        use crate::core::statement::{ImportSpecifier, StatementKind};
+
+        // Build per-module data structures needed for spec-compliant ResolveExport
+        let mut local_exports: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+        // import_bindings: module_key → { local_name → (source_module_key, import_name) }
+        let mut import_bindings: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>> =
+            std::collections::HashMap::new();
+        // export_to_local: module_key → { export_name → local_name }
+        let mut export_to_local: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+            std::collections::HashMap::new();
+
+        // Helper: extract import bindings from statements
+        fn extract_imports(
+            stmts: &[crate::core::Statement],
+            base_path: &std::path::Path,
+        ) -> std::collections::HashMap<String, (String, String)> {
+            let mut map = std::collections::HashMap::new();
+            for stmt in stmts {
+                if let StatementKind::Import(specs, source) = &*stmt.kind {
+                    let resolved = resolve_module_path(source, base_path).to_string_lossy().to_string();
+                    for spec in specs {
+                        match spec {
+                            ImportSpecifier::Named(import_name, Some(local_name)) => {
+                                map.insert(local_name.clone(), (resolved.clone(), import_name.clone()));
+                            }
+                            ImportSpecifier::Named(name, None) => {
+                                map.insert(name.clone(), (resolved.clone(), name.clone()));
+                            }
+                            ImportSpecifier::Default(local_name) => {
+                                map.insert(local_name.clone(), (resolved.clone(), "default".to_string()));
+                            }
+                            ImportSpecifier::Namespace(local_name) | ImportSpecifier::DeferredNamespace(local_name) => {
+                                // import * as foo → namespace import; use sentinel
+                                map.insert(local_name.clone(), (resolved.clone(), "\x00namespace".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            map
+        }
+
+        // Populate maps for all dependency modules
+        for (key, record) in &self.module_records {
+            let mut set = std::collections::HashSet::new();
+            for k in record.export_name_to_local.keys() {
+                set.insert(k.clone());
+            }
+            local_exports.insert(key.clone(), set);
+            import_bindings.insert(key.clone(), extract_imports(&record.statements, &record.resolved_path));
+            export_to_local.insert(key.clone(), record.export_name_to_local.clone());
+        }
+        // Add main module's exports and import bindings
+        {
+            let mut set = std::collections::HashSet::new();
+            for k in main_export_name_to_local.keys() {
+                set.insert(k.clone());
+            }
+            local_exports.insert(main_module_key.to_string(), set);
+            import_bindings.insert(main_module_key.to_string(), extract_imports(main_statements, entry_path));
+            export_to_local.insert(main_module_key.to_string(), main_export_name_to_local.clone());
+        }
+
+        // Build reexport_deps map including main module
+        let mut all_reexport_deps: std::collections::HashMap<String, Vec<(String, Vec<crate::core::ReexportSpec>)>> =
+            std::collections::HashMap::new();
+        {
+            let mut resolved_reexports = Vec::new();
+            for (source, specs) in main_reexport_sources {
+                let resolved = resolve_module_path(source, entry_path).to_string_lossy().to_string();
+                resolved_reexports.push((resolved, specs.clone()));
+            }
+            if !resolved_reexports.is_empty() {
+                all_reexport_deps.insert(main_module_key.to_string(), resolved_reexports);
+            }
+        }
+        // Dependency re-exports (already resolved)
+        for (key, deps) in &self.reexport_deps {
+            all_reexport_deps.insert(key.clone(), deps.clone());
+        }
+
+        let ctx = ModuleResolutionContext {
+            local_exports: &local_exports,
+            all_reexport_deps: &all_reexport_deps,
+            import_bindings: &import_bindings,
+            export_to_local: &export_to_local,
+        };
+
+        // Validate: for each module's IndirectExportEntries (named re-exports),
+        // resolve the export using spec-compliant ResolveExport.
+        for reexport_list in all_reexport_deps.values() {
+            for (src_key, specs) in reexport_list {
+                for spec in specs {
+                    if let crate::core::ReexportSpec::Named(name, alias) = spec {
+                        let export_name = alias.as_deref().unwrap_or(name);
+                        let mut visited = std::collections::HashSet::new();
+                        let result = Self::resolve_export_static(src_key, name, &ctx, &mut visited);
+                        match result {
+                            ResolveExportResult::Found(..) => {}
+                            ResolveExportResult::Null => {
+                                let display_src = self.get_module_display_name(src_key);
+                                return Err(crate::raise_syntax_error!(format!(
+                                    "The requested module '{}' does not provide an export named '{}'",
+                                    display_src, export_name
+                                )));
+                            }
+                            ResolveExportResult::Ambiguous => {
+                                let display_src = self.get_module_display_name(src_key);
+                                return Err(crate::raise_syntax_error!(format!(
+                                    "The requested module '{}' contains ambiguous star exports for the name '{}'",
+                                    display_src, export_name
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate import bindings in main module
+        for stmt in main_statements {
+            if let StatementKind::Import(specs, source) = &*stmt.kind {
+                let resolved = resolve_module_path(source, entry_path).to_string_lossy().to_string();
+                Self::validate_import_specs_static(specs, &resolved, source, &ctx)?;
+            }
+        }
+        // Validate import bindings in dependency modules
+        for record in self.module_records.values() {
+            for stmt in &record.statements {
+                if let StatementKind::Import(specs, source) = &*stmt.kind {
+                    let resolved = resolve_module_path(source, &record.resolved_path).to_string_lossy().to_string();
+                    Self::validate_import_specs_static(specs, &resolved, source, &ctx)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate import specifiers against a source module.
+    fn validate_import_specs_static(
+        specs: &[crate::core::statement::ImportSpecifier],
+        resolved_key: &str,
+        display_source: &str,
+        ctx: &ModuleResolutionContext<'_>,
+    ) -> Result<(), JSError> {
+        use crate::core::statement::ImportSpecifier;
+        for spec in specs {
+            let binding_name = match spec {
+                ImportSpecifier::Named(name, _) => Some(name.as_str()),
+                ImportSpecifier::Default(_) => Some("default"),
+                ImportSpecifier::Namespace(_) | ImportSpecifier::DeferredNamespace(_) => None,
+            };
+            if let Some(name) = binding_name {
+                let mut visited = std::collections::HashSet::new();
+                let result = Self::resolve_export_static(resolved_key, name, ctx, &mut visited);
+                match result {
+                    ResolveExportResult::Found(..) => {}
+                    ResolveExportResult::Null => {
+                        return Err(crate::raise_syntax_error!(format!(
+                            "The requested module '{}' does not provide an export named '{}'",
+                            display_source, name
+                        )));
+                    }
+                    ResolveExportResult::Ambiguous => {
+                        return Err(crate::raise_syntax_error!(format!(
+                            "The requested module '{}' contains ambiguous star exports for the name '{}'",
+                            display_source, name
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Spec-compliant ResolveExport: traces export resolution through re-exports.
+    fn resolve_export_static(
+        module_key: &str,
+        export_name: &str,
+        ctx: &ModuleResolutionContext<'_>,
+        visited: &mut std::collections::HashSet<(String, String)>,
+    ) -> ResolveExportResult {
+        let pair = (module_key.to_string(), export_name.to_string());
+        if visited.contains(&pair) {
+            return ResolveExportResult::Null;
+        }
+        visited.insert(pair);
+
+        // 1. Check local/direct exports
+        if let Some(locals) = ctx.local_exports.get(module_key)
+            && locals.contains(export_name)
+        {
+            // Per spec ParseModule step 10.1.ii: if the local name is in
+            // importedBoundNames, it becomes an indirect export entry —
+            // follow the import chain to find the true origin.
+            if let Some(etl) = ctx.export_to_local.get(module_key)
+                && let Some(local_name) = etl.get(export_name)
+                && let Some(imports) = ctx.import_bindings.get(module_key)
+                && let Some((src_mod, import_name)) = imports.get(local_name)
+            {
+                if import_name == "\x00namespace" {
+                    // import * as foo; export { foo } → namespace re-export
+                    return ResolveExportResult::Found(src_mod.clone(), "\x00namespace".to_string());
+                }
+                return Self::resolve_export_static(src_mod, import_name, ctx, visited);
+            }
+            return ResolveExportResult::Found(module_key.to_string(), export_name.to_string());
+        }
+
+        // 2. Check indirect export entries (named re-exports + namespace re-exports)
+        if let Some(reexport_list) = ctx.all_reexport_deps.get(module_key) {
+            for (src_key, specs) in reexport_list {
+                for spec in specs {
+                    match spec {
+                        crate::core::ReexportSpec::Named(name, alias) => {
+                            let ename = alias.as_deref().unwrap_or(name);
+                            if ename == export_name {
+                                return Self::resolve_export_static(src_key, name, ctx, visited);
+                            }
+                        }
+                        crate::core::ReexportSpec::Namespace(name) => {
+                            if name == export_name {
+                                // export * as foo from 'mod' -> per spec resolves to
+                                // { Module: importedModule, BindingName: namespace }
+                                return ResolveExportResult::Found(src_key.clone(), "\x00namespace".to_string());
+                            }
+                        }
+                        crate::core::ReexportSpec::Star => {}
+                    }
+                }
+            }
+        }
+
+        // 3. Check star re-exports (StarExportEntries)
+        if export_name == "default" {
+            return ResolveExportResult::Null;
+        }
+        let mut star_resolution: Option<(String, String)> = None;
+        if let Some(reexport_list) = ctx.all_reexport_deps.get(module_key) {
+            for (src_key, specs) in reexport_list {
+                let has_star = specs.iter().any(|s| matches!(s, crate::core::ReexportSpec::Star));
+                if !has_star {
+                    continue;
+                }
+                let resolution = Self::resolve_export_static(src_key, export_name, ctx, visited);
+                match resolution {
+                    ResolveExportResult::Ambiguous => return ResolveExportResult::Ambiguous,
+                    ResolveExportResult::Found(ref m, ref b) => {
+                        if let Some((ref pm, ref pb)) = star_resolution {
+                            if m != pm || b != pb {
+                                return ResolveExportResult::Ambiguous;
+                            }
+                        } else {
+                            star_resolution = Some((m.clone(), b.clone()));
+                        }
+                    }
+                    ResolveExportResult::Null => {}
+                }
+            }
+        }
+        match star_resolution {
+            Some((m, b)) => ResolveExportResult::Found(m, b),
+            None => ResolveExportResult::Null,
+        }
+    }
+
+    /// Get a human-readable display name for a module key (use relative path if possible).
+    fn get_module_display_name(&self, module_key: &str) -> String {
+        if let Some(record) = self.module_records.get(module_key)
+            && let Some(fname) = record.resolved_path.file_name()
+        {
+            return format!("./{}", fname.to_string_lossy());
+        }
+        module_key.to_string()
     }
 
     /// Inject loaded module bindings into `module_locals` based on `chunk.loaded_module_vars`.

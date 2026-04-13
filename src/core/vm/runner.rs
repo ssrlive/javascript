@@ -4069,6 +4069,10 @@ impl<'gc> VM<'gc> {
                                 "entries" if !map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_MAP_ENTRIES)),
                                 "forEach" if !map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_MAP_FOREACH)),
                                 "clear" if !map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_MAP_CLEAR)),
+                                "getOrInsert" if !map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_MAP_GETORINSERT)),
+                                "getOrInsertComputed" if !map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_MAP_GETORINSERTCOMPUTED)),
+                                "getOrInsert" if map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_WEAKMAP_GETORINSERT)),
+                                "getOrInsertComputed" if map_data.borrow().is_weak => Some(Value::VmNativeFunction(BUILTIN_WEAKMAP_GETORINSERTCOMPUTED)),
                                 _ => None,
                             };
                             if let Some(v) = resolved {
@@ -4433,15 +4437,17 @@ impl<'gc> VM<'gc> {
             },
             Value::VmMap(m) => match key.as_str() {
                 "size" => self.stack.push(Value::Number(m.borrow().entries.len() as f64)),
-                "set" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_SET)),
-                "get" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_GET)),
-                "has" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_HAS)),
-                "delete" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_DELETE)),
+                "set" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET })),
+                "get" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET })),
+                "has" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS })),
+                "delete" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE })),
                 "keys" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_KEYS)),
                 "values" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_VALUES)),
                 "entries" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_ENTRIES)),
                 "forEach" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_FOREACH)),
                 "clear" => self.stack.push(Value::VmNativeFunction(BUILTIN_MAP_CLEAR)),
+                "getOrInsert" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GETORINSERT } else { BUILTIN_MAP_GETORINSERT })),
+                "getOrInsertComputed" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GETORINSERTCOMPUTED } else { BUILTIN_MAP_GETORINSERTCOMPUTED })),
                 _ => self.stack.push(Value::Undefined),
             },
             Value::VmSet(s) => match key.as_str() {
@@ -6558,16 +6564,18 @@ impl<'gc> VM<'gc> {
                     self.read_named_property_with_receiver(ctx, &wrapped, &key, &obj)
                 }
             },
-            Value::VmMap(_) => match key.as_str() {
-                "set" => Value::VmNativeFunction(BUILTIN_MAP_SET),
-                "get" => Value::VmNativeFunction(BUILTIN_MAP_GET),
-                "has" => Value::VmNativeFunction(BUILTIN_MAP_HAS),
-                "delete" => Value::VmNativeFunction(BUILTIN_MAP_DELETE),
+            Value::VmMap(m) => match key.as_str() {
+                "set" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET }),
+                "get" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET }),
+                "has" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_HAS } else { BUILTIN_MAP_HAS }),
+                "delete" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_DELETE } else { BUILTIN_MAP_DELETE }),
                 "keys" => Value::VmNativeFunction(BUILTIN_MAP_KEYS),
                 "values" => Value::VmNativeFunction(BUILTIN_MAP_VALUES),
                 "entries" => Value::VmNativeFunction(BUILTIN_MAP_ENTRIES),
                 "forEach" => Value::VmNativeFunction(BUILTIN_MAP_FOREACH),
                 "clear" => Value::VmNativeFunction(BUILTIN_MAP_CLEAR),
+                "getOrInsert" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GETORINSERT } else { BUILTIN_MAP_GETORINSERT }),
+                "getOrInsertComputed" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GETORINSERTCOMPUTED } else { BUILTIN_MAP_GETORINSERTCOMPUTED }),
                 "toString" => Value::VmNativeFunction(BUILTIN_OBJ_TOSTRING),
                 _ => Value::Undefined,
             },

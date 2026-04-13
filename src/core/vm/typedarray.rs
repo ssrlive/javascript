@@ -1936,6 +1936,239 @@ impl<'gc> VM<'gc> {
                 }
                 self.call_host_fn(ctx, "array.toLocaleString", Some(this_val), args)
             }
+            "typedarray.toReversed" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined).clone();
+                if !self.validate_typed_array(ctx, &this_val, "toReversed") {
+                    return Value::Undefined;
+                }
+                let Value::VmArray(arr) = &this_val else {
+                    return Value::Undefined;
+                };
+                self.sync_resizable_ta_elements(ctx, arr);
+                let len = arr.borrow().elements.len();
+                let ta_name = match arr.borrow().props.get("__typedarray_name__") {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    _ => "Uint8Array".to_string(),
+                };
+                let bpe = match arr.borrow().props.get("__bytes_per_element__") {
+                    Some(Value::Number(n)) => *n as usize,
+                    _ => 1,
+                };
+                // Sync elements from buffer
+                self.sync_ta_elements_from_buffer(ctx, arr, &ta_name, bpe, len);
+                // TypedArrayCreateSameType (ignores @@species)
+                let result = match self.typed_array_create_same_type(ctx, &this_val, &[Value::Number(len as f64)]) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let Value::VmArray(res_arr) = &result else {
+                    return result;
+                };
+                let res_ta_name = match res_arr.borrow().props.get("__typedarray_name__") {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    _ => ta_name.clone(),
+                };
+                // Copy elements in reverse order
+                for k in 0..len {
+                    let from_value = self.ta_get_element(ctx, arr, len - 1 - k);
+                    if k < res_arr.borrow().elements.len() {
+                        if is_bigint_typed_array(&res_ta_name) {
+                            let bi = match &from_value {
+                                Value::BigInt(b) => (**b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
+                            res_arr.borrow_mut(ctx).elements[k] = Value::BigInt(Box::new(coerced));
+                            self.sync_ta_element_to_buffer(ctx, res_arr, k, 0.0, &res_ta_name);
+                        } else {
+                            let num = to_number(&from_value);
+                            let coerced = Self::typed_array_coerce_value(num, &res_ta_name);
+                            res_arr.borrow_mut(ctx).elements[k] = Value::Number(coerced);
+                            self.sync_ta_element_to_buffer(ctx, res_arr, k, num, &res_ta_name);
+                        }
+                    }
+                }
+                result
+            }
+            "typedarray.toSorted" => {
+                let this_val = receiver.unwrap_or(&Value::Undefined).clone();
+                let comparefn = args.first().cloned();
+
+                // Step 1: If comparefn is not undefined and not callable, throw
+                if let Some(ref cf) = comparefn
+                    && !matches!(cf, Value::Undefined)
+                    && !self.is_callable_value(cf)
+                {
+                    self.throw_type_error(ctx, "comparefn is not a function");
+                    return Value::Undefined;
+                }
+
+                if !self.validate_typed_array(ctx, &this_val, "toSorted") {
+                    return Value::Undefined;
+                }
+                let Value::VmArray(arr) = &this_val else {
+                    return Value::Undefined;
+                };
+                self.sync_resizable_ta_elements(ctx, arr);
+                let len = arr.borrow().elements.len();
+                let ta_name = match arr.borrow().props.get("__typedarray_name__") {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    _ => "Uint8Array".to_string(),
+                };
+                let bpe = match arr.borrow().props.get("__bytes_per_element__") {
+                    Some(Value::Number(n)) => *n as usize,
+                    _ => 1,
+                };
+                self.sync_ta_elements_from_buffer(ctx, arr, &ta_name, bpe, len);
+
+                // TypedArrayCreateSameType (ignores @@species)
+                let result = match self.typed_array_create_same_type(ctx, &this_val, &[Value::Number(len as f64)]) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                let Value::VmArray(res_arr) = &result else {
+                    return result;
+                };
+                let res_ta_name = match res_arr.borrow().props.get("__typedarray_name__") {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    _ => ta_name.clone(),
+                };
+
+                // Copy elements from source to result
+                for k in 0..len {
+                    let from_value = self.ta_get_element(ctx, arr, k);
+                    if k < res_arr.borrow().elements.len() {
+                        if is_bigint_typed_array(&res_ta_name) {
+                            let bi = match &from_value {
+                                Value::BigInt(b) => (**b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
+                            res_arr.borrow_mut(ctx).elements[k] = Value::BigInt(Box::new(coerced));
+                        } else {
+                            let num = to_number(&from_value);
+                            let coerced = Self::typed_array_coerce_value(num, &res_ta_name);
+                            res_arr.borrow_mut(ctx).elements[k] = Value::Number(coerced);
+                        }
+                    }
+                }
+
+                // Sort the result in-place (reuse the sort logic)
+                let has_custom = matches!(&comparefn, Some(v) if !matches!(v, Value::Undefined));
+
+                if is_bigint_typed_array(&res_ta_name) {
+                    let mut bi_elements: Vec<num_bigint::BigInt> = {
+                        let a = res_arr.borrow();
+                        a.elements.iter().map(|v| match v {
+                            Value::BigInt(bi) => (**bi).clone(),
+                            _ => num_bigint::BigInt::from(0),
+                        }).collect()
+                    };
+                    if has_custom {
+                        let cmp_fn = comparefn.unwrap();
+                        let mut had_error = false;
+                        bi_elements.sort_by(|a, b| {
+                            if had_error { return std::cmp::Ordering::Equal; }
+                            let result = self.vm_call_function_value(
+                                ctx, &cmp_fn, &Value::Undefined,
+                                &[Value::BigInt(Box::new(a.clone())), Value::BigInt(Box::new(b.clone()))],
+                            );
+                            match result {
+                                Ok(v) => {
+                                    let n = match self.extract_number_with_coercion(ctx, &v) {
+                                        Some(n) => n,
+                                        None => { had_error = true; return std::cmp::Ordering::Equal; }
+                                    };
+                                    if n.is_nan() { std::cmp::Ordering::Equal }
+                                    else if n < 0.0 { std::cmp::Ordering::Less }
+                                    else if n > 0.0 { std::cmp::Ordering::Greater }
+                                    else { std::cmp::Ordering::Equal }
+                                }
+                                Err(e) => {
+                                    had_error = true;
+                                    self.set_pending_throw_from_error(&e);
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                        });
+                    } else {
+                        bi_elements.sort();
+                    }
+                    let mut a = res_arr.borrow_mut(ctx);
+                    for (i, bi) in bi_elements.into_iter().enumerate() {
+                        a.elements[i] = Value::BigInt(Box::new(coerce_bigint_for_ta(&bi, &res_ta_name)));
+                    }
+                    drop(a);
+                } else {
+                    let mut f64_elements: Vec<f64> = {
+                        let a = res_arr.borrow();
+                        a.elements.iter().map(|v| to_number(v)).collect()
+                    };
+                    if has_custom {
+                        let cmp_fn = comparefn.unwrap();
+                        let mut had_error = false;
+                        f64_elements.sort_by(|a, b| {
+                            if had_error { return std::cmp::Ordering::Equal; }
+                            let result = self.vm_call_function_value(
+                                ctx, &cmp_fn, &Value::Undefined,
+                                &[Value::Number(*a), Value::Number(*b)],
+                            );
+                            match result {
+                                Ok(v) => {
+                                    let n = match self.extract_number_with_coercion(ctx, &v) {
+                                        Some(n) => n,
+                                        None => { had_error = true; return std::cmp::Ordering::Equal; }
+                                    };
+                                    if n.is_nan() { std::cmp::Ordering::Equal }
+                                    else if n < 0.0 { std::cmp::Ordering::Less }
+                                    else if n > 0.0 { std::cmp::Ordering::Greater }
+                                    else { std::cmp::Ordering::Equal }
+                                }
+                                Err(e) => {
+                                    had_error = true;
+                                    self.set_pending_throw_from_error(&e);
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                        });
+                    } else {
+                        // Default numeric sort for TypedArrays
+                        f64_elements.sort_by(|a, b| {
+                            if a.is_nan() && b.is_nan() { return std::cmp::Ordering::Equal; }
+                            if a.is_nan() { return std::cmp::Ordering::Greater; }
+                            if b.is_nan() { return std::cmp::Ordering::Less; }
+                            if *a == 0.0 && *b == 0.0 {
+                                if a.is_sign_negative() && !b.is_sign_negative() { return std::cmp::Ordering::Less; }
+                                if !a.is_sign_negative() && b.is_sign_negative() { return std::cmp::Ordering::Greater; }
+                                return std::cmp::Ordering::Equal;
+                            }
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    }
+                    let mut a = res_arr.borrow_mut(ctx);
+                    for (i, val) in f64_elements.into_iter().enumerate() {
+                        a.elements[i] = Value::Number(Self::typed_array_coerce_value(val, &res_ta_name));
+                    }
+                    drop(a);
+                }
+
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+
+                // Sync all result elements to buffer
+                for i in 0..len {
+                    let num = { let a = res_arr.borrow(); to_number(&a.elements[i]) };
+                    self.sync_ta_element_to_buffer(ctx, res_arr, i, num, &res_ta_name);
+                }
+                result
+            }
             "typedarray.with" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
                 if !self.validate_typed_array(ctx, &this_val, "with") {
@@ -2006,8 +2239,8 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                // Create new TypedArray of same type with ORIGINAL length
-                let result = match self.typed_array_species_create(ctx, &this_val, &[Value::Number(original_len as f64)]) {
+                // TypedArrayCreateSameType with ORIGINAL length (ignores @@species)
+                let result = match self.typed_array_create_same_type(ctx, &this_val, &[Value::Number(original_len as f64)]) {
                     Some(v) => v,
                     None => return Value::Undefined,
                 };
@@ -2174,6 +2407,31 @@ impl<'gc> VM<'gc> {
         // Step 8: Throw TypeError
         self.throw_type_error(ctx, "Species constructor is not a constructor");
         None
+    }
+
+    /// TypedArrayCreateSameType: creates a new TypedArray of the same type
+    /// using the intrinsic constructor (ignores @@species).
+    fn typed_array_create_same_type(&mut self, ctx: &GcContext<'gc>, exemplar: &Value<'gc>, args: &[Value<'gc>]) -> Option<Value<'gc>> {
+        let ta_name = match exemplar {
+            Value::VmArray(arr) => match arr.borrow().props.get("__typedarray_name__") {
+                Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Look up the intrinsic constructor from globals
+        let ctor = self.globals.get(&ta_name).cloned()?;
+        let result = match self.construct_value(ctx, &ctor, args, None) {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_pending_throw_from_error(&e);
+                return None;
+            }
+        };
+        if !self.validate_typed_array(ctx, &result, &ta_name) {
+            return None;
+        }
+        Some(result)
     }
 
     /// TypedArraySpeciesCreate: use species constructor to create result,
@@ -3772,6 +4030,14 @@ impl<'gc> VM<'gc> {
             "with".to_string(),
             Self::make_host_fn_with_name_len(ctx, "typedarray.with", "with", 2.0, false),
         );
+        ta_proto_map.insert(
+            "toReversed".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "typedarray.toReversed", "toReversed", 0.0, false),
+        );
+        ta_proto_map.insert(
+            "toSorted".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "typedarray.toSorted", "toSorted", 1.0, false),
+        );
         // TypedArray-specific methods
         ta_proto_map.insert(
             "set".to_string(),
@@ -3844,6 +4110,8 @@ impl<'gc> VM<'gc> {
             "set",
             "subarray",
             "with",
+            "toReversed",
+            "toSorted",
         ] {
             mark_nonenumerable(&mut ta_proto_map, key);
         }

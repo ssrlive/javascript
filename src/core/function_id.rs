@@ -362,4 +362,24 @@ pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_DISPOSED_GET: FunctionID = 535;
 pub(crate) const BUILTIN_ASYNCDISPOSABLESTACK_MOVE: FunctionID = 536;
 // ── Iterator dispose (540) ──────────────────────────────────────────
 pub(crate) const BUILTIN_ITERATOR_PROTOTYPE_DISPOSE: FunctionID = 540;
-// Next available group: 550
+// ── change-array-by-copy (550–553) ──────────────────────────────────
+pub(crate) const BUILTIN_ARRAY_TOREVERSED: FunctionID = 550;
+pub(crate) const BUILTIN_ARRAY_TOSORTED: FunctionID = 551;
+pub(crate) const BUILTIN_ARRAY_TOSPLICED: FunctionID = 552;
+pub(crate) const BUILTIN_ARRAY_WITH: FunctionID = 553;
+// ── Map upsert (560–561) ────────────────────────────────────────────
+pub(crate) const BUILTIN_MAP_GETORINSERT: FunctionID = 560;
+pub(crate) const BUILTIN_MAP_GETORINSERTCOMPUTED: FunctionID = 561;
+// ── ArrayBuffer detached / transfer (570–572) ───────────────────────
+pub(crate) const BUILTIN_ARRAYBUFFER_DETACHED_GET: FunctionID = 570;
+pub(crate) const BUILTIN_ARRAYBUFFER_TRANSFER: FunctionID = 571;
+pub(crate) const BUILTIN_ARRAYBUFFER_TRANSFER_TO_FIXED: FunctionID = 572;
+// ── WeakMap upsert (580–581) ─────────────────────────────────────────
+pub(crate) const BUILTIN_WEAKMAP_GETORINSERT: FunctionID = 580;
+pub(crate) const BUILTIN_WEAKMAP_GETORINSERTCOMPUTED: FunctionID = 581;
+// ── TypedArray change-array-by-copy (590–593) ───────────────────────
+pub(crate) const BUILTIN_TYPEDARRAY_TOREVERSED: FunctionID = 590;
+pub(crate) const BUILTIN_TYPEDARRAY_TOSORTED: FunctionID = 591;
+pub(crate) const BUILTIN_TYPEDARRAY_TOSPLICED: FunctionID = 592;
+pub(crate) const BUILTIN_TYPEDARRAY_WITH: FunctionID = 593;
+// Next available group: 600

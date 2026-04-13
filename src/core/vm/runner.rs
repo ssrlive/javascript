@@ -176,6 +176,10 @@ impl<'gc> VM<'gc> {
                 Opcode::ClearLocalCells => self.run_opcode_clear_local_cells()?,
                 Opcode::InitNamedFnSelf => self.run_opcode_init_named_fn_self(ctx)?,
                 Opcode::FreezeTemplate => self.run_opcode_freeze_template(ctx)?,
+                Opcode::DisposeResources | Opcode::DisposeResourcesAsync => {
+                    // Currently unused — disposal is emitted inline by the compiler.
+                    OpcodeAction::Continue
+                }
             };
             // If a throw was caught by handle_throw during this opcode, the
             // handler may have pushed extra values onto the stack afterwards.

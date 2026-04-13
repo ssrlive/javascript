@@ -3909,12 +3909,12 @@ impl<'gc> VM<'gc> {
             BUILTIN_FR_UNREGISTER => 1.0,
             BUILTIN_WEAKREF_DEREF | BUILTIN_SYMBOL => 0.0,
             BUILTIN_CTOR_DISPOSABLESTACK | BUILTIN_CTOR_ASYNCDISPOSABLESTACK => 0.0,
-            BUILTIN_DISPOSABLESTACK_DISPOSE | BUILTIN_DISPOSABLESTACK_MOVE
-            | BUILTIN_DISPOSABLESTACK_DISPOSED_GET => 0.0,
+            BUILTIN_DISPOSABLESTACK_DISPOSE | BUILTIN_DISPOSABLESTACK_MOVE | BUILTIN_DISPOSABLESTACK_DISPOSED_GET => 0.0,
             BUILTIN_DISPOSABLESTACK_USE | BUILTIN_DISPOSABLESTACK_DEFER => 1.0,
             BUILTIN_DISPOSABLESTACK_ADOPT => 2.0,
-            BUILTIN_ASYNCDISPOSABLESTACK_DISPOSEASYNC | BUILTIN_ASYNCDISPOSABLESTACK_MOVE
-            | BUILTIN_ASYNCDISPOSABLESTACK_DISPOSED_GET => 0.0,
+            BUILTIN_ASYNCDISPOSABLESTACK_DISPOSEASYNC | BUILTIN_ASYNCDISPOSABLESTACK_MOVE | BUILTIN_ASYNCDISPOSABLESTACK_DISPOSED_GET => {
+                0.0
+            }
             BUILTIN_ASYNCDISPOSABLESTACK_USE | BUILTIN_ASYNCDISPOSABLESTACK_DEFER => 1.0,
             BUILTIN_ASYNCDISPOSABLESTACK_ADOPT => 2.0,
             BUILTIN_ITERATOR_PROTOTYPE_DISPOSE => 0.0,
@@ -8103,7 +8103,7 @@ impl<'gc> VM<'gc> {
                             return promise;
                         }
                         // PromiseResolve(%Promise%, result) then resolve with undefined
-                        let wrapper = self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[result]);
+                        let _wrapper = self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[result]);
                         if let Some(thrown) = self.pending_throw.take() {
                             let _ = self.vm_call_function_value(ctx, &reject, &Value::Undefined, &[thrown]);
                             self.pending_throw = None;
@@ -17461,11 +17461,7 @@ impl<'gc> VM<'gc> {
 
         // ── DisposableStack ────────────────────────────────────────────
         {
-            let obj_proto = self.read_named_property(
-                ctx,
-                &self.globals.get("Object").cloned().unwrap_or(Value::Undefined),
-                "prototype",
-            );
+            let obj_proto = self.read_named_property(ctx, &self.globals.get("Object").cloned().unwrap_or(Value::Undefined), "prototype");
 
             let mut proto = IndexMap::new();
             proto.insert("__type__".to_string(), Value::from("DisposableStack"));
@@ -17499,8 +17495,7 @@ impl<'gc> VM<'gc> {
             );
             mark_nonenumerable(&mut proto, "move");
 
-            let disposed_getter =
-                Self::make_host_fn_with_name_len(ctx, "disposableStack.getDisposed", "get disposed", 0.0, false);
+            let disposed_getter = Self::make_host_fn_with_name_len(ctx, "disposableStack.getDisposed", "get disposed", 0.0, false);
             Self::insert_getter_property_with_attributes(&mut proto, "disposed", &disposed_getter, false, true);
 
             proto.insert("@@sym:4".to_string(), Value::from("DisposableStack"));
@@ -17535,23 +17530,13 @@ impl<'gc> VM<'gc> {
 
         // ── AsyncDisposableStack ───────────────────────────────────────
         {
-            let obj_proto = self.read_named_property(
-                ctx,
-                &self.globals.get("Object").cloned().unwrap_or(Value::Undefined),
-                "prototype",
-            );
+            let obj_proto = self.read_named_property(ctx, &self.globals.get("Object").cloned().unwrap_or(Value::Undefined), "prototype");
 
             let mut proto = IndexMap::new();
             proto.insert("__type__".to_string(), Value::from("AsyncDisposableStack"));
             proto.insert("__proto__".to_string(), obj_proto.clone());
 
-            let dispose_async_fn = Self::make_host_fn_with_name_len(
-                ctx,
-                "asyncDisposableStack.disposeAsync",
-                "disposeAsync",
-                0.0,
-                false,
-            );
+            let dispose_async_fn = Self::make_host_fn_with_name_len(ctx, "asyncDisposableStack.disposeAsync", "disposeAsync", 0.0, false);
             proto.insert("disposeAsync".to_string(), dispose_async_fn.clone());
             mark_nonenumerable(&mut proto, "disposeAsync");
             // Symbol.asyncDispose points to the same function as disposeAsync()
@@ -17579,13 +17564,7 @@ impl<'gc> VM<'gc> {
             );
             mark_nonenumerable(&mut proto, "move");
 
-            let disposed_getter = Self::make_host_fn_with_name_len(
-                ctx,
-                "asyncDisposableStack.getDisposed",
-                "get disposed",
-                0.0,
-                false,
-            );
+            let disposed_getter = Self::make_host_fn_with_name_len(ctx, "asyncDisposableStack.getDisposed", "get disposed", 0.0, false);
             Self::insert_getter_property_with_attributes(&mut proto, "disposed", &disposed_getter, false, true);
 
             proto.insert("@@sym:4".to_string(), Value::from("AsyncDisposableStack"));
@@ -17808,12 +17787,12 @@ impl<'gc> VM<'gc> {
         // Fix up __proto__ for DisposableStack/AsyncDisposableStack prototypes
         // (they were created before Object was available)
         for ctor_name in ["DisposableStack", "AsyncDisposableStack"] {
-            if let Some(Value::VmObject(ctor_obj)) = self.globals.get(ctor_name) {
-                if let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype") {
-                    proto_obj
-                        .borrow_mut(ctx)
-                        .insert("__proto__".to_string(), Value::VmObject(object_proto));
-                }
+            if let Some(Value::VmObject(ctor_obj)) = self.globals.get(ctor_name)
+                && let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+            {
+                proto_obj
+                    .borrow_mut(ctx)
+                    .insert("__proto__".to_string(), Value::VmObject(object_proto));
             }
         }
 
@@ -20142,37 +20121,23 @@ impl<'gc> VM<'gc> {
 
     /// Check if the disposable stack is already disposed; if so, set pending_throw with
     /// ReferenceError and return true.
-    fn disposable_stack_check_disposed(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        obj: &crate::core::VmObjectHandle<'gc>,
-        method_name: &str,
-    ) -> bool {
+    fn disposable_stack_check_disposed(&mut self, ctx: &GcContext<'gc>, obj: &crate::core::VmObjectHandle<'gc>, method_name: &str) -> bool {
         let state = obj.borrow().get("__disposable_state__").cloned();
-        if let Some(Value::String(s)) = state {
-            if crate::unicode::utf16_to_utf8(&s) == "disposed" {
-                self.pending_throw = Some(self.make_reference_error(
-                    ctx,
-                    &format!("{method_name} called on a disposed stack"),
-                ));
-                return true;
-            }
+        if let Some(Value::String(s)) = state
+            && crate::unicode::utf16_to_utf8(&s) == "disposed"
+        {
+            self.pending_throw = Some(self.make_reference_error(ctx, &format!("{method_name} called on a disposed stack")));
+            return true;
         }
         false
     }
 
     /// Execute the sync dispose algorithm: iterate the stack in reverse order, calling
     /// each dispose method, and aggregate errors via SuppressedError.
-    fn disposable_stack_perform_dispose(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        obj: &crate::core::VmObjectHandle<'gc>,
-    ) -> Value<'gc> {
+    fn disposable_stack_perform_dispose(&mut self, ctx: &GcContext<'gc>, obj: &crate::core::VmObjectHandle<'gc>) -> Value<'gc> {
         // Mark as disposed
-        obj.borrow_mut(ctx).insert(
-            "__disposable_state__".to_string(),
-            Value::from("disposed"),
-        );
+        obj.borrow_mut(ctx)
+            .insert("__disposable_state__".to_string(), Value::from("disposed"));
         // Take the stack
         let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
             Some(Value::VmArray(arr)) => arr,
@@ -20228,16 +20193,10 @@ impl<'gc> VM<'gc> {
     /// Execute the async dispose algorithm: iterate the stack in reverse order, calling
     /// each dispose method (possibly awaiting), and aggregate errors via SuppressedError.
     /// Returns a Promise that resolves to undefined or rejects with the aggregated error.
-    fn disposable_stack_perform_dispose_async(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        obj: &crate::core::VmObjectHandle<'gc>,
-    ) -> Value<'gc> {
+    fn disposable_stack_perform_dispose_async(&mut self, ctx: &GcContext<'gc>, obj: &crate::core::VmObjectHandle<'gc>) -> Value<'gc> {
         // Mark as disposed
-        obj.borrow_mut(ctx).insert(
-            "__disposable_state__".to_string(),
-            Value::from("disposed"),
-        );
+        obj.borrow_mut(ctx)
+            .insert("__disposable_state__".to_string(), Value::from("disposed"));
         // Take the stack
         let stack_arr = match obj.borrow().get("__dispose_stack__").cloned() {
             Some(Value::VmArray(arr)) => arr,
@@ -20363,7 +20322,9 @@ impl<'gc> VM<'gc> {
                 }
             }
             "getDisposed" => {
-                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("get {type_name}.prototype.disposed")) else {
+                let Some(obj) =
+                    self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("get {type_name}.prototype.disposed"))
+                else {
                     return Value::Undefined;
                 };
                 let state = obj.borrow().get("__disposable_state__").cloned();
@@ -20373,29 +20334,32 @@ impl<'gc> VM<'gc> {
                 }
             }
             "dispose" => {
-                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.dispose")) else {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.dispose"))
+                else {
                     return Value::Undefined;
                 };
                 // If already disposed, return undefined
                 let state = obj.borrow().get("__disposable_state__").cloned();
-                if let Some(Value::String(s)) = state {
-                    if crate::unicode::utf16_to_utf8(&s) == "disposed" {
-                        return Value::Undefined;
-                    }
+                if let Some(Value::String(s)) = state
+                    && crate::unicode::utf16_to_utf8(&s) == "disposed"
+                {
+                    return Value::Undefined;
                 }
                 self.disposable_stack_perform_dispose(ctx, &obj)
             }
             "disposeAsync" => {
-                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.disposeAsync")) else {
+                let Some(obj) =
+                    self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.disposeAsync"))
+                else {
                     return Value::Undefined;
                 };
                 let state = obj.borrow().get("__disposable_state__").cloned();
-                if let Some(Value::String(s)) = state {
-                    if crate::unicode::utf16_to_utf8(&s) == "disposed" {
-                        // Return Promise.resolve(undefined)
-                        let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
-                        return self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[Value::Undefined]);
-                    }
+                if let Some(Value::String(s)) = state
+                    && crate::unicode::utf16_to_utf8(&s) == "disposed"
+                {
+                    // Return Promise.resolve(undefined)
+                    let promise_ctor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+                    return self.call_host_fn(ctx, "promise.resolve", Some(&promise_ctor), &[Value::Undefined]);
                 }
                 self.disposable_stack_perform_dispose_async(ctx, &obj)
             }
@@ -20412,19 +20376,32 @@ impl<'gc> VM<'gc> {
                     return value;
                 }
                 // Must be an object
-                if !matches!(value, Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)) {
-                    self.throw_type_error(ctx, &format!("{type_name}.prototype.use: value must be an object or null/undefined"));
+                if !matches!(
+                    value,
+                    Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+                ) {
+                    self.throw_type_error(
+                        ctx,
+                        &format!("{type_name}.prototype.use: value must be an object or null/undefined"),
+                    );
                     return Value::Undefined;
                 }
                 // For async, try Symbol.asyncDispose first, then fall back to Symbol.dispose
                 let dispose_method = if is_async {
                     let async_method = self.read_named_property(ctx, &value, "@@sym:13");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     if matches!(async_method, Value::Undefined | Value::Null) {
                         let sync_method = self.read_named_property(ctx, &value, "@@sym:12");
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         if matches!(sync_method, Value::Undefined | Value::Null) {
-                            self.throw_type_error(ctx, &format!("{type_name}.prototype.use: value does not have a Symbol.asyncDispose or Symbol.dispose method"));
+                            self.throw_type_error(
+                                ctx,
+                                &format!("{type_name}.prototype.use: value does not have a Symbol.asyncDispose or Symbol.dispose method"),
+                            );
                             return Value::Undefined;
                         }
                         if !self.is_value_callable(&sync_method) {
@@ -20434,16 +20411,24 @@ impl<'gc> VM<'gc> {
                         sync_method
                     } else {
                         if !self.is_value_callable(&async_method) {
-                            self.throw_type_error(ctx, &format!("{type_name}.prototype.use: Symbol.asyncDispose method is not callable"));
+                            self.throw_type_error(
+                                ctx,
+                                &format!("{type_name}.prototype.use: Symbol.asyncDispose method is not callable"),
+                            );
                             return Value::Undefined;
                         }
                         async_method
                     }
                 } else {
                     let method = self.read_named_property(ctx, &value, "@@sym:12");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     if matches!(method, Value::Undefined | Value::Null) {
-                        self.throw_type_error(ctx, &format!("{type_name}.prototype.use: value does not have a Symbol.dispose method"));
+                        self.throw_type_error(
+                            ctx,
+                            &format!("{type_name}.prototype.use: value does not have a Symbol.dispose method"),
+                        );
                         return Value::Undefined;
                     }
                     if !self.is_value_callable(&method) {
@@ -20465,7 +20450,8 @@ impl<'gc> VM<'gc> {
                 value
             }
             "adopt" => {
-                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.adopt")) else {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.adopt"))
+                else {
                     return Value::Undefined;
                 };
                 if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.adopt")) {
@@ -20490,7 +20476,8 @@ impl<'gc> VM<'gc> {
                 value
             }
             "defer" => {
-                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.defer")) else {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.defer"))
+                else {
                     return Value::Undefined;
                 };
                 if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.defer")) {
@@ -20512,7 +20499,8 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             "move" => {
-                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.move")) else {
+                let Some(obj) = self.disposable_stack_validate_this(ctx, receiver, type_name, &format!("{type_name}.prototype.move"))
+                else {
                     return Value::Undefined;
                 };
                 if self.disposable_stack_check_disposed(ctx, &obj, &format!("{type_name}.prototype.move")) {
@@ -20535,17 +20523,15 @@ impl<'gc> VM<'gc> {
 
                 // Transfer the stack
                 let old_stack = obj.borrow().get("__dispose_stack__").cloned();
-                if let Value::VmObject(new_obj) = &new_instance {
-                    if let Some(stack_val) = old_stack {
-                        new_obj.borrow_mut(ctx).insert("__dispose_stack__".to_string(), stack_val);
-                    }
+                if let Value::VmObject(new_obj) = &new_instance
+                    && let Some(stack_val) = old_stack
+                {
+                    new_obj.borrow_mut(ctx).insert("__dispose_stack__".to_string(), stack_val);
                 }
 
                 // Set current object to disposed with empty stack
-                obj.borrow_mut(ctx).insert(
-                    "__disposable_state__".to_string(),
-                    Value::from("disposed"),
-                );
+                obj.borrow_mut(ctx)
+                    .insert("__disposable_state__".to_string(), Value::from("disposed"));
                 obj.borrow_mut(ctx).insert(
                     "__dispose_stack__".to_string(),
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(vec![]))),

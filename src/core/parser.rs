@@ -25,12 +25,14 @@ fn is_lexical_declaration(stmt: &Statement) -> bool {
             | StatementKind::ConstDestructuringArray(..)
             | StatementKind::ConstDestructuringObject(..)
             | StatementKind::Class(..)
+            | StatementKind::Using(..)
+            | StatementKind::AwaitUsing(..)
     )
 }
 fn reject_lexical_in_single_statement(stmt: &Statement, context: &str) -> Result<(), JSError> {
     if is_lexical_declaration(stmt) {
         return Err(raise_parse_error!(
-            &format!("Lexical declaration (let/const/class) not allowed in {} body", context),
+            &format!("Lexical declaration not allowed in {} body", context),
             stmt.line,
             stmt.column
         ));
@@ -166,7 +168,9 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             if let Token::Identifier(ref name) = start_token.token
                 && name == "using"
                 && *index + 1 < t.len()
-                && matches!(t[*index + 1].token, Token::Identifier(_))
+                && (matches!(t[*index + 1].token, Token::Identifier(_))
+                    || (matches!(t[*index + 1].token, Token::Await) && !in_await_context() && !forbid_await_identifier())
+                    || (matches!(t[*index + 1].token, Token::Yield) && !in_generator_context()))
             {
                 return parse_using_statement(t, index);
             }
@@ -1023,6 +1027,9 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                     let body = parse_nested_statement_item(t, index)?;
                     reject_lexical_in_single_statement(&body, "for")?;
                     let body_stmts = vec![body];
+                    // using/await using head names conflict with var in body
+                    let head_names = vec![first_name.clone()];
+                    check_forinof_head_body_var_conflict(&head_names, &body_stmts, line, column)?;
                     let kind = if is_for_await {
                         StatementKind::ForAwaitOf(Some(crate::core::VarDeclKind::AwaitUsing), first_name, iterable, body_stmts)
                     } else {
@@ -2021,6 +2028,15 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                     break;
                 }
                 stmts.push(parse_nested_statement_item(t, index)?);
+                if let Some(last) = stmts.last()
+                    && matches!(&*last.kind, StatementKind::Using(..) | StatementKind::AwaitUsing(..))
+                {
+                    return Err(raise_parse_error!(
+                        "using declarations are not allowed in switch case clauses",
+                        last.line,
+                        last.column
+                    ));
+                }
             }
             cases.push(crate::core::SwitchCase::Case(case_expr, stmts));
         } else if matches!(t[*index].token, Token::Default) {
@@ -2042,6 +2058,15 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                     break;
                 }
                 stmts.push(parse_nested_statement_item(t, index)?);
+                if let Some(last) = stmts.last()
+                    && matches!(&*last.kind, StatementKind::Using(..) | StatementKind::AwaitUsing(..))
+                {
+                    return Err(raise_parse_error!(
+                        "using declarations are not allowed in switch case clauses",
+                        last.line,
+                        last.column
+                    ));
+                }
             }
             cases.push(crate::core::SwitchCase::Default(stmts));
         } else if matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
@@ -3075,6 +3100,14 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 /// Parse `using x = expr, y = expr;` declaration
 fn parse_using_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
+    // using declarations are not allowed at the top level of a Script
+    if statement_depth() == 1 && !in_module_context() {
+        return Err(raise_parse_error!(
+            "using declarations are not allowed at the top level of a script",
+            t[start].line,
+            t[start].column
+        ));
+    }
     *index += 1;
     let mut decls = Vec::new();
     loop {
@@ -3090,6 +3123,8 @@ fn parse_using_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         }
         let name = match &t[*index].token {
             Token::Identifier(n) => n.clone(),
+            Token::Await if !in_await_context() && !forbid_await_identifier() => "await".to_string(),
+            Token::Yield if !in_generator_context() => "yield".to_string(),
             _ => {
                 return Err(raise_parse_error_with_token!(
                     t.get(*index).unwrap(),
@@ -3126,6 +3161,14 @@ fn parse_using_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
 /// Parse `await using x = expr;` declaration
 fn parse_await_using_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
+    // await using declarations are not allowed at the top level of a Script
+    if statement_depth() == 1 && !in_module_context() {
+        return Err(raise_parse_error!(
+            "await using declarations are not allowed at the top level of a script",
+            t[start].line,
+            t[start].column
+        ));
+    }
     *index += 2;
     let mut decls = Vec::new();
     loop {
@@ -3141,6 +3184,7 @@ fn parse_await_using_statement(t: &[TokenData], index: &mut usize) -> Result<Sta
         }
         let name = match &t[*index].token {
             Token::Identifier(n) => n.clone(),
+            Token::Yield if !in_generator_context() => "yield".to_string(),
             _ => {
                 return Err(raise_parse_error_with_token!(
                     t.get(*index).unwrap(),

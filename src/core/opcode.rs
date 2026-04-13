@@ -118,6 +118,8 @@ pub enum Opcode {
     MarkPropertyNonEnumerable = 112, // pop object, read key const, mark property [[Enumerable]] = false
     MarkPropertyReadonly = 113,      // pop object, read key const, mark property [[Writable]] = false
     AssertGlobalDefined = 114,       // read name const; throw ReferenceError if name not in globals/globalThis (strict pre-check)
+    DisposeResources = 115, // dispose resources: operand u8 = count, pops count values, calls Symbol.dispose on each (reverse order)
+    DisposeResourcesAsync = 116, // async dispose resources: like DisposeResources but uses Symbol.asyncDispose + await
 }
 
 impl TryFrom<u8> for Opcode {
@@ -240,6 +242,8 @@ impl TryFrom<u8> for Opcode {
             112 => Opcode::MarkPropertyNonEnumerable,
             113 => Opcode::MarkPropertyReadonly,
             114 => Opcode::AssertGlobalDefined,
+            115 => Opcode::DisposeResources,
+            116 => Opcode::DisposeResourcesAsync,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)

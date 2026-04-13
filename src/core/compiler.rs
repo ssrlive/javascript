@@ -83,6 +83,12 @@ pub struct Compiler<'gc> {
     last_class_ctor_ip: Option<usize>,
     /// Original source text for Function.prototype.toString source recovery.
     source_text: Option<String>,
+    /// Stack of disposable resource lists per block scope.
+    /// Each entry is (variable_name, is_async, optional global_helper_name for catch path).
+    dispose_stack: Vec<Vec<(String, bool, Option<String>)>>,
+    /// True when compiling a function body that has using/await using declarations
+    /// so that Return statements emit disposal code before returning.
+    fn_body_has_disposables: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1161,6 +1167,9 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::SetLocal);
                             self.chunk.write_byte(pos as u8);
                             self.chunk.write_opcode(Opcode::Pop);
+                            // Mark as initialized so same-name declarations in
+                            // inner scopes (e.g. for-init) create new locals.
+                            self.hoisted_function_lexicals.remove(name);
                         } else {
                             // let is block-scoped: create a new local slot
                             self.locals.push(name.clone());
@@ -1245,6 +1254,7 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::SetLocal);
                             self.chunk.write_byte(pos as u8);
                             self.chunk.write_opcode(Opcode::Pop);
+                            self.hoisted_function_lexicals.remove(name);
                         } else {
                             self.locals.push(name.clone());
                         }
@@ -1302,8 +1312,18 @@ impl<'gc> Compiler<'gc> {
                 let saved_force_local_let = self.force_local_let;
                 let mut block_local_names: Vec<String> = Vec::new();
 
+                // Detect if block contains using/await using declarations
+                let has_disposables = statements
+                    .iter()
+                    .any(|s| matches!(*s.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_)));
+
+                // Push dispose frame for this block
+                if has_disposables {
+                    self.dispose_stack.push(Vec::new());
+                }
+
                 if use_block_locals {
-                    // Collect block-scoped names (let/const/class/strict-mode function decls)
+                    // Collect block-scoped names (let/const/class/strict-mode function decls/using)
                     for s in statements.iter() {
                         match &*s.kind {
                             StatementKind::FunctionDeclaration(name, _, _, is_gen, is_async)
@@ -1321,6 +1341,13 @@ impl<'gc> Compiler<'gc> {
                                 }
                             }
                             StatementKind::Const(decls) => {
+                                for (name, _) in decls {
+                                    if !block_local_names.contains(name) {
+                                        block_local_names.push(name.clone());
+                                    }
+                                }
+                            }
+                            StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
                                 for (name, _) in decls {
                                     if !block_local_names.contains(name) {
                                         block_local_names.push(name.clone());
@@ -1362,6 +1389,24 @@ impl<'gc> Compiler<'gc> {
                     }
                 }
 
+                // If block has disposables, wrap body in try-catch for exception disposal
+                let mut try_catch_placeholder = 0usize;
+                let dispose_exc_name;
+                if has_disposables {
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    try_catch_placeholder = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    dispose_exc_name = format!("__disposeExc_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    let binding_idx = self
+                        .chunk
+                        .add_constant(Value::String(crate::unicode::utf8_to_utf16(&dispose_exc_name)));
+                    self.chunk.write_u16(binding_idx);
+                    self.chunk.write_byte(0); // no finally
+                } else {
+                    dispose_exc_name = String::new();
+                }
+
                 let effective_count = statements
                     .iter()
                     .filter(|s| !(use_block_locals && matches!(*s.kind, StatementKind::FunctionDeclaration(..))))
@@ -1384,6 +1429,48 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_u16(idx);
                     }
                 }
+
+                // Emit disposal code for normal path
+                if has_disposables {
+                    let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    // Normal path: dispose resources in reverse order
+                    let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+                    // If disposal threw, throw the accumulated error
+                    if let Some(ref nev) = normal_err_var {
+                        self.emit_helper_get(nev);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                        self.emit_helper_get(nev);
+                        self.chunk.write_opcode(Opcode::Throw);
+                        self.patch_jump(jump_no_err);
+                    }
+                    let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+                    // Catch path: dispose resources then re-throw
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[try_catch_placeholder] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 2] = ((catch_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[try_catch_placeholder + 3] = ((catch_ip >> 24) & 0xff) as u8;
+                    let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&dispose_exc_name))?;
+                    // Throw the accumulated error
+                    if let Some(ref cev) = catch_err_var {
+                        self.emit_helper_get(cev);
+                    } else {
+                        let exc_key = crate::unicode::utf8_to_utf16(&dispose_exc_name);
+                        let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(exc_idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Throw);
+
+                    self.patch_jump(jump_over_catch);
+                }
+
                 // Clean up block-scoped locals
                 if is_last {
                     self.locals.truncate(saved_locals);
@@ -1576,6 +1663,8 @@ impl<'gc> Compiler<'gc> {
                         &*init.kind,
                         StatementKind::Let(_)
                             | StatementKind::Const(_)
+                            | StatementKind::Using(_)
+                            | StatementKind::AwaitUsing(_)
                             | StatementKind::LetDestructuringArray(_, _)
                             | StatementKind::LetDestructuringObject(_, _)
                             | StatementKind::ConstDestructuringArray(_, _)
@@ -1584,10 +1673,32 @@ impl<'gc> Compiler<'gc> {
                 } else {
                     false
                 };
+                let is_using_init = if let Some(init) = &for_stmt.init {
+                    matches!(&*init.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_))
+                } else {
+                    false
+                };
                 let saved_init_locals = self.locals.len();
                 let saved_force_local = self.force_local_let;
                 if is_lexical_init && self.scope_depth == 0 {
                     self.force_local_let = true;
+                }
+                // Push dispose frame and set up try-catch BEFORE init so that
+                // exceptions during subsequent initializers are caught for disposal.
+                let mut for_dispose_try_ph = 0usize;
+                let mut for_dispose_exc_name = String::new();
+                if is_using_init {
+                    self.dispose_stack.push(Vec::new());
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    for_dispose_try_ph = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    for_dispose_exc_name = format!("__forDisposeExc_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    let binding_idx = self
+                        .chunk
+                        .add_constant(Value::String(crate::unicode::utf8_to_utf16(&for_dispose_exc_name)));
+                    self.chunk.write_u16(binding_idx);
+                    self.chunk.write_byte(0);
                 }
                 if let Some(init) = &for_stmt.init {
                     self.compile_statement(init, false)?;
@@ -1682,6 +1793,42 @@ impl<'gc> Compiler<'gc> {
                 let ctx = self.loop_stack.pop().unwrap();
                 for bp in ctx.break_patches {
                     self.patch_jump(bp);
+                }
+
+                // Emit disposal for using in for-init
+                if is_using_init {
+                    let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+                    if let Some(ref nev) = normal_err_var {
+                        self.emit_helper_get(nev);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                        self.emit_helper_get(nev);
+                        self.chunk.write_opcode(Opcode::Throw);
+                        self.patch_jump(jump_no_err);
+                    }
+                    let jump_ok = self.emit_jump(Opcode::Jump);
+
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[for_dispose_try_ph] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[for_dispose_try_ph + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[for_dispose_try_ph + 2] = ((catch_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[for_dispose_try_ph + 3] = ((catch_ip >> 24) & 0xff) as u8;
+                    let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&for_dispose_exc_name))?;
+                    if let Some(ref cev) = catch_err_var {
+                        self.emit_helper_get(cev);
+                    } else {
+                        let exc_key = crate::unicode::utf8_to_utf16(&for_dispose_exc_name);
+                        let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(exc_idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Throw);
+                    self.patch_jump(jump_ok);
                 }
 
                 // Pop for-init lexical locals (let/const forced to local at scope_depth 0)
@@ -1784,6 +1931,32 @@ impl<'gc> Compiler<'gc> {
                 }
                 if self.try_finally_stack.is_empty() {
                     self.emit_for_of_close_all();
+                    if self.fn_body_has_disposables {
+                        // TeardownTry from the function-body using try-catch
+                        self.chunk.write_opcode(Opcode::TeardownTry);
+                        // Save return value, dispose, then restore
+                        let ret_var = format!("__ret_dispose_{}__", self.forin_counter);
+                        self.forin_counter += 1;
+                        self.emit_define_helper_slot(&ret_var);
+                        self.emit_helper_set(&ret_var);
+                        self.chunk.write_opcode(Opcode::Pop);
+                        if let Some(frame) = self.dispose_stack.last() {
+                            let frame_clone = frame.clone();
+                            let err_var = self.emit_dispose_resources(&frame_clone, false, None)?;
+                            if let Some(ref ev) = err_var {
+                                self.emit_helper_get(ev);
+                                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(undef_idx);
+                                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                                let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                                self.emit_helper_get(ev);
+                                self.chunk.write_opcode(Opcode::Throw);
+                                self.patch_jump(jump_no_err);
+                            }
+                        }
+                        self.emit_helper_get(&ret_var);
+                    }
                     self.chunk.write_opcode(Opcode::Return);
                 }
             }
@@ -2457,9 +2630,68 @@ impl<'gc> Compiler<'gc> {
 
                 // Try body (block-scoped)
                 let saved_try = self.locals.len();
+
+                // Check if try body contains using/await using
+                let try_has_disposables = tc
+                    .try_body
+                    .iter()
+                    .any(|s| matches!(*s.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_)));
+                let mut try_dispose_try_ph = 0usize;
+                let mut try_dispose_exc_name = String::new();
+                if try_has_disposables {
+                    self.dispose_stack.push(Vec::new());
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    try_dispose_try_ph = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    try_dispose_exc_name = format!("__disposeExc_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    let binding_idx = self
+                        .chunk
+                        .add_constant(Value::String(crate::unicode::utf8_to_utf16(&try_dispose_exc_name)));
+                    self.chunk.write_u16(binding_idx);
+                    self.chunk.write_byte(0);
+                }
+
                 for s in &tc.try_body {
                     self.compile_statement(s, false)?;
                 }
+
+                // Emit disposal for try body using declarations
+                if try_has_disposables {
+                    let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+                    if let Some(ref nev) = normal_err_var {
+                        self.emit_helper_get(nev);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                        self.emit_helper_get(nev);
+                        self.chunk.write_opcode(Opcode::Throw);
+                        self.patch_jump(jump_no_err);
+                    }
+                    let jump_ok = self.emit_jump(Opcode::Jump);
+
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[try_dispose_try_ph] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[try_dispose_try_ph + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[try_dispose_try_ph + 2] = ((catch_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[try_dispose_try_ph + 3] = ((catch_ip >> 24) & 0xff) as u8;
+                    let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&try_dispose_exc_name))?;
+                    if let Some(ref cev) = catch_err_var {
+                        self.emit_helper_get(cev);
+                    } else {
+                        let exc_key = crate::unicode::utf8_to_utf16(&try_dispose_exc_name);
+                        let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(exc_idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Throw);
+                    self.patch_jump(jump_ok);
+                }
+
                 self.end_block_scope(saved_try);
                 self.chunk.write_opcode(Opcode::TeardownTry);
 
@@ -2980,12 +3212,73 @@ impl<'gc> Compiler<'gc> {
                 }
                 self.hoisting_fn_decl = false;
 
+                // Detect if function body contains using/await using declarations
+                let fn_has_disposables = body
+                    .iter()
+                    .any(|s| matches!(*s.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_)));
+                let mut fn_try_catch_placeholder = 0usize;
+                let fn_dispose_exc_name;
+                if fn_has_disposables {
+                    self.dispose_stack.push(Vec::new());
+                    self.fn_body_has_disposables = true;
+                    self.chunk.write_opcode(Opcode::SetupTry);
+                    fn_try_catch_placeholder = self.chunk.code.len();
+                    self.chunk.write_u32(0xffff_ffff);
+                    fn_dispose_exc_name = format!("__disposeExc_{}__", self.forin_counter);
+                    self.forin_counter += 1;
+                    let binding_idx = self
+                        .chunk
+                        .add_constant(Value::String(crate::unicode::utf8_to_utf16(&fn_dispose_exc_name)));
+                    self.chunk.write_u16(binding_idx);
+                    self.chunk.write_byte(0);
+                } else {
+                    fn_dispose_exc_name = String::new();
+                }
+
                 for (i, s) in body.iter().enumerate() {
                     // Skip function declarations (already hoisted above)
                     if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
                         continue;
                     }
                     self.compile_statement(s, i == body.len() - 1)?;
+                }
+
+                // Emit disposal for function body using declarations
+                if fn_has_disposables {
+                    self.fn_body_has_disposables = false;
+                    let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+                    self.chunk.write_opcode(Opcode::TeardownTry);
+                    let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+                    if let Some(ref nev) = normal_err_var {
+                        self.emit_helper_get(nev);
+                        let undef_idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(undef_idx);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                        self.emit_helper_get(nev);
+                        self.chunk.write_opcode(Opcode::Throw);
+                        self.patch_jump(jump_no_err);
+                    }
+                    let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+                    let catch_ip = self.chunk.code.len();
+                    self.chunk.code[fn_try_catch_placeholder] = (catch_ip & 0xff) as u8;
+                    self.chunk.code[fn_try_catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+                    self.chunk.code[fn_try_catch_placeholder + 2] = ((catch_ip >> 16) & 0xff) as u8;
+                    self.chunk.code[fn_try_catch_placeholder + 3] = ((catch_ip >> 24) & 0xff) as u8;
+                    let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&fn_dispose_exc_name))?;
+                    if let Some(ref cev) = catch_err_var {
+                        self.emit_helper_get(cev);
+                    } else {
+                        let exc_key = crate::unicode::utf8_to_utf16(&fn_dispose_exc_name);
+                        let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                        self.chunk.write_opcode(Opcode::GetGlobal);
+                        self.chunk.write_u16(exc_idx);
+                    }
+                    self.chunk.write_opcode(Opcode::Throw);
+
+                    self.patch_jump(jump_over_catch);
                 }
 
                 // Implicit return undefined if no explicit return
@@ -3069,7 +3362,10 @@ impl<'gc> Compiler<'gc> {
                 let forced_local = self.scope_depth == 0
                     && matches!(
                         decl_kind,
-                        Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+                        Some(crate::core::VarDeclKind::Const)
+                            | Some(crate::core::VarDeclKind::Let)
+                            | Some(crate::core::VarDeclKind::Using)
+                            | Some(crate::core::VarDeclKind::AwaitUsing)
                     );
                 let forced_local_base = if forced_local {
                     Some(format!("__forof_scope_base_{}__", self.forin_counter))
@@ -3095,12 +3391,24 @@ impl<'gc> Compiler<'gc> {
                 let is_tdz = self.scope_depth > 0
                     && matches!(
                         decl_kind,
-                        Some(crate::core::VarDeclKind::Const) | Some(crate::core::VarDeclKind::Let)
+                        Some(crate::core::VarDeclKind::Const)
+                            | Some(crate::core::VarDeclKind::Let)
+                            | Some(crate::core::VarDeclKind::Using)
+                            | Some(crate::core::VarDeclKind::AwaitUsing)
                     );
-                // Track const loop variable so assignment inside body is rejected
-                let restore_const_tracking =
-                    matches!(decl_kind, Some(crate::core::VarDeclKind::Const)) && !self.const_locals.contains(var_name.as_str());
-                if matches!(decl_kind, Some(crate::core::VarDeclKind::Const)) {
+                // Track const/using loop variable so assignment inside body is rejected
+                let restore_const_tracking = matches!(
+                    decl_kind,
+                    Some(crate::core::VarDeclKind::Const)
+                        | Some(crate::core::VarDeclKind::Using)
+                        | Some(crate::core::VarDeclKind::AwaitUsing)
+                ) && !self.const_locals.contains(var_name.as_str());
+                if matches!(
+                    decl_kind,
+                    Some(crate::core::VarDeclKind::Const)
+                        | Some(crate::core::VarDeclKind::Using)
+                        | Some(crate::core::VarDeclKind::AwaitUsing)
+                ) {
                     self.const_locals.insert(var_name.clone());
                 }
                 if is_tdz && !self.locals[saved_locals..].iter().any(|l| l == var_name) {
@@ -4451,11 +4759,66 @@ impl<'gc> Compiler<'gc> {
             StatementKind::Debugger => {
                 // debugger statement is a no-op in this engine
             }
-            _ => {
-                return Err(crate::raise_syntax_error!(format!(
-                    "Unimplemented statement kind for VM: {:?}",
-                    stmt.kind
-                )));
+            StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
+                let is_async_dispose = matches!(*stmt.kind, StatementKind::AwaitUsing(_));
+
+                // Pre-create helpers for ALL declarations so that if a subsequent
+                // initializer throws, earlier resources can be found by the catch handler.
+                let mut helper_names: Vec<Option<String>> = Vec::new();
+                if !self.dispose_stack.is_empty() {
+                    for _ in decls {
+                        let helper_name = format!("__dispose_res_{}__", self.forin_counter);
+                        self.forin_counter += 1;
+                        self.emit_define_helper_slot(&helper_name);
+                        helper_names.push(Some(helper_name));
+                    }
+                } else {
+                    for _ in decls {
+                        helper_names.push(None);
+                    }
+                }
+
+                for (i, (name, init)) in decls.iter().enumerate() {
+                    self.compile_expr_with_name_inference(init, name)?;
+                    if self.scope_depth > 0 || self.force_local_let {
+                        if ((self.scope_depth == 1 && self.block_stmt_depth == 0) || (self.scope_depth == 0 && self.force_local_let))
+                            && self.hoisted_function_lexicals.contains(name)
+                            && let Some(pos) = self.locals.iter().rposition(|l| l == name)
+                        {
+                            self.chunk.write_opcode(Opcode::SetLocal);
+                            self.chunk.write_byte(pos as u8);
+                            self.chunk.write_opcode(Opcode::Pop);
+                            self.hoisted_function_lexicals.remove(name);
+                        } else {
+                            self.locals.push(name.clone());
+                        }
+                        self.const_locals.insert(name.clone());
+                    } else {
+                        self.emit_define_global_binding(name, true);
+                    }
+                    // Track resource for disposal at block exit
+                    if !self.dispose_stack.is_empty() {
+                        let helper_name = helper_names[i].clone();
+                        if let Some(ref hn) = helper_name {
+                            self.emit_helper_get(name);
+                            self.emit_helper_set(hn);
+                            self.chunk.write_opcode(Opcode::Pop);
+                        }
+                        self.dispose_stack
+                            .last_mut()
+                            .unwrap()
+                            .push((name.clone(), is_async_dispose, helper_name));
+                    }
+                }
+                if is_last {
+                    if self.completion_var.is_some() {
+                        self.emit_load_completion();
+                    } else {
+                        let idx = self.chunk.add_constant(Value::Undefined);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(idx);
+                    }
+                }
             }
         }
         Ok(())
@@ -7311,6 +7674,189 @@ impl<'gc> Compiler<'gc> {
         self.chunk.write_u16(ni);
     }
 
+    /// Emit inline disposal code for a list of disposable resources (in LIFO order).
+    /// Each resource's [Symbol.dispose]() or [Symbol.asyncDispose]() is called.
+    /// null/undefined values are skipped. If disposal throws, errors are accumulated
+    /// into SuppressedError chains.
+    /// `use_helpers`: use global helper names for loading resources (catch path after stack unwind).
+    /// `pending_exc_var`: if Some, this variable already holds a pending exception (catch path).
+    /// Returns the name of the variable holding the accumulated error (or None if no pending var).
+    fn emit_dispose_resources(
+        &mut self,
+        resources: &[(String, bool, Option<String>)],
+        use_helpers: bool,
+        pending_exc_var: Option<&str>,
+    ) -> Result<Option<String>, JSError> {
+        if resources.is_empty() {
+            return Ok(pending_exc_var.map(|s| s.to_string()));
+        }
+
+        // Create a variable to track the accumulated error during disposal
+        let err_var = format!("__dispose_err_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        self.emit_define_helper_slot(&err_var);
+
+        // Initialize: if there's already a pending exception, set it; otherwise undefined stays
+        if let Some(pev) = pending_exc_var {
+            self.emit_helper_get(pev);
+            self.emit_helper_set(&err_var);
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        // A flag to track whether we have an error (1.0 = yes, 0.0 = no)
+        let has_err_var = format!("__dispose_has_err_{}__", self.forin_counter);
+        self.forin_counter += 1;
+        self.emit_define_helper_slot(&has_err_var);
+        if pending_exc_var.is_some() {
+            let one = self.chunk.add_constant(Value::Number(1.0));
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(one);
+            self.emit_helper_set(&has_err_var);
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        for (name, is_async, helper) in resources.iter().rev() {
+            // Load resource value
+            let load_name = if use_helpers { helper.as_deref().unwrap_or(name) } else { name };
+            self.emit_helper_get(load_name);
+            // Check if null or undefined
+            self.chunk.write_opcode(Opcode::Dup);
+            let null_idx = self.chunk.add_constant(Value::Null);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(null_idx);
+            self.chunk.write_opcode(Opcode::Equal);
+            let jump_if_nullish = self.emit_jump(Opcode::JumpIfTrue);
+
+            // Wrap dispose call in try-catch to catch disposal errors
+            let catch_binding_name = format!("__dispose_catch_{}__", self.forin_counter);
+            self.forin_counter += 1;
+            self.chunk.write_opcode(Opcode::SetupTry);
+            let try_catch_ph = self.chunk.code.len();
+            self.chunk.write_u32(0xffff_ffff);
+            let binding_idx = self
+                .chunk
+                .add_constant(Value::String(crate::unicode::utf8_to_utf16(&catch_binding_name)));
+            self.chunk.write_u16(binding_idx);
+            self.chunk.write_byte(0);
+
+            // Get the dispose method and call it
+            // Stack before: [..., obj]
+            self.chunk.write_opcode(Opcode::Dup);
+            // Stack: [..., obj, obj]
+            if *is_async {
+                // await using: try obj[Symbol.asyncDispose], fall back to obj[Symbol.dispose]
+                // After Dup: [obj, obj]
+                let sym_key = crate::unicode::utf8_to_utf16("Symbol");
+                let sym_idx = self.chunk.add_constant(Value::String(sym_key.clone()));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(sym_idx);
+                let ad_key = crate::unicode::utf8_to_utf16("asyncDispose");
+                let ad_idx = self.chunk.add_constant(Value::String(ad_key));
+                self.chunk.write_opcode(Opcode::GetProperty);
+                self.chunk.write_u16(ad_idx);
+                self.chunk.write_opcode(Opcode::GetIndex);
+                // Stack: [obj, obj[Symbol.asyncDispose]]  (maybe undefined)
+                self.chunk.write_opcode(Opcode::Dup);
+                // Stack: [obj, method?, method?]
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                // Stack: [obj, method?, method?, undefined]
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                // Stack: [obj, method?, bool]
+                let jump_has_async = self.emit_jump(Opcode::JumpIfTrue);
+                // asyncDispose is undefined — pop it, redo with Symbol.dispose
+                self.chunk.write_opcode(Opcode::Pop);
+                // Stack: [obj]
+                self.chunk.write_opcode(Opcode::Dup);
+                // Stack: [obj, obj]
+                let sym_idx2 = self.chunk.add_constant(Value::String(sym_key));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(sym_idx2);
+                let d_key = crate::unicode::utf8_to_utf16("dispose");
+                let d_idx = self.chunk.add_constant(Value::String(d_key));
+                self.chunk.write_opcode(Opcode::GetProperty);
+                self.chunk.write_u16(d_idx);
+                self.chunk.write_opcode(Opcode::GetIndex);
+                // Stack: [obj, obj[Symbol.dispose]]
+                let jump_do_call = self.emit_jump(Opcode::Jump);
+                self.patch_jump(jump_has_async);
+                // Stack: [obj, asyncDispose_method]
+                self.patch_jump(jump_do_call);
+            } else {
+                let sym_key = crate::unicode::utf8_to_utf16("Symbol");
+                let sym_idx = self.chunk.add_constant(Value::String(sym_key));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(sym_idx);
+                let prop_key = crate::unicode::utf8_to_utf16("dispose");
+                let prop_idx = self.chunk.add_constant(Value::String(prop_key));
+                self.chunk.write_opcode(Opcode::GetProperty);
+                self.chunk.write_u16(prop_idx);
+                self.chunk.write_opcode(Opcode::GetIndex);
+            }
+            // Stack: [obj, method]
+            self.chunk.write_opcode(Opcode::Call);
+            self.chunk.write_byte(0x80); // method call, 0 args
+            if *is_async {
+                self.chunk.write_opcode(Opcode::Await);
+            }
+            self.chunk.write_opcode(Opcode::Pop); // discard return
+            self.chunk.write_opcode(Opcode::TeardownTry);
+            let jump_ok = self.emit_jump(Opcode::Jump);
+
+            // Catch path: disposal threw an error
+            let catch_ip = self.chunk.code.len();
+            self.chunk.code[try_catch_ph] = (catch_ip & 0xff) as u8;
+            self.chunk.code[try_catch_ph + 1] = ((catch_ip >> 8) & 0xff) as u8;
+            self.chunk.code[try_catch_ph + 2] = ((catch_ip >> 16) & 0xff) as u8;
+            self.chunk.code[try_catch_ph + 3] = ((catch_ip >> 24) & 0xff) as u8;
+
+            // Check if we already have a pending error
+            self.emit_helper_get(&has_err_var);
+            let jump_no_prev = self.emit_jump(Opcode::JumpIfFalse);
+
+            // Yes: wrap in SuppressedError(new_error, old_error)
+            // new SuppressedError(caught_error, pending_error)
+            let se_key = crate::unicode::utf8_to_utf16("SuppressedError");
+            let se_idx = self.chunk.add_constant(Value::String(se_key));
+            self.chunk.write_opcode(Opcode::GetGlobal);
+            self.chunk.write_u16(se_idx);
+            // arg 1: the new disposal error
+            self.emit_helper_get(&catch_binding_name);
+            // arg 2: the suppressed (previous) error
+            self.emit_helper_get(&err_var);
+            // Call: new SuppressedError(error, suppressed)
+            self.chunk.write_opcode(Opcode::NewCall);
+            self.chunk.write_byte(2);
+            self.emit_helper_set(&err_var);
+            self.chunk.write_opcode(Opcode::Pop);
+            let jump_after_wrap = self.emit_jump(Opcode::Jump);
+
+            // No previous error: just store the caught error
+            self.patch_jump(jump_no_prev);
+            self.emit_helper_get(&catch_binding_name);
+            self.emit_helper_set(&err_var);
+            self.chunk.write_opcode(Opcode::Pop);
+            let one = self.chunk.add_constant(Value::Number(1.0));
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(one);
+            self.emit_helper_set(&has_err_var);
+            self.chunk.write_opcode(Opcode::Pop);
+
+            self.patch_jump(jump_after_wrap);
+            self.patch_jump(jump_ok);
+            let jump_end = self.emit_jump(Opcode::Jump);
+
+            // null/undefined skip: pop the resource value
+            self.patch_jump(jump_if_nullish);
+            self.chunk.write_opcode(Opcode::Pop);
+
+            self.patch_jump(jump_end);
+        }
+
+        Ok(Some(err_var))
+    }
+
     /// Set up a completion value variable for tracking eval loop results.
     /// Returns the synthetic variable name. Pushes `undefined` as initial value.
     fn setup_completion_var(&mut self) {
@@ -8740,6 +9286,8 @@ impl<'gc> Compiler<'gc> {
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
+        let old_fn_body_has_disposables = self.fn_body_has_disposables;
+        self.fn_body_has_disposables = false;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
         self.parent_const_locals = old_const_locals.clone();
@@ -8823,11 +9371,72 @@ impl<'gc> Compiler<'gc> {
         }
         self.hoisting_fn_decl = false;
 
+        // Detect if function body contains using/await using declarations
+        let has_disposables = body
+            .iter()
+            .any(|s| matches!(*s.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_)));
+        let mut try_catch_placeholder = 0usize;
+        let dispose_exc_name;
+        if has_disposables {
+            self.dispose_stack.push(Vec::new());
+            self.fn_body_has_disposables = true;
+            self.chunk.write_opcode(Opcode::SetupTry);
+            try_catch_placeholder = self.chunk.code.len();
+            self.chunk.write_u32(0xffff_ffff);
+            dispose_exc_name = format!("__disposeExc_{}__", self.forin_counter);
+            self.forin_counter += 1;
+            let binding_idx = self
+                .chunk
+                .add_constant(Value::String(crate::unicode::utf8_to_utf16(&dispose_exc_name)));
+            self.chunk.write_u16(binding_idx);
+            self.chunk.write_byte(0);
+        } else {
+            dispose_exc_name = String::new();
+        }
+
         for (i, s) in body.iter().enumerate() {
             if matches!(*s.kind, StatementKind::FunctionDeclaration(..)) {
                 continue;
             }
             self.compile_statement(s, i == body.len() - 1)?;
+        }
+
+        // Emit disposal for function body using declarations
+        if has_disposables {
+            self.fn_body_has_disposables = false;
+            let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+            self.chunk.write_opcode(Opcode::TeardownTry);
+            let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+            if let Some(ref nev) = normal_err_var {
+                self.emit_helper_get(nev);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                self.emit_helper_get(nev);
+                self.chunk.write_opcode(Opcode::Throw);
+                self.patch_jump(jump_no_err);
+            }
+            let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+            let catch_ip = self.chunk.code.len();
+            self.chunk.code[try_catch_placeholder] = (catch_ip & 0xff) as u8;
+            self.chunk.code[try_catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+            self.chunk.code[try_catch_placeholder + 2] = ((catch_ip >> 16) & 0xff) as u8;
+            self.chunk.code[try_catch_placeholder + 3] = ((catch_ip >> 24) & 0xff) as u8;
+            let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&dispose_exc_name))?;
+            if let Some(ref cev) = catch_err_var {
+                self.emit_helper_get(cev);
+            } else {
+                let exc_key = crate::unicode::utf8_to_utf16(&dispose_exc_name);
+                let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(exc_idx);
+            }
+            self.chunk.write_opcode(Opcode::Throw);
+
+            self.patch_jump(jump_over_catch);
         }
 
         let idx = self.chunk.add_constant(Value::Undefined);
@@ -8876,6 +9485,7 @@ impl<'gc> Compiler<'gc> {
         // restore strict context inherited from outer scope
         self.current_strict = old_ctx;
         self.allow_super_call = old_allow_super;
+        self.fn_body_has_disposables = old_fn_body_has_disposables;
 
         // Arity = non-rest params only (call site pushes all args, function collects rest)
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };
@@ -9401,9 +10011,70 @@ impl<'gc> Compiler<'gc> {
         let gen_marker = "__gen_yield_marker__".to_string();
         self.generator_items_stack.push(gen_marker);
 
+        // Check if generator body contains using/await using
+        let old_fn_body_has_disposables = self.fn_body_has_disposables;
+        self.fn_body_has_disposables = false;
+        let gen_has_disposables = body
+            .iter()
+            .any(|s| matches!(*s.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_)));
+        let mut gen_try_catch_ph = 0usize;
+        let mut gen_dispose_exc_name = String::new();
+        if gen_has_disposables {
+            self.dispose_stack.push(Vec::new());
+            self.fn_body_has_disposables = true;
+            self.chunk.write_opcode(Opcode::SetupTry);
+            gen_try_catch_ph = self.chunk.code.len();
+            self.chunk.write_u32(0xffff_ffff);
+            gen_dispose_exc_name = format!("__genDisposeExc_{}__", self.forin_counter);
+            self.forin_counter += 1;
+            let binding_idx = self
+                .chunk
+                .add_constant(Value::String(crate::unicode::utf8_to_utf16(&gen_dispose_exc_name)));
+            self.chunk.write_u16(binding_idx);
+            self.chunk.write_byte(0);
+        }
+
         for (i, s) in body.iter().enumerate() {
             self.compile_statement(s, i == body.len() - 1)?;
         }
+
+        // Emit disposal for generator body
+        if gen_has_disposables {
+            self.fn_body_has_disposables = false;
+            let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+            self.chunk.write_opcode(Opcode::TeardownTry);
+            let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+            if let Some(ref nev) = normal_err_var {
+                self.emit_helper_get(nev);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                self.emit_helper_get(nev);
+                self.chunk.write_opcode(Opcode::Throw);
+                self.patch_jump(jump_no_err);
+            }
+            let jump_ok = self.emit_jump(Opcode::Jump);
+
+            let catch_ip = self.chunk.code.len();
+            self.chunk.code[gen_try_catch_ph] = (catch_ip & 0xff) as u8;
+            self.chunk.code[gen_try_catch_ph + 1] = ((catch_ip >> 8) & 0xff) as u8;
+            self.chunk.code[gen_try_catch_ph + 2] = ((catch_ip >> 16) & 0xff) as u8;
+            self.chunk.code[gen_try_catch_ph + 3] = ((catch_ip >> 24) & 0xff) as u8;
+            let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&gen_dispose_exc_name))?;
+            if let Some(ref cev) = catch_err_var {
+                self.emit_helper_get(cev);
+            } else {
+                let exc_key = crate::unicode::utf8_to_utf16(&gen_dispose_exc_name);
+                let exc_idx = self.chunk.add_constant(Value::String(exc_key));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(exc_idx);
+            }
+            self.chunk.write_opcode(Opcode::Throw);
+            self.patch_jump(jump_ok);
+        }
+        self.fn_body_has_disposables = old_fn_body_has_disposables;
 
         self.generator_items_stack.pop();
 

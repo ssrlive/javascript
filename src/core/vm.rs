@@ -1256,6 +1256,19 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn empty_module_execution_state(&self) -> ModuleExecutionState<'gc> {
+        ModuleExecutionState {
+            module_locals: IndexMap::new(),
+            const_globals: std::collections::HashSet::new(),
+            loaded_module_vars: std::collections::HashMap::new(),
+            const_import_bindings: std::collections::HashSet::new(),
+            self_namespace_imports: Vec::new(),
+            self_deferred_namespace_imports: Vec::new(),
+            self_import_aliases: std::collections::HashMap::new(),
+            live_import_bindings: std::collections::HashMap::new(),
+        }
+    }
+
     fn enter_module_execution_context(&mut self, module_key: Option<&str>) -> Option<SavedModuleExecutionContext<'gc>> {
         let module_key = module_key?;
         if self.is_module_mode && self.current_source_path() == Some(module_key) {
@@ -2071,6 +2084,11 @@ impl<'gc> VM<'gc> {
             return;
         }
 
+        if resolved_path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            self.load_single_json_module(ctx, resolved_path, &key);
+            return;
+        }
+
         let dep_source = match crate::core::read_script_file(resolved_path) {
             Ok(s) => s,
             Err(err) => {
@@ -2151,6 +2169,68 @@ impl<'gc> VM<'gc> {
         self.module_records.insert(key.clone(), record);
         self.refresh_module_namespace_object(ctx, &key);
         self.refresh_deferred_module_namespace_object(ctx, &key);
+    }
+
+    fn load_single_json_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
+        let dep_source = match crate::core::read_script_file(resolved_path) {
+            Ok(s) => s,
+            Err(err) => {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(key, error_value);
+                return;
+            }
+        };
+
+        let parsed = match serde_json::from_str::<serde_json::Value>(&dep_source) {
+            Ok(value) => value,
+            Err(_) => {
+                self.record_module_load_error(key, self.make_syntax_error_object(ctx, "Invalid JSON"));
+                return;
+            }
+        };
+
+        let export_names = vec!["default".to_string()];
+        let export_name_to_local = std::collections::HashMap::from([("default".to_string(), "default".to_string())]);
+        let reexport_sources = Vec::new();
+        let requests = Vec::new();
+
+        self.pre_create_module_namespace(ctx, key);
+        self.pre_create_deferred_module_namespace(ctx, key);
+        self.seed_module_record(key, &export_names, &export_name_to_local);
+        self.seed_module_export_metadata(key, &export_name_to_local, &reexport_sources, resolved_path);
+
+        let default_value = self.json_to_value(ctx, &parsed);
+        if let Some(exports) = self.loaded_modules.get_mut(key) {
+            exports.insert("default".to_string(), default_value.clone());
+        }
+
+        let mut state = self.empty_module_execution_state();
+        state.module_locals.insert("default".to_string(), default_value);
+        self.loaded_module_states.insert(key.to_string(), state);
+
+        self.module_records.insert(
+            key.to_string(),
+            StoredModuleRecord {
+                source: dep_source,
+                resolved_path: resolved_path.to_path_buf(),
+                statements: Vec::new(),
+                export_names,
+                export_name_to_local,
+                reexport_sources,
+                requests,
+                loaded_module_vars: std::collections::HashMap::new(),
+                const_import_bindings: std::collections::HashSet::new(),
+                self_namespace_imports: Vec::new(),
+                self_deferred_namespace_imports: Vec::new(),
+                self_import_aliases: std::collections::HashMap::new(),
+                ip: 0,
+                has_tla: false,
+                status: ModuleStatus::Evaluated,
+            },
+        );
+        self.module_load_errors.remove(key);
+        self.refresh_module_namespace_object(ctx, key);
+        self.refresh_deferred_module_namespace_object(ctx, key);
     }
 
     fn finalize_dependency_module_record(&mut self, ctx: &GcContext<'gc>, record: &StoredModuleRecord) {
@@ -4520,6 +4600,14 @@ impl<'gc> VM<'gc> {
             }
         };
 
+        if let Some(options) = args.get(1)
+            && let Err(err) = self.note_dynamic_import_attributes(ctx, options)
+        {
+            let reject_value = self.vm_value_from_error(ctx, &err);
+            reject_with(self, reject_value);
+            return promise;
+        }
+
         let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
             let reject_value = self.make_type_error_object(ctx, "Dynamic import requires an active script or module");
             reject_with(self, reject_value);
@@ -4568,6 +4656,31 @@ impl<'gc> VM<'gc> {
             self.set_pending_throw_from_error(&err);
         }
         promise
+    }
+
+    fn note_dynamic_import_attributes(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>) -> Result<(), JSError> {
+        if matches!(options, Value::Undefined) {
+            return Ok(());
+        }
+
+        let with_value = self.read_named_property(ctx, options, "with");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        if matches!(with_value, Value::Undefined) {
+            return Ok(());
+        }
+
+        let type_value = self.read_named_property(ctx, &with_value, "type");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        if matches!(type_value, Value::Undefined) {
+            return Ok(());
+        }
+
+        let _ = self.vm_to_string_like_spec(ctx, &type_value)?;
+        Ok(())
     }
 
     fn host_deferred_import_namespace(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {

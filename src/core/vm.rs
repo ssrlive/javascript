@@ -15730,6 +15730,7 @@ impl<'gc> VM<'gc> {
                 .as_ref()
                 .and_then(|o| desc_from_legacy_map(&o.borrow(), key))
                 .or_else(|| desc_from_legacy_map(&props.borrow(), key));
+            let own_is_data = matches!(current_desc.as_ref().map(|d| &d.kind), Some(PropKind::Data(_)));
             // Check for setter accessor
             let setter_fn = overlay
                 .as_ref()
@@ -15739,29 +15740,31 @@ impl<'gc> VM<'gc> {
                 let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
                 return Ok(val.clone());
             }
-            let mut proto = overlay
-                .as_ref()
-                .and_then(|o| o.borrow().get("__proto__").cloned())
-                .or_else(|| props.borrow().get("__proto__").cloned());
-            while let Some(ref proto_val) = proto {
-                if let Value::VmObject(proto_obj) = proto_val {
-                    let borrow = proto_obj.borrow();
-                    if let Some(sf) = lookup_setter(&borrow, key).cloned() {
-                        drop(borrow);
-                        let _ = self.vm_call_function_value(ctx, &sf, &setter_receiver, std::slice::from_ref(val))?;
-                        return Ok(val.clone());
+            if !own_is_data {
+                let mut proto = overlay
+                    .as_ref()
+                    .and_then(|o| o.borrow().get("__proto__").cloned())
+                    .or_else(|| props.borrow().get("__proto__").cloned());
+                while let Some(ref proto_val) = proto {
+                    if let Value::VmObject(proto_obj) = proto_val {
+                        let borrow = proto_obj.borrow();
+                        if let Some(sf) = lookup_setter(&borrow, key).cloned() {
+                            drop(borrow);
+                            let _ = self.vm_call_function_value(ctx, &sf, &setter_receiver, std::slice::from_ref(val))?;
+                            return Ok(val.clone());
+                        }
+                        if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
+                            && !matches!(&**sf, Value::Undefined)
+                        {
+                            let sf_clone = (**sf).clone();
+                            drop(borrow);
+                            let _ = self.vm_call_function_value(ctx, &sf_clone, &setter_receiver, std::slice::from_ref(val))?;
+                            return Ok(val.clone());
+                        }
+                        proto = borrow.get("__proto__").cloned();
+                    } else {
+                        break;
                     }
-                    if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
-                        && !matches!(&**sf, Value::Undefined)
-                    {
-                        let sf_clone = (**sf).clone();
-                        drop(borrow);
-                        let _ = self.vm_call_function_value(ctx, &sf_clone, &setter_receiver, std::slice::from_ref(val))?;
-                        return Ok(val.clone());
-                    }
-                    proto = borrow.get("__proto__").cloned();
-                } else {
-                    break;
                 }
             }
             // Check for readonly

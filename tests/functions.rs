@@ -429,6 +429,35 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_own_prototype_assignment_ignores_inherited_setter() {
+        let script = r#"
+            (function() {
+                let data = "data";
+                let setFunc = function(value) { data = value; };
+                Object.defineProperty(Function.prototype, "prototype", {
+                    get: function() { return 100; },
+                    set: setFunc,
+                    configurable: true
+                });
+
+                let fun = function() {};
+                let before = Object.getOwnPropertyDescriptor(fun, "prototype");
+                fun.prototype = { marker: 1 };
+                let after = Object.getOwnPropertyDescriptor(fun, "prototype");
+                delete Function.prototype.prototype;
+
+                return before.writable &&
+                    before.enumerable === false &&
+                    before.configurable === false &&
+                    after.value.marker === 1 &&
+                    data === "data";
+            })()
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_bound_native_constructor_targets_call_like_functions() {
         let script = r#"
             Number.bind(null)(42) === 42 &&

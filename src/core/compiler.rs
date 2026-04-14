@@ -6243,24 +6243,21 @@ impl<'gc> Compiler<'gc> {
                         let throw_idx = self.chunk.add_constant(Value::String(throw_key));
                         self.chunk.write_opcode(Opcode::GetProperty);
                         self.chunk.write_u16(throw_idx);
+                        self.chunk.write_opcode(Opcode::Dup);
                         let null_check_idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_check_idx);
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         self.chunk.write_opcode(Opcode::Not);
                         let throw_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
-                        self.emit_helper_get(&ys_iter);
-                        let throw_key_null = crate::unicode::utf8_to_utf16("throw");
-                        let throw_idx_null = self.chunk.add_constant(Value::String(throw_key_null));
-                        self.chunk.write_opcode(Opcode::GetProperty);
-                        self.chunk.write_u16(throw_idx_null);
+                        self.chunk.write_opcode(Opcode::Dup);
                         let null_check_idx = self.chunk.add_constant(Value::Null);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_check_idx);
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         self.chunk.write_opcode(Opcode::Not);
                         let no_throw_method = self.emit_jump(Opcode::JumpIfTrue);
-                        self.patch_jump(throw_is_undefined);
+                        self.chunk.write_opcode(Opcode::Pop);
 
                         // Has .throw method: ys_result = iter.throw(thrown)
                         self.emit_helper_get(&ys_iter);
@@ -6287,30 +6284,29 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_u32(result_check as u32);
 
                         // No .throw method: close iterator then throw TypeError
+                        self.patch_jump(throw_is_undefined);
                         self.patch_jump(no_throw_method);
+                        self.chunk.write_opcode(Opcode::Pop);
                         self.emit_helper_get(&ys_iter);
                         let return_key = crate::unicode::utf8_to_utf16("return");
                         let return_idx = self.chunk.add_constant(Value::String(return_key));
                         self.chunk.write_opcode(Opcode::GetProperty);
                         self.chunk.write_u16(return_idx);
+                        self.chunk.write_opcode(Opcode::Dup);
                         let null_check2_idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_check2_idx);
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         self.chunk.write_opcode(Opcode::Not);
                         let return_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
-                        self.emit_helper_get(&ys_iter);
-                        let return_key_null = crate::unicode::utf8_to_utf16("return");
-                        let return_idx_null = self.chunk.add_constant(Value::String(return_key_null));
-                        self.chunk.write_opcode(Opcode::GetProperty);
-                        self.chunk.write_u16(return_idx_null);
+                        self.chunk.write_opcode(Opcode::Dup);
                         let null_check2_idx = self.chunk.add_constant(Value::Null);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_check2_idx);
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         self.chunk.write_opcode(Opcode::Not);
                         let no_return_method = self.emit_jump(Opcode::JumpIfTrue);
-                        self.patch_jump(return_is_undefined);
+                        self.chunk.write_opcode(Opcode::Pop);
                         self.emit_helper_get(&ys_iter);
                         let return_key2 = crate::unicode::utf8_to_utf16("return");
                         let return_idx2 = self.chunk.add_constant(Value::String(return_key2));
@@ -6319,7 +6315,9 @@ impl<'gc> Compiler<'gc> {
                         self.chunk.write_u16(return_idx2);
                         self.emit_call_opcode(0, 0x80);
                         self.chunk.write_opcode(Opcode::Pop);
+                        self.patch_jump(return_is_undefined);
                         self.patch_jump(no_return_method);
+                        self.chunk.write_opcode(Opcode::Pop);
                         let te_msg = "The iterator does not provide a 'throw' method";
                         let te_msg_idx = self.chunk.add_constant(Value::from(te_msg));
                         self.chunk.write_opcode(Opcode::Constant);
@@ -6339,24 +6337,21 @@ impl<'gc> Compiler<'gc> {
                         let ret_idx_rd = self.chunk.add_constant(Value::String(ret_key_rd));
                         self.chunk.write_opcode(Opcode::GetProperty);
                         self.chunk.write_u16(ret_idx_rd);
+                        self.chunk.write_opcode(Opcode::Dup);
                         let undef_rd = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(undef_rd);
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         self.chunk.write_opcode(Opcode::Not);
                         let return_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
-                        self.emit_helper_get(&ys_iter);
-                        let ret_key_rd_null = crate::unicode::utf8_to_utf16("return");
-                        let ret_idx_rd_null = self.chunk.add_constant(Value::String(ret_key_rd_null));
-                        self.chunk.write_opcode(Opcode::GetProperty);
-                        self.chunk.write_u16(ret_idx_rd_null);
+                        self.chunk.write_opcode(Opcode::Dup);
                         let null_rd = self.chunk.add_constant(Value::Null);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_rd);
                         self.chunk.write_opcode(Opcode::StrictNotEqual);
                         self.chunk.write_opcode(Opcode::Not);
                         let has_return_method = self.emit_jump(Opcode::JumpIfTrue);
-                        self.patch_jump(return_is_undefined);
+                        self.chunk.write_opcode(Opcode::Pop);
 
                         // c.iv: innerReturnResult = Call(return, iterator, « received.[[Value]] »)
                         self.emit_helper_get(&ys_iter);
@@ -6404,7 +6399,9 @@ impl<'gc> Compiler<'gc> {
                         // c.iii: return is undefined — return Completion(received)
                         // Restore generator_return_pending before throwing so the return
                         // propagates through finally handlers as a return completion.
+                        self.patch_jump(return_is_undefined);
                         self.patch_jump(has_return_method);
+                        self.chunk.write_opcode(Opcode::Pop);
                         self.emit_helper_get(&ys_thrown);
                         self.chunk.write_opcode(Opcode::Dup);
                         self.chunk.write_opcode(Opcode::SetGeneratorReturn);

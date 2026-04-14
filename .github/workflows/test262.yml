@@ -11,47 +11,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - id: 1
-          - id: 2
-          - id: 3
-          - id: 4
-          - id: 5
-          - id: 6
-          - id: 7
-          - id: 8
-          - id: 9
-          - id: 10
-          - id: 11
-          - id: 12
-          - id: 13
-          - id: 14
-          - id: 15
-          - id: 16
-          - id: 17
-          - id: 18
-          - id: 19
-          - id: 20
-          - id: 21
-          - id: 22
-          - id: 23
-          - id: 24
-          - id: 25
-          - id: 26
-          - id: 27
-          - id: 28
-          - id: 29
-          - id: 30
-          - id: 31
-          - id: 32
-          - id: 33
-          - id: 34
-          - id: 35
-          - id: 36
-          - id: 37
-          - id: 38
-          - id: 39
-          - id: 40
-          - id: 41
+          - cluster: 1
+          - cluster: 2
+          - cluster: 3
+          - cluster: 4
+          - cluster: 5
+          - cluster: 6
+          - cluster: 7
+          - cluster: 8
+          - cluster: 9
+          - cluster: 10
+          - cluster: 11
+          - cluster: 12
+          - cluster: 13
+          - cluster: 14
+          - cluster: 15
+          - cluster: 16
+          - cluster: 17
+          - cluster: 18
+          - cluster: 19
+          - cluster: 20
+          - cluster: 21
+          - cluster: 22
+          - cluster: 23
+          - cluster: 24
+          - cluster: 25
+          - cluster: 26
+          - cluster: 27
+          - cluster: 28
+          - cluster: 29
+          - cluster: 30
+          - cluster: 31
+          - cluster: 32
+          - cluster: 33
+          - cluster: 34
+          - cluster: 35
+          - cluster: 36
+          - cluster: 37
+          - cluster: 38
+          - cluster: 39
+          - cluster: 40
+          - cluster: 41
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -70,7 +70,7 @@ jobs:
         run: |
           cargo build --all-features --release --package js
 
-      - name: Run test262 subset ${{ matrix.id }}
+      - name: Run test262 subset ${{ matrix.cluster }}
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
@@ -82,7 +82,7 @@ jobs:
           RUN_TESTS=""
           TITLE=""
 
-          case "${{ matrix.id }}" in
+          case "${{ matrix.cluster }}" in
             1)
               TITLE='"language/arguments-object" - "language/export"'
               FOCUS='language/arguments-object,language/asi,language/block-scope,language/comments,language/computed-property-names,language/destructuring,language/directive-prologue,language/eval-code,language/export'
@@ -293,12 +293,12 @@ jobs:
               RUN_TESTS='true'
               ;;
             *)
-              echo "Unknown subset id: ${{ matrix.id }}" >&2
+              echo "Unknown subset: ${{ matrix.cluster }}" >&2
               exit 1
               ;;
           esac
 
-          echo "Running subset ${{ matrix.id }}: $TITLE"
+          echo "Running subset ${{ matrix.cluster }}: $TITLE"
           RUN_ARGS=(--limit 10000 --focus "$FOCUS")
           if [ -n "$TIMEOUT" ]; then
             RUN_ARGS+=(--timeout "$TIMEOUT")
@@ -313,7 +313,7 @@ jobs:
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v6
         with:
-          name: test262-results-${{ matrix.id }}
+          name: test262-results-${{ matrix.cluster }}
           path: test262-results.log
 
   summarize-test262-results:

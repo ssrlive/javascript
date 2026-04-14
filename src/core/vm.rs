@@ -10813,7 +10813,7 @@ impl<'gc> VM<'gc> {
                 let value = args.get(2).cloned().unwrap_or(Value::Undefined);
                 let receiver = args.get(3).cloned().unwrap_or_else(|| target.clone());
 
-                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(&target) {
+                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(ctx, &target) {
                     if revoked {
                         self.throw_type_error(ctx, "Cannot perform 'set' on a revoked proxy");
                         return Value::Undefined;
@@ -11380,7 +11380,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Reflect.isExtensible requires an object");
                     return Value::Undefined;
                 }
-                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(&target) {
+                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(ctx, &target) {
                     if revoked {
                         self.throw_type_error(ctx, "Cannot perform 'isExtensible' on a revoked proxy");
                         return Value::Undefined;
@@ -11504,7 +11504,7 @@ impl<'gc> VM<'gc> {
 
                 // For proxy targets, preserve Reflect semantics: falsy trap => false,
                 // missing trap => forward to the proxy target's Reflect.defineProperty.
-                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(&target) {
+                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(ctx, &target) {
                     if revoked {
                         self.throw_type_error(ctx, "Cannot perform 'defineProperty' on a revoked proxy");
                         return Value::Undefined;
@@ -11626,7 +11626,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Reflect.preventExtensions requires an object");
                     return Value::Undefined;
                 }
-                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(&target) {
+                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(ctx, &target) {
                     if revoked {
                         self.throw_type_error(ctx, "Cannot perform 'preventExtensions' on a revoked proxy");
                         return Value::Undefined;
@@ -11790,7 +11790,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Object prototype may only be an Object or null");
                     return Value::Undefined;
                 }
-                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(&target) {
+                if let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(ctx, &target) {
                     if revoked {
                         self.throw_type_error(ctx, "Cannot perform 'setPrototypeOf' on a revoked proxy");
                         return Value::Undefined;
@@ -20792,15 +20792,15 @@ impl<'gc> VM<'gc> {
                         Ok(result)
                     }
                 } else if borrow.contains_key("__proxy_target__") {
-                    let target = borrow.get("__proxy_target__").cloned().unwrap_or(Value::Undefined);
-                    let handler = borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined);
-                    let revoked = matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true)));
                     drop(borrow);
+                    let Some((target, handler, revoked)) = self.get_proxy_target_handler(ctx, func) else {
+                        return Err(self.proxy_type_error(ctx, "Proxy is missing internal target"));
+                    };
                     if revoked {
                         return Err(self.proxy_type_error(ctx, "Cannot perform 'apply' on a revoked proxy"));
                     }
                     if let Some(trap_fn) = self.get_proxy_trap(ctx, &handler, "apply")? {
-                        let arg_array = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(args.to_vec())));
+                        let arg_array = self.create_vm_array(ctx, args.to_vec());
                         return self.call_proxy_trap(ctx, &handler, &trap_fn, &[target, this_arg.clone(), arg_array]);
                     }
                     self.vm_call_function_value(ctx, &target, this_arg, args)
@@ -40535,15 +40535,40 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn get_proxy_target_handler(&self, obj: &Value<'gc>) -> Option<(Value<'gc>, Value<'gc>, bool)> {
+    fn get_proxy_target_handler(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>) -> Option<(Value<'gc>, Value<'gc>, bool)> {
         let Value::VmObject(proxy_obj) = obj else {
             return None;
         };
 
-        let borrow = proxy_obj.borrow();
-        let target = borrow.get("__proxy_target__")?.clone();
-        let handler = borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined);
-        let revoked = matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true)));
+        let (target, handler, revoked, realm_id) = {
+            let borrow = proxy_obj.borrow();
+            (
+                borrow.get("__proxy_target__")?.clone(),
+                borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined),
+                matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))),
+                match borrow.get("__realm_id__") {
+                    Some(Value::Number(n)) => Some(*n as usize),
+                    _ => None,
+                },
+            )
+        };
+
+        if let Some(realm_id) = realm_id
+            && realm_id < self.child_realms.len()
+            && let Some(mut child) = self.child_realms[realm_id].take()
+        {
+            let target = match target {
+                Value::VmNativeFunction(id) => Value::VmObject(self.get_cross_realm_native_fn_props(ctx, &mut child, id, realm_id)),
+                other => self.register_cross_realm_fn(ctx, &mut child, other, realm_id),
+            };
+            let handler = match handler {
+                Value::VmNativeFunction(id) => Value::VmObject(self.get_cross_realm_native_fn_props(ctx, &mut child, id, realm_id)),
+                other => self.register_cross_realm_fn(ctx, &mut child, other, realm_id),
+            };
+            self.child_realms[realm_id] = Some(child);
+            return Some((target, handler, revoked));
+        }
+
         Some((target, handler, revoked))
     }
 
@@ -40707,7 +40732,7 @@ impl<'gc> VM<'gc> {
         key: &str,
         receiver: Option<&Value<'gc>>,
     ) -> Result<Option<Value<'gc>>, JSError> {
-        let Some((target, handler, revoked)) = self.get_proxy_target_handler(obj) else {
+        let Some((target, handler, revoked)) = self.get_proxy_target_handler(ctx, obj) else {
             return Ok(None);
         };
 
@@ -40801,7 +40826,7 @@ impl<'gc> VM<'gc> {
         value: &Value<'gc>,
         receiver: Option<&Value<'gc>>,
     ) -> Result<Option<Value<'gc>>, JSError> {
-        let Some((target, handler, revoked)) = self.get_proxy_target_handler(obj) else {
+        let Some((target, handler, revoked)) = self.get_proxy_target_handler(ctx, obj) else {
             return Ok(None);
         };
 
@@ -40929,7 +40954,7 @@ impl<'gc> VM<'gc> {
 
             if matches!(own_desc, Value::Undefined) {
                 // Property not on target; forward to target.[[Set]] on the prototype chain.
-                if self.get_proxy_target_handler(&target).is_some() {
+                if self.get_proxy_target_handler(ctx, &target).is_some() {
                     return self.try_proxy_set(ctx, &target, key, value, Some(&recv));
                 }
 
@@ -41022,7 +41047,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn try_proxy_delete(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, key: &str) -> Result<Option<bool>, JSError> {
-        let Some((target, handler, revoked)) = self.get_proxy_target_handler(obj) else {
+        let Some((target, handler, revoked)) = self.get_proxy_target_handler(ctx, obj) else {
             return Ok(None);
         };
 
@@ -41127,7 +41152,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn try_proxy_has(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, key: &str) -> Result<Option<bool>, JSError> {
-        let Some((target, handler, revoked)) = self.get_proxy_target_handler(obj) else {
+        let Some((target, handler, revoked)) = self.get_proxy_target_handler(ctx, obj) else {
             return Ok(None);
         };
 
@@ -41416,13 +41441,8 @@ impl<'gc> VM<'gc> {
                     return Ok(result);
                 }
                 if map.borrow().contains_key("__proxy_target__") {
-                    let (proxy_target, handler, revoked) = {
-                        let borrow = map.borrow();
-                        (
-                            borrow.get("__proxy_target__").cloned().unwrap_or(Value::Undefined),
-                            borrow.get("__proxy_handler__").cloned().unwrap_or(Value::Undefined),
-                            matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))),
-                        )
+                    let Some((proxy_target, handler, revoked)) = self.get_proxy_target_handler(ctx, target) else {
+                        return Err(self.proxy_type_error(ctx, "Proxy is missing internal target"));
                     };
                     if revoked {
                         return Err(self.proxy_type_error(ctx, "Cannot perform 'construct' on a revoked proxy"));
@@ -41431,7 +41451,7 @@ impl<'gc> VM<'gc> {
                         return Err(crate::raise_type_error!("Target is not a constructor"));
                     }
                     if let Some(trap_fn) = self.get_proxy_trap(ctx, &handler, "construct")? {
-                        let arg_array = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(args.to_vec())));
+                        let arg_array = self.create_vm_array(ctx, args.to_vec());
                         let trap_new_target = new_target.cloned().unwrap_or_else(|| target.clone());
                         let out = self.call_proxy_trap(ctx, &handler, &trap_fn, &[proxy_target.clone(), arg_array, trap_new_target])?;
                         if matches!(

@@ -169,6 +169,7 @@ pub(crate) enum ModuleRequestPhase {
 pub(crate) struct ModuleRequest {
     pub specifier: String,
     pub phase: ModuleRequestPhase,
+    pub import_type: Option<String>,
 }
 
 /// Resolve a module specifier relative to a base path.
@@ -182,6 +183,19 @@ pub(crate) fn resolve_module_path(specifier: &str, base_path: &std::path::Path) 
         return normalize_path(&parent.join(spec_path));
     }
     spec_path.to_path_buf()
+}
+
+pub(crate) fn module_request_key_from_resolved_path(resolved_path: &std::path::Path, import_type: Option<&str>) -> String {
+    let resolved = resolved_path.to_string_lossy().to_string();
+    match import_type {
+        Some(import_type) => format!("{resolved}\0{import_type}"),
+        None => resolved,
+    }
+}
+
+pub(crate) fn resolve_module_request_key(specifier: &str, base_path: &std::path::Path, import_type: Option<&str>) -> String {
+    let resolved_path = resolve_module_path(specifier, base_path);
+    module_request_key_from_resolved_path(&resolved_path, import_type)
 }
 
 /// Remove `.` and resolve `..` components from a path without touching the filesystem.
@@ -2367,7 +2381,7 @@ fn collect_module_declared_names(statements: &[Statement], names: &mut std::coll
                     names.insert(def.name.clone());
                 }
             }
-            SK::Import(specs, _) => {
+            SK::Import(specs, _, _) => {
                 for spec in specs {
                     match spec {
                         crate::core::statement::ImportSpecifier::Default(n) => {
@@ -2570,9 +2584,9 @@ pub(crate) fn collect_module_sources(statements: &[Statement], self_basename: &s
 
     for stmt in statements {
         match &*stmt.kind {
-            StatementKind::Import(_, source) => {
+            StatementKind::Import(_, source, import_type) => {
                 let import_base = source.strip_prefix("./").unwrap_or(source);
-                if import_base == self_basename {
+                if import_type.is_none() && import_base == self_basename {
                     continue;
                 }
                 if known_builtins.contains(&source.as_str()) {
@@ -2604,29 +2618,30 @@ pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &
 
     for stmt in statements {
         let maybe_request = match &*stmt.kind {
-            StatementKind::Import(specifiers, source) => {
+            StatementKind::Import(specifiers, source, import_type) => {
                 let phase = if specifiers.iter().any(|spec| matches!(spec, ImportSpecifier::DeferredNamespace(_))) {
                     ModuleRequestPhase::Defer
                 } else {
                     ModuleRequestPhase::Evaluation
                 };
-                Some((source, phase))
+                Some((source, phase, import_type))
             }
-            StatementKind::Export(_specs, _, Some(source)) => Some((source, ModuleRequestPhase::Evaluation)),
+            StatementKind::Export(_specs, _, Some(source)) => Some((source, ModuleRequestPhase::Evaluation, &None)),
             _ => None,
         };
 
-        let Some((source, phase)) = maybe_request else {
+        let Some((source, phase, import_type)) = maybe_request else {
             continue;
         };
         let import_base = source.strip_prefix("./").unwrap_or(source);
-        if import_base == self_basename || known_builtins.contains(&source.as_str()) {
+        if (import_type.is_none() && import_base == self_basename) || known_builtins.contains(&source.as_str()) {
             continue;
         }
-        if seen.insert((source.clone(), phase)) {
+        if seen.insert((source.clone(), phase, import_type.clone())) {
             requests.push(ModuleRequest {
                 specifier: source.clone(),
                 phase,
+                import_type: import_type.clone(),
             });
         }
     }

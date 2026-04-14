@@ -725,7 +725,10 @@ impl<'gc> Compiler<'gc> {
     }
 
     /// Check if an import source refers to the current module (self-import)
-    fn is_self_import(&self, source: &str) -> bool {
+    fn is_self_import(&self, source: &str, import_type: Option<&str>) -> bool {
+        if import_type.is_some() {
+            return false;
+        }
         if let Some(ref fname) = self.script_filename {
             let import_base = source.strip_prefix("./").unwrap_or(source);
             let self_base = std::path::Path::new(fname).file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -736,11 +739,10 @@ impl<'gc> Compiler<'gc> {
     }
 
     /// Resolve an import specifier to a loaded module path, if available.
-    fn resolve_import_path(&self, source: &str) -> Option<String> {
+    fn resolve_import_path(&self, source: &str, import_type: Option<&str>) -> Option<String> {
         if let Some(ref fname) = self.script_filename {
             let base_path = std::path::Path::new(fname);
-            let resolved = crate::core::resolve_module_path(source, base_path);
-            let resolved_str = resolved.to_string_lossy().to_string();
+            let resolved_str = crate::core::resolve_module_request_key(source, base_path, import_type);
             if self.loaded_module_exports.contains_key(&resolved_str) {
                 Some(resolved_str)
             } else {
@@ -834,7 +836,7 @@ impl<'gc> Compiler<'gc> {
         let mut reexport_map: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
         for stmt in statements {
             if let StatementKind::Export(specs, _, Some(source)) = &*stmt.kind {
-                if self.is_self_import(source) {
+                if self.is_self_import(source, None) {
                     continue; // Skip self-re-exports
                 }
                 for spec in specs {
@@ -848,7 +850,7 @@ impl<'gc> Compiler<'gc> {
                         }
                         crate::core::statement::ExportSpecifier::Star => {
                             // export * from "module" — expand all exports (except default)
-                            if let Some(resolved) = self.resolve_import_path(source)
+                            if let Some(resolved) = self.resolve_import_path(source, None)
                                 && let Some(exports) = self.loaded_module_exports.get(&resolved)
                             {
                                 for export_name in exports.keys() {
@@ -868,8 +870,8 @@ impl<'gc> Compiler<'gc> {
         }
 
         for stmt in statements {
-            if let StatementKind::Import(specifiers, source) = &*stmt.kind
-                && self.is_self_import(source)
+            if let StatementKind::Import(specifiers, source, import_type) = &*stmt.kind
+                && self.is_self_import(source, import_type.as_deref())
             {
                 for spec in specifiers {
                     match spec {
@@ -877,7 +879,7 @@ impl<'gc> Compiler<'gc> {
                             let local = alias.as_deref().unwrap_or(name).to_string();
                             // Check if this is a re-export → redirect to loaded module
                             if let Some((re_src, orig_name)) = reexport_map.get(name)
-                                && let Some(resolved) = self.resolve_import_path(re_src)
+                                && let Some(resolved) = self.resolve_import_path(re_src, None)
                             {
                                 self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
                                 self.chunk.const_import_bindings.insert(local);
@@ -892,7 +894,7 @@ impl<'gc> Compiler<'gc> {
                         ImportSpecifier::Default(local) => {
                             // Check if default is a re-export
                             if let Some((re_src, orig_name)) = reexport_map.get("default")
-                                && let Some(resolved) = self.resolve_import_path(re_src)
+                                && let Some(resolved) = self.resolve_import_path(re_src, None)
                             {
                                 self.chunk.loaded_module_vars.insert(local.clone(), (resolved, orig_name.clone()));
                                 self.chunk.const_import_bindings.insert(local.clone());
@@ -922,7 +924,7 @@ impl<'gc> Compiler<'gc> {
 
                             // Include re-exported names in the namespace
                             for (export_name, (re_src, orig_name)) in &reexport_map {
-                                if let Some(resolved) = self.resolve_import_path(re_src) {
+                                if let Some(resolved) = self.resolve_import_path(re_src, None) {
                                     let ns_reexport_key = format!("__ns_reexport_{}_{}", local, export_name);
                                     self.chunk
                                         .loaded_module_vars
@@ -954,7 +956,7 @@ impl<'gc> Compiler<'gc> {
                                 .collect();
 
                             for (export_name, (re_src, orig_name)) in &reexport_map {
-                                if let Some(resolved) = self.resolve_import_path(re_src) {
+                                if let Some(resolved) = self.resolve_import_path(re_src, None) {
                                     let ns_reexport_key = format!("__ns_reexport_{}_{}", local, export_name);
                                     self.chunk
                                         .loaded_module_vars
@@ -4379,7 +4381,7 @@ impl<'gc> Compiler<'gc> {
                     self.chunk.write_u16(idx);
                 }
             }
-            StatementKind::Import(specifiers, source) => {
+            StatementKind::Import(specifiers, source, import_type) => {
                 let define_binding = |this: &mut Self, local_name: &str| {
                     this.emit_define_var(local_name);
                 };
@@ -4417,7 +4419,7 @@ impl<'gc> Compiler<'gc> {
 
                 for spec in specifiers {
                     // Check for self-import first
-                    if self.is_self_import(source) {
+                    if self.is_self_import(source, import_type.as_deref()) {
                         match spec {
                             ImportSpecifier::Named(name, alias) => {
                                 let local = alias.as_deref().unwrap_or(name).to_string();
@@ -4585,7 +4587,7 @@ impl<'gc> Compiler<'gc> {
                             define_binding(self, local);
                         }
                         (_, ImportSpecifier::Namespace(local)) => {
-                            if let Some(resolved_str) = self.resolve_import_path(source) {
+                            if let Some(resolved_str) = self.resolve_import_path(source, import_type.as_deref()) {
                                 // Resolved from loaded module — value injected at runtime.
                                 // Still emit placeholder + define to keep stack balanced.
                                 self.chunk.write_opcode(Opcode::NewObject);
@@ -4600,7 +4602,7 @@ impl<'gc> Compiler<'gc> {
                             define_binding(self, local);
                         }
                         (_, ImportSpecifier::DeferredNamespace(local)) => {
-                            if let Some(resolved_str) = self.resolve_import_path(source) {
+                            if let Some(resolved_str) = self.resolve_import_path(source, import_type.as_deref()) {
                                 self.chunk.write_opcode(Opcode::NewObject);
                                 self.chunk.write_byte(0);
                                 self.chunk
@@ -4614,7 +4616,7 @@ impl<'gc> Compiler<'gc> {
                             define_binding(self, local);
                         }
                         (_, ImportSpecifier::Default(local)) => {
-                            let resolved = self.resolve_import_path(source);
+                            let resolved = self.resolve_import_path(source, import_type.as_deref());
                             if let Some(resolved_str) = resolved {
                                 // Resolved from loaded module — value injected at runtime.
                                 let idx = self.chunk.add_constant(Value::Undefined);
@@ -4633,7 +4635,7 @@ impl<'gc> Compiler<'gc> {
                         }
                         (_, ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name).to_string();
-                            let resolved = self.resolve_import_path(source);
+                            let resolved = self.resolve_import_path(source, import_type.as_deref());
                             if let Some(resolved_str) = resolved {
                                 // Resolved from loaded module — value injected at runtime.
                                 let idx = self.chunk.add_constant(Value::Undefined);

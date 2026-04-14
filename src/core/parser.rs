@@ -2683,7 +2683,7 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             }
         }
     }
-    consume_import_attributes_clause(t, index)?;
+    let import_type = consume_import_attributes_clause(t, index)?;
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
@@ -2716,19 +2716,19 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         }
     }
     Ok(Statement {
-        kind: Box::new(StatementKind::Import(specifiers, source)),
+        kind: Box::new(StatementKind::Import(specifiers, source, import_type)),
         line: t[start].line,
         column: t[start].column,
     })
 }
-fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Result<(), JSError> {
+fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Result<Option<String>, JSError> {
     if *index >= t.len() {
-        return Ok(());
+        return Ok(None);
     }
     let is_with_clause = (matches!(t[*index].token, Token::With) || matches!(&t[*index].token, Token::Identifier(s) if s == "with"))
         && !raw_identifier_source_has_escape(&t[*index]);
     if !is_with_clause {
-        return Ok(());
+        return Ok(None);
     }
     *index += 1;
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -2739,6 +2739,7 @@ fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Resul
     }
     *index += 1; // skip '{'
     let mut seen_keys: Vec<String> = Vec::new();
+    let mut import_type = None;
     loop {
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
@@ -2748,7 +2749,7 @@ fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Resul
         }
         if matches!(t[*index].token, Token::RBrace) {
             *index += 1;
-            return Ok(());
+            return Ok(import_type);
         }
         // Parse attribute key: IdentifierName or StringLiteral
         let key = match &t[*index].token {
@@ -2774,7 +2775,7 @@ fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Resul
         if seen_keys.contains(&key) {
             return Err(raise_syntax_error!(format!("Duplicate import attribute key '{}'", key)));
         }
-        seen_keys.push(key);
+        seen_keys.push(key.clone());
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
@@ -2789,6 +2790,14 @@ fn consume_import_attributes_clause(t: &[TokenData], index: &mut usize) -> Resul
         // Expect string value
         if *index >= t.len() || !matches!(t[*index].token, Token::StringLit(_)) {
             return Err(raise_parse_error!("Import attribute value must be a string"));
+        }
+        let value = if let Token::StringLit(s) = &t[*index].token {
+            utf16_to_utf8(s)
+        } else {
+            unreachable!()
+        };
+        if key == "type" {
+            import_type = Some(value);
         }
         *index += 1;
         while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -2953,7 +2962,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 }
             }
         }
-        consume_import_attributes_clause(t, index)?;
+        let _ = consume_import_attributes_clause(t, index)?;
         finish_statement_without_semicolon(t, index)?;
     } else if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
         *index += 1;
@@ -3036,7 +3045,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 "A string literal cannot be used as an exported binding without `from`"
             ));
         }
-        consume_import_attributes_clause(t, index)?;
+        let _ = consume_import_attributes_clause(t, index)?;
         finish_statement_without_semicolon(t, index)?;
     } else {
         let stmt = match t[*index].token {

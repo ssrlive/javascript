@@ -3198,6 +3198,21 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, buf_map))
     }
 
+    fn create_immutable_array_buffer(&mut self, ctx: &GcContext<'gc>, bytes: Vec<Value<'gc>>) -> Value<'gc> {
+        let mut buf_map = IndexMap::new();
+        buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
+        buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
+        buf_map.insert(
+            "__buffer_bytes__".to_string(),
+            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+        );
+        buf_map.insert("__immutable__".to_string(), Value::Boolean(true));
+        if let Some(proto) = self.ctor_prototype_from_globals(ctx, "ArrayBuffer") {
+            buf_map.insert("__proto__".to_string(), proto);
+        }
+        Value::VmObject(new_gc_cell_ptr(ctx, buf_map))
+    }
+
     /// If `arr` is a TypedArray backed by a resizable buffer, sync its
     /// elements vector so that `elements.len()` reflects the current
     /// dynamic length after any buffer resize.  No-op for non-resizable TAs.
@@ -4906,6 +4921,29 @@ impl<'gc> VM<'gc> {
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         let buf_bytes: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
         let buffer_obj = self.create_ordinary_array_buffer(ctx, buf_bytes);
+        data.props.insert("buffer".to_string(), buffer_obj.clone());
+        mark_nonenumerable(&mut data.props, "buffer");
+        data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);
+        data.props.insert("__byte_offset__".to_string(), Value::Number(0.0));
+        data.props.insert("__bytes_per_element__".to_string(), Value::Number(1.0));
+        data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
+        data.props.insert("__length_tracking__".to_string(), Value::Boolean(false));
+        if let Some(Value::VmObject(ctor)) = self.globals.get("Uint8Array")
+            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+        {
+            data.props.insert("__proto__".to_string(), proto);
+        }
+        Value::VmArray(new_gc_cell_ptr(ctx, data))
+    }
+
+    pub(super) fn create_immutable_uint8array_from_bytes(&mut self, ctx: &GcContext<'gc>, bytes: Vec<u8>) -> Value<'gc> {
+        let elements: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
+        let len = elements.len();
+        let mut data = VmArrayData::new(elements);
+        data.props.insert("__typedarray_name__".to_string(), Value::from("Uint8Array"));
+        data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
+        let buf_bytes: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
+        let buffer_obj = self.create_immutable_array_buffer(ctx, buf_bytes);
         data.props.insert("buffer".to_string(), buffer_obj.clone());
         mark_nonenumerable(&mut data.props, "buffer");
         data.props.insert("__typedarray_buffer__".to_string(), buffer_obj);

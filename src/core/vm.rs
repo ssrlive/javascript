@@ -1740,9 +1740,8 @@ impl<'gc> VM<'gc> {
             return false;
         }
         for request in &record.requests {
-            let required_module = crate::core::resolve_module_path(&request.specifier, &record.resolved_path)
-                .to_string_lossy()
-                .to_string();
+            let required_module =
+                crate::core::resolve_module_request_key(&request.specifier, &record.resolved_path, request.import_type.as_deref());
             if !self.ready_for_sync_execution(&required_module, seen) {
                 return false;
             }
@@ -1787,16 +1786,21 @@ impl<'gc> VM<'gc> {
     }
 
     fn encode_live_binding_target(module_key: &str, local_name: &str) -> String {
-        let mut encoded = String::from("\0live:");
-        encoded.push_str(module_key);
-        encoded.push('\0');
-        encoded.push_str(local_name);
-        encoded
+        format!("\0live:{}:{}:{}{}", module_key.len(), local_name.len(), module_key, local_name)
     }
 
     fn decode_live_binding_target(encoded: &str) -> Option<(&str, &str)> {
         let rest = encoded.strip_prefix("\0live:")?;
-        rest.split_once('\0')
+        let (module_len, rest) = rest.split_once(':')?;
+        let (local_len, payload) = rest.split_once(':')?;
+        let module_len: usize = module_len.parse().ok()?;
+        let local_len: usize = local_len.parse().ok()?;
+        if payload.len() < module_len + local_len {
+            return None;
+        }
+        let module_key = payload.get(..module_len)?;
+        let local_name = payload.get(module_len..module_len + local_len)?;
+        Some((module_key, local_name))
     }
 
     fn resolve_live_binding_target(&self, module_key: &str, binding_name: &str) -> Option<String> {
@@ -1999,18 +2003,15 @@ impl<'gc> VM<'gc> {
             return;
         }
         for request in &record.requests {
-            let dep_key = crate::core::resolve_module_path(&request.specifier, &record.resolved_path)
-                .to_string_lossy()
-                .to_string();
+            let dep_key =
+                crate::core::resolve_module_request_key(&request.specifier, &record.resolved_path, request.import_type.as_deref());
             self.collect_async_transitive_dependencies(&dep_key, seen, out);
         }
     }
 
     fn module_has_async_dependency(&self, entry_path: &std::path::Path, requests: &[crate::core::ModuleRequest]) -> bool {
         requests.iter().any(|request| {
-            let dep_key = crate::core::resolve_module_path(&request.specifier, entry_path)
-                .to_string_lossy()
-                .to_string();
+            let dep_key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
             self.module_records
                 .get(&dep_key)
                 .is_some_and(|record| record.status == ModuleStatus::EvaluatingAsync)
@@ -2028,9 +2029,8 @@ impl<'gc> VM<'gc> {
             return false;
         };
         record.requests.iter().any(|request| {
-            let dep_key = crate::core::resolve_module_path(&request.specifier, &record.resolved_path)
-                .to_string_lossy()
-                .to_string();
+            let dep_key =
+                crate::core::resolve_module_request_key(&request.specifier, &record.resolved_path, request.import_type.as_deref());
             self.module_reaches_module(&dep_key, target_key, visited)
         })
     }
@@ -2057,9 +2057,7 @@ impl<'gc> VM<'gc> {
         requests: &[crate::core::ModuleRequest],
     ) -> bool {
         requests.iter().any(|request| {
-            let dep_key = crate::core::resolve_module_path(&request.specifier, entry_path)
-                .to_string_lossy()
-                .to_string();
+            let dep_key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
             !self.modules_share_async_cycle(module_key, &dep_key) && self.module_cycle_has_evaluating_async(&dep_key)
         })
     }
@@ -2072,16 +2070,32 @@ impl<'gc> VM<'gc> {
     ) {
         for request in requests {
             let resolved = crate::core::resolve_module_path(&request.specifier, entry_path);
-            self.load_single_module(ctx, &resolved);
+            self.load_single_module(ctx, &resolved, request.import_type.as_deref());
         }
     }
 
-    fn load_single_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path) {
+    fn load_single_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, import_type: Option<&str>) {
         use crate::core::{collect_exports_from_ast, collect_module_requests, module_has_top_level_await};
 
-        let key = resolved_path.to_string_lossy().to_string();
+        let key = crate::core::module_request_key_from_resolved_path(resolved_path, import_type);
         if self.module_records.contains_key(&key) || self.module_load_errors.contains_key(&key) {
             return;
+        }
+
+        match import_type {
+            Some("text") => {
+                self.load_single_text_module(ctx, resolved_path, &key);
+                return;
+            }
+            Some("bytes") => {
+                self.load_single_bytes_module(ctx, resolved_path, &key);
+                return;
+            }
+            Some("json") => {
+                self.load_single_json_module(ctx, resolved_path, &key);
+                return;
+            }
+            _ => {}
         }
 
         if resolved_path.extension().and_then(|ext| ext.to_str()) == Some("json") {
@@ -2171,24 +2185,14 @@ impl<'gc> VM<'gc> {
         self.refresh_deferred_module_namespace_object(ctx, &key);
     }
 
-    fn load_single_json_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
-        let dep_source = match crate::core::read_script_file(resolved_path) {
-            Ok(s) => s,
-            Err(err) => {
-                let error_value = self.vm_value_from_error(ctx, &err);
-                self.record_module_load_error(key, error_value);
-                return;
-            }
-        };
-
-        let parsed = match serde_json::from_str::<serde_json::Value>(&dep_source) {
-            Ok(value) => value,
-            Err(_) => {
-                self.record_module_load_error(key, self.make_syntax_error_object(ctx, "Invalid JSON"));
-                return;
-            }
-        };
-
+    fn load_single_synthetic_default_module(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        resolved_path: &std::path::Path,
+        key: &str,
+        source: String,
+        default_value: Value<'gc>,
+    ) {
         let export_names = vec!["default".to_string()];
         let export_name_to_local = std::collections::HashMap::from([("default".to_string(), "default".to_string())]);
         let reexport_sources = Vec::new();
@@ -2199,7 +2203,6 @@ impl<'gc> VM<'gc> {
         self.seed_module_record(key, &export_names, &export_name_to_local);
         self.seed_module_export_metadata(key, &export_name_to_local, &reexport_sources, resolved_path);
 
-        let default_value = self.json_to_value(ctx, &parsed);
         if let Some(exports) = self.loaded_modules.get_mut(key) {
             exports.insert("default".to_string(), default_value.clone());
         }
@@ -2211,7 +2214,7 @@ impl<'gc> VM<'gc> {
         self.module_records.insert(
             key.to_string(),
             StoredModuleRecord {
-                source: dep_source,
+                source,
                 resolved_path: resolved_path.to_path_buf(),
                 statements: Vec::new(),
                 export_names,
@@ -2231,6 +2234,56 @@ impl<'gc> VM<'gc> {
         self.module_load_errors.remove(key);
         self.refresh_module_namespace_object(ctx, key);
         self.refresh_deferred_module_namespace_object(ctx, key);
+    }
+
+    fn load_single_json_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
+        let dep_source = match crate::core::read_script_file(resolved_path) {
+            Ok(s) => s,
+            Err(err) => {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(key, error_value);
+                return;
+            }
+        };
+
+        let parsed = match serde_json::from_str::<serde_json::Value>(&dep_source) {
+            Ok(value) => value,
+            Err(_) => {
+                self.record_module_load_error(key, self.make_syntax_error_object(ctx, "Invalid JSON"));
+                return;
+            }
+        };
+
+        let default_value = self.json_to_value(ctx, &parsed);
+        self.load_single_synthetic_default_module(ctx, resolved_path, key, dep_source, default_value);
+    }
+
+    fn load_single_text_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
+        let dep_source = match crate::core::read_script_file(resolved_path) {
+            Ok(s) => s,
+            Err(err) => {
+                let error_value = self.vm_value_from_error(ctx, &err);
+                self.record_module_load_error(key, error_value);
+                return;
+            }
+        };
+        let default_value = Value::from(dep_source.as_str());
+        self.load_single_synthetic_default_module(ctx, resolved_path, key, dep_source, default_value);
+    }
+
+    fn load_single_bytes_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
+        let dep_bytes = match std::fs::read(resolved_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let error = crate::raise_eval_error!(format!("Failed to read script file '{}': {err}", resolved_path.display()));
+                let error_value = self.vm_value_from_error(ctx, &error);
+                self.record_module_load_error(key, error_value);
+                return;
+            }
+        };
+        let source = String::from_utf8_lossy(&dep_bytes).into_owned();
+        let default_value = self.create_immutable_uint8array_from_bytes(ctx, dep_bytes);
+        self.load_single_synthetic_default_module(ctx, resolved_path, key, source, default_value);
     }
 
     fn finalize_dependency_module_record(&mut self, ctx: &GcContext<'gc>, record: &StoredModuleRecord) {
@@ -2260,8 +2313,8 @@ impl<'gc> VM<'gc> {
         let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
         let mut ns_import_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
         for stmt in &record.statements {
-            if let crate::core::statement::StatementKind::Import(specs, source) = &*stmt.kind {
-                let imp_resolved = resolve_module_path(source, &record.resolved_path).to_string_lossy().to_string();
+            if let crate::core::statement::StatementKind::Import(specs, source, import_type) = &*stmt.kind {
+                let imp_resolved = crate::core::resolve_module_request_key(source, &record.resolved_path, import_type.as_deref());
                 for spec in specs {
                     match spec {
                         crate::core::statement::ImportSpecifier::Namespace(local_name) => {
@@ -2589,9 +2642,7 @@ impl<'gc> VM<'gc> {
         let mut evaluation_list = Vec::new();
         let mut scheduled = std::collections::HashSet::new();
         for request in requests {
-            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
-                .to_string_lossy()
-                .to_string();
+            let key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
             match request.phase {
                 crate::core::ModuleRequestPhase::Evaluation => {
                     if scheduled.insert(key.clone()) {
@@ -2638,9 +2689,7 @@ impl<'gc> VM<'gc> {
         // Propagate load errors (e.g. SyntaxError) for all requested modules,
         // including deferred ones whose evaluation is skipped.
         for request in requests {
-            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
-                .to_string_lossy()
-                .to_string();
+            let key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
             if let Some(error) = self.module_load_errors.get(&key).cloned() {
                 self.pending_throw = Some(error);
                 return;
@@ -2658,9 +2707,7 @@ impl<'gc> VM<'gc> {
         requests: &[crate::core::ModuleRequest],
     ) -> Result<(), JSError> {
         for request in requests {
-            let key = crate::core::resolve_module_path(&request.specifier, entry_path)
-                .to_string_lossy()
-                .to_string();
+            let key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
             if let Some(error) = self.module_load_errors.get(&key).cloned() {
                 return Err(self.vm_error_to_js_error(ctx, &error));
             }
@@ -2777,8 +2824,8 @@ impl<'gc> VM<'gc> {
         ) -> std::collections::HashMap<String, (String, String)> {
             let mut map = std::collections::HashMap::new();
             for stmt in stmts {
-                if let StatementKind::Import(specs, source) = &*stmt.kind {
-                    let resolved = resolve_module_path(source, base_path).to_string_lossy().to_string();
+                if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
+                    let resolved = crate::core::resolve_module_request_key(source, base_path, import_type.as_deref());
                     for spec in specs {
                         match spec {
                             ImportSpecifier::Named(import_name, Some(local_name)) => {
@@ -2880,16 +2927,16 @@ impl<'gc> VM<'gc> {
 
         // Validate import bindings in main module
         for stmt in main_statements {
-            if let StatementKind::Import(specs, source) = &*stmt.kind {
-                let resolved = resolve_module_path(source, entry_path).to_string_lossy().to_string();
+            if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
+                let resolved = crate::core::resolve_module_request_key(source, entry_path, import_type.as_deref());
                 Self::validate_import_specs_static(specs, &resolved, source, &ctx)?;
             }
         }
         // Validate import bindings in dependency modules
         for record in self.module_records.values() {
             for stmt in &record.statements {
-                if let StatementKind::Import(specs, source) = &*stmt.kind {
-                    let resolved = resolve_module_path(source, &record.resolved_path).to_string_lossy().to_string();
+                if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
+                    let resolved = crate::core::resolve_module_request_key(source, &record.resolved_path, import_type.as_deref());
                     Self::validate_import_specs_static(specs, &resolved, source, &ctx)?;
                 }
             }
@@ -4786,13 +4833,18 @@ impl<'gc> VM<'gc> {
             }
         };
 
-        if let Some(options) = args.get(1)
-            && let Err(err) = self.note_dynamic_import_attributes(ctx, options)
-        {
-            let reject_value = self.vm_value_from_error(ctx, &err);
-            reject_with(self, reject_value);
-            return promise;
-        }
+        let import_type = if let Some(options) = args.get(1) {
+            match self.note_dynamic_import_attributes(ctx, options) {
+                Ok(import_type) => import_type,
+                Err(err) => {
+                    let reject_value = self.vm_value_from_error(ctx, &err);
+                    reject_with(self, reject_value);
+                    return promise;
+                }
+            }
+        } else {
+            None
+        };
 
         let Some(base_source) = self.current_source_path().map(str::to_owned).or_else(|| self.script_path.clone()) else {
             let reject_value = self.make_type_error_object(ctx, "Dynamic import requires an active script or module");
@@ -4801,8 +4853,7 @@ impl<'gc> VM<'gc> {
         };
 
         let base_path = std::path::Path::new(&base_source);
-        let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
-        let module_key = resolved_path.to_string_lossy().to_string();
+        let module_key = crate::core::resolve_module_request_key(&specifier_string, base_path, import_type.as_deref());
 
         if !self.loaded_modules.contains_key(&module_key)
             || self
@@ -4813,6 +4864,7 @@ impl<'gc> VM<'gc> {
             let request = crate::core::ModuleRequest {
                 specifier: specifier_string.clone(),
                 phase: crate::core::ModuleRequestPhase::Evaluation,
+                import_type: import_type.clone(),
             };
             self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
             self.fixup_circular_reexports();
@@ -4844,9 +4896,9 @@ impl<'gc> VM<'gc> {
         promise
     }
 
-    fn note_dynamic_import_attributes(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>) -> Result<(), JSError> {
+    fn note_dynamic_import_attributes(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>) -> Result<Option<String>, JSError> {
         if matches!(options, Value::Undefined) {
-            return Ok(());
+            return Ok(None);
         }
 
         let with_value = self.read_named_property(ctx, options, "with");
@@ -4854,7 +4906,7 @@ impl<'gc> VM<'gc> {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }
         if matches!(with_value, Value::Undefined) {
-            return Ok(());
+            return Ok(None);
         }
 
         let type_value = self.read_named_property(ctx, &with_value, "type");
@@ -4862,11 +4914,11 @@ impl<'gc> VM<'gc> {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }
         if matches!(type_value, Value::Undefined) {
-            return Ok(());
+            return Ok(None);
         }
 
-        let _ = self.vm_to_string_like_spec(ctx, &type_value)?;
-        Ok(())
+        let import_type = self.vm_to_string_like_spec(ctx, &type_value)?;
+        Ok(Some(import_type))
     }
 
     fn host_deferred_import_namespace(&mut self, ctx: &GcContext<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
@@ -4909,11 +4961,11 @@ impl<'gc> VM<'gc> {
         };
 
         let base_path = std::path::Path::new(&base_source);
-        let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
-        let module_key = resolved_path.to_string_lossy().to_string();
+        let module_key = crate::core::resolve_module_request_key(&specifier_string, base_path, None);
         let request = crate::core::ModuleRequest {
             specifier: specifier_string,
             phase: crate::core::ModuleRequestPhase::Defer,
+            import_type: None,
         };
         self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
         self.fixup_circular_reexports();
@@ -4977,8 +5029,7 @@ impl<'gc> VM<'gc> {
         };
 
         let base_path = std::path::Path::new(&base_source);
-        let resolved_path = crate::core::resolve_module_path(&specifier_string, base_path);
-        let module_key = resolved_path.to_string_lossy().to_string();
+        let module_key = crate::core::resolve_module_request_key(&specifier_string, base_path, None);
 
         if !self.loaded_modules.contains_key(&module_key)
             || self
@@ -4989,6 +5040,7 @@ impl<'gc> VM<'gc> {
             let request = crate::core::ModuleRequest {
                 specifier: specifier_string.clone(),
                 phase: crate::core::ModuleRequestPhase::Evaluation,
+                import_type: None,
             };
             self.load_module_dependencies(ctx, base_path, std::slice::from_ref(&request));
             self.fixup_circular_reexports();

@@ -49,10 +49,10 @@ pub enum StatementKind {
     Continue(Option<String>),
     Debugger,
     Label(String, Box<Statement>),
-    Import(Vec<ImportSpecifier>, String), // import specifiers, module name
+    Import(Vec<ImportSpecifier>, String, Option<String>), // import specifiers, module name, optional import type
     Export(Vec<ExportSpecifier>, Option<Box<Statement>>, Option<String>), // export specifiers, optional inner declaration, optional source
-    Using(Vec<(String, Expr)>),           // using declarations: using x = expr, y = expr;
-    AwaitUsing(Vec<(String, Expr)>),      // await using declarations: await using x = expr;
+    Using(Vec<(String, Expr)>),                           // using declarations: using x = expr, y = expr;
+    AwaitUsing(Vec<(String, Expr)>),                      // await using declarations: await using x = expr;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -4721,7 +4721,7 @@ impl<'gc> VM<'gc> {
     fn hex_decode_core(input: &str, max_length: Option<usize>) -> (Vec<u8>, usize, Option<String>) {
         let bytes_in = input.as_bytes();
         // Spec step 2: odd length check FIRST (before any decoding)
-        if bytes_in.len() % 2 != 0 {
+        if !bytes_in.len().is_multiple_of(2) {
             return (Vec::new(), 0, Some("Invalid hex string: odd length".into()));
         }
         let max_len = max_length.unwrap_or(usize::MAX);
@@ -4778,12 +4778,12 @@ impl<'gc> VM<'gc> {
     fn check_uint8array_not_detached(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> bool {
         if let Value::VmArray(arr) = val {
             let a = arr.borrow();
-            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__") {
-                if matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true))) {
-                    drop(a);
-                    self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
-                    return false;
-                }
+            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
+            {
+                drop(a);
+                self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
+                return false;
             }
         }
         true

@@ -5452,9 +5452,7 @@ impl<'gc> VM<'gc> {
                 if let Some(Value::VmArray(src)) = &old_bytes {
                     let src_b = src.borrow();
                     let copy_len = old_len.min(new_len).min(src_b.elements.len());
-                    for i in 0..copy_len {
-                        new_bytes[i] = src_b.elements[i].clone();
-                    }
+                    new_bytes[..copy_len].clone_from_slice(&src_b.elements[..copy_len]);
                 }
                 let new_bytes_arr = Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(new_bytes)));
 
@@ -5497,12 +5495,10 @@ impl<'gc> VM<'gc> {
                     new_map.insert("__maxByteLength__".to_string(), Value::Number(new_max as f64));
                 }
                 // Set prototype
-                if let Some(ab_ctor) = self.globals.get("ArrayBuffer") {
-                    if let Value::VmObject(ctor_obj) = ab_ctor {
-                        if let Some(proto) = ctor_obj.borrow().get("prototype") {
-                            new_map.insert("__proto__".to_string(), proto.clone());
-                        }
-                    }
+                if let Some(Value::VmObject(ctor_obj)) = self.globals.get("ArrayBuffer")
+                    && let Some(proto) = ctor_obj.borrow().get("prototype")
+                {
+                    new_map.insert("__proto__".to_string(), proto.clone());
                 }
                 Value::VmObject(new_gc_cell_ptr(ctx, new_map))
             }
@@ -8810,11 +8806,9 @@ impl<'gc> VM<'gc> {
                         Value::Undefined
                     };
 
-                    if mode == "longest" && !matches!(padding, Value::Undefined) {
-                        if !Self::is_iterator_object_like(&padding) {
-                            self.throw_type_error(ctx, "padding must be an object");
-                            return Value::Undefined;
-                        }
+                    if mode == "longest" && !matches!(padding, Value::Undefined) && !Self::is_iterator_object_like(&padding) {
+                        self.throw_type_error(ctx, "padding must be an object");
+                        return Value::Undefined;
                     }
 
                     (mode, padding)
@@ -9018,12 +9012,10 @@ impl<'gc> VM<'gc> {
                             }
                         }
                         // If padding iterator not exhausted, close it
-                        if using_iterator {
-                            if !self.iterator_close_normal(ctx, &pi) {
-                                // pending_throw already set
-                                self.close_iterators(ctx, &iters);
-                                return Value::Undefined;
-                            }
+                        if using_iterator && !self.iterator_close_normal(ctx, &pi) {
+                            // pending_throw already set
+                            self.close_iterators(ctx, &iters);
+                            return Value::Undefined;
                         }
                         pad_vals
                     }
@@ -24572,7 +24564,7 @@ impl<'gc> VM<'gc> {
                     };
 
                     // Check if C is a constructor - if not, ArrayCreate limit is 2^32-1
-                    let c_is_ctor = ctor_this.as_ref().map_or(false, |c| self.is_constructor_value(c));
+                    let c_is_ctor = ctor_this.as_ref().is_some_and(|c| self.is_constructor_value(c));
                     if !c_is_ctor && len_num >= 4_294_967_296.0 {
                         let err_val = self.make_range_error_object(ctx, "Invalid array length");
                         let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
@@ -24726,7 +24718,7 @@ impl<'gc> VM<'gc> {
                 raw_obj.insert("__proto__".to_string(), Value::Null);
                 let obj = Value::VmObject(new_gc_cell_ptr(ctx, raw_obj));
                 // Freeze the object
-                let _ = self.call_host_fn(ctx, "object.freeze", None, &[obj.clone()]);
+                let _ = self.call_host_fn(ctx, "object.freeze", None, std::slice::from_ref(&obj));
                 obj
             }
             BUILTIN_JSON_ISRAWJSON => {
@@ -27395,11 +27387,9 @@ impl<'gc> VM<'gc> {
                                                     }
                                                 }
                                                 // §10.5.6 step 20c: non-configurable + writable target → cannot set writable to false
-                                                if target_writable {
-                                                    if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
-                                                        self.throw_type_error(ctx, "'defineProperty' on proxy: trap returned truish for setting writable to false on a non-configurable, writable property");
-                                                        return Value::Undefined;
-                                                    }
+                                                if target_writable && matches!(desc.get("writable"), Some(Value::Boolean(false))) {
+                                                    self.throw_type_error(ctx, "'defineProperty' on proxy: trap returned truish for setting writable to false on a non-configurable, writable property");
+                                                    return Value::Undefined;
                                                 }
                                             }
                                             // If both are accessors: cannot change get/set
@@ -27598,8 +27588,7 @@ impl<'gc> VM<'gc> {
                                                     );
                                                     return Value::Undefined;
                                                 }
-                                                let result_writable_false =
-                                                    matches!(desc.get("writable"), Some(Value::Boolean(false)));
+                                                let result_writable_false = matches!(desc.get("writable"), Some(Value::Boolean(false)));
                                                 let target_writable_true =
                                                     matches!(desc_borrow.get("writable"), Some(Value::Boolean(true)));
                                                 if result_writable_false && target_writable_true {
@@ -28763,13 +28752,13 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             // toSorted: check IsCallable(compareFn) BEFORE reading length (spec step 1)
-            if id == BUILTIN_ARRAY_TOSORTED {
-                if let Some(ref cmp) = args.first() {
-                    if !matches!(cmp, Value::Undefined) && !self.is_value_callable(cmp) {
-                        self.throw_type_error(ctx, "The comparison function must be either a function or undefined");
-                        return Value::Undefined;
-                    }
-                }
+            if id == BUILTIN_ARRAY_TOSORTED
+                && let Some(ref cmp) = args.first()
+                && !matches!(cmp, Value::Undefined)
+                && !self.is_value_callable(cmp)
+            {
+                self.throw_type_error(ctx, "The comparison function must be either a function or undefined");
+                return Value::Undefined;
             }
             // For non-array objects: coerce to object, read properties by index
             if !matches!(receiver, Value::VmArray(_)) {
@@ -28870,7 +28859,7 @@ impl<'gc> VM<'gc> {
                                 }
                             });
                         } else {
-                            elems.sort_by(|a, b| value_to_string(a).cmp(&value_to_string(b)));
+                            elems.sort_by_key(value_to_string);
                         }
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
@@ -29962,24 +29951,24 @@ impl<'gc> VM<'gc> {
                         if is_typed_array {
                             Self::is_valid_integer_index(arr, k as f64)
                         } else {
-                        let b = arr.borrow();
-                        let dense_present = if k < b.elements.len() {
-                            !b.props.contains_key(&format!("__deleted_{}", k))
-                                || b.props.contains_key(&key)
-                                || has_getter(&b.props, &key)
-                                || has_setter(&b.props, &key)
-                        } else {
-                            false
-                        };
-                        let own_prop_present = b.props.contains_key(&key) || has_getter(&b.props, &key) || has_setter(&b.props, &key);
-                        if dense_present || own_prop_present {
-                            true
-                        } else {
-                            let proto = b.props.get("__proto__").cloned();
-                            drop(b);
-                            self.lookup_proto_chain(proto.as_ref(), &key).is_some()
-                                || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
-                        }
+                            let b = arr.borrow();
+                            let dense_present = if k < b.elements.len() {
+                                !b.props.contains_key(&format!("__deleted_{}", k))
+                                    || b.props.contains_key(&key)
+                                    || has_getter(&b.props, &key)
+                                    || has_setter(&b.props, &key)
+                            } else {
+                                false
+                            };
+                            let own_prop_present = b.props.contains_key(&key) || has_getter(&b.props, &key) || has_setter(&b.props, &key);
+                            if dense_present || own_prop_present {
+                                true
+                            } else {
+                                let proto = b.props.get("__proto__").cloned();
+                                drop(b);
+                                self.lookup_proto_chain(proto.as_ref(), &key).is_some()
+                                    || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                            }
                         }
                     }
                     Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
@@ -34649,10 +34638,10 @@ impl<'gc> VM<'gc> {
                     let mut key = args.first().cloned().unwrap_or(Value::Undefined);
                     let value = args.get(1).cloned().unwrap_or(Value::Undefined);
                     // CanonicalizeKeyedCollectionKey: -0 → +0
-                    if let Value::Number(n) = &key {
-                        if *n == 0.0 {
-                            key = Value::Number(0.0);
-                        }
+                    if let Value::Number(n) = &key
+                        && *n == 0.0
+                    {
+                        key = Value::Number(0.0);
                     }
                     {
                         let borrow = m.borrow();
@@ -34672,10 +34661,10 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     // CanonicalizeKeyedCollectionKey: -0 → +0
-                    if let Value::Number(n) = &key {
-                        if *n == 0.0 {
-                            key = Value::Number(0.0);
-                        }
+                    if let Value::Number(n) = &key
+                        && *n == 0.0
+                    {
+                        key = Value::Number(0.0);
                     }
                     {
                         let borrow = m.borrow();
@@ -34683,7 +34672,7 @@ impl<'gc> VM<'gc> {
                             return v.clone();
                         }
                     }
-                    match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[key.clone()]) {
+                    match self.vm_call_function_value(ctx, &callback, &Value::Undefined, std::slice::from_ref(&key)) {
                         Ok(value) => {
                             // If callback inserted the key, overwrite it
                             {
@@ -34735,7 +34724,7 @@ impl<'gc> VM<'gc> {
                             return v.clone();
                         }
                     }
-                    match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[key.clone()]) {
+                    match self.vm_call_function_value(ctx, &callback, &Value::Undefined, std::slice::from_ref(&key)) {
                         Ok(value) => {
                             {
                                 let mut borrow = m.borrow_mut(ctx);
@@ -35912,12 +35901,12 @@ impl<'gc> VM<'gc> {
                 return Value::Boolean(false);
             }
             // Step 2: If C has [[BoundTargetFunction]], delegate to it
-            if let Value::VmObject(obj) = receiver {
-                if let Some(bound_target) = obj.borrow().get("__bound_target__").cloned() {
-                    // InstanceofOperator(V, BC) — recursively check via the underlying instanceof
-                    // which will call @@hasInstance on the bound target
-                    return self.call_method_builtin(ctx, BUILTIN_FN_HASINSTANCE, &bound_target, std::slice::from_ref(&v));
-                }
+            if let Value::VmObject(obj) = receiver
+                && let Some(bound_target) = obj.borrow().get("__bound_target__").cloned()
+            {
+                // InstanceofOperator(V, BC) — recursively check via the underlying instanceof
+                // which will call @@hasInstance on the bound target
+                return self.call_method_builtin(ctx, BUILTIN_FN_HASINSTANCE, &bound_target, std::slice::from_ref(&v));
             }
             // Step 3: If Type(O) is not Object, return false
             // Note: Symbols are VmObjects with __vm_symbol__ but are NOT objects per spec
@@ -36879,28 +36868,6 @@ impl<'gc> VM<'gc> {
         self.iterator_close_all(ctx, &pairs, true);
     }
 
-    /// Close all live (non-done) iterators in a zip helper using IteratorCloseAll semantics.
-    fn close_zip_open_iterators_reverse(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        iters_gc: &VmArrayHandle<'gc>,
-        flags_gc: &VmArrayHandle<'gc>,
-        count: usize,
-    ) {
-        self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, count, true);
-    }
-
-    /// Close all live (non-done) iterators in a zip helper (same as reverse, alias for longest mode).
-    fn close_zip_live_iterators_reverse(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        iters_gc: &VmArrayHandle<'gc>,
-        flags_gc: &VmArrayHandle<'gc>,
-        count: usize,
-    ) {
-        self.close_zip_open_iterators_reverse(ctx, iters_gc, flags_gc, count);
-    }
-
     /// Build a null-prototype object for zipKeyed results.
     fn build_zip_keyed_result(&self, ctx: &GcContext<'gc>, keys_arr: &Value<'gc>, results: &[Value<'gc>]) -> Value<'gc> {
         let mut obj = IndexMap::new();
@@ -36957,10 +36924,7 @@ impl<'gc> VM<'gc> {
             Value::String(s) => crate::unicode::utf16_to_utf8(s),
             Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => match sym.borrow().get("__symbol_id__") {
                 Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
-                _ => {
-                    let s = self.vm_to_string(ctx, val);
-                    s
-                }
+                _ => self.vm_to_string(ctx, val),
             },
             Value::Number(n) => {
                 if *n == (*n as u32) as f64 && *n >= 0.0 {
@@ -36969,10 +36933,7 @@ impl<'gc> VM<'gc> {
                     format!("{}", n)
                 }
             }
-            _ => {
-                let s = self.vm_to_string(ctx, val);
-                s
-            }
+            _ => self.vm_to_string(ctx, val),
         }
     }
 
@@ -37507,7 +37468,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
                 };
-                return self.create_iterator_result_object(ctx, result, false);
+                self.create_iterator_result_object(ctx, result, false)
             }
             _ => {
                 self.throw_type_error(ctx, "Unknown iterator helper kind");
@@ -39562,9 +39523,7 @@ impl<'gc> VM<'gc> {
                     if is_accessor {
                         return false;
                     }
-                    // TypedArray element descriptors are fixed as
-                    // { [[Configurable]]: false, [[Enumerable]]: true, [[Writable]]: true }.
-                    if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
+                    if matches!(desc.get("configurable"), Some(Value::Boolean(false))) {
                         return false;
                     }
                     // enumerable: false → false
@@ -43187,12 +43146,11 @@ impl<'gc> VM<'gc> {
         }
 
         // Handle raw JSON objects (JSON.rawJSON)
-        if let Value::VmObject(obj) = &value {
-            if matches!(obj.borrow().get("__is_raw_json__"), Some(Value::Boolean(true))) {
-                if let Some(Value::String(raw_str)) = obj.borrow().get("rawJSON") {
-                    return Some(crate::unicode::utf16_to_utf8(raw_str));
-                }
-            }
+        if let Value::VmObject(obj) = &value
+            && matches!(obj.borrow().get("__is_raw_json__"), Some(Value::Boolean(true)))
+            && let Some(Value::String(raw_str)) = obj.borrow().get("rawJSON")
+        {
+            return Some(crate::unicode::utf16_to_utf8(raw_str));
         }
 
         let value = self.json_stringify_prepare_value(ctx, value)?;
@@ -43602,10 +43560,10 @@ impl<'gc> VM<'gc> {
                                     *pos += 1;
                                 }
                             }
-                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                if let Some(ch) = char::from_u32(code) {
-                                    result.push(ch);
-                                }
+                            if let Ok(code) = u32::from_str_radix(&hex, 16)
+                                && let Some(ch) = char::from_u32(code)
+                            {
+                                result.push(ch);
                             }
                             continue;
                         }

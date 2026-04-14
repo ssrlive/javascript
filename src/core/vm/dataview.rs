@@ -1020,12 +1020,12 @@ impl<'gc> VM<'gc> {
                 return None;
             }
             // Check immutability before argument coercion (spec step 3)
-            if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__") {
-                if matches!(GcCell::borrow(buf).get("__immutable__"), Some(Value::Boolean(true))) {
-                    drop(b);
-                    self.throw_type_error(ctx, "Cannot modify an immutable ArrayBuffer");
-                    return None;
-                }
+            if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                && matches!(GcCell::borrow(buf).get("__immutable__"), Some(Value::Boolean(true)))
+            {
+                drop(b);
+                self.throw_type_error(ctx, "Cannot modify an immutable ArrayBuffer");
+                return None;
             }
         }
         let offset_arg = args.first().cloned().unwrap_or(Value::Undefined);

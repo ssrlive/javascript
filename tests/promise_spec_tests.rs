@@ -41,11 +41,19 @@ fn spec_allsettled_mixed_outcomes() {
             Promise.resolve(3)
         ]);
     "#;
-    let result = eval_vm_async_iife(body);
-    assert_eq!(
-        result,
-        "[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":2},{\"status\":\"fulfilled\",\"value\":3}]"
-    );
+
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = eval_vm_async_iife(body);
+            assert_eq!(
+                result,
+                r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":2},{"status":"fulfilled","value":3}]"#
+            );
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]

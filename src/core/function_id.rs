@@ -373,17 +373,13 @@ pub(crate) const BUILTIN_ARRAY_WITH: FunctionID = 553;
 // ── Map upsert (560–561) ────────────────────────────────────────────
 pub(crate) const BUILTIN_MAP_GETORINSERT: FunctionID = 560;
 pub(crate) const BUILTIN_MAP_GETORINSERTCOMPUTED: FunctionID = 561;
-// ── ArrayBuffer detached / transfer (570–572) ───────────────────────
-pub(crate) const BUILTIN_ARRAYBUFFER_DETACHED_GET: FunctionID = 570;
-pub(crate) const BUILTIN_ARRAYBUFFER_TRANSFER: FunctionID = 571;
-pub(crate) const BUILTIN_ARRAYBUFFER_TRANSFER_TO_FIXED: FunctionID = 572;
+// ── ArrayBuffer detached / transfer (570–572) reserved ──────────────
 // ── WeakMap upsert (580–581) ─────────────────────────────────────────
 pub(crate) const BUILTIN_WEAKMAP_GETORINSERT: FunctionID = 580;
 pub(crate) const BUILTIN_WEAKMAP_GETORINSERTCOMPUTED: FunctionID = 581;
 // ── TypedArray change-array-by-copy (590–593) ───────────────────────
 pub(crate) const BUILTIN_TYPEDARRAY_TOREVERSED: FunctionID = 590;
 pub(crate) const BUILTIN_TYPEDARRAY_TOSORTED: FunctionID = 591;
-pub(crate) const BUILTIN_TYPEDARRAY_TOSPLICED: FunctionID = 592;
 pub(crate) const BUILTIN_TYPEDARRAY_WITH: FunctionID = 593;
 // ── Float16Array + Math.f16round (610-611) ──────────────────────────
 pub(crate) const BUILTIN_CTOR_FLOAT16ARRAY: FunctionID = 610;

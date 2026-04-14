@@ -7269,34 +7269,12 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
         if !matches!(has_instance_fn, Value::Undefined | Value::Null) {
-            let result = match has_instance_fn {
-                Value::VmFunction(ip, _) => {
-                    self.this_stack.push(rhs.clone());
-                    let r = self.call_vm_function_result(ctx, ip, std::slice::from_ref(&lhs), None, &[]);
-                    self.this_stack.pop();
-                    match r {
-                        Ok(v) => v,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Ok(OpcodeAction::Continue);
-                        }
-                    }
+            let result = match self.vm_call_function_value(ctx, &has_instance_fn, &rhs, std::slice::from_ref(&lhs)) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    return Ok(OpcodeAction::Continue);
                 }
-                Value::VmClosure(ip, _, upv) => {
-                    self.this_stack.push(rhs.clone());
-                    let uv = upv;
-                    let r = self.call_vm_function_result(ctx, ip, std::slice::from_ref(&lhs), None, &uv);
-                    self.this_stack.pop();
-                    match r {
-                        Ok(v) => v,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Ok(OpcodeAction::Continue);
-                        }
-                    }
-                }
-                Value::VmNativeFunction(id) => self.call_method_builtin(ctx, id, &rhs, std::slice::from_ref(&lhs)),
-                _ => Value::Boolean(false),
             };
             self.stack.push(Value::Boolean(result.to_truthy()));
             return Ok(OpcodeAction::Continue);

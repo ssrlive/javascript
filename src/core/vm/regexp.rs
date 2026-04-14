@@ -20,6 +20,12 @@ const U16_OPEN_BRACKET: u16 = b'[' as u16;
 const U16_OPEN_PAREN: u16 = b'(' as u16;
 const U16_PIPE: u16 = b'|' as u16;
 const U16_QUESTION: u16 = b'?' as u16;
+const LEGACY_REGEXP_INPUT_KEY: &str = "__legacy_regexp_input__";
+const LEGACY_REGEXP_LAST_MATCH_KEY: &str = "__legacy_regexp_last_match__";
+const LEGACY_REGEXP_LAST_PAREN_KEY: &str = "__legacy_regexp_last_paren__";
+const LEGACY_REGEXP_LEFT_CONTEXT_KEY: &str = "__legacy_regexp_left_context__";
+const LEGACY_REGEXP_RIGHT_CONTEXT_KEY: &str = "__legacy_regexp_right_context__";
+const LEGACY_REGEXP_PAREN_PREFIX: &str = "__legacy_regexp_paren_";
 
 /// Compile a regex, returning a cached copy when the same pattern+flags
 /// have been compiled before.
@@ -455,6 +461,101 @@ impl<'gc> VM<'gc> {
         false
     }
 
+    fn is_home_regexp_instance(&self, re_obj: &VmObjectHandle<'gc>) -> bool {
+        let borrow = re_obj.borrow();
+        if borrow.get("__type__").map(value_to_string).as_deref() != Some("RegExp") {
+            return false;
+        }
+        let Some(Value::VmObject(proto)) = borrow.get("__proto__").cloned() else {
+            return false;
+        };
+        drop(borrow);
+        self.is_home_regexp_prototype(&proto)
+    }
+
+    fn legacy_regexp_ctor(&self) -> Option<VmObjectHandle<'gc>> {
+        match self.globals.get("RegExp") {
+            Some(Value::VmObject(obj)) => Some(*obj),
+            _ => None,
+        }
+    }
+
+    fn legacy_regexp_value(&self, key: &str) -> Value<'gc> {
+        self.legacy_regexp_ctor()
+            .and_then(|ctor| ctor.borrow().get(key).cloned())
+            .unwrap_or_else(|| Value::from(""))
+    }
+
+    fn set_legacy_regexp_value(&mut self, ctx: &GcContext<'gc>, key: &str, value: Vec<u16>) {
+        if let Some(ctor) = self.legacy_regexp_ctor() {
+            ctor.borrow_mut(ctx).insert(key.to_string(), Value::String(value));
+        }
+    }
+
+    fn validate_legacy_regexp_static_receiver(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        property_name: &str,
+        operation: &str,
+    ) -> bool {
+        let expected = self.legacy_regexp_ctor().map(Value::VmObject).unwrap_or(Value::Undefined);
+        let Some(actual) = receiver else {
+            self.throw_type_error(ctx, &format!("RegExp.{property_name} {operation} called on incompatible receiver"));
+            return false;
+        };
+        if !self.values_same(actual, &expected) {
+            self.throw_type_error(ctx, &format!("RegExp.{property_name} {operation} called on incompatible receiver"));
+            return false;
+        }
+        true
+    }
+
+    fn update_legacy_regexp_static_state(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        input_u16: &[u16],
+        match_start: usize,
+        match_end: usize,
+        captures: &[Option<std::ops::Range<usize>>],
+        mapped_input: bool,
+    ) {
+        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_INPUT_KEY, input_u16.to_vec());
+        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_LAST_MATCH_KEY, input_u16[match_start..match_end].to_vec());
+        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_LEFT_CONTEXT_KEY, input_u16[..match_start].to_vec());
+        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_RIGHT_CONTEXT_KEY, input_u16[match_end..].to_vec());
+
+        let mut last_paren = Vec::new();
+        for capture_index in 0..9 {
+            self.set_legacy_regexp_value(ctx, &format!("{LEGACY_REGEXP_PAREN_PREFIX}{}", capture_index + 1), Vec::new());
+        }
+
+        for (capture_index, capture) in captures.iter().enumerate() {
+            let Some(range) = capture else {
+                continue;
+            };
+            let (capture_start, capture_end) = if mapped_input {
+                (
+                    Self::regex_map_index_back(input_u16, range.start),
+                    Self::regex_map_index_back(input_u16, range.end),
+                )
+            } else {
+                (range.start, range.end)
+            };
+            let capture_value = input_u16[capture_start..capture_end].to_vec();
+            if capture_index < 9 {
+                self.set_legacy_regexp_value(
+                    ctx,
+                    &format!("{LEGACY_REGEXP_PAREN_PREFIX}{}", capture_index + 1),
+                    capture_value.clone(),
+                );
+            }
+            last_paren = capture_value;
+        }
+
+        self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_LAST_PAREN_KEY, last_paren);
+    }
+
     pub(super) fn regexp_handle_host_fn(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -776,6 +877,66 @@ impl<'gc> VM<'gc> {
                 self.regexp_symbol_split(ctx, &rx, &s_str, &limit)
             }
             "regexp.compile" => self.regexp_compile(ctx, receiver, _args),
+            "regexp.legacy.get_input" => {
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, "input", "getter") {
+                    return Value::Undefined;
+                }
+                self.legacy_regexp_value(LEGACY_REGEXP_INPUT_KEY)
+            }
+            "regexp.legacy.set_input" => {
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, "input", "setter") {
+                    return Value::Undefined;
+                }
+                let value = _args.first().cloned().unwrap_or(Value::Undefined);
+                let coerced = match self.vm_to_string_like_spec(ctx, &value) {
+                    Ok(s) => crate::unicode::utf8_to_utf16(&s),
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
+                self.set_legacy_regexp_value(ctx, LEGACY_REGEXP_INPUT_KEY, coerced);
+                Value::Undefined
+            }
+            "regexp.legacy.get_lastMatch" => {
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, "lastMatch", "getter") {
+                    return Value::Undefined;
+                }
+                self.legacy_regexp_value(LEGACY_REGEXP_LAST_MATCH_KEY)
+            }
+            "regexp.legacy.get_lastParen" => {
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, "lastParen", "getter") {
+                    return Value::Undefined;
+                }
+                self.legacy_regexp_value(LEGACY_REGEXP_LAST_PAREN_KEY)
+            }
+            "regexp.legacy.get_leftContext" => {
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, "leftContext", "getter") {
+                    return Value::Undefined;
+                }
+                self.legacy_regexp_value(LEGACY_REGEXP_LEFT_CONTEXT_KEY)
+            }
+            "regexp.legacy.get_rightContext" => {
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, "rightContext", "getter") {
+                    return Value::Undefined;
+                }
+                self.legacy_regexp_value(LEGACY_REGEXP_RIGHT_CONTEXT_KEY)
+            }
+            _ if name.starts_with("regexp.legacy.get_paren") => {
+                let index = name
+                    .trim_start_matches("regexp.legacy.get_paren")
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| (1..=9).contains(index));
+                let Some(index) = index else {
+                    log::warn!("Unknown regexp legacy paren getter: {}", name);
+                    return Value::Undefined;
+                };
+                if !self.validate_legacy_regexp_static_receiver(ctx, receiver, &format!("${index}"), "getter") {
+                    return Value::Undefined;
+                }
+                self.legacy_regexp_value(&format!("{LEGACY_REGEXP_PAREN_PREFIX}{index}"))
+            }
             _ => {
                 log::warn!("Unknown regexp host function: {}", name);
                 Value::Undefined
@@ -891,6 +1052,70 @@ impl<'gc> VM<'gc> {
             "escape".to_string(),
             Self::make_native_fn(ctx, BUILTIN_REGEXP_ESCAPE, "escape", 1.0),
         );
+        for (name, getter_host_name, getter_display_name, setter_host_name, setter_display_name) in [
+            (
+                "input",
+                "regexp.legacy.get_input",
+                "get input",
+                Some("regexp.legacy.set_input"),
+                Some("set input"),
+            ),
+            (
+                "$_",
+                "regexp.legacy.get_input",
+                "get $_",
+                Some("regexp.legacy.set_input"),
+                Some("set $_"),
+            ),
+            ("lastMatch", "regexp.legacy.get_lastMatch", "get lastMatch", None, None),
+            ("$&", "regexp.legacy.get_lastMatch", "get $&", None, None),
+            ("lastParen", "regexp.legacy.get_lastParen", "get lastParen", None, None),
+            ("$+", "regexp.legacy.get_lastParen", "get $+", None, None),
+            ("leftContext", "regexp.legacy.get_leftContext", "get leftContext", None, None),
+            ("$`", "regexp.legacy.get_leftContext", "get $`", None, None),
+            ("rightContext", "regexp.legacy.get_rightContext", "get rightContext", None, None),
+            ("$'", "regexp.legacy.get_rightContext", "get $'", None, None),
+        ] {
+            set_getter(
+                &mut regexp_ctor,
+                name,
+                Self::make_host_fn_with_name_len(ctx, getter_host_name, getter_display_name, 0.0, false),
+            );
+            if let (Some(setter_host_name), Some(setter_display_name)) = (setter_host_name, setter_display_name) {
+                set_setter(
+                    &mut regexp_ctor,
+                    name,
+                    Self::make_host_fn_with_name_len(ctx, setter_host_name, setter_display_name, 1.0, false),
+                );
+            }
+            mark_nonenumerable(&mut regexp_ctor, name);
+        }
+        for index in 1..=9 {
+            set_getter(
+                &mut regexp_ctor,
+                &format!("${index}"),
+                Self::make_host_fn_with_name_len(
+                    ctx,
+                    &format!("regexp.legacy.get_paren{index}"),
+                    &format!("get ${index}"),
+                    0.0,
+                    false,
+                ),
+            );
+            mark_nonenumerable(&mut regexp_ctor, &format!("${index}"));
+        }
+        for key in [
+            LEGACY_REGEXP_INPUT_KEY,
+            LEGACY_REGEXP_LAST_MATCH_KEY,
+            LEGACY_REGEXP_LAST_PAREN_KEY,
+            LEGACY_REGEXP_LEFT_CONTEXT_KEY,
+            LEGACY_REGEXP_RIGHT_CONTEXT_KEY,
+        ] {
+            regexp_ctor.insert(key.to_string(), Value::from(""));
+        }
+        for index in 1..=9 {
+            regexp_ctor.insert(format!("{LEGACY_REGEXP_PAREN_PREFIX}{index}"), Value::from(""));
+        }
         Self::set_property_attributes(&mut regexp_ctor, "escape", true, false, true);
         let regexp_ctor_val = Self::finalize_ctor_with_prototype(ctx, regexp_ctor, regexp_proto_obj);
         self.globals.insert("RegExp".to_string(), regexp_ctor_val);
@@ -918,14 +1143,22 @@ impl<'gc> VM<'gc> {
         self.globals.insert("RegExpStringIteratorPrototype".to_string(), iter_proto_val);
     }
 
-    /// Set `__regexp_home_proto__` on each getter function in the given prototype
-    /// so cross-realm identity checks can find the correct %RegExpPrototype%.
+    /// Set `__regexp_home_proto__` on host functions that need `%RegExpPrototype%`
+    /// identity checks so cross-realm dispatch can validate against the right home object.
     pub(super) fn stamp_regexp_getters_with_home_proto(ctx: &GcContext<'gc>, proto: VmObjectHandle<'gc>) {
         let proto_val = Value::VmObject(proto);
-        let getter_keys: Vec<String> = proto.borrow().keys().filter(|k| k.starts_with(GETTER_PREFIX)).cloned().collect();
-        for key in getter_keys {
-            if let Some(Value::VmObject(getter_obj)) = proto.borrow().get(&key) {
-                getter_obj
+        let host_fn_keys: Vec<String> = proto
+            .borrow()
+            .iter()
+            .filter_map(|(key, value)| match value {
+                Value::VmObject(obj) if obj.borrow().contains_key("__host_fn__") => Some(key.clone()),
+                _ if key.starts_with(GETTER_PREFIX) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        for key in host_fn_keys {
+            if let Some(Value::VmObject(host_fn_obj)) = proto.borrow().get(&key) {
+                host_fn_obj
                     .borrow_mut(ctx)
                     .insert("__regexp_home_proto__".to_string(), proto_val.clone());
             }
@@ -2155,7 +2388,7 @@ impl<'gc> VM<'gc> {
     fn regexp_compile(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         // Step 1: Let O be the this value.
         let re_obj = match receiver {
-            Some(Value::VmObject(obj)) if obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp") => *obj,
+            Some(Value::VmObject(obj)) if self.is_home_regexp_instance(obj) => *obj,
             _ => {
                 self.throw_type_error(ctx, "RegExp.prototype.compile called on incompatible receiver");
                 return Value::Undefined;
@@ -2608,6 +2841,8 @@ impl<'gc> VM<'gc> {
                 }
 
                 let arr = Value::VmArray(new_gc_cell_ptr(ctx, arr_data));
+
+                self.update_legacy_regexp_static_state(ctx, &input_u16, match_start, match_end, &m.captures, mapped_input);
 
                 // Update lastIndex for global/sticky
                 if (is_global || is_sticky)

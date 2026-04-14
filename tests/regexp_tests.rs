@@ -198,4 +198,52 @@ mod regexp_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
+
+    #[test]
+    fn test_regexp_legacy_static_accessors_exist() {
+        let script = r#"
+            (function() {
+                var inputDesc = Object.getOwnPropertyDescriptor(RegExp, "input");
+                var parenDesc = Object.getOwnPropertyDescriptor(RegExp, "$1");
+                return [
+                    typeof inputDesc.get,
+                    typeof inputDesc.set,
+                    typeof parenDesc.get,
+                    parenDesc.set === undefined
+                ];
+            })()
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"function\",\"function\",\"function\",true]");
+    }
+
+    #[test]
+    fn test_regexp_legacy_static_state_updates_after_exec() {
+        let script = r#"
+            (function() {
+                /a(b)c/.exec("zzabcqq");
+                return [RegExp.$1, RegExp.lastMatch, RegExp.leftContext, RegExp.rightContext, RegExp.lastParen];
+            })()
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"b\",\"abc\",\"zz\",\"qq\",\"b\"]");
+    }
+
+    #[test]
+    fn test_regexp_legacy_input_setter_and_compile_guard() {
+        let script = r#"
+            (function() {
+                class SubRegExp extends RegExp {}
+                RegExp.input = 123;
+                try {
+                    RegExp.prototype.compile.call(new SubRegExp(""));
+                    return "no error";
+                } catch (e) {
+                    return [RegExp.$_, e.name];
+                }
+            })()
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"123\",\"TypeError\"]");
+    }
 }

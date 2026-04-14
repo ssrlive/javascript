@@ -15739,6 +15739,31 @@ impl<'gc> VM<'gc> {
                 let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
                 return Ok(val.clone());
             }
+            let mut proto = overlay
+                .as_ref()
+                .and_then(|o| o.borrow().get("__proto__").cloned())
+                .or_else(|| props.borrow().get("__proto__").cloned());
+            while let Some(ref proto_val) = proto {
+                if let Value::VmObject(proto_obj) = proto_val {
+                    let borrow = proto_obj.borrow();
+                    if let Some(sf) = lookup_setter(&borrow, key).cloned() {
+                        drop(borrow);
+                        let _ = self.vm_call_function_value(ctx, &sf, &setter_receiver, std::slice::from_ref(val))?;
+                        return Ok(val.clone());
+                    }
+                    if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
+                        && !matches!(&**sf, Value::Undefined)
+                    {
+                        let sf_clone = (**sf).clone();
+                        drop(borrow);
+                        let _ = self.vm_call_function_value(ctx, &sf_clone, &setter_receiver, std::slice::from_ref(val))?;
+                        return Ok(val.clone());
+                    }
+                    proto = borrow.get("__proto__").cloned();
+                } else {
+                    break;
+                }
+            }
             // Check for readonly
             let is_readonly = overlay.is_some_and(|o| has_readonly_mark(&o.borrow(), key)) || has_readonly_mark(&props.borrow(), key);
             if is_readonly {

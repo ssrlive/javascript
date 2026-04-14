@@ -274,6 +274,51 @@ fn parse_rejects_import_meta_assignment_target() {
 }
 
 #[test]
+fn parse_rejects_import_meta_in_script_goal() {
+    let res = evaluate_script("import.meta", false, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected parse to fail for import.meta in script goal");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn module_parse_rejects_escaped_import_meta() {
+    let res = evaluate_script("import.m\\u0065ta", true, None::<&std::path::Path>);
+    assert!(res.is_err(), "Expected module parse to fail for escaped import.meta");
+    let err = res.unwrap_err();
+    assert!(
+        err.message().contains("SyntaxError"),
+        "Expected SyntaxError, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn module_parse_rejects_import_meta_for_in_of_targets() {
+    for script in [
+        "for (import.meta in null) ;",
+        "for (import.meta of null) ;",
+        "async function* f() { for await (import.meta of null) ; }",
+    ] {
+        let res = evaluate_script(script, true, None::<&std::path::Path>);
+        assert!(
+            res.is_err(),
+            "Expected module parse to fail for invalid import.meta target: {script}"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+}
+
+#[test]
 fn parse_rejects_empty_object_assignment_targets() {
     for script in ["({}) = 1", "() => ({}) = 1", "async () => ({}) = 1"] {
         let res = evaluate_script(script, false, None::<&std::path::Path>);

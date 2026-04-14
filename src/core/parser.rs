@@ -5647,7 +5647,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 if *index < tokens.len()
                     && let Token::Identifier(id) = &tokens[*index].token
                     && id == "meta"
+                    && !raw_identifier_source_has_escape(&tokens[*index])
                 {
+                    if !in_module_context() {
+                        return Err(raise_parse_error!("Cannot use import.meta outside a module"));
+                    }
                     *index += 1;
                     Expr::Property(
                         Box::new(Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column))),

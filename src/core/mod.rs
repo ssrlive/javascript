@@ -2198,7 +2198,7 @@ fn validate_statement(statement: &Statement) -> Result<(), JSError> {
         StatementKind::ForOfExpr(lhs, iter, body)
         | StatementKind::ForAwaitOfExpr(lhs, iter, body)
         | StatementKind::ForInExpr(lhs, iter, body) => {
-            validate_expression(lhs)?;
+            validate_assignment_target_expr(lhs, true)?;
             validate_expression(iter)?;
             for statement in body {
                 validate_non_block_body(statement)?;

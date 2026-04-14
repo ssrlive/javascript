@@ -47,6 +47,7 @@ pub type VmSetHandle<'gc> = VmStrong<'gc, VmSetData<'gc>>;
 static VM_OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static VM_NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
 const OWN_DUNDER_PROTO_DATA_KEY: &str = "__own_data___proto__";
+const IMPORT_META_SENTINEL_KEY: &str = "__import_meta_sentinel__";
 
 fn vm_next_os_file_id() -> u64 {
     let mut id = VM_NEXT_OS_FILE_ID.lock().unwrap();
@@ -701,8 +702,14 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         for exports in self.loaded_modules.values() {
             exports.trace(cc);
         }
+        for namespace in self.module_ns_objects.values() {
+            namespace.trace(cc);
+        }
         for namespace in self.deferred_module_ns_objects.values() {
             namespace.trace(cc);
+        }
+        for meta in self.module_import_meta_objects.values() {
+            meta.trace(cc);
         }
         // Trace suspended module states (TLA)
         for state in &self.suspended_module_states {
@@ -863,6 +870,8 @@ pub struct VM<'gc> {
     /// Cross-module namespace identity cache: absolute module path → namespace Value.
     /// Ensures `GetModuleNamespace(module)` always returns the same object (spec §16.2.1.10).
     pub(crate) module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
+    /// Per-module import.meta object cache.
+    module_import_meta_objects: std::collections::HashMap<String, Value<'gc>>,
     /// Deferred namespace identity cache: absolute module path → deferred namespace Value.
     deferred_module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
     /// Parsed/compiled module records, including modules that are linked but not yet evaluated.
@@ -1128,6 +1137,7 @@ impl<'gc> VM<'gc> {
             loaded_module_states: std::collections::HashMap::new(),
             main_module_ip_start: None,
             module_ns_objects: std::collections::HashMap::new(),
+            module_import_meta_objects: std::collections::HashMap::new(),
             deferred_module_ns_objects: std::collections::HashMap::new(),
             module_records: std::collections::HashMap::new(),
             module_request_depth: 0,
@@ -1199,6 +1209,38 @@ impl<'gc> VM<'gc> {
             .last()
             .and_then(|frame| self.chunk.fn_source_paths.get(&frame.func_ip).map(String::as_str))
             .or(self.script_path.as_deref())
+    }
+
+    fn active_module_key(&self) -> Option<String> {
+        self.current_source_path()
+            .filter(|path| self.module_records.contains_key(*path))
+            .map(str::to_owned)
+            .or_else(|| {
+                self.script_path
+                    .as_ref()
+                    .filter(|path| self.module_records.contains_key(path.as_str()))
+                    .cloned()
+            })
+    }
+
+    fn get_import_meta_object(&mut self, ctx: &GcContext<'gc>) -> Value<'gc> {
+        let Some(module_key) = self.active_module_key() else {
+            return Value::Undefined;
+        };
+        if let Some(meta) = self.module_import_meta_objects.get(&module_key).cloned() {
+            return meta;
+        }
+
+        let mut meta_map = IndexMap::new();
+        meta_map.insert(
+            "__proto__".to_string(),
+            self.ctor_prototype_from_globals(ctx, "Object").unwrap_or(Value::Null),
+        );
+        meta_map.insert("url".to_string(), Value::from(&module_key));
+
+        let meta = Value::VmObject(new_gc_cell_ptr(ctx, meta_map));
+        self.module_import_meta_objects.insert(module_key, meta.clone());
+        meta
     }
 
     fn snapshot_module_execution_state(&self) -> ModuleExecutionState<'gc> {
@@ -16555,7 +16597,12 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 }
             }
-            Value::VmObject(_) => self.read_named_property_with_receiver(ctx, obj, key, obj),
+            Value::VmObject(map) => {
+                if key == "meta" && matches!(map.borrow().get(IMPORT_META_SENTINEL_KEY), Some(Value::Boolean(true))) {
+                    return self.get_import_meta_object(ctx);
+                }
+                self.read_named_property_with_receiver(ctx, obj, key, obj)
+            }
             Value::VmFunction(ip, arity) => {
                 let current_fn = Value::VmFunction(*ip, *arity);
                 let props = self.get_fn_props(ctx, *ip, *arity);
@@ -17295,6 +17342,7 @@ impl<'gc> VM<'gc> {
         let mut import_map = IndexMap::new();
         // Probe compatibility hook for the `import-defer` feature check. Static
         // `import defer` syntax remains gated separately in the Test262 runner.
+        import_map.insert(IMPORT_META_SENTINEL_KEY.to_string(), Value::Boolean(true));
         import_map.insert("defer".to_string(), Self::make_host_fn(ctx, "import.defer"));
         import_map.insert("source".to_string(), Self::make_host_fn(ctx, "import.source"));
         self.globals
@@ -24769,9 +24817,15 @@ impl<'gc> VM<'gc> {
                     // Indirect eval runs as global (sloppy) code: relax strict-mode
                     // binding restrictions so `var eval` / `arguments = 42` are allowed.
                     let do_parse = |code: &str| -> Result<Vec<crate::core::statement::Statement>, JSError> {
-                        let tokens = crate::core::tokenize(code)?;
-                        let mut index = 0;
-                        crate::core::parse_statements(&tokens, &mut index)
+                        let prev_module_context = crate::core::parser::in_module_context();
+                        crate::core::parser::set_module_context(false);
+                        let result = (|| {
+                            let tokens = crate::core::tokenize(code)?;
+                            let mut index = 0;
+                            crate::core::parse_statements(&tokens, &mut index)
+                        })();
+                        crate::core::parser::set_module_context(prev_module_context);
+                        result
                     };
                     // For direct eval inside class bodies, push private names so parser accepts #field access
                     let privns_context = if is_direct {

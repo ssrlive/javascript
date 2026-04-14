@@ -143,6 +143,78 @@ mod promise_tests {
     }
 
     #[test]
+    fn test_promise_allkeyed_resolved() {
+        let code = r#"
+            let result = null;
+            let sym = Symbol("s");
+            let input = {
+                first: Promise.resolve(1),
+                second: Promise.resolve(2)
+            };
+            input[sym] = Promise.resolve(3);
+            Promise.allKeyed(input).then(function(values) {
+                let keys = Reflect.ownKeys(values);
+                result = [
+                    Object.getPrototypeOf(values) === null,
+                    keys[0] === "first",
+                    keys[1] === "second",
+                    keys[2] === sym,
+                    values.first,
+                    values.second,
+                    values[sym],
+                    values.hasOwnProperty === undefined
+                ];
+            });
+            result
+        "#;
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[true,true,true,true,1,2,3,true]");
+    }
+
+    #[test]
+    fn test_promise_allkeyed_rejected() {
+        let code = r#"
+            let result = null;
+            Promise.allKeyed({
+                ok: Promise.resolve(1),
+                bad: Promise.reject("boom")
+            }).then(function() {
+                result = "fulfilled";
+            }, function(reason) {
+                result = reason;
+            });
+            result
+        "#;
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"boom\"");
+    }
+
+    #[test]
+    fn test_promise_allsettledkeyed_mixed() {
+        let code = r#"
+            let result = null;
+            Promise.allSettledKeyed({
+                first: Promise.resolve(1),
+                second: Promise.reject("boom")
+            }).then(function(settled) {
+                let keys = Object.keys(settled);
+                result = [
+                    Object.getPrototypeOf(settled) === null,
+                    keys[0],
+                    keys[1],
+                    settled.first.status,
+                    settled.first.value,
+                    settled.second.status,
+                    settled.second.reason
+                ];
+            });
+            result
+        "#;
+        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[true,\"first\",\"second\",\"fulfilled\",1,\"rejected\",\"boom\"]");
+    }
+
+    #[test]
     fn test_promise_any_fulfilled() {
         let code = r#"
             let result = null;

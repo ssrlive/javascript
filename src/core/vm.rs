@@ -3462,6 +3462,182 @@ impl<'gc> VM<'gc> {
         )
     }
 
+    fn perform_promise_keyed(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        promises: &Value<'gc>,
+        settled: bool,
+    ) -> Value<'gc> {
+        let constructor = match self.promise_constructor_from_receiver(receiver) {
+            Ok(v) => v,
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                return Value::Undefined;
+            }
+        };
+        let (promise, resolve, reject) = match self.new_promise_capability(ctx, &constructor) {
+            Ok(v) => v,
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                return Value::Undefined;
+            }
+        };
+        let promise_resolve = match self.get_promise_resolve_method(ctx, &constructor) {
+            Ok(v) => v,
+            Err(err) => {
+                let reject_reason = self.vm_value_from_error(ctx, &err);
+                if let Err(reject_err) = self.call_promise_capability_function(ctx, &reject, &reject_reason) {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &reject_err));
+                    return Value::Undefined;
+                }
+                return promise;
+            }
+        };
+        if !Self::is_iterator_object_like(promises) {
+            let reject_reason = self.make_type_error_object(ctx, "Promise.allKeyed requires an object argument");
+            if let Err(reject_err) = self.call_promise_capability_function(ctx, &reject, &reject_reason) {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &reject_err));
+                return Value::Undefined;
+            }
+            return promise;
+        }
+        let invoke_resolve = self.bind_promise_resolve_invoker(ctx, &constructor, &promise_resolve);
+        const PROMISE_ALL_KEYED_HELPER: &str = r#"
+(function(invokeResolve, promises, resolve, reject) {
+        var values = [];
+        var keys = [];
+        var remaining = 1;
+        var allKeys = Reflect.ownKeys(promises);
+        function finish() {
+            var result = Object.create(null);
+            for (var i = 0; i < keys.length; i += 1) {
+                result[keys[i]] = values[i];
+            }
+            resolve(result);
+        }
+        function makeFulfilled(index) {
+            var alreadyCalled = false;
+            return function(value) {
+                if (alreadyCalled) {
+                    return;
+                }
+                alreadyCalled = true;
+                values[index] = value;
+                remaining -= 1;
+                if (remaining === 0) {
+                    finish();
+                }
+            };
+        }
+        for (var k = 0; k < allKeys.length; k += 1) {
+            var key = allKeys[k];
+            var desc = Object.getOwnPropertyDescriptor(promises, key);
+            if (desc !== undefined && desc.enumerable) {
+                var currentIndex = keys.length;
+                keys.push(key);
+                values.push(undefined);
+                remaining += 1;
+                var nextValue = promises[key];
+                var onFulfilled = makeFulfilled(currentIndex);
+                var nextPromise = invokeResolve(nextValue);
+                nextPromise.then(onFulfilled, reject);
+            }
+        }
+        remaining -= 1;
+        if (remaining === 0) {
+            finish();
+        }
+})"#;
+        const PROMISE_ALL_SETTLED_KEYED_HELPER: &str = r#"
+(function(invokeResolve, promises, resolve, reject) {
+        var values = [];
+        var keys = [];
+        var remaining = 1;
+        var allKeys = Reflect.ownKeys(promises);
+        function finish() {
+            var result = Object.create(null);
+            for (var i = 0; i < keys.length; i += 1) {
+                result[keys[i]] = values[i];
+            }
+            resolve(result);
+        }
+        function makeHandlers(index) {
+            var alreadyCalled = false;
+            return {
+                onFulfilled: function(value) {
+                    var entry;
+                    if (alreadyCalled) {
+                        return;
+                    }
+                    alreadyCalled = true;
+                    entry = {};
+                    entry.status = "fulfilled";
+                    entry.value = value;
+                    values[index] = entry;
+                    remaining -= 1;
+                    if (remaining === 0) {
+                        finish();
+                    }
+                },
+                onRejected: function(reason) {
+                    var entry;
+                    if (alreadyCalled) {
+                        return;
+                    }
+                    alreadyCalled = true;
+                    entry = {};
+                    entry.status = "rejected";
+                    entry.reason = reason;
+                    values[index] = entry;
+                    remaining -= 1;
+                    if (remaining === 0) {
+                        finish();
+                    }
+                }
+            };
+        }
+        for (var k = 0; k < allKeys.length; k += 1) {
+            var key = allKeys[k];
+            var desc = Object.getOwnPropertyDescriptor(promises, key);
+            if (desc !== undefined && desc.enumerable) {
+                var currentIndex = keys.length;
+                keys.push(key);
+                values.push(undefined);
+                remaining += 1;
+                var nextValue = promises[key];
+                var handlers = makeHandlers(currentIndex);
+                var nextPromise = invokeResolve(nextValue);
+                nextPromise.then(handlers.onFulfilled, handlers.onRejected);
+            }
+        }
+        remaining -= 1;
+        if (remaining === 0) {
+            finish();
+        }
+})"#;
+
+        match self.call_eval_function(
+            ctx,
+            if settled {
+                PROMISE_ALL_SETTLED_KEYED_HELPER
+            } else {
+                PROMISE_ALL_KEYED_HELPER
+            },
+            &[invoke_resolve, promises.clone(), resolve.clone(), reject.clone()],
+        ) {
+            Ok(_) => promise,
+            Err(err) => {
+                let reject_reason = self.vm_value_from_error(ctx, &err);
+                if let Err(reject_err) = self.call_promise_capability_function(ctx, &reject, &reject_reason) {
+                    self.pending_throw = Some(self.vm_value_from_error(ctx, &reject_err));
+                    return Value::Undefined;
+                }
+                promise
+            }
+        }
+    }
+
     fn call_promise_capability_function(&mut self, ctx: &GcContext<'gc>, func: &Value<'gc>, value: &Value<'gc>) -> Result<(), JSError> {
         let saved_try_stack = std::mem::take(&mut self.try_stack);
         let call_result = self.vm_call_function_value(ctx, func, &Value::Undefined, std::slice::from_ref(value));
@@ -13354,6 +13530,10 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            "promise.allKeyed" => {
+                let promises = args.first().cloned().unwrap_or(Value::Undefined);
+                self.perform_promise_keyed(ctx, receiver, &promises, false)
+            }
             "promise.any" => {
                 let constructor = match self.promise_constructor_from_receiver(receiver) {
                     Ok(v) => v,
@@ -13840,6 +14020,10 @@ impl<'gc> VM<'gc> {
                         promise
                     }
                 }
+            }
+            "promise.allSettledKeyed" => {
+                let promises = args.first().cloned().unwrap_or(Value::Undefined);
+                self.perform_promise_keyed(ctx, receiver, &promises, true)
             }
             "promise.finally" => {
                 let recv = receiver.unwrap_or(&Value::Undefined).clone();
@@ -18231,6 +18415,14 @@ impl<'gc> VM<'gc> {
         );
         Self::insert_property_with_attributes(
             &mut promise_map,
+            "allKeyed",
+            &Self::make_host_fn_with_name_len(ctx, "promise.allKeyed", "allKeyed", 1.0, false),
+            true,
+            false,
+            true,
+        );
+        Self::insert_property_with_attributes(
+            &mut promise_map,
             "any",
             &Self::make_host_fn_with_name_len(ctx, "promise.any", "any", 1.0, false),
             true,
@@ -18249,6 +18441,14 @@ impl<'gc> VM<'gc> {
             &mut promise_map,
             "allSettled",
             &Self::make_host_fn_with_name_len(ctx, "promise.allSettled", "allSettled", 1.0, false),
+            true,
+            false,
+            true,
+        );
+        Self::insert_property_with_attributes(
+            &mut promise_map,
+            "allSettledKeyed",
+            &Self::make_host_fn_with_name_len(ctx, "promise.allSettledKeyed", "allSettledKeyed", 1.0, false),
             true,
             false,
             true,

@@ -4,8 +4,6 @@ const path = require('path');
 const { spawnSync, spawn } = require('child_process');
 const { composeTest, extractMeta, parseList, hasFlag, referencesAssert } = require('./compose_test');
 
-const SCRIPT_START_NS = process.hrtime.bigint();
-
 const TEST262_ROOT_DIR = path.resolve(__dirname, '..', '..', 'test262');
 const RESULTS_FILE = 'test262-results.log';
 
@@ -20,13 +18,6 @@ let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
 const envKeep = process.env.TEST262_KEEP_TMP;
 // Default: delete composed temporary files (set TEST262_KEEP_TMP=1 to keep)
 let KEEP_TMP = (envKeep === undefined) ? false : (envKeep === '1' || envKeep === 'true');
-
-process.on('exit', (code) => {
-  const elapsedMs = Number((process.hrtime.bigint() - SCRIPT_START_NS) / 1000000n);
-  const elapsedLine = `Total elapsed: ${formatElapsed(elapsedMs)} (${elapsedMs} ms), exit=${code}`;
-  console.log(elapsedLine);
-  log(elapsedLine);
-});
 
 // Simple arg parsing
 const argv = process.argv.slice(2);
@@ -52,6 +43,12 @@ for (let i = 0; i < argv.length; i++) {
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
     process.exit(0);
   }
+}
+
+if (FOCUS_LIST.length === 0) {
+  console.error('ERROR: No --focus parameter provided. This runner requires at least one --focus token.');
+  console.error('Usage: node ci/runner.js [--keep-tmp] [--jobs N] [--limit N] --focus name[,name2]');
+  process.exit(1);
 }
 
 JOBS = Math.max(1, Number.isFinite(JOBS) ? Math.floor(JOBS) : 1);
@@ -157,6 +154,14 @@ if (!BIN) {
   if (fs.existsSync('target/debug/js')) BIN = path.resolve('target/debug/js');
 }
 console.log(`JS engine binary: ${BIN}`);
+
+const SCRIPT_START_NS = process.hrtime.bigint();
+process.on('exit', (code) => {
+  const elapsedMs = Number((process.hrtime.bigint() - SCRIPT_START_NS) / 1000000n);
+  const elapsedLine = `Total elapsed: ${formatElapsed(elapsedMs)} (${elapsedMs} ms), exit=${code}`;
+  console.log(elapsedLine);
+  log(elapsedLine);
+});
 
 fs.writeFileSync(RESULTS_FILE, '');
 function log(line) { fs.appendFileSync(RESULTS_FILE, line + '\n'); }

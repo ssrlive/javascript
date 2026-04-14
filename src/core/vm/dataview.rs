@@ -490,20 +490,6 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                 }
-                let offset_arg = args.first().cloned().unwrap_or(Value::Undefined);
-                let get_index = match self.dataview_to_index(ctx, &offset_arg) {
-                    Some(v) => v,
-                    None => return Value::Undefined,
-                };
-                let value_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let big_val: i128 = match self.value_to_bigint(ctx, &value_arg) {
-                    Some(bi) => {
-                        let s = bi.to_string();
-                        s.parse::<i128>().unwrap_or(0)
-                    }
-                    None => return Value::Undefined,
-                };
-                let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let b = view.borrow();
                 let byte_offset = match b.get("__dv_byteOffset__") {
                     Some(Value::Number(n)) => *n as usize,
@@ -522,6 +508,24 @@ impl<'gc> VM<'gc> {
                     }
                 };
                 drop(b);
+                if matches!(GcCell::borrow(&buffer).get("__immutable__"), Some(Value::Boolean(true))) {
+                    self.throw_type_error(ctx, "Cannot perform operation on an immutable ArrayBuffer");
+                    return Value::Undefined;
+                }
+                let offset_arg = args.first().cloned().unwrap_or(Value::Undefined);
+                let get_index = match self.dataview_to_index(ctx, &offset_arg) {
+                    Some(v) => v,
+                    None => return Value::Undefined,
+                };
+                let value_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let big_val: i128 = match self.value_to_bigint(ctx, &value_arg) {
+                    Some(bi) => {
+                        let s = bi.to_string();
+                        s.parse::<i128>().unwrap_or(0)
+                    }
+                    None => return Value::Undefined,
+                };
+                let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 if matches!(GcCell::borrow(&buffer).get("__detached__"), Some(Value::Boolean(true))) {
                     self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
                     return Value::Undefined;

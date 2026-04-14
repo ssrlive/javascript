@@ -3915,6 +3915,45 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn native_function_uses_method_receiver(id: FunctionID) -> bool {
+        matches!(
+            id,
+            BUILTIN_ARRAY_POP
+                | BUILTIN_ARRAY_JOIN
+                | BUILTIN_ARRAY_INDEXOF
+                | BUILTIN_ARRAY_SLICE
+                | BUILTIN_ARRAY_CONCAT
+                | BUILTIN_ARRAY_MAP
+                | BUILTIN_ARRAY_FILTER
+                | BUILTIN_ARRAY_FOREACH
+                | BUILTIN_ARRAY_REDUCE
+                | BUILTIN_ARRAY_ITERATOR
+                | BUILTIN_ARRAY_PUSH
+                | BUILTIN_ARRAY_SHIFT
+                | BUILTIN_ARRAY_UNSHIFT
+                | BUILTIN_ARRAY_SPLICE
+                | BUILTIN_ARRAY_REVERSE
+                | BUILTIN_ARRAY_SORT
+                | BUILTIN_ARRAY_FIND
+                | BUILTIN_ARRAY_FINDINDEX
+                | BUILTIN_ARRAY_INCLUDES
+                | BUILTIN_ARRAY_FLAT
+                | BUILTIN_ARRAY_FLATMAP
+                | BUILTIN_ARRAY_AT
+                | BUILTIN_ARRAY_EVERY
+                | BUILTIN_ARRAY_SOME
+                | BUILTIN_ARRAY_FILL
+                | BUILTIN_ARRAY_LASTINDEXOF
+                | BUILTIN_ARRAY_FINDLAST
+                | BUILTIN_ARRAY_FINDLASTINDEX
+                | BUILTIN_ARRAY_REDUCERIGHT
+                | BUILTIN_ARRAY_TOREVERSED
+                | BUILTIN_ARRAY_TOSORTED
+                | BUILTIN_ARRAY_TOSPLICED
+                | BUILTIN_ARRAY_WITH
+        )
+    }
+
     fn finalize_ctor_with_prototype(
         ctx: &GcContext<'gc>,
         ctor_map: IndexMap<String, Value<'gc>>,
@@ -8714,11 +8753,14 @@ impl<'gc> VM<'gc> {
 
                 // Step 1: If iterables is not an Object, throw TypeError (before reading options)
                 if !Self::is_iterator_object_like(&iterables_arg) {
-                    self.throw_type_error(ctx, if is_keyed {
-                        "Iterator.zipKeyed requires an object argument"
-                    } else {
-                        "Iterator.zip requires an iterable argument"
-                    });
+                    self.throw_type_error(
+                        ctx,
+                        if is_keyed {
+                            "Iterator.zipKeyed requires an object argument"
+                        } else {
+                            "Iterator.zip requires an iterable argument"
+                        },
+                    );
                     return Value::Undefined;
                 }
 
@@ -8738,7 +8780,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         let m = self.read_named_property(ctx, &options, "mode");
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         m
                     };
 
@@ -8758,7 +8802,9 @@ impl<'gc> VM<'gc> {
 
                     let padding = if mode == "longest" && !matches!(options, Value::Undefined) {
                         let p = self.read_named_property(ctx, &options, "padding");
-                        if self.pending_throw.is_some() { return Value::Undefined; }
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
                         p
                     } else {
                         Value::Undefined
@@ -8787,7 +8833,9 @@ impl<'gc> VM<'gc> {
                     }
                     // Get own keys via Reflect.ownKeys logic
                     let all_keys_val = self.call_host_fn(ctx, "reflect.ownKeys", None, std::slice::from_ref(&iterables_arg));
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     let all_keys = if let Value::VmArray(arr) = &all_keys_val {
                         arr.borrow().elements.clone()
                     } else {
@@ -8807,7 +8855,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         if let Some((enumerable, _)) = desc {
-                            if !enumerable { continue; }
+                            if !enumerable {
+                                continue;
+                            }
                         } else {
                             continue;
                         }
@@ -8818,7 +8868,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         // Skip undefined values (per spec step 11.b.iv.2.b)
-                        if matches!(value, Value::Undefined) { continue; }
+                        if matches!(value, Value::Undefined) {
+                            continue;
+                        }
                         // GetIteratorFlattenable(value, reject-strings)
                         let (iter, next) = match self.get_iterator_flattenable(ctx, &value, false) {
                             Some(pair) => pair,
@@ -8834,21 +8886,28 @@ impl<'gc> VM<'gc> {
                 } else {
                     // zip: iterables is an iterable, iterate over it
                     let iter_fn = self.read_named_property(ctx, &iterables_arg, "@@sym:1");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
                     if matches!(iter_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&iter_fn) {
                         self.throw_type_error(ctx, "Iterator.zip requires an iterable argument");
                         return Value::Undefined;
                     }
                     let input_iterator = match self.vm_call_function_value(ctx, &iter_fn, &iterables_arg, &[]) {
                         Ok(v) => v,
-                        Err(err) => { self.set_pending_throw_from_error(&err); return Value::Undefined; }
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
                     };
                     if !Self::is_iterator_object_like(&input_iterator) {
                         self.throw_type_error(ctx, "Iterator.zip requires an iterable argument");
                         return Value::Undefined;
                     }
                     let input_next = self.read_named_property(ctx, &input_iterator, "next");
-                    if self.pending_throw.is_some() { return Value::Undefined; }
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
 
                     loop {
                         match self.iterator_step_value(ctx, &input_iterator, &input_next) {
@@ -8974,7 +9033,10 @@ impl<'gc> VM<'gc> {
 
                 // 4. Build the helper object
                 let mut obj = IndexMap::new();
-                obj.insert("__helper_kind__".to_string(), Value::from(if is_keyed { "zipKeyed" } else { "zip" }));
+                obj.insert(
+                    "__helper_kind__".to_string(),
+                    Value::from(if is_keyed { "zipKeyed" } else { "zip" }),
+                );
                 obj.insert("__helper_done__".to_string(), Value::Boolean(false));
                 obj.insert("__helper_executing__".to_string(), Value::Boolean(false));
                 obj.insert("__zip_mode__".to_string(), Value::from(mode_str.as_str()));
@@ -10624,6 +10686,50 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
                     return define_result;
+                }
+
+                // Same-receiver path: implement OrdinarySet checks before
+                // calling assign_named_property, which may throw instead of
+                // returning Err for non-writable/non-extensible cases.
+                let own_desc = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[target.clone(), Value::from(key.as_str())]);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if let Value::VmObject(ref d) = own_desc {
+                    let borrow = d.borrow();
+                    let is_accessor = borrow.contains_key("get") || borrow.contains_key("set");
+                    if is_accessor {
+                        // Accessor property: call setter if present
+                        let setter = borrow.get("set").cloned();
+                        drop(borrow);
+                        if let Some(setter_fn) = setter {
+                            if matches!(setter_fn, Value::Undefined) {
+                                return Value::Boolean(false);
+                            }
+                            let saved = std::mem::take(&mut self.try_stack);
+                            let out = self.vm_call_function_value(ctx, &setter_fn, &target, std::slice::from_ref(&value));
+                            self.try_stack = saved;
+                            if let Err(err) = out {
+                                self.set_pending_throw_from_error(&err);
+                                return Value::Undefined;
+                            }
+                            return Value::Boolean(true);
+                        }
+                        return Value::Boolean(false);
+                    }
+                    // Data property with writable: false → return false
+                    if matches!(borrow.get("writable"), Some(Value::Boolean(false))) {
+                        return Value::Boolean(false);
+                    }
+                } else if matches!(own_desc, Value::Undefined) {
+                    // No own property — check extensibility
+                    let extensible = self.call_host_fn(ctx, "reflect.isExtensible", None, std::slice::from_ref(&target));
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if matches!(extensible, Value::Boolean(false)) {
+                        return Value::Boolean(false);
+                    }
                 }
 
                 match self.assign_named_property(ctx, &target, &key, &value, Some(&receiver)) {
@@ -15254,6 +15360,8 @@ impl<'gc> VM<'gc> {
                 if (is_non_ext && !key_exists) || is_readonly || accessor_without_setter {
                     let msg = if accessor_without_setter {
                         format!("Cannot set property {} of object which has only a getter", key)
+                    } else if is_readonly {
+                        format!("Cannot assign to read only property '{}'", key)
                     } else {
                         format!("Cannot add property {}, object is not extensible", key)
                     };
@@ -16633,17 +16741,10 @@ impl<'gc> VM<'gc> {
                     // TypedArray: use canonical numeric index for element access.
                     // Non-canonical strings ("+1", "1.0") are ordinary string properties.
                     if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
-                        if numeric_index >= 0.0
-                            && numeric_index.fract() == 0.0
-                            && !numeric_index.is_nan()
-                            && numeric_index != f64::INFINITY
-                            && numeric_index != f64::NEG_INFINITY
-                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
-                        {
+                        drop(borrow);
+                        if Self::is_valid_integer_index(arr, numeric_index) {
                             let idx = numeric_index as usize;
-                            if idx < borrow.elements.len() {
-                                return borrow.elements[idx].clone();
-                            }
+                            return arr.borrow().elements[idx].clone();
                         }
                         // Canonical numeric index but invalid → return undefined per spec
                         return Value::Undefined;
@@ -21772,7 +21873,7 @@ impl<'gc> VM<'gc> {
                             r
                         }
                         Value::VmNativeFunction(id) => {
-                            if matches!(this_val, Value::Undefined | Value::Null) {
+                            if matches!(this_val, Value::Undefined | Value::Null) && !VM::<'gc>::native_function_uses_method_receiver(id) {
                                 vm.call_builtin(ctx, id, &arg_vals)
                             } else {
                                 vm.call_method_builtin(ctx, id, &this_val, &arg_vals)
@@ -24058,6 +24159,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            BUILTIN_ARRAY_CONCAT => self.call_method_builtin(ctx, id, &Value::Undefined, args),
             BUILTIN_ARRAY_PUSH => Value::Undefined,
             BUILTIN_ARRAY_ISARRAY => match args.first() {
                 Some(Value::VmArray(arr)) => Value::Boolean(!arr.borrow().props.contains_key("__typedarray_name__")),
@@ -27496,6 +27598,17 @@ impl<'gc> VM<'gc> {
                                                     );
                                                     return Value::Undefined;
                                                 }
+                                                let result_writable_false =
+                                                    matches!(desc.get("writable"), Some(Value::Boolean(false)));
+                                                let target_writable_true =
+                                                    matches!(desc_borrow.get("writable"), Some(Value::Boolean(true)));
+                                                if result_writable_false && target_writable_true {
+                                                    self.throw_type_error(
+                                                        ctx,
+                                                        "'getOwnPropertyDescriptor' on proxy: trap reported a non-configurable, non-writable descriptor for a writable target property",
+                                                    );
+                                                    return Value::Undefined;
+                                                }
                                             }
                                             Value::Undefined => {
                                                 self.throw_type_error(
@@ -27621,19 +27734,13 @@ impl<'gc> VM<'gc> {
                             // whether the key is an element index or an ordinary property.
                             if is_ta {
                                 if let Some(numeric_index) = Self::canonical_numeric_index_string(&key) {
-                                    // It IS a canonical numeric index — only return element if valid index
-                                    let idx = numeric_index as usize;
-                                    if numeric_index >= 0.0
-                                        && numeric_index.fract() == 0.0
-                                        && !numeric_index.is_nan()
-                                        && numeric_index != f64::INFINITY
-                                        && numeric_index != f64::NEG_INFINITY
-                                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
-                                        && idx < borrow.elements.len()
-                                    {
-                                        self.make_data_descriptor_object(ctx, &borrow.elements[idx], true, true, true)
+                                    // TypedArray [[GetOwnProperty]] §10.4.5.1 — use IsValidIntegerIndex
+                                    drop(borrow);
+                                    if Self::is_valid_integer_index(arr, numeric_index) {
+                                        let idx = numeric_index as usize;
+                                        let val = arr.borrow().elements[idx].clone();
+                                        self.make_data_descriptor_object(ctx, &val, true, true, true)
                                     } else {
-                                        // Invalid canonical numeric index — return undefined per spec
                                         Value::Undefined
                                     }
                                 } else {
@@ -29554,6 +29661,9 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Cannot convert undefined or null to object");
                     return Value::Undefined;
                 }
+                Value::VmObject(_) if receiver.is_symbol_value() => {
+                    self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver))
+                }
                 Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
                     receiver.clone()
                 }
@@ -29829,6 +29939,9 @@ impl<'gc> VM<'gc> {
             // Sync elements after coercion (valueOf may have resized the buffer)
             if is_typed_array && let Value::VmArray(arr) = &target {
                 self.maybe_sync_resizable_ta(ctx, arr);
+                if Self::is_typed_array_buffer_detached(arr) {
+                    return Value::Number(-1.0);
+                }
             }
 
             if n.is_infinite() && n.is_sign_positive() {
@@ -29846,6 +29959,9 @@ impl<'gc> VM<'gc> {
                 let key = k.to_string();
                 let present = match &target {
                     Value::VmArray(arr) => {
+                        if is_typed_array {
+                            Self::is_valid_integer_index(arr, k as f64)
+                        } else {
                         let b = arr.borrow();
                         let dense_present = if k < b.elements.len() {
                             !b.props.contains_key(&format!("__deleted_{}", k))
@@ -29863,6 +29979,7 @@ impl<'gc> VM<'gc> {
                             drop(b);
                             self.lookup_proto_chain(proto.as_ref(), &key).is_some()
                                 || self.has_accessor_in_proto_chain(proto.as_ref(), &key)
+                        }
                         }
                     }
                     Value::VmObject(_) => match self.try_proxy_has(ctx, &target, &key) {
@@ -29925,6 +30042,9 @@ impl<'gc> VM<'gc> {
             // Sync elements after coercion (valueOf may have resized the buffer)
             if is_typed_array && let Value::VmArray(arr) = &target {
                 self.maybe_sync_resizable_ta(ctx, arr);
+                if Self::is_typed_array_buffer_detached(arr) {
+                    return Value::Number(-1.0);
+                }
             }
 
             let mut k: i128 = if n.is_infinite() {
@@ -31313,8 +31433,23 @@ impl<'gc> VM<'gc> {
                     }
                 };
                 if spreadable {
-                    let Some(len_u64) = self.array_like_length_u64(ctx, &item) else {
+                    // Concat spec uses Get(item, "length") which reads overridden
+                    // length (unlike TypedArray builtins which use internal length).
+                    let len_val = self.read_named_property(ctx, &item, "length");
+                    if self.pending_throw.is_some() {
                         return Value::Undefined;
+                    }
+                    let len_u64 = {
+                        let Some(n_f) = self.extract_number_with_coercion(ctx, &len_val) else {
+                            return Value::Undefined;
+                        };
+                        if n_f.is_nan() || n_f <= 0.0 {
+                            0u64
+                        } else if !n_f.is_finite() {
+                            max_len
+                        } else {
+                            n_f.floor().min(max_len as f64) as u64
+                        }
                     };
                     if n.saturating_add(len_u64) > max_len {
                         self.throw_type_error(ctx, "Invalid array length");
@@ -32047,16 +32182,41 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_INDEXOF => {
                     let needle = args.first().cloned().unwrap_or(Value::Undefined);
-                    let from_index = match args.get(1) {
-                        Some(Value::Number(n)) => {
-                            let i = *n as i64;
-                            let len = arr.borrow().elements.len() as i64;
-                            if i < 0 { (len + i).max(0) as usize } else { i as usize }
-                        }
-                        _ => 0,
+                    let is_typed_array = arr.borrow().props.contains_key("__typedarray_name__");
+                    let len = arr.borrow().elements.len() as i64;
+                    let n = match args.get(1) {
+                        None | Some(Value::Undefined) => 0.0,
+                        Some(v) => match self.extract_number_with_coercion(ctx, v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
                     };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if n.is_infinite() && n.is_sign_positive() {
+                        return Value::Number(-1.0);
+                    }
+                    let n = if n.is_nan() {
+                        0.0
+                    } else if n.is_infinite() && n.is_sign_negative() {
+                        f64::NEG_INFINITY
+                    } else {
+                        n.trunc()
+                    };
+                    let from_index = if n.is_infinite() && n.is_sign_negative() {
+                        0usize
+                    } else if n < 0.0 {
+                        (len + n as i64).max(0) as usize
+                    } else {
+                        (n as i64).min(len) as usize
+                    };
+                    if is_typed_array && Self::is_typed_array_buffer_detached(arr) {
+                        return Value::Number(-1.0);
+                    }
+                    self.maybe_sync_resizable_ta(ctx, arr);
                     let a = arr.borrow();
-                    for (i, v) in a.iter().enumerate().skip(from_index) {
+                    for (i, v) in a.iter().enumerate().take(len.max(0) as usize).skip(from_index) {
                         if self.values_equal(v, &needle) {
                             return Value::Number(i as f64);
                         }
@@ -32130,10 +32290,21 @@ impl<'gc> VM<'gc> {
                         };
 
                         if spreadable {
-                            if let Value::VmArray(other) = arg {
-                                result_vec.extend(other.borrow().iter().cloned());
+                            let use_fast_path = if let Value::VmArray(other) = arg {
+                                let b = other.borrow();
+                                !b.props.contains_key("__typedarray_name__")
+                                    && !b.props.contains_key("@@sym:15")
+                                    && !has_getter(&b.props, "@@sym:15")
                             } else {
-                                // Generic array-like spreadable object
+                                false
+                            };
+                            if use_fast_path {
+                                if let Value::VmArray(other) = arg {
+                                    result_vec.extend(other.borrow().iter().cloned());
+                                }
+                            } else {
+                                // Spec: read "length", then for each index k,
+                                // check HasProperty(k) before Get(k) — missing → hole.
                                 let len = self.read_named_property(ctx, arg, "length");
                                 if self.pending_throw.is_some() {
                                     return Value::Undefined;
@@ -32142,12 +32313,22 @@ impl<'gc> VM<'gc> {
                                     Value::Number(n) => *n as usize,
                                     _ => 0,
                                 };
+                                let base = result_vec.len();
+                                result_vec.resize(base + len_u, Value::Undefined);
                                 for i in 0..len_u {
-                                    let val = self.read_named_property(ctx, arg, &i.to_string());
+                                    let key_s = i.to_string();
+                                    let has = self.has_property_in_chain(ctx, arg, &key_s);
                                     if self.pending_throw.is_some() {
                                         return Value::Undefined;
                                     }
-                                    result_vec.push(val);
+                                    if has {
+                                        let val = self.read_named_property(ctx, arg, &key_s);
+                                        if self.pending_throw.is_some() {
+                                            return Value::Undefined;
+                                        }
+                                        result_vec[base + i] = val;
+                                    }
+                                    // else: leave as Value::Undefined (hole)
                                 }
                             }
                         } else if let Value::VmObject(obj) = arg {
@@ -32863,8 +33044,41 @@ impl<'gc> VM<'gc> {
                 }
                 BUILTIN_ARRAY_INCLUDES => {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
+                    let is_typed_array = arr.borrow().props.contains_key("__typedarray_name__");
+                    let len = arr.borrow().elements.len() as i64;
+                    let n = match args.get(1) {
+                        None | Some(Value::Undefined) => 0.0,
+                        Some(v) => match self.extract_number_with_coercion(ctx, v) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if n.is_infinite() && n.is_sign_positive() {
+                        return Value::Boolean(false);
+                    }
+                    let n = if n.is_nan() {
+                        0.0
+                    } else if n.is_infinite() && n.is_sign_negative() {
+                        f64::NEG_INFINITY
+                    } else {
+                        n.trunc()
+                    };
+                    let from_index = if n.is_infinite() && n.is_sign_negative() {
+                        0usize
+                    } else if n < 0.0 {
+                        (len + n as i64).max(0) as usize
+                    } else {
+                        (n as i64).min(len) as usize
+                    };
+                    if is_typed_array && Self::is_typed_array_buffer_detached(arr) {
+                        return Value::Boolean(matches!(target, Value::Undefined) && from_index < len.max(0) as usize);
+                    }
+                    self.maybe_sync_resizable_ta(ctx, arr);
                     let elements = arr.borrow().elements.clone();
-                    for elem in &elements {
+                    for elem in elements.iter().take(len.max(0) as usize).skip(from_index) {
                         if self.strict_equal(elem, &target) {
                             return Value::Boolean(true);
                         }
@@ -33057,19 +33271,24 @@ impl<'gc> VM<'gc> {
                 BUILTIN_ARRAY_LASTINDEXOF => {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
                     let receiver_value = Value::VmArray(*arr);
-                    let present_indices = {
-                        let borrow = arr.borrow();
-                        self.vm_array_present_indices(&borrow)
-                    };
+                    let is_typed_array = arr.borrow().props.contains_key("__typedarray_name__");
                     let logical_len = {
-                        let borrow = arr.borrow();
-                        self.vm_array_logical_length_u64(&borrow) as i64
+                        self.maybe_sync_resizable_ta(ctx, arr);
+                        arr.borrow().elements.len() as i64
                     };
-                    let start_from = args
-                        .get(1)
-                        .map(|v| match v {
-                            Value::Number(n) => {
-                                let s = *n as i64;
+                    let start_from = match args.get(1) {
+                        None | Some(Value::Undefined) => logical_len - 1,
+                        Some(v) => {
+                            let Some(n) = self.extract_number_with_coercion(ctx, v) else {
+                                return Value::Undefined;
+                            };
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            if n.is_infinite() && n.is_sign_negative() {
+                                logical_len - 1
+                            } else {
+                                let s = if n.is_nan() { 0.0 } else { n.trunc() } as i64;
                                 if logical_len <= 0 {
                                     -1
                                 } else if s < 0 {
@@ -33078,9 +33297,15 @@ impl<'gc> VM<'gc> {
                                     s.min(logical_len - 1)
                                 }
                             }
-                            _ => logical_len - 1,
-                        })
-                        .unwrap_or(logical_len - 1);
+                        }
+                    };
+                    if is_typed_array && Self::is_typed_array_buffer_detached(arr) {
+                        return Value::Number(-1.0);
+                    }
+                    let present_indices = {
+                        let borrow = arr.borrow();
+                        self.vm_array_present_indices(&borrow)
+                    };
                     if start_from < 0 {
                         return Value::Number(-1.0);
                     }
@@ -36523,7 +36748,12 @@ impl<'gc> VM<'gc> {
 
     /// GetIteratorFlattenable(obj, reject-strings / iterate-string-primitives)
     /// Returns (iterator, next_method) or None on error.
-    fn get_iterator_flattenable(&mut self, ctx: &GcContext<'gc>, obj: &Value<'gc>, allow_strings: bool) -> Option<(Value<'gc>, Value<'gc>)> {
+    fn get_iterator_flattenable(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        obj: &Value<'gc>,
+        allow_strings: bool,
+    ) -> Option<(Value<'gc>, Value<'gc>)> {
         if !Self::is_iterator_object_like(obj) {
             if !allow_strings {
                 self.throw_type_error(ctx, "Iterator.zip requires object arguments");
@@ -36535,7 +36765,9 @@ impl<'gc> VM<'gc> {
             }
         }
         let iter_fn = self.read_named_property(ctx, obj, "@@sym:1");
-        if self.pending_throw.is_some() { return None; }
+        if self.pending_throw.is_some() {
+            return None;
+        }
 
         if matches!(iter_fn, Value::Undefined | Value::Null) {
             // No [Symbol.iterator] — use obj itself as an iterator (must be object)
@@ -36544,7 +36776,9 @@ impl<'gc> VM<'gc> {
                 return None;
             }
             let next = self.read_named_property(ctx, obj, "next");
-            if self.pending_throw.is_some() { return None; }
+            if self.pending_throw.is_some() {
+                return None;
+            }
             Some((obj.clone(), next))
         } else {
             if !self.is_value_callable(&iter_fn) {
@@ -36553,14 +36787,19 @@ impl<'gc> VM<'gc> {
             }
             let iterator = match self.vm_call_function_value(ctx, &iter_fn, obj, &[]) {
                 Ok(v) => v,
-                Err(err) => { self.set_pending_throw_from_error(&err); return None; }
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    return None;
+                }
             };
             if !Self::is_iterator_object_like(&iterator) {
                 self.throw_type_error(ctx, "iterator must be an object");
                 return None;
             }
             let next = self.read_named_property(ctx, &iterator, "next");
-            if self.pending_throw.is_some() { return None; }
+            if self.pending_throw.is_some() {
+                return None;
+            }
             Some((iterator, next))
         }
     }
@@ -36569,17 +36808,14 @@ impl<'gc> VM<'gc> {
     /// `iters_with_done` contains (iterator, is_done) pairs.
     /// `initial_is_throw`: true if the initial completion is a throw (error already in pending_throw).
     /// After return, any error is in pending_throw; no error means normal completion.
-    fn iterator_close_all(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        iters_with_done: &[(Value<'gc>, bool)],
-        initial_is_throw: bool,
-    ) {
+    fn iterator_close_all(&mut self, ctx: &GcContext<'gc>, iters_with_done: &[(Value<'gc>, bool)], initial_is_throw: bool) {
         let mut completion_is_throw = initial_is_throw;
         let mut saved_error = if initial_is_throw { self.pending_throw.take() } else { None };
 
         for (iter, is_done) in iters_with_done.iter().rev() {
-            if *is_done { continue; }
+            if *is_done {
+                continue;
+            }
             let _ = self.pending_throw.take();
             let return_method = self.read_named_property(ctx, iter, "return");
             let getmethod_err = self.pending_throw.take();
@@ -36626,11 +36862,13 @@ impl<'gc> VM<'gc> {
         count: usize,
         initial_is_throw: bool,
     ) {
-        let pairs: Vec<(Value<'gc>, bool)> = (0..count).map(|i| {
-            let iter = iters_gc.borrow().get(i).cloned().unwrap_or(Value::Undefined);
-            let is_done = matches!(flags_gc.borrow().get(i), Some(Value::Boolean(true)));
-            (iter, is_done)
-        }).collect();
+        let pairs: Vec<(Value<'gc>, bool)> = (0..count)
+            .map(|i| {
+                let iter = iters_gc.borrow().get(i).cloned().unwrap_or(Value::Undefined);
+                let is_done = matches!(flags_gc.borrow().get(i), Some(Value::Boolean(true)));
+                (iter, is_done)
+            })
+            .collect();
         self.iterator_close_all(ctx, &pairs, initial_is_throw);
     }
 
@@ -36674,12 +36912,10 @@ impl<'gc> VM<'gc> {
                 if let Some(key) = keys.get(i) {
                     let key_str = match key {
                         Value::String(s) => crate::unicode::utf16_to_utf8(s),
-                        Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => {
-                            match sym.borrow().get("__symbol_id__") {
-                                Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
-                                _ => continue,
-                            }
-                        }
+                        Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => match sym.borrow().get("__symbol_id__") {
+                            Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
+                            _ => continue,
+                        },
                         Value::Number(n) => {
                             if *n == (*n as u32) as f64 && *n >= 0.0 {
                                 format!("{}", *n as u32)
@@ -36702,10 +36938,16 @@ impl<'gc> VM<'gc> {
         // accessor properties, proxies, and all edge cases
         let key_val = Value::from(key);
         let desc_result = self.call_host_fn(ctx, "reflect.getOwnPropertyDescriptor", None, &[obj.clone(), key_val]);
-        if self.pending_throw.is_some() { return None; }
-        if matches!(desc_result, Value::Undefined) { return None; }
+        if self.pending_throw.is_some() {
+            return None;
+        }
+        if matches!(desc_result, Value::Undefined) {
+            return None;
+        }
         let enumerable = self.read_named_property(ctx, &desc_result, "enumerable");
-        if self.pending_throw.is_some() { return None; }
+        if self.pending_throw.is_some() {
+            return None;
+        }
         Some((Self::value_is_truthy(&enumerable), true))
     }
 
@@ -36713,15 +36955,13 @@ impl<'gc> VM<'gc> {
     fn value_to_property_key(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
         match val {
             Value::String(s) => crate::unicode::utf16_to_utf8(s),
-            Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => {
-                match sym.borrow().get("__symbol_id__") {
-                    Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
-                    _ => {
-                        let s = self.vm_to_string(ctx, val);
-                        s
-                    }
+            Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => match sym.borrow().get("__symbol_id__") {
+                Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
+                _ => {
+                    let s = self.vm_to_string(ctx, val);
+                    s
                 }
-            }
+            },
             Value::Number(n) => {
                 if *n == (*n as u32) as f64 && *n >= 0.0 {
                     format!("{}", *n as u32)
@@ -37099,7 +37339,8 @@ impl<'gc> VM<'gc> {
                     )
                 };
                 let (Value::VmArray(iters_gc), Value::VmArray(nexts_gc), Value::VmArray(flags_gc)) =
-                    (&iterators_arr, &nexts_arr, &done_flags_arr) else {
+                    (&iterators_arr, &nexts_arr, &done_flags_arr)
+                else {
                     obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
                     return self.create_iterator_result_object(ctx, Value::Undefined, true);
                 };
@@ -37194,7 +37435,9 @@ impl<'gc> VM<'gc> {
                                     // IteratorCloseAll(openIters, ReturnCompletion(undefined))
                                     obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
                                     self.iterator_close_all_from_gc(ctx, iters_gc, flags_gc, iter_count, false);
-                                    if self.pending_throw.is_some() { return Value::Undefined; }
+                                    if self.pending_throw.is_some() {
+                                        return Value::Undefined;
+                                    }
                                     return self.create_iterator_result_object(ctx, Value::Undefined, true);
                                 }
                                 "strict" => {
@@ -37265,7 +37508,7 @@ impl<'gc> VM<'gc> {
                     Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
                 };
                 return self.create_iterator_result_object(ctx, result, false);
-            },
+            }
             _ => {
                 self.throw_type_error(ctx, "Unknown iterator helper kind");
                 Value::Undefined
@@ -38672,6 +38915,18 @@ impl<'gc> VM<'gc> {
                     depth += 1;
                     match cur {
                         Value::VmObject(m) => {
+                            // If this object is a Proxy, delegate to try_proxy_has
+                            // which invokes the proxy's `has` trap if present.
+                            if m.borrow().contains_key("__proxy_target__") {
+                                match self.try_proxy_has(ctx, &Value::VmObject(m), key) {
+                                    Ok(Some(result)) => return result,
+                                    Ok(None) => { /* no proxy trap, fall through */ }
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return false;
+                                    }
+                                }
+                            }
                             if m.borrow().contains_key("__module_namespace__") {
                                 if !Self::namespace_is_symbol_like_key(&m, key)
                                     && let Err(err) = self.ensure_deferred_namespace_evaluation(ctx, &m)
@@ -38727,6 +38982,7 @@ impl<'gc> VM<'gc> {
                             current = next;
                         }
                         Value::VmArray(arr) => {
+                            self.maybe_sync_resizable_ta(ctx, &arr);
                             let b = arr.borrow();
                             let is_typed_array = b.props.contains_key("__typedarray_name__");
                             if key == "length" {
@@ -38735,20 +38991,9 @@ impl<'gc> VM<'gc> {
                             // TypedArray: use canonical numeric index string
                             if is_typed_array {
                                 if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
-                                    // Valid integer index within bounds → true; otherwise → false
-                                    if numeric_index >= 0.0
-                                        && numeric_index.fract() == 0.0
-                                        && !numeric_index.is_nan()
-                                        && numeric_index != f64::INFINITY
-                                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
-                                    {
-                                        let idx = numeric_index as usize;
-                                        // Must sync resizable TA to get current length
-                                        drop(b);
-                                        self.maybe_sync_resizable_ta(ctx, &arr);
-                                        return idx < arr.borrow().elements.len();
-                                    }
-                                    return false;
+                                    drop(b);
+                                    // TypedArray [[HasProperty]] — use IsValidIntegerIndex
+                                    return Self::is_valid_integer_index(&arr, numeric_index);
                                 }
                             } else if let Ok(idx) = key.parse::<usize>()
                                 && idx < b.len()
@@ -38773,23 +39018,15 @@ impl<'gc> VM<'gc> {
                 if key == "length" {
                     return true;
                 }
+                self.maybe_sync_resizable_ta(ctx, arr);
                 let b = arr.borrow();
                 let is_typed_array = b.props.contains_key("__typedarray_name__");
                 // TypedArray: use canonical numeric index string
                 if is_typed_array {
                     if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
-                        if numeric_index >= 0.0
-                            && numeric_index.fract() == 0.0
-                            && !numeric_index.is_nan()
-                            && numeric_index != f64::INFINITY
-                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
-                        {
-                            let idx = numeric_index as usize;
-                            drop(b);
-                            self.maybe_sync_resizable_ta(ctx, arr);
-                            return idx < arr.borrow().elements.len();
-                        }
-                        return false;
+                        drop(b);
+                        // TypedArray [[HasProperty]] — use IsValidIntegerIndex
+                        return Self::is_valid_integer_index(arr, numeric_index);
                     }
                 } else if let Ok(idx) = key.parse::<usize>()
                     && idx < b.len()
@@ -38805,6 +39042,17 @@ impl<'gc> VM<'gc> {
                 } else {
                     let proto = b.props.get("__proto__").cloned();
                     drop(b);
+                    // Check if proto is a Proxy — invoke its `has` trap
+                    if let Some(ref proto_val) = proto {
+                        match self.try_proxy_has(ctx, proto_val, key) {
+                            Ok(Some(result)) => return result,
+                            Ok(None) => {}
+                            Err(err) => {
+                                self.set_pending_throw_from_error(&err);
+                                return false;
+                            }
+                        }
+                    }
                     self.lookup_proto_chain(proto.as_ref(), key).is_some() || self.has_accessor_in_proto_chain(proto.as_ref(), key)
                 }
             }
@@ -39303,29 +39551,20 @@ impl<'gc> VM<'gc> {
                 // Check if key is a canonical numeric index string
                 if let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
                     drop(b);
-                    // Sync resizable TA elements before bounds check
+                    // TypedArray [[DefineOwnProperty]] §10.4.5.3 observes the
+                    // post-coercion view length for resizable buffers.
                     self.maybe_sync_resizable_ta(ctx, arr);
-                    let arr_len = arr.borrow().elements.len();
-                    // Must be a non-negative integer within bounds
-                    if numeric_index.is_nan()
-                        || numeric_index < 0.0
-                        || numeric_index.fract() != 0.0
-                        || numeric_index == f64::INFINITY
-                        || numeric_index == f64::NEG_INFINITY
-                        || (numeric_index == 0.0 && numeric_index.is_sign_negative())
-                    {
-                        return false;
-                    }
-                    let idx = numeric_index as usize;
-                    if idx >= arr_len {
+                    // Use IsValidIntegerIndex (includes detached/OOB checks).
+                    if !Self::is_valid_integer_index(arr, numeric_index) {
                         return false;
                     }
                     // Accessor descriptor → false
                     if is_accessor {
                         return false;
                     }
-                    // configurable: false → false
-                    if matches!(desc.get("configurable"), Some(Value::Boolean(false))) {
+                    // TypedArray element descriptors are fixed as
+                    // { [[Configurable]]: false, [[Enumerable]]: true, [[Writable]]: true }.
+                    if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
                         return false;
                     }
                     // enumerable: false → false
@@ -42560,6 +42799,12 @@ impl<'gc> VM<'gc> {
             Value::VmArray(arr) => {
                 self.maybe_sync_resizable_ta(ctx, arr);
                 let b = arr.borrow();
+                if b.props.contains_key("__typedarray_name__")
+                    && let Some(numeric_index) = Self::canonical_numeric_index_string(key)
+                {
+                    drop(b);
+                    return Ok(Self::is_valid_integer_index(arr, numeric_index));
+                }
                 let logical_len = self.vm_array_logical_length_u64(&b) as usize;
                 let dense_present = if index < logical_len && index < b.elements.len() {
                     !b.props.contains_key(&format!("__deleted_{}", index))

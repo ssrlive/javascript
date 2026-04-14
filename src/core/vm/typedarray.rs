@@ -222,6 +222,41 @@ pub(crate) fn coerce_typed_array_value(n: f64, ta_name: &str) -> f64 {
 }
 
 impl<'gc> VM<'gc> {
+    /// Check whether a TypedArray's underlying ArrayBuffer is detached.
+    /// `arr` must be a VmArrayHandle that has `__typedarray_name__` in props.
+    pub(crate) fn is_typed_array_buffer_detached(arr: &VmArrayHandle<'gc>) -> bool {
+        let b = arr.borrow();
+        if let Some(Value::VmObject(buf)) = b.props.get("__typedarray_buffer__") {
+            matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
+        } else if let Some(Value::VmObject(buf)) = b.props.get("buffer") {
+            matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
+        } else {
+            false
+        }
+    }
+
+    /// Spec `IsValidIntegerIndex(O, index)`.
+    /// Returns true if `numeric_index` is a valid integer index for the typed array.
+    pub(crate) fn is_valid_integer_index(arr: &VmArrayHandle<'gc>, numeric_index: f64) -> bool {
+        if Self::is_typed_array_buffer_detached(arr) {
+            return false;
+        }
+        if numeric_index.is_nan() || numeric_index.is_infinite() {
+            return false;
+        }
+        if numeric_index.fract() != 0.0 {
+            return false;
+        }
+        if numeric_index == 0.0 && numeric_index.is_sign_negative() {
+            return false;
+        }
+        if numeric_index < 0.0 {
+            return false;
+        }
+        let idx = numeric_index as usize;
+        idx < arr.borrow().elements.len()
+    }
+
     pub(super) fn typedarray_handle_host_fn(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -1813,15 +1848,14 @@ impl<'gc> VM<'gc> {
                     };
                     let res_buf = res_arr.borrow().props.get("__typedarray_buffer__").cloned();
 
-                    // Check if same buffer and same element type
                     let same_buffer = match (&src_buf, &res_buf) {
                         (Some(Value::VmObject(a)), Some(Value::VmObject(b))) => Gc::ptr_eq(*a, *b),
                         _ => false,
                     };
 
-                    if same_buffer && ta_name == res_ta_name {
-                        // Same buffer, same type: byte-by-byte copy (spec deliberately does NOT
-                        // handle overlap, so we copy directly without an intermediate buffer)
+                    if ta_name == res_ta_name {
+                        // Same element type: copy raw bytes so Float16/NaN payloads preserve
+                        // exact bit patterns instead of round-tripping through f64 values.
                         let src_byte_offset = if let Value::VmArray(src_arr) = &this_val {
                             match src_arr.borrow().props.get("__byte_offset__") {
                                 Some(Value::Number(n)) => *n as usize,
@@ -1835,22 +1869,46 @@ impl<'gc> VM<'gc> {
                             _ => 0,
                         };
 
-                        let buf_bytes_gc = if let Some(Value::VmObject(buf_obj)) = &src_buf {
+                        let src_buf_bytes = if let Some(Value::VmObject(buf_obj)) = &src_buf {
                             buf_obj.borrow().get("__buffer_bytes__").cloned()
                         } else {
                             None
                         };
-                        if let Some(Value::VmArray(buf_bytes)) = buf_bytes_gc {
+                        let res_buf_bytes = if let Some(Value::VmObject(buf_obj)) = &res_buf {
+                            buf_obj.borrow().get("__buffer_bytes__").cloned()
+                        } else {
+                            None
+                        };
+                        if let (Some(Value::VmArray(src_bytes)), Some(Value::VmArray(dst_bytes))) = (src_buf_bytes, res_buf_bytes) {
                             let src_start_byte = src_byte_offset + k as usize * bpe;
                             let target_start_byte = res_byte_offset;
-                            {
-                                let mut bb = buf_bytes.borrow_mut(ctx);
+                            if same_buffer {
+                                let mut db = dst_bytes.borrow_mut(ctx);
                                 for i in 0..(actual_count * bpe) {
                                     let src_idx = src_start_byte + i;
                                     let tgt_idx = target_start_byte + i;
-                                    if src_idx < bb.elements.len() && tgt_idx < bb.elements.len() {
-                                        let byte_val = bb.elements[src_idx].clone();
-                                        bb.elements[tgt_idx] = byte_val;
+                                    if src_idx < db.elements.len() && tgt_idx < db.elements.len() {
+                                        let byte_val = db.elements[src_idx].clone();
+                                        db.elements[tgt_idx] = byte_val;
+                                    }
+                                }
+                            } else {
+                                let copied = {
+                                    let sb = src_bytes.borrow();
+                                    let mut copied = Vec::with_capacity(actual_count * bpe);
+                                    for i in 0..(actual_count * bpe) {
+                                        let src_idx = src_start_byte + i;
+                                        copied.push(sb.elements.get(src_idx).cloned().unwrap_or(Value::Number(0.0)));
+                                    }
+                                    copied
+                                };
+                                {
+                                    let mut db = dst_bytes.borrow_mut(ctx);
+                                    for (i, byte_val) in copied.into_iter().enumerate() {
+                                        let tgt_idx = target_start_byte + i;
+                                        if tgt_idx < db.elements.len() {
+                                            db.elements[tgt_idx] = byte_val;
+                                        }
                                     }
                                 }
                             }
@@ -3276,6 +3334,7 @@ impl<'gc> VM<'gc> {
         match ta_name {
             "Float16Array" => return f16round(num),
             "Float32Array" => return (num as f32) as f64,
+            "Float64Array" => return num,
             _ => {}
         }
         if num.is_nan() || num == 0.0 || !num.is_finite() {

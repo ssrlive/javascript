@@ -889,7 +889,11 @@ impl<'gc> VM<'gc> {
                     }
                 } else {
                     let pushed_new_target = self.push_dynamic_function_call_new_target(&callee, id);
-                    let result = self.call_builtin(ctx, id, &args);
+                    let result = if Self::native_function_uses_method_receiver(id) {
+                        self.call_method_builtin(ctx, id, &Value::Undefined, &args)
+                    } else {
+                        self.call_builtin(ctx, id, &args)
+                    };
                     if pushed_new_target {
                         self.new_target_stack.pop();
                     }
@@ -3050,7 +3054,11 @@ impl<'gc> VM<'gc> {
                     }
                 } else {
                     let pushed_new_target = self.push_dynamic_function_call_new_target(&callee, id);
-                    let result = self.call_builtin(ctx, id, &args);
+                    let result = if Self::native_function_uses_method_receiver(id) {
+                        self.call_method_builtin(ctx, id, &Value::Undefined, &args)
+                    } else {
+                        self.call_builtin(ctx, id, &args)
+                    };
                     if pushed_new_target {
                         self.new_target_stack.pop();
                     }
@@ -7135,13 +7143,8 @@ impl<'gc> VM<'gc> {
                 // must fall through to ordinary string property lookup.
                 if is_ta {
                     if let Some(numeric_index) = Self::canonical_numeric_index_string(&key) {
-                        let borrow = arr.borrow();
-                        numeric_index >= 0.0
-                            && numeric_index.fract() == 0.0
-                            && !numeric_index.is_nan()
-                            && numeric_index != f64::INFINITY
-                            && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
-                            && (numeric_index as usize) < borrow.elements.len()
+                        // TypedArray [[HasProperty]] §10.4.5.2 — use IsValidIntegerIndex
+                        Self::is_valid_integer_index(arr, numeric_index)
                     } else {
                         let borrow = arr.borrow();
                         if borrow.props.contains_key(&key) || has_getter(&borrow.props, &key) || has_setter(&borrow.props, &key) {
@@ -7664,15 +7667,44 @@ impl<'gc> VM<'gc> {
                 self.stack.push(Value::Boolean(true));
             }
         } else if let Value::VmArray(arr) = &obj {
-            let mut b = arr.borrow_mut(ctx);
-            if let Ok(idx) = key.parse::<usize>()
-                && idx < b.elements.len()
-            {
-                b.elements[idx] = Value::Undefined;
-                b.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
+            let is_ta = arr.borrow().props.contains_key("__typedarray_name__");
+            if is_ta {
+                // TypedArray [[Delete]] §10.4.5.4
+                if let Some(numeric_index) = Self::canonical_numeric_index_string(&key) {
+                    if Self::is_valid_integer_index(arr, numeric_index) {
+                        // Valid integer index → cannot delete, return false (TypeError in strict)
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of a TypedArray", key));
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(Value::Boolean(false));
+                    } else {
+                        // Invalid canonical numeric index (incl. detached) → return true
+                        self.stack.push(Value::Boolean(true));
+                    }
+                } else {
+                    // Non-numeric key → OrdinaryDelete
+                    let mut b = arr.borrow_mut(ctx);
+                    let attrs = attrs_from_legacy_map(&b.props, &key);
+                    if !attrs.contains(PropAttrs::CONFIGURABLE) && b.props.contains_key(&key) {
+                        drop(b);
+                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                        self.handle_throw(ctx, &err)?;
+                        self.stack.push(Value::Boolean(false));
+                    } else {
+                        PropDesc::remove_legacy_keys(&mut b.props, &key);
+                        self.stack.push(Value::Boolean(true));
+                    }
+                }
+            } else {
+                let mut b = arr.borrow_mut(ctx);
+                if let Ok(idx) = key.parse::<usize>()
+                    && idx < b.elements.len()
+                {
+                    b.elements[idx] = Value::Undefined;
+                    b.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
+                }
+                PropDesc::remove_legacy_keys(&mut b.props, &key);
+                self.stack.push(Value::Boolean(true));
             }
-            PropDesc::remove_legacy_keys(&mut b.props, &key);
-            self.stack.push(Value::Boolean(true));
         } else if matches!(obj, Value::Null | Value::Undefined) {
             let type_name = if matches!(obj, Value::Null) { "null" } else { "undefined" };
             let err = self.make_type_error_object(ctx, &format!("Cannot convert {} to object", type_name));
@@ -8457,23 +8489,51 @@ impl<'gc> VM<'gc> {
                     Ok(k) => k,
                     Err(_) => value_to_string(&idx_val),
                 };
-                let attrs = attrs_from_legacy_map(&arr.borrow().props, &key);
-                if !attrs.contains(PropAttrs::CONFIGURABLE) {
-                    if self.current_execution_is_strict() {
-                        let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
-                        self.handle_throw(ctx, &err)?;
+                let is_ta = arr.borrow().props.contains_key("__typedarray_name__");
+                if is_ta {
+                    // TypedArray [[Delete]] §10.4.5.4
+                    if let Some(numeric_index) = Self::canonical_numeric_index_string(&key) {
+                        if Self::is_valid_integer_index(arr, numeric_index) {
+                            // Valid integer index → cannot delete
+                            let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of a TypedArray", key));
+                            self.handle_throw(ctx, &err)?;
+                            self.stack.push(Value::Boolean(false));
+                        } else {
+                            self.stack.push(Value::Boolean(true));
+                        }
+                    } else {
+                        // Non-numeric key → OrdinaryDelete
+                        let mut b = arr.borrow_mut(ctx);
+                        let attrs = attrs_from_legacy_map(&b.props, &key);
+                        if !attrs.contains(PropAttrs::CONFIGURABLE) && b.props.contains_key(&key) {
+                            drop(b);
+                            let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                            self.handle_throw(ctx, &err)?;
+                            self.stack.push(Value::Boolean(false));
+                        } else {
+                            PropDesc::remove_legacy_keys(&mut b.props, &key);
+                            self.stack.push(Value::Boolean(true));
+                        }
                     }
-                    self.stack.push(Value::Boolean(false));
                 } else {
-                    let mut borrow = arr.borrow_mut(ctx);
-                    if let Ok(idx) = key.parse::<usize>()
-                        && idx < borrow.elements.len()
-                    {
-                        borrow.elements[idx] = Value::Undefined;
-                        borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
+                    let attrs = attrs_from_legacy_map(&arr.borrow().props, &key);
+                    if !attrs.contains(PropAttrs::CONFIGURABLE) {
+                        if self.current_execution_is_strict() {
+                            let err = self.make_type_error_object(ctx, &format!("Cannot delete property '{}' of #<Object>", key));
+                            self.handle_throw(ctx, &err)?;
+                        }
+                        self.stack.push(Value::Boolean(false));
+                    } else {
+                        let mut borrow = arr.borrow_mut(ctx);
+                        if let Ok(idx) = key.parse::<usize>()
+                            && idx < borrow.elements.len()
+                        {
+                            borrow.elements[idx] = Value::Undefined;
+                            borrow.props.insert(format!("__deleted_{}", idx), Value::Boolean(true));
+                        }
+                        PropDesc::remove_legacy_keys(&mut borrow.props, &key);
+                        self.stack.push(Value::Boolean(true));
                     }
-                    PropDesc::remove_legacy_keys(&mut borrow.props, &key);
-                    self.stack.push(Value::Boolean(true));
                 }
             }
             Value::VmObject(map) => {

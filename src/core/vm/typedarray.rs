@@ -926,9 +926,24 @@ impl<'gc> VM<'gc> {
                                 return Value::Undefined;
                             }
                             let iterator = iterator.unwrap();
+                            if !matches!(
+                                iterator,
+                                Value::VmObject(_)
+                                    | Value::VmArray(_)
+                                    | Value::VmFunction(..)
+                                    | Value::VmClosure(..)
+                                    | Value::VmNativeFunction(_)
+                            ) {
+                                self.throw_type_error(ctx, "iterator must return an object");
+                                return Value::Undefined;
+                            }
                             loop {
                                 let next_method = self.read_named_property(ctx, &iterator, "next");
                                 if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                if !self.is_value_callable(&next_method) {
+                                    self.throw_type_error(ctx, "iterator.next is not callable");
                                     return Value::Undefined;
                                 }
                                 let result = self.vm_call_function_value(ctx, &next_method, &iterator, &[]);
@@ -937,6 +952,17 @@ impl<'gc> VM<'gc> {
                                     return Value::Undefined;
                                 }
                                 let result = result.unwrap();
+                                if !matches!(
+                                    result,
+                                    Value::VmObject(_)
+                                        | Value::VmArray(_)
+                                        | Value::VmFunction(..)
+                                        | Value::VmClosure(..)
+                                        | Value::VmNativeFunction(_)
+                                ) {
+                                    self.throw_type_error(ctx, "iterator result is not an object");
+                                    return Value::Undefined;
+                                }
                                 let done = self.read_named_property(ctx, &result, "done");
                                 if done.to_truthy() {
                                     break;

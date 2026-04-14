@@ -79,7 +79,17 @@ pub enum Value<'gc> {
 }
 
 impl<'gc> Value<'gc> {
+    pub fn is_html_dda(&self) -> bool {
+        match self {
+            Value::VmObject(map) => map.borrow().contains_key("__is_html_dda__"),
+            _ => false,
+        }
+    }
+
     pub fn to_truthy(&self) -> bool {
+        if self.is_html_dda() {
+            return false;
+        }
         match self {
             Value::Boolean(b) => *b,
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
@@ -91,6 +101,9 @@ impl<'gc> Value<'gc> {
     }
 
     pub fn typeof_value(&self) -> &'static str {
+        if self.is_html_dda() {
+            return "undefined";
+        }
         match self {
             Value::Number(_) => "number",
             Value::String(_) => "string",

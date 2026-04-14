@@ -5588,13 +5588,15 @@ impl<'gc> Compiler<'gc> {
                 let null_idx = self.chunk.add_constant(Value::Null);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(null_idx);
-                self.chunk.write_opcode(Opcode::Equal);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                self.chunk.write_opcode(Opcode::Not);
                 let is_null = self.emit_jump(Opcode::JumpIfTrue);
                 self.chunk.write_opcode(Opcode::Dup);
                 let undef_idx = self.chunk.add_constant(Value::Undefined);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Equal);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                self.chunk.write_opcode(Opcode::Not);
                 let is_undef = self.emit_jump(Opcode::JumpIfTrue);
                 // Not nullish: do private property access
                 let resolved = self.resolve_prefixed_private_key(prop);
@@ -6244,8 +6246,21 @@ impl<'gc> Compiler<'gc> {
                         let null_check_idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_check_idx);
-                        self.chunk.write_opcode(Opcode::Equal);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
+                        let throw_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
+                        self.emit_helper_get(&ys_iter);
+                        let throw_key_null = crate::unicode::utf8_to_utf16("throw");
+                        let throw_idx_null = self.chunk.add_constant(Value::String(throw_key_null));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(throw_idx_null);
+                        let null_check_idx = self.chunk.add_constant(Value::Null);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(null_check_idx);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
                         let no_throw_method = self.emit_jump(Opcode::JumpIfTrue);
+                        self.patch_jump(throw_is_undefined);
 
                         // Has .throw method: ys_result = iter.throw(thrown)
                         self.emit_helper_get(&ys_iter);
@@ -6281,8 +6296,21 @@ impl<'gc> Compiler<'gc> {
                         let null_check2_idx = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(null_check2_idx);
-                        self.chunk.write_opcode(Opcode::Equal);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
+                        let return_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
+                        self.emit_helper_get(&ys_iter);
+                        let return_key_null = crate::unicode::utf8_to_utf16("return");
+                        let return_idx_null = self.chunk.add_constant(Value::String(return_key_null));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(return_idx_null);
+                        let null_check2_idx = self.chunk.add_constant(Value::Null);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(null_check2_idx);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
                         let no_return_method = self.emit_jump(Opcode::JumpIfTrue);
+                        self.patch_jump(return_is_undefined);
                         self.emit_helper_get(&ys_iter);
                         let return_key2 = crate::unicode::utf8_to_utf16("return");
                         let return_idx2 = self.chunk.add_constant(Value::String(return_key2));
@@ -6314,8 +6342,21 @@ impl<'gc> Compiler<'gc> {
                         let undef_rd = self.chunk.add_constant(Value::Undefined);
                         self.chunk.write_opcode(Opcode::Constant);
                         self.chunk.write_u16(undef_rd);
-                        self.chunk.write_opcode(Opcode::Equal);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
+                        let return_is_undefined = self.emit_jump(Opcode::JumpIfTrue);
+                        self.emit_helper_get(&ys_iter);
+                        let ret_key_rd_null = crate::unicode::utf8_to_utf16("return");
+                        let ret_idx_rd_null = self.chunk.add_constant(Value::String(ret_key_rd_null));
+                        self.chunk.write_opcode(Opcode::GetProperty);
+                        self.chunk.write_u16(ret_idx_rd_null);
+                        let null_rd = self.chunk.add_constant(Value::Null);
+                        self.chunk.write_opcode(Opcode::Constant);
+                        self.chunk.write_u16(null_rd);
+                        self.chunk.write_opcode(Opcode::StrictNotEqual);
+                        self.chunk.write_opcode(Opcode::Not);
                         let has_return_method = self.emit_jump(Opcode::JumpIfTrue);
+                        self.patch_jump(return_is_undefined);
 
                         // c.iv: innerReturnResult = Call(return, iterator, « received.[[Value]] »)
                         self.emit_helper_get(&ys_iter);
@@ -6604,14 +6645,16 @@ impl<'gc> Compiler<'gc> {
                 let null_idx = self.chunk.add_constant(Value::Null);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(null_idx);
-                self.chunk.write_opcode(Opcode::Equal);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                self.chunk.write_opcode(Opcode::Not);
                 let is_null = self.emit_jump(Opcode::JumpIfTrue);
                 // Undefined check
                 self.chunk.write_opcode(Opcode::Dup);
                 let undef_idx = self.chunk.add_constant(Value::Undefined);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(undef_idx);
-                self.chunk.write_opcode(Opcode::Equal);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                self.chunk.write_opcode(Opcode::Not);
                 let is_undef = self.emit_jump(Opcode::JumpIfTrue);
                 // Not nullish: keep left
                 let end_jump = self.emit_jump(Opcode::Jump);
@@ -7282,14 +7325,16 @@ impl<'gc> Compiler<'gc> {
                     let null_idx = self.chunk.add_constant(Value::Null);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(null_idx);
-                    self.chunk.write_opcode(Opcode::Equal);
+                    self.chunk.write_opcode(Opcode::StrictNotEqual);
+                    self.chunk.write_opcode(Opcode::Not);
                     let is_null = self.emit_jump(Opcode::JumpIfTrue);
                     // Check undefined
                     self.chunk.write_opcode(Opcode::Dup);
                     let undef_idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(undef_idx);
-                    self.chunk.write_opcode(Opcode::Equal);
+                    self.chunk.write_opcode(Opcode::StrictNotEqual);
+                    self.chunk.write_opcode(Opcode::Not);
                     end_jump = self.emit_jump(Opcode::JumpIfFalse);
                     self.patch_jump(is_null);
                     assign_jump = None;
@@ -7352,13 +7397,15 @@ impl<'gc> Compiler<'gc> {
                     let null_idx = self.chunk.add_constant(Value::Null);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(null_idx);
-                    self.chunk.write_opcode(Opcode::Equal);
+                    self.chunk.write_opcode(Opcode::StrictNotEqual);
+                    self.chunk.write_opcode(Opcode::Not);
                     let is_null = self.emit_jump(Opcode::JumpIfTrue);
                     self.chunk.write_opcode(Opcode::Dup);
                     let undef_idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
                     self.chunk.write_u16(undef_idx);
-                    self.chunk.write_opcode(Opcode::Equal);
+                    self.chunk.write_opcode(Opcode::StrictNotEqual);
+                    self.chunk.write_opcode(Opcode::Not);
                     end_jump = self.emit_jump(Opcode::JumpIfFalse);
                     self.patch_jump(is_null);
                 }

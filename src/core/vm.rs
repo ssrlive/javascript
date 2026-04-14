@@ -3677,6 +3677,16 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
+    fn make_is_html_dda_fn(ctx: &GcContext<'gc>) -> Value<'gc> {
+        let value = Self::make_host_fn_with_name_len(ctx, "__isHTMLDDA__", "__isHTMLDDA__", 0.0, false);
+        if let Value::VmObject(obj) = &value {
+            let mut borrow = obj.borrow_mut(ctx);
+            borrow.insert("__is_html_dda__".to_string(), Value::Boolean(true));
+            mark_nonenumerable(&mut borrow, "__is_html_dda__");
+        }
+        value
+    }
+
     fn make_bound_host_fn(ctx: &GcContext<'gc>, name: &str, receiver: &Value<'gc>) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__host_fn__".to_string(), Value::from(name));
@@ -5018,6 +5028,7 @@ impl<'gc> VM<'gc> {
                 );
                 Value::Undefined
             }
+            "__isHTMLDDA__" => Value::Null,
             "__evalScript__" => {
                 let src = if let Some(v) = args.first() {
                     match self.vm_to_string_like_spec(ctx, v) {
@@ -14187,6 +14198,7 @@ impl<'gc> VM<'gc> {
                 );
                 Value::Undefined
             }
+            "__isHTMLDDA__" => Value::Null,
             "__detachArrayBuffer__" => {
                 let Some(Value::VmObject(buf_obj)) = args.first().cloned() else {
                     let mut err_map = IndexMap::new();
@@ -19666,6 +19678,7 @@ impl<'gc> VM<'gc> {
 
         // globalThis — refers to the global this object
         self.globals.insert("globalThis".to_string(), Value::VmObject(self.global_this));
+        let is_html_dda_fn = Self::make_is_html_dda_fn(ctx);
         self.globals.insert(
             "__detachArrayBuffer__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
@@ -19678,6 +19691,7 @@ impl<'gc> VM<'gc> {
             "__evalScript__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
         );
+        self.globals.insert("__isHTMLDDA__".to_string(), is_html_dda_fn.clone());
         self.global_this.borrow_mut(ctx).insert(
             "__detachArrayBuffer__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
@@ -19690,6 +19704,7 @@ impl<'gc> VM<'gc> {
             "__evalScript__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
         );
+        self.global_this.borrow_mut(ctx).insert("__isHTMLDDA__".to_string(), is_html_dda_fn);
         {
             let mut gt = self.global_this.borrow_mut(ctx);
             for name in [
@@ -38645,6 +38660,11 @@ impl<'gc> VM<'gc> {
 
     /// JS loose equality (==) with type coercion
     fn loose_equal(&mut self, ctx: &GcContext<'gc>, a: &Value<'gc>, b: &Value<'gc>) -> bool {
+        if (a.is_html_dda() && matches!(b, Value::Null | Value::Undefined))
+            || (b.is_html_dda() && matches!(a, Value::Null | Value::Undefined))
+        {
+            return true;
+        }
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => x == y,
             (Value::BigInt(x), Value::BigInt(y)) => x == y,
@@ -39429,13 +39449,7 @@ impl<'gc> VM<'gc> {
 
     /// JS ToBoolean: returns true for truthy values.
     fn value_is_truthy(v: &Value<'gc>) -> bool {
-        match v {
-            Value::Undefined | Value::Null => false,
-            Value::Boolean(b) => *b,
-            Value::Number(n) => *n != 0.0 && !n.is_nan(),
-            Value::String(s) => !s.is_empty(),
-            _ => true, // objects, functions, arrays are truthy
-        }
+        v.to_truthy()
     }
 
     fn validate_property_descriptor(&self, desc: &IndexMap<String, Value<'gc>>) -> Result<(), ()> {

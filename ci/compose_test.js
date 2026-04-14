@@ -105,7 +105,7 @@ function get262StubLines() {
     '  };',
     '}',
     'if (typeof $262.IsHTMLDDA === "undefined" && typeof globalThis !== "undefined") {',
-    '  try { if (globalThis.__isHTMLDDA__ && (globalThis.__isHTMLDDA__() === null)) $262.IsHTMLDDA = globalThis.__isHTMLDDA__; } catch(e) {}',
+    '  try { var __htmlDDAHook = globalThis.__isHTMLDDA__; if (__htmlDDAHook !== undefined && __htmlDDAHook !== null && (__htmlDDAHook() === null)) $262.IsHTMLDDA = __htmlDDAHook; } catch(e) {}',
     '}',
     'if (typeof $262.createRealm !== "function") {',
     '  $262.createRealm = function() {',

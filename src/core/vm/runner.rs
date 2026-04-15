@@ -926,36 +926,51 @@ impl<'gc> VM<'gc> {
                         bound_this
                     };
                     self.regexp_home_proto_temp = regexp_home;
-                    // Cross-realm dispatch: run host function on child VM
-                    let result = if let Some(rid) = realm_id
-                        && rid < self.child_realms.len()
-                        && let Some(mut child) = self.child_realms[rid].take()
-                    {
-                        self.sync_runtime_to_child(&mut child);
-                        child.regexp_home_proto_temp = self.regexp_home_proto_temp.take();
-                        // For __realm_eval__: give child a callback to parent so it can
-                        // execute parent-compiled functions (proxy traps, closures).
-                        if host_name == "__realm_eval__" {
-                            child.realm_parent_ptr = Some(self as *mut VM<'gc>);
+
+                    // ShadowRealm wrapped function dispatch (must happen before cross-realm)
+                    if host_name == "shadowRealm.wrappedFunction" || host_name == "shadowRealm.inboundWrappedFunction" {
+                        let result = if host_name == "shadowRealm.wrappedFunction" {
+                            self.shadow_realm_call_wrapped_function(ctx, map, &args_collected)
+                        } else {
+                            self.shadow_realm_call_inbound_wrapped_function(ctx, map, &args_collected)
+                        };
+                        self.stack.push(result);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
                         }
-                        let r = child.call_host_fn(ctx, &host_name, recv.as_ref(), &args_collected);
-                        child.realm_parent_ptr = None;
-                        if let Some(thrown) = child.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
-                        }
-                        let r = self.register_cross_realm_fn(ctx, &mut child, r, rid);
-                        self.sync_runtime_from_child(&child);
-                        self.child_realms[rid] = Some(child);
-                        r
                     } else {
-                        let receiver = recv.as_ref();
-                        self.call_host_fn(ctx, &host_name, receiver, &args_collected)
-                    };
-                    self.stack.push(result);
-                    if let Some(thrown) = self.pending_throw.take() {
-                        self.handle_throw(ctx, &thrown)?;
-                        return Ok(OpcodeAction::Continue);
-                    }
+                        // Cross-realm dispatch: run host function on child VM
+                        let result = if let Some(rid) = realm_id
+                            && rid < self.child_realms.len()
+                            && let Some(mut child) = self.child_realms[rid].take()
+                        {
+                            self.sync_runtime_to_child(&mut child);
+                            child.regexp_home_proto_temp = self.regexp_home_proto_temp.take();
+                            // For __realm_eval__: give child a callback to parent so it can
+                            // execute parent-compiled functions (proxy traps, closures).
+                            if host_name == "__realm_eval__" {
+                                child.realm_parent_ptr = Some(self as *mut VM<'gc>);
+                            }
+                            let r = child.call_host_fn(ctx, &host_name, recv.as_ref(), &args_collected);
+                            child.realm_parent_ptr = None;
+                            if let Some(thrown) = child.pending_throw.take() {
+                                self.pending_throw = Some(thrown);
+                            }
+                            let r = self.register_cross_realm_fn(ctx, &mut child, r, rid);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[rid] = Some(child);
+                            r
+                        } else {
+                            let receiver = recv.as_ref();
+                            self.call_host_fn(ctx, &host_name, receiver, &args_collected)
+                        };
+                        self.stack.push(result);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    } // close ShadowRealm else branch
                 } else if let Some(bound_target) = borrow.get("__bound_target__").cloned() {
                     let bound_this = borrow.get("__bound_this__").cloned().unwrap_or(Value::Undefined);
                     let mut final_args: Vec<Value<'gc>> = match borrow.get("__bound_args__") {

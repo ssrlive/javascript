@@ -386,4 +386,9 @@ pub(crate) const BUILTIN_CTOR_FLOAT16ARRAY: FunctionID = 610;
 pub(crate) const BUILTIN_MATH_F16ROUND: FunctionID = 611;
 // ── Function.prototype[@@hasInstance] (600) ──────────────────────────
 pub(crate) const BUILTIN_FN_HASINSTANCE: FunctionID = 600;
-// Next available group: 610
+// ── ShadowRealm (620–629) ───────────────────────────────────────────
+#[allow(dead_code)]
+pub(crate) const BUILTIN_CTOR_SHADOWREALM: FunctionID = 620;
+pub(crate) const BUILTIN_SHADOWREALM_EVALUATE: FunctionID = 621;
+pub(crate) const BUILTIN_SHADOWREALM_IMPORTVALUE: FunctionID = 622;
+// Next available group: 630

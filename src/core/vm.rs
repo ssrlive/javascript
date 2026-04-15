@@ -14218,6 +14218,7 @@ impl<'gc> VM<'gc> {
             || name.starts_with("async.")
             || name.starts_with("disposableStack.")
             || name.starts_with("asyncDisposableStack.")
+            || name.starts_with("shadowRealm.")
         {
             return self.call_host_fn(ctx, name, receiver, args);
         }
@@ -18800,6 +18801,72 @@ impl<'gc> VM<'gc> {
             mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "AsyncDisposableStack");
         }
 
+        // ── ShadowRealm ───────────────────────────────────────────────────
+        {
+            let obj_proto = self.read_named_property(ctx, &self.globals.get("Object").cloned().unwrap_or(Value::Undefined), "prototype");
+
+            let mut proto = IndexMap::new();
+            proto.insert("__type__".to_string(), Value::from("ShadowRealm"));
+            proto.insert("__proto__".to_string(), obj_proto.clone());
+
+            let fn_proto = self.globals.get("Function").and_then(|f| {
+                if let Value::VmObject(obj) = f {
+                    own_data_from_legacy_map(&obj.borrow(), "prototype")
+                } else {
+                    None
+                }
+            });
+
+            let evaluate_fn = Self::make_native_fn(ctx, BUILTIN_SHADOWREALM_EVALUATE, "evaluate", 1.0);
+            if let Value::VmObject(ref obj) = evaluate_fn
+                && let Some(ref fp) = fn_proto
+            {
+                obj.borrow_mut(ctx).insert("__proto__".to_string(), fp.clone());
+            }
+            proto.insert("evaluate".to_string(), evaluate_fn);
+            mark_nonenumerable(&mut proto, "evaluate");
+
+            let import_value_fn = Self::make_native_fn(ctx, BUILTIN_SHADOWREALM_IMPORTVALUE, "importValue", 2.0);
+            if let Value::VmObject(ref obj) = import_value_fn
+                && let Some(ref fp) = fn_proto
+            {
+                obj.borrow_mut(ctx).insert("__proto__".to_string(), fp.clone());
+            }
+            proto.insert("importValue".to_string(), import_value_fn);
+            mark_nonenumerable(&mut proto, "importValue");
+
+            proto.insert("@@sym:4".to_string(), Value::from("ShadowRealm"));
+            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+
+            let proto_val = Value::VmObject(new_gc_cell_ptr(ctx, proto));
+
+            let mut ctor = IndexMap::new();
+            ctor.insert("__host_fn__".to_string(), Value::from("shadowRealm.constructor"));
+            ctor.insert("__constructible__".to_string(), Value::Boolean(true));
+            ctor.insert("name".to_string(), Value::from("ShadowRealm"));
+            ctor.insert("length".to_string(), Value::Number(0.0));
+            ctor.insert("prototype".to_string(), proto_val.clone());
+            if let Some(Value::VmObject(function_ctor)) = self.globals.get("Function")
+                && let Some(fn_proto) = function_ctor.borrow().get("prototype").cloned()
+            {
+                ctor.insert("__proto__".to_string(), fn_proto);
+            }
+            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+
+            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor));
+            if let Value::VmObject(p) = &proto_val {
+                let mut borrow = p.borrow_mut(ctx);
+                borrow.insert("constructor".to_string(), ctor_val.clone());
+                mark_nonenumerable(&mut borrow, "constructor");
+                write_attrs_to_legacy_map(&mut borrow, "constructor", PropAttrs::WRITABLE | PropAttrs::CONFIGURABLE);
+            }
+            self.globals.insert("ShadowRealm".to_string(), ctor_val.clone());
+            self.global_this.borrow_mut(ctx).insert("ShadowRealm".to_string(), ctor_val);
+            mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "ShadowRealm");
+        }
+
         self.globals
             .insert("__await__".to_string(), Self::make_host_fn(ctx, "promise.await"));
         self.globals
@@ -19000,7 +19067,7 @@ impl<'gc> VM<'gc> {
 
         // Fix up __proto__ for DisposableStack/AsyncDisposableStack prototypes
         // (they were created before Object was available)
-        for ctor_name in ["DisposableStack", "AsyncDisposableStack"] {
+        for ctor_name in ["DisposableStack", "AsyncDisposableStack", "ShadowRealm"] {
             if let Some(Value::VmObject(ctor_obj)) = self.globals.get(ctor_name)
                 && let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
             {
@@ -20595,6 +20662,23 @@ impl<'gc> VM<'gc> {
                     };
                     drop(borrow);
                     self.regexp_home_proto_temp = regexp_home;
+
+                    // ShadowRealm wrapped function dispatch
+                    if host_name == "shadowRealm.wrappedFunction" {
+                        let result = self.shadow_realm_call_wrapped_function(ctx, map, args);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            return Err(self.vm_error_to_js_error(ctx, &thrown));
+                        }
+                        return Ok(result);
+                    }
+                    if host_name == "shadowRealm.inboundWrappedFunction" {
+                        let result = self.shadow_realm_call_inbound_wrapped_function(ctx, map, args);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            return Err(self.vm_error_to_js_error(ctx, &thrown));
+                        }
+                        return Ok(result);
+                    }
+
                     let receiver = host_this.as_ref().unwrap_or(this_arg);
                     // Cross-realm dispatch: run host function on child VM
                     if let Some(rid) = realm_id
@@ -22388,6 +22472,719 @@ impl<'gc> VM<'gc> {
             }
         }
         "Value".to_string()
+    }
+
+    // ── ShadowRealm ──────────────────────────────────────────────────────
+
+    fn vm_construct_shadow_realm(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_map: crate::core::VmObjectHandle<'gc>,
+        new_target: Option<&Value<'gc>>,
+    ) -> Result<Value<'gc>, JSError> {
+        let ctor_val = self.globals.get("ShadowRealm").cloned().unwrap_or(Value::Undefined);
+        let proto_source = new_target.unwrap_or(&ctor_val);
+        let selected_proto = match self.get_prototype_from_constructor_with_intrinsic(ctx, proto_source, "ShadowRealm")? {
+            Some(p) => p,
+            None => ctor_map.borrow().get("prototype").cloned().unwrap_or(Value::Undefined),
+        };
+
+        // Create a fresh child realm (like __createRealm__)
+        let realm_id = self.child_realms.len();
+        let mut child = Box::new(VM::new(Chunk::default(), ctx));
+
+        // Sync Symbol registry so well-known symbols have the same identity
+        if let Some(Value::VmObject(parent_symbol_obj)) = self.globals.get("Symbol")
+            && let Some(Value::VmObject(child_symbol_obj)) = child.globals.get("Symbol").cloned()
+        {
+            let mut child_symbol_borrow = child_symbol_obj.borrow_mut(ctx);
+            for (key, id) in [
+                ("iterator", 1_u64),
+                ("hasInstance", 2),
+                ("toPrimitive", 3),
+                ("toStringTag", 4),
+                ("species", 5),
+                ("asyncIterator", 6),
+                ("match", 7),
+                ("replace", 8),
+                ("search", 9),
+                ("split", 10),
+                ("matchAll", 11),
+            ] {
+                if let Some(shared_symbol) = parent_symbol_obj.borrow().get(key).cloned() {
+                    child_symbol_borrow.insert(key.to_string(), shared_symbol.clone());
+                    child.cache_symbol_value(id, &shared_symbol);
+                }
+            }
+        }
+        child.symbol_counter = self.symbol_counter;
+        child.symbol_registry = self.symbol_registry.clone();
+        let shared_symbols: Vec<Value<'gc>> = child.symbol_registry.values().cloned().collect();
+        for value in &shared_symbols {
+            if let Some(id) = child.symbol_id(value) {
+                child.cache_symbol_value(id, value);
+            }
+        }
+
+        self.child_realms.push(Some(child));
+
+        let mut obj = IndexMap::new();
+        obj.insert("__type__".to_string(), Value::from("ShadowRealm"));
+        obj.insert("__shadow_realm_id__".to_string(), Value::Number(realm_id as f64));
+        if !matches!(selected_proto, Value::Undefined) {
+            obj.insert("__proto__".to_string(), selected_proto);
+        }
+        Ok(Value::VmObject(new_gc_cell_ptr(ctx, obj)))
+    }
+
+    /// Validate `this` is a ShadowRealm instance. Returns the realm_id.
+    fn shadow_realm_validate_this(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, method_name: &str) -> Option<usize> {
+        let Value::VmObject(obj) = receiver else {
+            self.throw_type_error(ctx, &format!("{method_name} called on incompatible receiver"));
+            return None;
+        };
+        let borrow = obj.borrow();
+        let is_valid = matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "ShadowRealm")
+            && borrow.contains_key("__shadow_realm_id__");
+        if !is_valid {
+            self.throw_type_error(ctx, "Value is not a ShadowRealm");
+            return None;
+        }
+        match borrow.get("__shadow_realm_id__") {
+            Some(Value::Number(n)) => Some(*n as usize),
+            _ => {
+                drop(borrow);
+                self.throw_type_error(ctx, "Value is not a ShadowRealm");
+                None
+            }
+        }
+    }
+
+    /// Check if a value is primitive (not an object/function).
+    fn is_primitive_value(value: &Value<'gc>) -> bool {
+        matches!(
+            value,
+            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Null | Value::Undefined | Value::BigInt(_)
+        ) || value.is_symbol_value()
+    }
+
+    /// GetWrappedValue: wrap a value for crossing the ShadowRealm boundary.
+    /// Primitives pass through; callables become WrappedFunctions; anything else is TypeError.
+    fn shadow_realm_get_wrapped_value(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>, realm_id: usize) -> Result<Value<'gc>, ()> {
+        // Symbols need special handling: reassign __proto__ to caller realm's Symbol.prototype
+        if value.is_symbol_value() {
+            if let Value::VmObject(obj) = value {
+                let caller_sym_proto = self.globals.get("Symbol").and_then(|s| {
+                    if let Value::VmObject(sym_ctor) = s {
+                        own_data_from_legacy_map(&sym_ctor.borrow(), "prototype")
+                    } else {
+                        None
+                    }
+                });
+                if let Some(proto) = caller_sym_proto {
+                    obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
+                }
+            }
+            return Ok(value.clone());
+        }
+        if Self::is_primitive_value(value) {
+            return Ok(value.clone());
+        }
+        if self.is_callable_value(value) {
+            return self.shadow_realm_wrapped_function_create(ctx, value, realm_id);
+        }
+        // Non-primitive, non-callable → TypeError
+        self.throw_type_error(ctx, "ShadowRealm evaluate result is not a primitive or callable");
+        Err(())
+    }
+
+    /// WrappedFunctionCreate: create a wrapped function for crossing realm boundary.
+    /// The wrapped function lives in the caller realm; when called, it delegates to target in the shadow realm.
+    fn shadow_realm_wrapped_function_create(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        target: &Value<'gc>,
+        realm_id: usize,
+    ) -> Result<Value<'gc>, ()> {
+        // For revoked proxies, GetFunctionRealm should throw
+        if let Value::VmObject(obj) = target {
+            let borrow = obj.borrow();
+            if borrow.contains_key("__proxy_target__") && matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))) {
+                drop(borrow);
+                self.throw_type_error(ctx, "Cannot wrap a revoked proxy");
+                return Err(());
+            }
+        }
+
+        // CopyNameAndLength from target
+        let (name, length) = self.shadow_realm_copy_name_and_length(ctx, target, realm_id);
+        if self.pending_throw.is_some() {
+            return Err(());
+        }
+
+        let fn_proto = self
+            .globals
+            .get("Function")
+            .and_then(|f| {
+                if let Value::VmObject(obj) = f {
+                    obj.borrow().get("prototype").cloned()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(Value::Undefined);
+
+        let mut wrapper = IndexMap::new();
+        wrapper.insert("__host_fn__".to_string(), Value::from("shadowRealm.wrappedFunction"));
+        wrapper.insert("__wrapped_target__".to_string(), target.clone());
+        wrapper.insert("__wrapped_realm_id__".to_string(), Value::Number(realm_id as f64));
+        wrapper.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        if !matches!(fn_proto, Value::Undefined) {
+            wrapper.insert("__proto__".to_string(), fn_proto);
+        }
+        Self::insert_property_with_attributes(&mut wrapper, "length", &Value::Number(length), false, false, true);
+        Self::insert_property_with_attributes(
+            &mut wrapper,
+            "name",
+            &Value::String(crate::unicode::utf8_to_utf16(&name)),
+            false,
+            false,
+            true,
+        );
+
+        Ok(Value::VmObject(new_gc_cell_ptr(ctx, wrapper)))
+    }
+
+    /// CopyNameAndLength: read name/length from the target function (in the child realm).
+    fn shadow_realm_copy_name_and_length(&mut self, ctx: &GcContext<'gc>, target: &Value<'gc>, realm_id: usize) -> (String, f64) {
+        if realm_id >= self.child_realms.len() || self.child_realms[realm_id].is_none() {
+            return (String::new(), 0.0);
+        }
+
+        let mut child = self.child_realms[realm_id].take().unwrap();
+        child.symbol_counter = self.symbol_counter;
+
+        // HasOwnProperty(target, "length") — triggers proxy getOwnPropertyDescriptor trap
+        let length_key = Value::from("length");
+        let has_length_val = child.call_builtin(ctx, BUILTIN_OBJECT_HASOWN, &[target.clone(), length_key]);
+        if let Some(_thrown) = child.pending_throw.take() {
+            self.symbol_counter = child.symbol_counter;
+            self.child_realms[realm_id] = Some(child);
+            self.throw_type_error(ctx, "Cannot read length from wrapped function target");
+            return (String::new(), 0.0);
+        }
+        let has_length = has_length_val.to_truthy();
+
+        // Get(target, "length") only if HasOwnProperty returned true
+        let target_length = if has_length {
+            let len_val = child.read_named_property(ctx, target, "length");
+            if let Some(_thrown) = child.pending_throw.take() {
+                self.symbol_counter = child.symbol_counter;
+                self.child_realms[realm_id] = Some(child);
+                self.throw_type_error(ctx, "Cannot read length from wrapped function target");
+                return (String::new(), 0.0);
+            }
+            match &len_val {
+                Value::Number(n) => {
+                    if n.is_nan() {
+                        0.0
+                    } else if *n == f64::INFINITY {
+                        f64::INFINITY
+                    } else if *n == f64::NEG_INFINITY {
+                        0.0
+                    } else {
+                        let int_val = n.trunc();
+                        if int_val < 0.0 { 0.0 } else { int_val }
+                    }
+                }
+                _ => 0.0,
+            }
+        } else {
+            0.0
+        };
+
+        // Get(target, "name") — always read
+        let name_val = child.read_named_property(ctx, target, "name");
+        if let Some(_thrown) = child.pending_throw.take() {
+            self.symbol_counter = child.symbol_counter;
+            self.child_realms[realm_id] = Some(child);
+            self.throw_type_error(ctx, "Cannot read name from wrapped function target");
+            return (String::new(), 0.0);
+        }
+
+        self.symbol_counter = child.symbol_counter;
+        self.child_realms[realm_id] = Some(child);
+
+        let target_name = match &name_val {
+            Value::String(s) => crate::unicode::utf16_to_utf8(s),
+            _ => String::new(),
+        };
+
+        (target_name, target_length)
+    }
+
+    /// ShadowRealm.prototype.evaluate(sourceText)
+    fn shadow_realm_evaluate(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        // 1. Validate this
+        let Some(realm_id) = self.shadow_realm_validate_this(ctx, receiver, "ShadowRealm.prototype.evaluate") else {
+            return Value::Undefined;
+        };
+
+        // 2. Validate sourceText is a string
+        let source_text = match args.first().unwrap_or(&Value::Undefined) {
+            Value::String(s) => crate::unicode::utf16_to_utf8(s),
+            _ => {
+                self.throw_type_error(ctx, "ShadowRealm.prototype.evaluate requires a string argument");
+                return Value::Undefined;
+            }
+        };
+
+        // 3. Parse the source — SyntaxError is thrown from the caller realm
+        let tokens = match crate::core::tokenize(&source_text) {
+            Ok(t) => t,
+            Err(err) => {
+                let msg = err.message();
+                let se = self.make_syntax_error_object(ctx, &msg);
+                self.pending_throw = Some(se);
+                return Value::Undefined;
+            }
+        };
+        let mut index = 0;
+        let statements = match crate::core::parse_statements(&tokens, &mut index) {
+            Ok(s) => s,
+            Err(err) => {
+                let msg = err.message();
+                let se = self.make_syntax_error_object(ctx, &msg);
+                self.pending_throw = Some(se);
+                return Value::Undefined;
+            }
+        };
+        let compiler = crate::core::Compiler::new();
+        let chunk = match compiler.compile(&statements) {
+            Ok(c) => c,
+            Err(err) => {
+                let msg = err.message();
+                let se = self.make_syntax_error_object(ctx, &msg);
+                self.pending_throw = Some(se);
+                return Value::Undefined;
+            }
+        };
+
+        // 4. Execute in child realm
+        let result = if realm_id < self.child_realms.len()
+            && let Some(mut child) = self.child_realms[realm_id].take()
+        {
+            child.symbol_counter = self.symbol_counter;
+            let res = {
+                let (code_offset, _) = child.merge_eval_chunk(&chunk);
+                let saved_ip = child.ip;
+                child.ip = code_offset;
+                let run_result = child.run(ctx);
+                child.ip = saved_ip;
+                run_result
+            };
+            self.symbol_counter = child.symbol_counter;
+            // Sync symbol registry: new Symbol.for() entries from child → parent
+            for (key, value) in &child.symbol_registry {
+                if !self.symbol_registry.contains_key(key) {
+                    self.symbol_registry.insert(key.clone(), value.clone());
+                }
+            }
+            self.child_realms[realm_id] = Some(child);
+            res
+        } else {
+            self.throw_type_error(ctx, "ShadowRealm: internal error - realm not found");
+            return Value::Undefined;
+        };
+
+        // 5. Handle result: wrap errors as TypeError, wrap values via GetWrappedValue
+        match result {
+            Ok(value) => {
+                match self.shadow_realm_get_wrapped_value(ctx, &value, realm_id) {
+                    Ok(wrapped) => wrapped,
+                    Err(()) => Value::Undefined, // pending_throw already set
+                }
+            }
+            Err(err) => {
+                // Wrap any runtime error from the shadow realm as TypeError in the caller realm
+                let msg = err.message();
+                let te = self.make_type_error_object(ctx, &msg);
+                self.pending_throw = Some(te);
+                Value::Undefined
+            }
+        }
+    }
+
+    /// ShadowRealm.prototype.importValue(specifier, exportName)
+    fn shadow_realm_import_value(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        // 1. Validate this
+        let Some(realm_id) = self.shadow_realm_validate_this(ctx, receiver, "ShadowRealm.prototype.importValue") else {
+            return Value::Undefined;
+        };
+
+        // 2. ToString(specifier) — per spec this happens BEFORE exportName validation
+        let specifier = match args.first().unwrap_or(&Value::Undefined) {
+            Value::String(s) => crate::unicode::utf16_to_utf8(s),
+            v => match self.vm_to_string_like_spec(ctx, v) {
+                Ok(s) => s,
+                Err(err) => {
+                    self.set_pending_throw_from_error(&err);
+                    return Value::Undefined;
+                }
+            },
+        };
+
+        // 3. Validate exportName is a string
+        let export_name = match args.get(1).unwrap_or(&Value::Undefined) {
+            Value::String(s) => crate::unicode::utf16_to_utf8(s),
+            _ => {
+                self.throw_type_error(ctx, "importValue exportName must be a string");
+                return Value::Undefined;
+            }
+        };
+
+        // 4. Build a Promise that resolves to the imported value
+        let promise_ctor = self.intrinsic_promise_ctor.clone();
+        let (promise, resolve_fn, reject_fn) = match self.new_promise_capability(ctx, &promise_ctor) {
+            Ok(cap) => cap,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return Value::Undefined;
+            }
+        };
+
+        // For now, try to do the import synchronously in the child realm
+        let import_result: Result<Value<'gc>, String> = if realm_id < self.child_realms.len()
+            && let Some(mut child) = self.child_realms[realm_id].take()
+        {
+            child.symbol_counter = self.symbol_counter;
+            // Attempt module import in child realm
+            let script_path = self.script_path.clone();
+            let base_dir = if let Some(ref p) = script_path {
+                std::path::Path::new(p).parent().map(|p| p.to_path_buf())
+            } else {
+                std::env::current_dir().ok()
+            };
+            let module_path = if let Some(base) = base_dir {
+                base.join(&specifier)
+            } else {
+                std::path::PathBuf::from(&specifier)
+            };
+
+            let result = if !module_path.exists() {
+                Err(format!("Cannot find module '{}'", specifier))
+            } else {
+                match std::fs::read_to_string(&module_path) {
+                    Err(e) => Err(format!("Cannot load module '{}': {}", specifier, e)),
+                    Ok(source) => {
+                        // Parse and run as module
+                        let run_res = (|| -> Result<Value<'gc>, JSError> {
+                            let tokens = crate::core::tokenize(&source)?;
+                            let mut idx = 0;
+                            let stmts = crate::core::parse_statements(&tokens, &mut idx)?;
+                            let compiler = crate::core::Compiler::new();
+                            let chunk = compiler.compile(&stmts)?;
+                            let (offset, _) = child.merge_eval_chunk(&chunk);
+                            let saved_ip = child.ip;
+                            child.ip = offset;
+                            let r = child.run(ctx);
+                            child.ip = saved_ip;
+                            r
+                        })();
+
+                        match run_res {
+                            Ok(_) => {
+                                let export_val = child
+                                    .globals
+                                    .get(&export_name)
+                                    .cloned()
+                                    .or_else(|| child.global_this.borrow().get(&export_name).cloned());
+                                match export_val {
+                                    Some(v) => Ok(v),
+                                    None => Err(format!("'{}' is not exported from module '{}'", export_name, specifier)),
+                                }
+                            }
+                            Err(err) => Err(err.message()),
+                        }
+                    }
+                }
+            };
+            self.symbol_counter = child.symbol_counter;
+            self.child_realms[realm_id] = Some(child);
+            result
+        } else {
+            Err("ShadowRealm: internal error - realm not found".to_string())
+        };
+
+        // Resolve or reject the promise
+        match import_result {
+            Ok(value) => {
+                match self.shadow_realm_get_wrapped_value(ctx, &value, realm_id) {
+                    Ok(wrapped) => {
+                        self.vm_call_function_value(ctx, &resolve_fn, &Value::Undefined, &[wrapped]).ok();
+                    }
+                    Err(()) => {
+                        // pending_throw was set; convert to rejection
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[thrown]).ok();
+                        }
+                    }
+                }
+            }
+            Err(msg) => {
+                let te = self.make_type_error_object(ctx, &msg);
+                self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[te]).ok();
+            }
+        }
+
+        promise
+    }
+
+    /// Execute a host function call for shadowRealm.wrappedFunction.
+    fn shadow_realm_call_wrapped_function(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        wrapper_obj: &crate::core::VmObjectHandle<'gc>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
+        let (target, realm_id) = {
+            let borrow = wrapper_obj.borrow();
+            let target = borrow.get("__wrapped_target__").cloned().unwrap_or(Value::Undefined);
+            let realm_id = match borrow.get("__wrapped_realm_id__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => {
+                    drop(borrow);
+                    self.throw_type_error(ctx, "Invalid wrapped function");
+                    return Value::Undefined;
+                }
+            };
+            (target, realm_id)
+        };
+
+        // Check for revoked proxy
+        if let Value::VmObject(obj) = &target {
+            let borrow = obj.borrow();
+            if borrow.contains_key("__proxy_target__") && matches!(borrow.get("__proxy_revoked__"), Some(Value::Boolean(true))) {
+                drop(borrow);
+                self.throw_type_error(ctx, "Cannot call a wrapped function on a revoked proxy");
+                return Value::Undefined;
+            }
+        }
+
+        // Validate all arguments are primitive or callable, wrap callable args
+        let mut wrapped_args = Vec::with_capacity(args.len());
+        for arg in args {
+            if Self::is_primitive_value(arg) {
+                wrapped_args.push(arg.clone());
+            } else if self.is_callable_value(arg) {
+                // Wrap callable arg into the target realm
+                match self.shadow_realm_wrapped_function_create_into_realm(ctx, arg, realm_id) {
+                    Ok(wrapped) => wrapped_args.push(wrapped),
+                    Err(()) => return Value::Undefined,
+                }
+            } else {
+                self.throw_type_error(ctx, "Arguments of a wrapped function must be primitives or callable");
+                return Value::Undefined;
+            }
+        }
+
+        // Call target in child realm
+        let call_result = if realm_id < self.child_realms.len()
+            && let Some(mut child) = self.child_realms[realm_id].take()
+        {
+            child.symbol_counter = self.symbol_counter;
+            child.realm_parent_ptr = Some(self as *mut VM<'gc>);
+            let res = child.vm_call_function_value(ctx, &target, &Value::Undefined, &wrapped_args);
+            child.realm_parent_ptr = None;
+            // Check pending_throw
+            let child_throw = child.pending_throw.take();
+            self.symbol_counter = child.symbol_counter;
+            self.child_realms[realm_id] = Some(child);
+            if let Some(_thrown) = child_throw {
+                Err(())
+            } else {
+                res.map_err(|_| ())
+            }
+        } else {
+            self.throw_type_error(ctx, "ShadowRealm: internal error - realm not found");
+            Err(())
+        };
+
+        match call_result {
+            Ok(value) => match self.shadow_realm_get_wrapped_value(ctx, &value, realm_id) {
+                Ok(wrapped) => wrapped,
+                Err(()) => Value::Undefined,
+            },
+            Err(()) => {
+                // Wrap error as TypeError from caller realm
+                if self.pending_throw.is_none() {
+                    self.throw_type_error(ctx, "Error from wrapped function in ShadowRealm");
+                }
+                Value::Undefined
+            }
+        }
+    }
+
+    /// Create a WrappedFunction that wraps a caller-realm callable for use *inside* the shadow realm.
+    /// (For wrapping arguments passed to a wrapped function.)
+    fn shadow_realm_wrapped_function_create_into_realm(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        target: &Value<'gc>,
+        realm_id: usize,
+    ) -> Result<Value<'gc>, ()> {
+        // For args going INTO the realm, we create a wrapper that, when called inside
+        // the child realm, will delegate back to the caller realm's function.
+
+        // Get Function.prototype from child realm for __proto__
+        let fn_proto = if realm_id < self.child_realms.len()
+            && let Some(child) = self.child_realms[realm_id].as_ref()
+        {
+            child
+                .globals
+                .get("Function")
+                .and_then(|f| {
+                    if let Value::VmObject(obj) = f {
+                        obj.borrow().get("prototype").cloned()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(Value::Undefined)
+        } else {
+            Value::Undefined
+        };
+
+        // Read name/length from the caller-realm function
+        let (name, length) = match target {
+            Value::VmObject(obj) => {
+                let borrow = obj.borrow();
+                let n = match borrow.get("name") {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    _ => String::new(),
+                };
+                let l = match borrow.get("length") {
+                    Some(Value::Number(v)) => *v,
+                    _ => 0.0,
+                };
+                (n, l)
+            }
+            _ => (String::new(), 0.0),
+        };
+
+        let mut wrapper = IndexMap::new();
+        wrapper.insert("__host_fn__".to_string(), Value::from("shadowRealm.inboundWrappedFunction"));
+        wrapper.insert("__inbound_wrapped_target__".to_string(), target.clone());
+        wrapper.insert("__inbound_wrapped_realm_id__".to_string(), Value::Number(realm_id as f64));
+        wrapper.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        if !matches!(fn_proto, Value::Undefined) {
+            wrapper.insert("__proto__".to_string(), fn_proto);
+        }
+        Self::insert_property_with_attributes(&mut wrapper, "length", &Value::Number(length), false, false, true);
+        Self::insert_property_with_attributes(
+            &mut wrapper,
+            "name",
+            &Value::String(crate::unicode::utf8_to_utf16(&name)),
+            false,
+            false,
+            true,
+        );
+
+        Ok(Value::VmObject(new_gc_cell_ptr(ctx, wrapper)))
+    }
+
+    /// Execute a host function call for shadowRealm.inboundWrappedFunction.
+    /// This is called from INSIDE the child realm to invoke a function from the caller realm.
+    fn shadow_realm_call_inbound_wrapped_function(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        wrapper_obj: &crate::core::VmObjectHandle<'gc>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
+        let target = wrapper_obj
+            .borrow()
+            .get("__inbound_wrapped_target__")
+            .cloned()
+            .unwrap_or(Value::Undefined);
+
+        // Validate all arguments: must be primitive or callable
+        for arg in args {
+            if !Self::is_primitive_value(arg) && !self.is_callable_value(arg) {
+                self.throw_type_error(ctx, "Arguments of a wrapped function must be primitives or callable");
+                return Value::Undefined;
+            }
+        }
+
+        // Short-circuit: if target is a wrappedFunction whose realm is currently taken
+        // (i.e., it wraps back to our own realm in a nested scenario), call the inner
+        // function directly to avoid the re-entrant take deadlock.
+        if let Value::VmObject(target_obj) = &target {
+            let target_borrow = target_obj.borrow();
+            if let Some(Value::String(hf)) = target_borrow.get("__host_fn__") {
+                let hf_str = crate::unicode::utf16_to_utf8(hf);
+                if hf_str == "shadowRealm.wrappedFunction" {
+                    let inner_target = target_borrow.get("__wrapped_target__").cloned();
+                    let inner_realm_id = match target_borrow.get("__wrapped_realm_id__") {
+                        Some(Value::Number(n)) => Some(*n as usize),
+                        _ => None,
+                    };
+                    drop(target_borrow);
+
+                    if let (Some(inner_target), Some(inner_realm_id)) = (inner_target, inner_realm_id)
+                        && let Some(parent_ptr) = self.realm_parent_ptr
+                    {
+                        let parent = unsafe { &mut *parent_ptr };
+                        // If the parent's child_realm slot is empty, the target realm is "us"
+                        // (already taken by the outer call). Call inner function directly.
+                        if inner_realm_id < parent.child_realms.len() && parent.child_realms[inner_realm_id].is_none() {
+                            let call_result = self.vm_call_function_value(ctx, &inner_target, &Value::Undefined, args);
+                            return match call_result {
+                                Ok(value) => {
+                                    if Self::is_primitive_value(&value) || self.is_callable_value(&value) {
+                                        value
+                                    } else {
+                                        self.throw_type_error(ctx, "Return value from wrapped function must be primitive or callable");
+                                        Value::Undefined
+                                    }
+                                }
+                                Err(_) => {
+                                    if self.pending_throw.is_none() {
+                                        self.throw_type_error(ctx, "Error from wrapped function");
+                                    }
+                                    Value::Undefined
+                                }
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        // The target is from the caller (parent) realm. Delegate call to the parent VM
+        // via realm_parent_ptr to avoid IP mismatch.
+        let call_result = if let Some(parent_ptr) = self.realm_parent_ptr {
+            let parent = unsafe { &mut *parent_ptr };
+            parent.vm_call_function_value(ctx, &target, &Value::Undefined, args)
+        } else {
+            // Fallback: try calling directly (may work for VmNativeFunction)
+            self.vm_call_function_value(ctx, &target, &Value::Undefined, args)
+        };
+        match call_result {
+            Ok(value) => {
+                if Self::is_primitive_value(&value) || self.is_callable_value(&value) {
+                    value
+                } else {
+                    self.throw_type_error(ctx, "Return value from wrapped function must be primitive or callable");
+                    Value::Undefined
+                }
+            }
+            Err(_) => {
+                if self.pending_throw.is_none() {
+                    self.throw_type_error(ctx, "Error from wrapped function");
+                }
+                Value::Undefined
+            }
+        }
     }
 
     /// Execute a native/built-in function
@@ -27441,7 +28238,7 @@ impl<'gc> VM<'gc> {
                             return remapped;
                         }
                     }
-                    if map.borrow().contains_key("__host_fn__")
+                    if (map.borrow().contains_key("__host_fn__") || map.borrow().contains_key("__native_id__"))
                         && !map.borrow().contains_key("__proto__")
                         && let Some(proto) = self.ctor_prototype_from_globals(ctx, "Function")
                     {
@@ -36854,6 +37651,16 @@ impl<'gc> VM<'gc> {
             return self.regexp_test_dispatch(ctx, receiver, args);
         }
 
+        // ShadowRealm.prototype.evaluate(sourceText)
+        if id == BUILTIN_SHADOWREALM_EVALUATE {
+            return self.shadow_realm_evaluate(ctx, receiver, args);
+        }
+
+        // ShadowRealm.prototype.importValue(specifier, exportName)
+        if id == BUILTIN_SHADOWREALM_IMPORTVALUE {
+            return self.shadow_realm_import_value(ctx, receiver, args);
+        }
+
         log::warn!("Unknown method builtin ID {} on {}", id, value_to_string(receiver));
         Value::Undefined
     }
@@ -41564,6 +42371,8 @@ impl<'gc> VM<'gc> {
                                     self.vm_construct_disposable_stack(ctx, map, false, new_target)
                                 } else if host_name == "asyncDisposableStack.constructor" {
                                     self.vm_construct_disposable_stack(ctx, map, true, new_target)
+                                } else if host_name == "shadowRealm.constructor" {
+                                    self.vm_construct_shadow_realm(ctx, map, new_target)
                                 } else if host_name == "intl.segmenter.ctor" {
                                     let (proto, segments_proto, segment_iter_proto) = {
                                         let borrow = map.borrow();

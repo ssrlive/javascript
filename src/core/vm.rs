@@ -1854,6 +1854,7 @@ impl<'gc> VM<'gc> {
                 .cloned()
                 && origin_binding != "namespace"
                 && origin_binding != "deferred-namespace"
+                && origin_binding != "\x00namespace"
             {
                 let origin_local = self
                     .loaded_module_local_names
@@ -1879,6 +1880,7 @@ impl<'gc> VM<'gc> {
             .cloned()
             && origin_binding != "namespace"
             && origin_binding != "deferred-namespace"
+            && origin_binding != "\x00namespace"
         {
             let origin_local = self
                 .loaded_module_local_names
@@ -2288,30 +2290,12 @@ impl<'gc> VM<'gc> {
 
     fn finalize_dependency_module_record(&mut self, ctx: &GcContext<'gc>, record: &StoredModuleRecord) {
         use crate::core::resolve_module_path;
+        use crate::core::statement::{ImportSpecifier, StatementKind};
 
         let key = record.resolved_path.to_string_lossy().to_string();
         let mut exports = IndexMap::new();
-
-        for (export_name, local_name) in &record.export_name_to_local {
-            if let Some(val) = self.module_locals.get(local_name).cloned() {
-                exports.insert(export_name.clone(), val);
-            } else if let Some(val) = self.globals.get(local_name).cloned() {
-                exports.insert(export_name.clone(), val);
-            }
-        }
-        for export_name in &record.export_names {
-            if exports.contains_key(export_name) {
-                continue;
-            }
-            if let Some(val) = self.module_locals.get(export_name).cloned() {
-                exports.insert(export_name.clone(), val);
-            } else if let Some(val) = self.globals.get(export_name).cloned() {
-                exports.insert(export_name.clone(), val);
-            }
-        }
-
-        let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
         let mut ns_import_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+
         for stmt in &record.statements {
             if let crate::core::statement::StatementKind::Import(specs, source, import_type) = &*stmt.kind {
                 let imp_resolved = crate::core::resolve_module_request_key(source, &record.resolved_path, import_type.as_deref());
@@ -2329,6 +2313,31 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        for (export_name, local_name) in &record.export_name_to_local {
+            if let Some((origin_module, origin_binding)) = ns_import_origins.get(local_name) {
+                let deferred = origin_binding == "deferred-namespace";
+                if let Some(val) = self.get_module_namespace_object(ctx, origin_module, deferred) {
+                    exports.insert(export_name.clone(), val);
+                }
+            } else if let Some(val) = self.module_locals.get(local_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            } else if let Some(val) = self.globals.get(local_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            }
+        }
+        for export_name in &record.export_names {
+            if exports.contains_key(export_name) {
+                continue;
+            }
+            if let Some(val) = self.module_locals.get(export_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            } else if let Some(val) = self.globals.get(export_name).cloned() {
+                exports.insert(export_name.clone(), val);
+            }
+        }
+
+        let mut origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+
         for export_name in exports.keys() {
             let local_name = record
                 .export_name_to_local
@@ -2342,27 +2351,102 @@ impl<'gc> VM<'gc> {
             }
         }
 
+        fn extract_imports(
+            stmts: &[crate::core::Statement],
+            base_path: &std::path::Path,
+        ) -> std::collections::HashMap<String, (String, String)> {
+            let mut map = std::collections::HashMap::new();
+            for stmt in stmts {
+                if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
+                    let resolved = crate::core::resolve_module_request_key(source, base_path, import_type.as_deref());
+                    for spec in specs {
+                        match spec {
+                            ImportSpecifier::Named(import_name, Some(local_name)) => {
+                                map.insert(local_name.clone(), (resolved.clone(), import_name.clone()));
+                            }
+                            ImportSpecifier::Named(name, None) => {
+                                map.insert(name.clone(), (resolved.clone(), name.clone()));
+                            }
+                            ImportSpecifier::Default(local_name) => {
+                                map.insert(local_name.clone(), (resolved.clone(), "default".to_string()));
+                            }
+                            ImportSpecifier::Namespace(local_name) | ImportSpecifier::DeferredNamespace(local_name) => {
+                                map.insert(local_name.clone(), (resolved.clone(), "\x00namespace".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            map
+        }
+
+        let mut local_exports: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+        let mut import_bindings: std::collections::HashMap<String, std::collections::HashMap<String, (String, String)>> =
+            std::collections::HashMap::new();
+        let mut export_to_local: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+            std::collections::HashMap::new();
+        let mut all_reexport_deps: std::collections::HashMap<String, Vec<(String, Vec<crate::core::ReexportSpec>)>> =
+            std::collections::HashMap::new();
+
+        for (module_key, stored) in &self.module_records {
+            local_exports.insert(module_key.clone(), stored.export_name_to_local.keys().cloned().collect());
+            import_bindings.insert(module_key.clone(), extract_imports(&stored.statements, &stored.resolved_path));
+            export_to_local.insert(module_key.clone(), stored.export_name_to_local.clone());
+            let resolved_reexports: Vec<(String, Vec<crate::core::ReexportSpec>)> = stored
+                .reexport_sources
+                .iter()
+                .map(|(source, specs)| {
+                    (
+                        resolve_module_path(source, &stored.resolved_path).to_string_lossy().to_string(),
+                        specs.clone(),
+                    )
+                })
+                .collect();
+            if !resolved_reexports.is_empty() {
+                all_reexport_deps.insert(module_key.clone(), resolved_reexports);
+            }
+        }
+
+        let resolve_ctx = ModuleResolutionContext {
+            local_exports: &local_exports,
+            all_reexport_deps: &all_reexport_deps,
+            import_bindings: &import_bindings,
+            export_to_local: &export_to_local,
+        };
+
         let mut star_export_origins: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
         let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut all_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
+        let mut runtime_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
         for (reexport_src, reexport_specs) in &record.reexport_sources {
             let reexport_resolved = resolve_module_path(reexport_src, &record.resolved_path);
             let reexport_key = reexport_resolved.to_string_lossy().to_string();
-            all_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
+            runtime_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
             if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
                 for spec in reexport_specs {
                     match spec {
                         crate::core::ReexportSpec::Named(name, alias) => {
                             let ename = alias.as_deref().unwrap_or(name).to_string();
-                            if let Some(val) = source_exports.get(name).cloned() {
-                                exports.insert(ename.clone(), val);
-                                let origin = self
-                                    .export_origins
-                                    .get(&reexport_key)
-                                    .and_then(|o| o.get(name))
-                                    .cloned()
-                                    .unwrap_or_else(|| (reexport_key.clone(), name.clone()));
-                                origins.insert(ename, origin);
+                            let mut visited = std::collections::HashSet::new();
+                            match Self::resolve_export_static(&reexport_key, name, &resolve_ctx, &mut visited) {
+                                ResolveExportResult::Found(resolved_module, resolved_binding) => {
+                                    let resolved_value = if resolved_binding == "\x00namespace" {
+                                        self.get_module_namespace_object(ctx, &resolved_module, false)
+                                    } else {
+                                        self.loaded_modules
+                                            .get(&resolved_module)
+                                            .and_then(|module_exports| module_exports.get(&resolved_binding))
+                                            .cloned()
+                                    }
+                                    .or_else(|| source_exports.get(name).cloned());
+                                    if let Some(val) = resolved_value {
+                                        exports.insert(ename.clone(), val);
+                                        origins.insert(ename, (resolved_module, resolved_binding));
+                                    }
+                                }
+                                ResolveExportResult::Ambiguous => {
+                                    ambiguous_keys.insert(ename);
+                                }
+                                ResolveExportResult::Null => {}
                             }
                         }
                         crate::core::ReexportSpec::Star => {
@@ -2370,15 +2454,29 @@ impl<'gc> VM<'gc> {
                                 if k == "default" {
                                     continue;
                                 }
+                                let mut visited = std::collections::HashSet::new();
+                                let resolution = Self::resolve_export_static(&reexport_key, k, &resolve_ctx, &mut visited);
+                                let (resolved_module, resolved_binding) = match resolution {
+                                    ResolveExportResult::Found(resolved_module, resolved_binding) => (resolved_module, resolved_binding),
+                                    ResolveExportResult::Ambiguous => {
+                                        ambiguous_keys.insert(k.clone());
+                                        continue;
+                                    }
+                                    ResolveExportResult::Null => continue,
+                                };
                                 if exports.contains_key(k) && !star_export_origins.contains_key(k) {
                                     continue;
                                 }
-                                let cur_origin = self
-                                    .export_origins
-                                    .get(&reexport_key)
-                                    .and_then(|o| o.get(k))
-                                    .cloned()
-                                    .unwrap_or_else(|| (reexport_key.clone(), k.clone()));
+                                let cur_origin = (resolved_module, resolved_binding);
+                                let resolved_value = if cur_origin.1 == "\x00namespace" {
+                                    self.get_module_namespace_object(ctx, &cur_origin.0, false)
+                                } else {
+                                    self.loaded_modules
+                                        .get(&cur_origin.0)
+                                        .and_then(|module_exports| module_exports.get(&cur_origin.1))
+                                        .cloned()
+                                }
+                                .unwrap_or_else(|| v.clone());
                                 if let Some(prev_origin) = star_export_origins.get(k) {
                                     if prev_origin != &cur_origin {
                                         ambiguous_keys.insert(k.clone());
@@ -2386,7 +2484,7 @@ impl<'gc> VM<'gc> {
                                 } else {
                                     star_export_origins.insert(k.clone(), cur_origin.clone());
                                     if !exports.contains_key(k) {
-                                        exports.insert(k.clone(), v.clone());
+                                        exports.insert(k.clone(), resolved_value);
                                     }
                                 }
                                 origins.insert(k.clone(), cur_origin);
@@ -2410,6 +2508,8 @@ impl<'gc> VM<'gc> {
         }
         if !ambiguous_keys.is_empty() {
             self.ambiguous_export_keys.insert(key.clone(), ambiguous_keys);
+        } else {
+            self.ambiguous_export_keys.remove(&key);
         }
 
         self.loaded_modules.insert(key.clone(), exports);
@@ -2422,8 +2522,8 @@ impl<'gc> VM<'gc> {
         self.module_load_errors.remove(&key);
         self.refresh_module_namespace_object(ctx, &key);
         self.refresh_deferred_module_namespace_object(ctx, &key);
-        if !all_reexport_deps.is_empty() {
-            self.reexport_deps.insert(key.clone(), all_reexport_deps);
+        if !runtime_reexport_deps.is_empty() {
+            self.reexport_deps.insert(key.clone(), runtime_reexport_deps);
         }
         self.set_module_record_status(&key, ModuleStatus::Evaluated);
     }

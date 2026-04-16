@@ -344,21 +344,6 @@ function detectFeature(feat) {
 
 let pass = 0, fail = 0, skip = 0, n = 0;
 
-function shouldSkipPendingTest(meta, f) {
-  const allowPending = [
-    path.join('language', 'expressions', 'async-arrow-function'),
-    path.join('language', 'expressions', 'async-function'),
-    path.join('language', 'expressions', 'await'),
-    path.join('language', 'expressions', 'object', 'method-definition'),
-    path.join('language', 'statements', 'async-function'),
-    path.join('language', 'statements', 'class', 'definition'),
-    path.join('language', 'statements', 'try'),
-    'built-ins',
-    'staging',
-  ];
-  return /esid\s*:\s*pending\b/.test(meta) && !allowPending.some(p => f.includes(p));
-}
-
 // Skip tests known to be too slow for a tree-walking interpreter
 const SLOW_TESTS = [
   'S15.1.3.1_A2.5_T1.js',
@@ -517,11 +502,8 @@ async function runAll() {
     // Detect noStrict
     const flagsBlock = (meta.match(/flags\s*:\s*\[[\s\S]*?\]/) || [''])[0];
     if (flagsBlock && flagsBlock.includes('noStrict')) { skip++; log(`SKIP (noStrict) ${f}`); continue; }
-    if (flagsBlock && flagsBlock.includes('raw')) { skip++; log(`SKIP (raw) ${f}`); continue; }
-    if (flagsBlock && flagsBlock.includes('CanBlockIsFalse')) { skip++; log(`SKIP (CanBlockIsFalse) ${f}`); continue; }
-    if (shouldSkipPendingTest(meta, f)) { skip++; log(`SKIP (esid pending) ${f}`); continue; }
 
-    // Parse negative metadata
+    // Parse negative metadata for negative-test result handling.
     let expectedNegative = null;
     if (/negative:\s*/.test(meta)) {
       const blockMatch = meta.match(/negative:[\s\S]*?(?=(?:\n[^\s]|-{3}|$))/);
@@ -536,6 +518,7 @@ async function runAll() {
         }
       }
     }
+    if (flagsBlock && flagsBlock.includes('CanBlockIsFalse')) { skip++; log(`SKIP (CanBlockIsFalse) ${f}`); continue; }
 
     // Feature detection
     const feats = (meta.match(/features:\s*\[(.*?)\]/s) || [])[1];
@@ -555,10 +538,6 @@ async function runAll() {
 
     // Read test source once and reuse for all checks below
     const testSrc = fs.readFileSync(f, 'utf8');
-
-    // Fast skip for Intl
-    if (/features:/.test(meta) && /Intl/.test(meta)) { skip++; log(`SKIP (feature: Intl) ${f}`); continue; }
-    if (/\bIntl\b/.test(testSrc)) { skip++; log(`SKIP (contains Intl) ${f}`); continue; }
 
     // Detect tests that require $262.agent (multi-threaded worker support)
     const needsAgent = /\$262\.agent\b/.test(testSrc);

@@ -288,9 +288,11 @@ function verifyComposeStubMarkerCount(testPath, harnessIndex = {}, prependFiles 
 }
 
 function composeTest({ testPath, repoDir, harnessIndex, prependFiles = [], needStrict = true, needsAgent = false, expectedNegative = null }) {
+  const meta = extractMeta(testPath);
+  const isRaw = hasFlag(meta, 'raw');
   // For non-runtime negative tests (parse/early/resolution phase), skip all
   // harness injections so the composed file matches the original source exactly.
-  const skipInjects = expectedNegative && expectedNegative.phase && expectedNegative.phase !== 'runtime';
+  const skipInjects = isRaw || (expectedNegative && expectedNegative.phase && expectedNegative.phase !== 'runtime');
 
   let PREPEND_FILES = prependFiles.slice();
 
@@ -373,8 +375,6 @@ function composeTest({ testPath, repoDir, harnessIndex, prependFiles = [], needS
   }
 
   PREPEND_FILES = ensureArrayDistinct(PREPEND_FILES);
-
-  const meta = extractMeta(testPath);
   const isModule = hasFlag(meta, 'module');
 
   let moduleBootstrapPath = null;

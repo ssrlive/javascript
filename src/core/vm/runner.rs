@@ -82,6 +82,7 @@ impl<'gc> VM<'gc> {
                 Opcode::GetNewTarget => self.run_opcode_get_new_target(ctx)?,
                 Opcode::GetGlobal => self.run_opcode_get_global(ctx)?,
                 Opcode::GetArguments => self.run_opcode_get_arguments(ctx)?,
+                Opcode::SetArguments => self.run_opcode_set_arguments(ctx)?,
                 Opcode::SetGlobal => self.run_opcode_set_global(ctx)?,
                 Opcode::Jump => self.run_opcode_jump(ctx)?,
                 Opcode::JumpIfFalse => self.run_opcode_jump_if_false(ctx)?,
@@ -927,13 +928,35 @@ impl<'gc> VM<'gc> {
                     };
                     self.regexp_home_proto_temp = regexp_home;
 
-                    // ShadowRealm wrapped function dispatch (must happen before cross-realm)
-                    if host_name == "shadowRealm.wrappedFunction" || host_name == "shadowRealm.inboundWrappedFunction" {
-                        let result = if host_name == "shadowRealm.wrappedFunction" {
-                            self.shadow_realm_call_wrapped_function(ctx, map, &args_collected)
+                    // ShadowRealm wrapped function dispatch (must happen before generic host-fn
+                    // cross-realm routing because __wrapped_realm_id__ is relative to the owner VM).
+                    if host_name == "shadowRealm.wrappedFunction" {
+                        let result = if let Some(rid) = realm_id
+                            && rid < self.child_realms.len()
+                            && let Some(mut child) = self.child_realms[rid].take()
+                        {
+                            self.sync_runtime_to_child(&mut child);
+                            child.realm_parent_ptr = Some(self as *mut VM<'gc>);
+                            let result = child.shadow_realm_call_wrapped_function(ctx, map, &args_collected);
+                            child.realm_parent_ptr = None;
+                            if let Some(thrown) = child.pending_throw.take() {
+                                let thrown = self.register_cross_realm_fn(ctx, &mut child, thrown, rid);
+                                self.pending_throw = Some(thrown);
+                            }
+                            let result = self.register_cross_realm_fn(ctx, &mut child, result, rid);
+                            self.sync_runtime_from_child(&child);
+                            self.child_realms[rid] = Some(child);
+                            result
                         } else {
-                            self.shadow_realm_call_inbound_wrapped_function(ctx, map, &args_collected)
+                            self.shadow_realm_call_wrapped_function(ctx, map, &args_collected)
                         };
+                        self.stack.push(result);
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.handle_throw(ctx, &thrown)?;
+                            return Ok(OpcodeAction::Continue);
+                        }
+                    } else if host_name == "shadowRealm.inboundWrappedFunction" {
+                        let result = self.shadow_realm_call_inbound_wrapped_function(ctx, map, &args_collected);
                         self.stack.push(result);
                         if let Some(thrown) = self.pending_throw.take() {
                             self.handle_throw(ctx, &thrown)?;
@@ -1069,6 +1092,7 @@ impl<'gc> VM<'gc> {
                         && let Some(mut child) = self.child_realms[rid].take()
                     {
                         self.sync_runtime_to_child(&mut child);
+                        child.realm_parent_ptr = Some(self as *mut VM<'gc>);
                         let pushed_new_target = child.push_dynamic_function_call_new_target(&ctor_for_realm, id);
                         let out = if let Some(recv) = method_receiver.as_ref() {
                             child.call_method_builtin(ctx, id, recv, &args_collected)
@@ -1078,6 +1102,7 @@ impl<'gc> VM<'gc> {
                         if pushed_new_target {
                             child.new_target_stack.pop();
                         }
+                        child.realm_parent_ptr = None;
                         if let Some(thrown) = child.pending_throw.take() {
                             self.pending_throw = Some(thrown);
                         }
@@ -1978,6 +2003,14 @@ impl<'gc> VM<'gc> {
         let obj_val = Value::VmObject(new_gc_cell_ptr(ctx, map));
         self.frames[frame_idx].arguments_obj = Some(obj_val.clone());
         self.stack.push(obj_val);
+        Ok(OpcodeAction::Continue)
+    }
+
+    fn run_opcode_set_arguments(&mut self, _ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+        if let Some(frame) = self.frames.last_mut() {
+            let val = self.stack.last().cloned().unwrap_or(Value::Undefined);
+            frame.arguments_obj = Some(val);
+        }
         Ok(OpcodeAction::Continue)
     }
 
@@ -3107,6 +3140,7 @@ impl<'gc> VM<'gc> {
                             && let Some(mut child) = self.child_realms[rid].take()
                         {
                             self.sync_runtime_to_child(&mut child);
+                            child.realm_parent_ptr = Some(self as *mut VM<'gc>);
                             let pushed_new_target = child.push_dynamic_function_call_new_target(&callee, id);
                             let out = if let Some(recv) = method_receiver.as_ref() {
                                 child.call_method_builtin(ctx, id, recv, &args_collected)
@@ -3116,6 +3150,7 @@ impl<'gc> VM<'gc> {
                             if pushed_new_target {
                                 child.new_target_stack.pop();
                             }
+                            child.realm_parent_ptr = None;
                             if let Some(thrown) = child.pending_throw.take() {
                                 self.pending_throw = Some(thrown);
                             }

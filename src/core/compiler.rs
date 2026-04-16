@@ -548,15 +548,11 @@ impl<'gc> Compiler<'gc> {
                     Self::collect_object_destructuring_binding_names(elem, out);
                 }
             }
-            StatementKind::Class(class_def) => {
-                if !class_def.name.is_empty() && !out.iter().any(|n| n == &class_def.name) {
-                    out.push(class_def.name.clone());
-                }
+            StatementKind::Class(class_def) if !class_def.name.is_empty() && !out.iter().any(|n| n == &class_def.name) => {
+                out.push(class_def.name.clone());
             }
-            StatementKind::FunctionDeclaration(name, ..) => {
-                if !name.is_empty() && !out.iter().any(|n| n == name) {
-                    out.push(name.clone());
-                }
+            StatementKind::FunctionDeclaration(name, ..) if !name.is_empty() && !out.iter().any(|n| n == name) => {
+                out.push(name.clone());
             }
             StatementKind::Export(_, Some(inner_stmt), _) => {
                 Self::collect_function_lexical_names_from_statement(inner_stmt, out);
@@ -647,10 +643,8 @@ impl<'gc> Compiler<'gc> {
                         Self::collect_object_destructuring_binding_names(elem, &mut hoisted);
                     }
                 }
-                StatementKind::Class(class_def) => {
-                    if !class_def.name.is_empty() && !hoisted.iter().any(|n| n == &class_def.name) {
-                        hoisted.push(class_def.name.clone());
-                    }
+                StatementKind::Class(class_def) if !class_def.name.is_empty() && !hoisted.iter().any(|n| n == &class_def.name) => {
+                    hoisted.push(class_def.name.clone());
                 }
                 StatementKind::Export(_specs, Some(inner_stmt), _) => match &*inner_stmt.kind {
                     StatementKind::Let(decls) => {
@@ -677,10 +671,8 @@ impl<'gc> Compiler<'gc> {
                             Self::collect_object_destructuring_binding_names(elem, &mut hoisted);
                         }
                     }
-                    StatementKind::Class(class_def) => {
-                        if !class_def.name.is_empty() && !hoisted.iter().any(|n| n == &class_def.name) {
-                            hoisted.push(class_def.name.clone());
-                        }
+                    StatementKind::Class(class_def) if !class_def.name.is_empty() && !hoisted.iter().any(|n| n == &class_def.name) => {
+                        hoisted.push(class_def.name.clone());
                     }
                     _ => {}
                 },
@@ -770,10 +762,8 @@ impl<'gc> Compiler<'gc> {
                             // e.g. `export { _if as if }` maps "if" -> "_if"
                             self.export_name_to_local.insert(exported.to_string(), name.clone());
                         }
-                        ExportSpecifier::Default(_) => {
-                            if !self.module_export_names.contains(&"default".to_string()) {
-                                self.module_export_names.push("default".to_string());
-                            }
+                        ExportSpecifier::Default(_) if !self.module_export_names.iter().any(|name| name == "default") => {
+                            self.module_export_names.push("default".to_string());
                         }
                         _ => {}
                     }
@@ -1287,7 +1277,9 @@ impl<'gc> Compiler<'gc> {
                     return Ok(());
                 }
                 self.compile_expr(expr)?;
-                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                if name == "arguments" && self.scope_depth > 0 {
+                    self.chunk.write_opcode(Opcode::SetArguments);
+                } else if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     if self.const_locals.contains(name.as_str()) {
                         self.emit_const_assign_error(name);
                     } else {
@@ -1331,11 +1323,9 @@ impl<'gc> Compiler<'gc> {
                     for s in statements.iter() {
                         match &*s.kind {
                             StatementKind::FunctionDeclaration(name, _, _, is_gen, is_async)
-                                if self.current_strict || *is_gen || *is_async =>
+                                if (self.current_strict || *is_gen || *is_async) && !block_local_names.contains(name) =>
                             {
-                                if !block_local_names.contains(name) {
-                                    block_local_names.push(name.clone());
-                                }
+                                block_local_names.push(name.clone());
                             }
                             StatementKind::Let(decls) => {
                                 for (name, _) in decls {
@@ -1358,10 +1348,10 @@ impl<'gc> Compiler<'gc> {
                                     }
                                 }
                             }
-                            StatementKind::Class(class_def) => {
-                                if !class_def.name.is_empty() && !block_local_names.contains(&class_def.name) {
-                                    block_local_names.push(class_def.name.clone());
-                                }
+                            StatementKind::Class(class_def)
+                                if !class_def.name.is_empty() && !block_local_names.contains(&class_def.name) =>
+                            {
+                                block_local_names.push(class_def.name.clone());
                             }
                             _ => {}
                         }
@@ -2847,12 +2837,12 @@ impl<'gc> Compiler<'gc> {
                                         }
                                     }
                                 }
-                                StatementKind::Class(class_def) => {
-                                    if !class_def.name.is_empty() && !body_aliases.contains_key(&class_def.name) {
-                                        let alias = format!("__catch_body_alias_{}__", self.forin_counter);
-                                        self.forin_counter = self.forin_counter.saturating_add(1);
-                                        body_aliases.insert(class_def.name.clone(), (alias, false));
-                                    }
+                                StatementKind::Class(class_def)
+                                    if !class_def.name.is_empty() && !body_aliases.contains_key(&class_def.name) =>
+                                {
+                                    let alias = format!("__catch_body_alias_{}__", self.forin_counter);
+                                    self.forin_counter = self.forin_counter.saturating_add(1);
+                                    body_aliases.insert(class_def.name.clone(), (alias, false));
                                 }
                                 _ => {}
                             }
@@ -4207,13 +4197,11 @@ impl<'gc> Compiler<'gc> {
                         for s in body_stmts {
                             match &*s.kind {
                                 StatementKind::FunctionDeclaration(name, _, _, is_gen, is_async)
-                                    if self.current_strict || *is_gen || *is_async =>
+                                    if (self.current_strict || *is_gen || *is_async) && !block_aliases.contains_key(name) =>
                                 {
-                                    if !block_aliases.contains_key(name) {
-                                        let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                        self.forin_counter = self.forin_counter.saturating_add(1);
-                                        block_aliases.insert(name.clone(), (alias, false));
-                                    }
+                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                    self.forin_counter = self.forin_counter.saturating_add(1);
+                                    block_aliases.insert(name.clone(), (alias, false));
                                 }
                                 StatementKind::Let(decls) => {
                                     for (name, _) in decls {
@@ -4233,12 +4221,12 @@ impl<'gc> Compiler<'gc> {
                                         }
                                     }
                                 }
-                                StatementKind::Class(class_def) => {
-                                    if !class_def.name.is_empty() && !block_aliases.contains_key(&class_def.name) {
-                                        let alias = format!("__top_block_alias_{}__", self.forin_counter);
-                                        self.forin_counter = self.forin_counter.saturating_add(1);
-                                        block_aliases.insert(class_def.name.clone(), (alias, false));
-                                    }
+                                StatementKind::Class(class_def)
+                                    if !class_def.name.is_empty() && !block_aliases.contains_key(&class_def.name) =>
+                                {
+                                    let alias = format!("__top_block_alias_{}__", self.forin_counter);
+                                    self.forin_counter = self.forin_counter.saturating_add(1);
+                                    block_aliases.insert(class_def.name.clone(), (alias, false));
                                 }
                                 _ => {}
                             }
@@ -5721,7 +5709,9 @@ impl<'gc> Compiler<'gc> {
                     if let Some(ip) = effective_ip {
                         self.chunk.fn_names.entry(ip).or_insert_with(|| name.clone());
                     }
-                    if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                    if name == "arguments" && self.scope_depth > 0 {
+                        self.chunk.write_opcode(Opcode::SetArguments);
+                    } else if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                         if self.const_locals.contains(name.as_str()) {
                             self.emit_const_assign_error(name);
                         } else {
@@ -7575,7 +7565,9 @@ impl<'gc> Compiler<'gc> {
     fn compile_store(&mut self, expr: &Expr) -> Result<(), JSError> {
         match expr {
             Expr::Var(name, ..) => {
-                if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
+                if name == "arguments" && self.scope_depth > 0 {
+                    self.chunk.write_opcode(Opcode::SetArguments);
+                } else if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     if self.const_locals.contains(name.as_str()) {
                         self.emit_const_assign_error(name);
                     } else {

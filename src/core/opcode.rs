@@ -120,6 +120,7 @@ pub enum Opcode {
     AssertGlobalDefined = 114,       // read name const; throw ReferenceError if name not in globals/globalThis (strict pre-check)
     DisposeResources = 115, // dispose resources: operand u8 = count, pops count values, calls Symbol.dispose on each (reverse order)
     DisposeResourcesAsync = 116, // async dispose resources: like DisposeResources but uses Symbol.asyncDispose + await
+    SetArguments = 117,     // assign current function's special `arguments` binding
 }
 
 impl TryFrom<u8> for Opcode {
@@ -244,6 +245,7 @@ impl TryFrom<u8> for Opcode {
             114 => Opcode::AssertGlobalDefined,
             115 => Opcode::DisposeResources,
             116 => Opcode::DisposeResourcesAsync,
+            117 => Opcode::SetArguments,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -545,7 +547,8 @@ impl<'gc> Chunk<'gc> {
                 | 79..=95
                 | 97..=100
                 | 102..=103
-                | 105..=107 => {}
+                | 105..=107
+                | 117 => {}
 
                 // u8 operand, no adjustment needed
                 16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 | 108 | 109 | 110 => {

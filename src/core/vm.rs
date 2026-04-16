@@ -22921,8 +22921,7 @@ impl<'gc> VM<'gc> {
             }
         };
         let mut index = 0;
-        let trimmed = source_text.trim();
-        let source_is_strict = trimmed.starts_with("'use strict'") || trimmed.starts_with("\"use strict\"");
+        let source_is_strict = Self::source_starts_with_use_strict(&source_text);
         let statements = match if source_is_strict {
             crate::core::parse_statements(&tokens, &mut index)
         } else {
@@ -42346,6 +42345,22 @@ impl<'gc> VM<'gc> {
         Ok(Some(self.has_property_in_chain(ctx, &target, key)))
     }
 
+    fn strip_leading_hashbang(source: &str) -> &str {
+        let trimmed = source.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("#!") {
+            if let Some(newline_idx) = rest.find('\n') {
+                return &rest[newline_idx + 1..];
+            }
+            return "";
+        }
+        trimmed
+    }
+
+    fn source_starts_with_use_strict(source: &str) -> bool {
+        let trimmed = Self::strip_leading_hashbang(source).trim_start();
+        trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'")
+    }
+
     fn current_execution_is_strict(&self) -> bool {
         // Check VM-level force_strict flag (set by strict-mode eval)
         if self.force_strict {
@@ -42357,10 +42372,7 @@ impl<'gc> VM<'gc> {
         }
 
         // At top level: check script source for "use strict" directive
-        self.script_source.as_deref().is_some_and(|src| {
-            let trimmed = src.trim_start();
-            trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'")
-        })
+        self.script_source.as_deref().is_some_and(Self::source_starts_with_use_strict)
     }
 
     /// Spec: GetFunctionRealm(obj)

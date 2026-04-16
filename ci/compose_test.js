@@ -369,7 +369,9 @@ function composeTest({ testPath, repoDir, harnessIndex, prependFiles = [], needS
   try { fs.unlinkSync(tmpName); } catch (_) {}
   const outLines = [];
 
-  if (needStrict && !skipInjects) {
+  // Always prepend "use strict" for onlyStrict tests, even when skipInjects is true
+  // (parse-phase negative tests must still run in strict mode to produce the expected SyntaxError).
+  if (needStrict) {
     outLines.push('"use strict";');
     outLines.push('');
   }

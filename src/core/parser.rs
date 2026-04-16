@@ -572,6 +572,17 @@ pub(crate) fn parse_without_strict_binding_checks<T, F: FnOnce() -> T>(f: F) -> 
         out
     })
 }
+/// Force strict binding checks to true inside `f`, regardless of outer setting.
+/// Used for class bodies and heritage expressions which are always strict per spec.
+pub(crate) fn with_strict_binding_checks<T, F: FnOnce() -> T>(f: F) -> T {
+    STRICT_BINDING_CHECKS.with(|c| {
+        let prev = c.get();
+        c.set(true);
+        let out = f();
+        c.set(prev);
+        out
+    })
+}
 pub(crate) fn with_parse_source<T, F: FnOnce() -> T>(source: &str, f: F) -> T {
     PARSE_SOURCE_STACK.with(|stack| stack.borrow_mut().push(source.to_string()));
     let out = f();
@@ -768,17 +779,18 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
     } else {
         return Err(raise_parse_error_at!(t.get(*index)));
     };
+    // Class declarations/expressions are always strict mode code (ES2024 §11.2.1).
     let extends = if *index < t.len() && matches!(t[*index].token, Token::Extends) {
         *index += 1;
         NO_ARROW_IN_PAREN.with(|c| c.set(true));
-        let heritage = parse_assignment(t, index);
+        let heritage = with_strict_binding_checks(|| parse_assignment(t, index));
         NO_ARROW_IN_PAREN.with(|c| c.set(false));
         Some(heritage?)
     } else {
         None
     };
     push_class_heritage(extends.is_some());
-    let members = parse_class_body(t, index)?;
+    let members = with_strict_binding_checks(|| parse_class_body(t, index))?;
     pop_class_heritage();
     let class_def = crate::core::ClassDefinition { name, extends, members };
     Ok(Statement {
@@ -5387,17 +5399,18 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             } else {
                 "".to_string()
             };
+            // Class expressions are always strict mode code (ES2024 §11.2.1).
             let extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
                 *index += 1;
                 NO_ARROW_IN_PAREN.with(|c| c.set(true));
-                let heritage = parse_assignment(tokens, index);
+                let heritage = with_strict_binding_checks(|| parse_assignment(tokens, index));
                 NO_ARROW_IN_PAREN.with(|c| c.set(false));
                 Some(heritage?)
             } else {
                 None
             };
             push_class_heritage(extends.is_some());
-            let members = parse_class_body(tokens, index)?;
+            let members = with_strict_binding_checks(|| parse_class_body(tokens, index))?;
             pop_class_heritage();
             let class_def = crate::core::ClassDefinition { name, extends, members };
             Expr::Class(Box::new(class_def))

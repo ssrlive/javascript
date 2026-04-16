@@ -86,14 +86,35 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
         }
         let mut index = 0;
         let result = if !run_as_module {
+            // Detect whether the script has a real "use strict" directive by checking
+            // the first non-LineTerminator token (the tokenizer already strips comments
+            // and hashbang lines, but emits LineTerminator tokens for newlines).
+            let has_real_directive = tokens
+                .iter()
+                .find(|td| !matches!(td.token, crate::core::token::Token::LineTerminator))
+                .map(|td| {
+                    if let crate::core::token::Token::StringLit(ref s) = td.token {
+                        String::from_utf16_lossy(s) == "use strict"
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
             let enable_top_level_await = !script_declares_await_identifier(script);
-            if enable_top_level_await {
-                crate::core::parser::push_await_context();
-                let res = parse_statements(&tokens, &mut index);
-                crate::core::parser::pop_await_context();
-                res
+            let parse_fn = |idx: &mut usize| {
+                if enable_top_level_await {
+                    crate::core::parser::push_await_context();
+                    let res = parse_statements(&tokens, idx);
+                    crate::core::parser::pop_await_context();
+                    res
+                } else {
+                    parse_statements(&tokens, idx)
+                }
+            };
+            if has_real_directive {
+                parse_fn(&mut index)
             } else {
-                parse_statements(&tokens, &mut index)
+                crate::core::parser::parse_without_strict_binding_checks(|| parse_fn(&mut index))
             }
         } else {
             crate::core::parser::push_await_context();
@@ -1510,21 +1531,23 @@ fn validate_class_method_name(name: &str, is_static: bool, is_special: bool) -> 
 }
 
 fn record_private_name_kind(
-    private_name_kinds: &mut std::collections::HashMap<String, (usize, usize, usize)>,
+    private_name_kinds: &mut std::collections::HashMap<String, (usize, usize, usize, usize, usize)>,
     name: &str,
     is_getter: bool,
     is_setter: bool,
+    is_static: bool,
 ) -> Result<(), JSError> {
     if name == "constructor" {
         return Err(crate::raise_syntax_error!("Private names may not be '#constructor'"));
     }
-    let entry = private_name_kinds.entry(name.to_string()).or_insert((0, 0, 0));
-    if is_getter {
-        entry.0 += 1;
-    } else if is_setter {
-        entry.1 += 1;
-    } else {
-        entry.2 += 1;
+    // Entry: (static_getters, instance_getters, static_setters, instance_setters, others)
+    let entry = private_name_kinds.entry(name.to_string()).or_insert((0, 0, 0, 0, 0));
+    match (is_getter, is_setter, is_static) {
+        (true, _, true) => entry.0 += 1,  // static getter
+        (true, _, false) => entry.1 += 1, // instance getter
+        (_, true, true) => entry.2 += 1,  // static setter
+        (_, true, false) => entry.3 += 1, // instance setter
+        _ => entry.4 += 1,                // method / property
     }
     Ok(())
 }
@@ -1535,7 +1558,7 @@ fn validate_class_definition(class_def: &ClassDefinition) -> Result<(), JSError>
     }
 
     let mut constructor_count = 0usize;
-    let mut private_name_kinds: HashMap<String, (usize, usize, usize)> = HashMap::new();
+    let mut private_name_kinds: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
 
     for member in &class_def.members {
         match member {
@@ -1659,23 +1682,31 @@ fn validate_class_definition(class_def: &ClassDefinition) -> Result<(), JSError>
                 validate_class_method_name(name, true, false)?;
             }
             ClassMember::PrivateProperty(name, _) | ClassMember::PrivateStaticProperty(name, _) => {
-                record_private_name_kind(&mut private_name_kinds, name, false, false)?;
+                record_private_name_kind(&mut private_name_kinds, name, false, false, false)?;
             }
             ClassMember::PrivateMethod(name, _, _)
             | ClassMember::PrivateMethodAsync(name, _, _)
             | ClassMember::PrivateMethodGenerator(name, _, _)
-            | ClassMember::PrivateMethodAsyncGenerator(name, _, _)
-            | ClassMember::PrivateStaticMethod(name, _, _)
+            | ClassMember::PrivateMethodAsyncGenerator(name, _, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, false, false, false)?;
+            }
+            ClassMember::PrivateStaticMethod(name, _, _)
             | ClassMember::PrivateStaticMethodAsync(name, _, _)
             | ClassMember::PrivateStaticMethodGenerator(name, _, _)
             | ClassMember::PrivateStaticMethodAsyncGenerator(name, _, _) => {
-                record_private_name_kind(&mut private_name_kinds, name, false, false)?;
+                record_private_name_kind(&mut private_name_kinds, name, false, false, true)?;
             }
-            ClassMember::PrivateGetter(name, _) | ClassMember::PrivateStaticGetter(name, _) => {
-                record_private_name_kind(&mut private_name_kinds, name, true, false)?;
+            ClassMember::PrivateGetter(name, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, true, false, false)?;
             }
-            ClassMember::PrivateSetter(name, _, _) | ClassMember::PrivateStaticSetter(name, _, _) => {
-                record_private_name_kind(&mut private_name_kinds, name, false, true)?;
+            ClassMember::PrivateStaticGetter(name, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, true, false, true)?;
+            }
+            ClassMember::PrivateSetter(name, _, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, false, true, false)?;
+            }
+            ClassMember::PrivateStaticSetter(name, _, _) => {
+                record_private_name_kind(&mut private_name_kinds, name, false, true, true)?;
             }
             _ => {}
         }
@@ -1685,9 +1716,20 @@ fn validate_class_definition(class_def: &ClassDefinition) -> Result<(), JSError>
         return Err(crate::raise_syntax_error!("Duplicate constructor"));
     }
 
-    for (name, (getters, setters, others)) in private_name_kinds {
-        let total = getters + setters + others;
-        if total > 1 && !(total == 2 && getters == 1 && setters == 1) {
+    for (name, (sg, ig, ss, is, others)) in private_name_kinds {
+        // Each private name slot may hold at most one method/property,
+        // or exactly one accessor pair (both static or both instance).
+        let total = sg + ig + ss + is + others;
+        let valid = match (sg, ig, ss, is, others) {
+            // single item
+            (_, _, _, _, _) if total == 1 => true,
+            // valid accessor pair: both static getter+setter
+            (1, 0, 1, 0, 0) => true,
+            // valid accessor pair: both instance getter+setter
+            (0, 1, 0, 1, 0) => true,
+            _ => false,
+        };
+        if !valid {
             return Err(crate::raise_syntax_error!(format!("Duplicate private name: #{}", name)));
         }
     }

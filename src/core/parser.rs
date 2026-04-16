@@ -2816,10 +2816,8 @@ fn track_module_level_names(stmt: &Statement) -> Result<(), JSError> {
         StatementKind::FunctionDeclaration(name, ..) => {
             add_module_lexical_name(name)?;
         }
-        StatementKind::Class(def) => {
-            if !def.name.is_empty() {
-                add_module_lexical_name(&def.name)?;
-            }
+        StatementKind::Class(def) if !def.name.is_empty() => {
+            add_module_lexical_name(&def.name)?;
         }
         StatementKind::Let(decls) => {
             for decl in decls {
@@ -2846,15 +2844,13 @@ fn track_module_level_names(stmt: &Statement) -> Result<(), JSError> {
                         Expr::Function(Some(name), ..)
                         | Expr::GeneratorFunction(Some(name), ..)
                         | Expr::AsyncFunction(Some(name), ..)
-                        | Expr::AsyncGeneratorFunction(Some(name), ..) => {
-                            if name != "default" {
-                                add_module_lexical_name(name)?;
-                            }
+                        | Expr::AsyncGeneratorFunction(Some(name), ..)
+                            if name != "default" =>
+                        {
+                            add_module_lexical_name(name)?;
                         }
-                        Expr::Class(def) => {
-                            if !def.name.is_empty() {
-                                add_module_lexical_name(&def.name)?;
-                            }
+                        Expr::Class(def) if !def.name.is_empty() => {
+                            add_module_lexical_name(&def.name)?;
                         }
                         _ => {}
                     }
@@ -3091,10 +3087,8 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 StatementKind::FunctionDeclaration(name, ..) => {
                     add_exported_name(name)?;
                 }
-                StatementKind::Class(def) => {
-                    if !def.name.is_empty() {
-                        add_exported_name(&def.name)?;
-                    }
+                StatementKind::Class(def) if !def.name.is_empty() => {
+                    add_exported_name(&def.name)?;
                 }
                 _ => {}
             }

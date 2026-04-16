@@ -1964,10 +1964,8 @@ fn collect_direct_lexical_names(
                 push_unique_or_throw(names, name)?;
             }
         }
-        StatementKind::Class(class_def) => {
-            if !class_def.name.is_empty() {
-                push_unique_or_throw(names, &class_def.name)?;
-            }
+        StatementKind::Class(class_def) if !class_def.name.is_empty() => {
+            push_unique_or_throw(names, &class_def.name)?;
         }
         StatementKind::FunctionDeclaration(name, ..) if list_kind == StatementListKind::Block => {
             push_unique_or_throw(names, name)?;
@@ -2376,10 +2374,8 @@ fn collect_module_declared_names(statements: &[Statement], names: &mut std::coll
             SK::FunctionDeclaration(n, ..) => {
                 names.insert(n.clone());
             }
-            SK::Class(def) => {
-                if !def.name.is_empty() {
-                    names.insert(def.name.clone());
-                }
+            SK::Class(def) if !def.name.is_empty() => {
+                names.insert(def.name.clone());
             }
             SK::Import(specs, _, _) => {
                 for spec in specs {
@@ -2410,10 +2406,8 @@ fn collect_module_declared_names(statements: &[Statement], names: &mut std::coll
                             | crate::core::Expr::AsyncGeneratorFunction(Some(n), ..) => {
                                 names.insert(n.clone());
                             }
-                            crate::core::Expr::Class(def) => {
-                                if !def.name.is_empty() {
-                                    names.insert(def.name.clone());
-                                }
+                            crate::core::Expr::Class(def) if !def.name.is_empty() => {
+                                names.insert(def.name.clone());
                             }
                             _ => {}
                         }
@@ -2535,19 +2529,15 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
                             export_name_to_local.insert(n.clone(), n.clone());
                         }
                     }
-                    StatementKind::FunctionDeclaration(name, _, _, _, _) => {
-                        if !name.is_empty() && !export_names.contains(name) {
-                            export_names.push(name.clone());
-                            export_name_to_local.insert(name.clone(), name.clone());
-                        }
+                    StatementKind::FunctionDeclaration(name, _, _, _, _) if !name.is_empty() && !export_names.contains(name) => {
+                        export_names.push(name.clone());
+                        export_name_to_local.insert(name.clone(), name.clone());
                     }
-                    StatementKind::Class(cd) => {
-                        if !cd.name.is_empty() {
-                            if !export_names.contains(&cd.name) {
-                                export_names.push(cd.name.clone());
-                            }
-                            export_name_to_local.insert(cd.name.clone(), cd.name.clone());
+                    StatementKind::Class(cd) if !cd.name.is_empty() => {
+                        if !export_names.contains(&cd.name) {
+                            export_names.push(cd.name.clone());
                         }
+                        export_name_to_local.insert(cd.name.clone(), cd.name.clone());
                     }
                     StatementKind::ConstDestructuringObject(elems, _)
                     | StatementKind::LetDestructuringObject(elems, _)

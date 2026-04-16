@@ -3070,20 +3070,16 @@ impl<'gc> VM<'gc> {
             let base = byte_offset + idx * bpe;
             let mut bb = buf_bytes.borrow_mut(ctx);
             match ta_name {
-                "Uint8Array" | "Uint8ClampedArray" => {
-                    if base < bb.elements.len() {
-                        let v = if ta_name == "Uint8ClampedArray" {
-                            Self::to_uint8_clamp(new_num)
-                        } else {
-                            Self::to_uint8(new_num)
-                        };
-                        bb.elements[base] = Value::Number(v as f64);
-                    }
+                "Uint8Array" | "Uint8ClampedArray" if base < bb.elements.len() => {
+                    let v = if ta_name == "Uint8ClampedArray" {
+                        Self::to_uint8_clamp(new_num)
+                    } else {
+                        Self::to_uint8(new_num)
+                    };
+                    bb.elements[base] = Value::Number(v as f64);
                 }
-                "Int8Array" => {
-                    if base < bb.elements.len() {
-                        bb.elements[base] = Value::Number((Self::to_int8(new_num) as u8) as f64);
-                    }
+                "Int8Array" if base < bb.elements.len() => {
+                    bb.elements[base] = Value::Number((Self::to_int8(new_num) as u8) as f64);
                 }
                 "Uint16Array" | "Int16Array" => {
                     let bytes = if ta_name == "Int16Array" {

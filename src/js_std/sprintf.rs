@@ -131,13 +131,7 @@ pub fn sprintf_impl<'gc>(format: &str, args: &[Value<'gc>]) -> Result<String, JS
                         // Integer
                         let val = match arg_val {
                             Value::Number(n) => *n as i64,
-                            Value::Boolean(b) => {
-                                if *b {
-                                    1
-                                } else {
-                                    0
-                                }
-                            }
+                            Value::Boolean(b) => i64::from(*b),
                             _ => 0,
                         };
                         let formatted = if let Some(w) = width {

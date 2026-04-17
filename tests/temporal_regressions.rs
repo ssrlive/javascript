@@ -511,3 +511,13 @@ fn test_temporal_instant_from_epoch_factories_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"217175010123000000,217175010123456789\"");
 }
+
+#[test]
+fn test_temporal_plain_time_from_property_bag_basic() {
+    let script = r#"
+        Temporal.PlainTime.from({ hour: 12, minute: 34, second: 56, millisecond: 987, microsecond: 654, nanosecond: 321 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"12:34:56.987654321\"");
+}

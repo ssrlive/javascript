@@ -680,7 +680,7 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainTime.from" => match self.temporal_from_plain_time(ctx, args.first()) {
+            "temporal.plainTime.from" => match self.temporal_plain_time_from_arg(ctx, args.first(), args.get(1)) {
                 Ok(value) => {
                     let ctor_value = self.temporal_intrinsic_ctor_value("PlainTime");
                     self.temporal_wrap_plain_time(ctx, ctor_value.as_ref().or(receiver), &value)
@@ -4547,8 +4547,85 @@ impl<'gc> VM<'gc> {
         PlainDate::try_new(year, month, day, calendar)
     }
 
-    fn temporal_from_plain_time(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainTime, TemporalError> {
-        self.temporal_from_string_like(ctx, value, "PlainTime", PlainTime::from_utf8)
+    fn temporal_plain_time_from_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<PlainTime, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainTime requires an argument"));
+        };
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainTime", SLOT_REPR) {
+            let value = PlainTime::from_utf8(text.as_bytes())?;
+            self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(value);
+        }
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_REPR) {
+            let value = PlainDateTime::from_utf8(text.as_bytes())?.to_plain_time();
+            self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(value);
+        }
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR) {
+            let value =
+                ZonedDateTime::from_utf8(text.as_bytes(), Disambiguation::Compatible, OffsetDisambiguation::Reject)?.to_plain_time();
+            self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(value);
+        }
+        if let Value::String(text) = value {
+            let text = crate::unicode::utf16_to_utf8(text);
+            let parsed = PlainTime::from_utf8(text.as_bytes()).or_else(|err| {
+                if text.contains('T') {
+                    Self::temporal_parse_plain_date_time_string(&text).map(|value| value.to_plain_time())
+                } else {
+                    Err(err)
+                }
+            })?;
+            self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(parsed);
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainTime input"));
+        }
+
+        let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
+        let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
+        let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
+        let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
+        let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
+        let second = self.temporal_optional_trunc_u8_property(ctx, value, "second")?;
+        if hour.is_none() && minute.is_none() && second.is_none() && millisecond.is_none() && microsecond.is_none() && nanosecond.is_none()
+        {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainTime-like object must have a time field"));
+        }
+
+        let overflow = self.temporal_overflow_option_arg(ctx, options)?;
+        match overflow {
+            Overflow::Constrain => PlainTime::try_new(
+                hour.unwrap_or(0).min(23),
+                minute.unwrap_or(0).min(59),
+                match second {
+                    Some(60) => 59,
+                    Some(value) => value.min(59),
+                    None => 0,
+                },
+                millisecond.unwrap_or(0).min(999),
+                microsecond.unwrap_or(0).min(999),
+                nanosecond.unwrap_or(0).min(999),
+            ),
+            Overflow::Reject => PlainTime::try_new(
+                hour.unwrap_or(0),
+                minute.unwrap_or(0),
+                match second {
+                    Some(60) => 60,
+                    Some(value) => value,
+                    None => 0,
+                },
+                millisecond.unwrap_or(0),
+                microsecond.unwrap_or(0),
+                nanosecond.unwrap_or(0),
+            ),
+        }
     }
 
     fn temporal_from_plain_date_time(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainDateTime, TemporalError> {
@@ -5766,28 +5843,6 @@ impl<'gc> VM<'gc> {
             nanosecond.unwrap_or(0).min(999),
         )
         .map(Some)
-    }
-
-    fn temporal_from_string_like<T>(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        value: Option<&Value<'gc>>,
-        kind: &str,
-        parser: fn(&[u8]) -> Result<T, TemporalError>,
-    ) -> Result<T, TemporalError> {
-        match value {
-            Some(v) => {
-                if let Some(text) = self.temporal_slot_string_if_kind(v, kind, SLOT_REPR) {
-                    parser(text.as_bytes())
-                } else {
-                    let text = self
-                        .temporal_value_string(ctx, v)
-                        .ok_or_else(|| TemporalError::r#type().with_message("Invalid Temporal input"))?;
-                    parser(text.as_bytes())
-                }
-            }
-            None => Err(TemporalError::r#type().with_message("Temporal.from requires one argument")),
-        }
     }
 
     fn temporal_expect_instant(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<Instant> {

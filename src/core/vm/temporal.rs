@@ -6,7 +6,7 @@ use std::str::FromStr;
 use temporal_rs::fields::{CalendarFields, ZonedDateTimeFields};
 use temporal_rs::options::{
     DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation, Overflow, RelativeTo,
-    RoundingIncrement, RoundingMode, ToStringRoundingOptions, Unit,
+    RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
 };
 use temporal_rs::parsers::Precision;
 use temporal_rs::partial::PartialTime;
@@ -241,6 +241,102 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainDateTime.add" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.add requires a duration");
+                    return Value::Undefined;
+                };
+                let duration = match self.temporal_to_duration(ctx, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let overflow = match self.temporal_overflow_option_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.add(&duration, Some(overflow)) {
+                    Ok(value) => self.temporal_wrap_plain_date_time(
+                        ctx,
+                        self.temporal_intrinsic_ctor_value("PlainDateTime").as_ref().or(receiver),
+                        &value,
+                    ),
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.plainDateTime.subtract" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.subtract requires a duration");
+                    return Value::Undefined;
+                };
+                let duration = match self.temporal_to_duration(ctx, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let overflow = match self.temporal_overflow_option_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.subtract(&duration, Some(overflow)) {
+                    Ok(value) => self.temporal_wrap_plain_date_time(
+                        ctx,
+                        self.temporal_intrinsic_ctor_value("PlainDateTime").as_ref().or(receiver),
+                        &value,
+                    ),
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.plainDateTime.until" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.until requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_from_plain_date_time(ctx, Some(arg)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let options = match self.temporal_difference_settings_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.until(&other, options) {
+                    Ok(value) => {
+                        self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.plainDateTime.since" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.since requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_from_plain_date_time(ctx, Some(arg)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let options = match self.temporal_difference_settings_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.since(&other, options) {
+                    Ok(value) => {
+                        self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainDateTime.toString" | "temporal.plainDateTime.toJSON" => {
                 self.temporal_repr_result(ctx, receiver, "PlainDateTime")
             }
@@ -380,6 +476,25 @@ impl<'gc> VM<'gc> {
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
                 match value.add(&other) {
+                    Ok(value) => {
+                        self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.duration.round" => {
+                let Some(value) = self.temporal_expect_duration(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.Duration.prototype.round requires an argument");
+                    return Value::Undefined;
+                };
+                let (options, relative_to) = match self.temporal_duration_round_args(ctx, &value, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.round(options, relative_to) {
                     Ok(value) => {
                         self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
                     }
@@ -1007,6 +1122,10 @@ impl<'gc> VM<'gc> {
             "Temporal.PlainDateTime",
             &[("from", "temporal.plainDateTime.from", "from", 1.0)],
             &[
+                ("add", "temporal.plainDateTime.add", "add", 1.0),
+                ("subtract", "temporal.plainDateTime.subtract", "subtract", 1.0),
+                ("until", "temporal.plainDateTime.until", "until", 1.0),
+                ("since", "temporal.plainDateTime.since", "since", 1.0),
                 ("toZonedDateTime", "temporal.plainDateTime.toZonedDateTime", "toZonedDateTime", 1.0),
                 ("toString", "temporal.plainDateTime.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainDateTime.toJSON", "toJSON", 0.0),
@@ -1042,6 +1161,7 @@ impl<'gc> VM<'gc> {
                 ("toJSON", "temporal.duration.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.duration.valueOf", "valueOf", 0.0),
                 ("add", "temporal.duration.add", "add", 1.0),
+                ("round", "temporal.duration.round", "round", 1.0),
                 ("negated", "temporal.duration.negated", "negated", 0.0),
                 ("with", "temporal.duration.with", "with", 1.0),
                 ("total", "temporal.duration.total", "total", 1.0),
@@ -1471,6 +1591,7 @@ impl<'gc> VM<'gc> {
                     ("toJSON", "temporal.duration.toJSON"),
                     ("valueOf", "temporal.duration.valueOf"),
                     ("add", "temporal.duration.add"),
+                    ("round", "temporal.duration.round"),
                     ("negated", "temporal.duration.negated"),
                     ("with", "temporal.duration.with"),
                     ("total", "temporal.duration.total"),
@@ -1863,6 +1984,66 @@ impl<'gc> VM<'gc> {
         Ok(settings)
     }
 
+    fn temporal_duration_round_args(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        current: &TemporalDuration,
+        value: &Value<'gc>,
+    ) -> Result<(RoundingOptions, Option<RelativeTo>), TemporalError> {
+        if let Value::String(text) = value {
+            let unit = Unit::from_str(&crate::unicode::utf16_to_utf8(text))
+                .map_err(|_| TemporalError::range().with_message("Invalid smallestUnit"))?;
+            let mut options = RoundingOptions::default();
+            options.smallest_unit = Some(unit);
+            return Ok((options, None));
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Options must be an object or string"));
+        }
+
+        let largest_unit = match self.temporal_get_option_string(ctx, value, "largestUnit")? {
+            Some(value) => Some(Unit::from_str(&value).map_err(|_| TemporalError::range().with_message("Invalid largestUnit"))?),
+            None => None,
+        };
+
+        let relative_to_value = self.read_named_property(ctx, value, "relativeTo");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal options"));
+        }
+
+        let rounding_increment = match self.temporal_get_option_number(ctx, value, "roundingIncrement")? {
+            Some(value) => Some(RoundingIncrement::try_from(value)?),
+            None => None,
+        };
+        let rounding_mode = match self.temporal_get_option_string(ctx, value, "roundingMode")? {
+            Some(value) => Some(RoundingMode::from_str(&value)?),
+            None => None,
+        };
+        let smallest_unit = match self.temporal_get_option_string(ctx, value, "smallestUnit")? {
+            Some(value) => Some(Unit::from_str(&value).map_err(|_| TemporalError::range().with_message("Invalid smallestUnit"))?),
+            None => None,
+        };
+
+        let mut options = RoundingOptions::default();
+        options.largest_unit = largest_unit;
+        options.smallest_unit = smallest_unit;
+        options.rounding_mode = rounding_mode;
+        options.increment = rounding_increment;
+
+        let needs_relative_to = current.years() != 0
+            || current.months() != 0
+            || current.weeks() != 0
+            || current.days() != 0
+            || options.largest_unit.is_some_and(|unit| unit.is_date_unit())
+            || options.smallest_unit.is_some_and(|unit| unit.is_date_unit());
+        let relative_to = match relative_to_value {
+            Value::Undefined => None,
+            value if needs_relative_to => Some(self.temporal_relative_to_from_value(ctx, &value)?),
+            _ => None,
+        };
+        Ok((options, relative_to))
+    }
+
     fn temporal_zoned_date_time_with_options_arg(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -2204,7 +2385,133 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_from_plain_date_time(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainDateTime, TemporalError> {
-        self.temporal_from_string_like(ctx, value, "PlainDateTime", PlainDateTime::from_utf8)
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainDateTime requires an argument"));
+        };
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_REPR) {
+            return PlainDateTime::from_utf8(text.as_bytes());
+        }
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_REPR) {
+            let date = PlainDate::from_utf8(text.as_bytes())?;
+            return PlainDateTime::try_new(date.year(), date.month(), date.day(), 0, 0, 0, 0, 0, 0, date.calendar().clone());
+        }
+        if let Value::String(text) = value {
+            let text = crate::unicode::utf16_to_utf8(text);
+            return Self::temporal_parse_plain_date_time_string(&text);
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainDateTime input"));
+        }
+
+        let calendar_value = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        let calendar = self.temporal_calendar_with_iso_default(ctx, &calendar_value)?;
+
+        let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
+        let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
+        let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
+        let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
+        let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
+        let month_code = {
+            let month_code_value = self.read_named_property(ctx, value, "monthCode");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+            }
+            if matches!(month_code_value, Value::Undefined) {
+                None
+            } else {
+                Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?)
+            }
+        };
+        let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
+        let second = self.temporal_optional_trunc_u8_property(ctx, value, "second")?;
+        let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+
+        let had_any_property = day.is_some()
+            || hour.is_some()
+            || microsecond.is_some()
+            || millisecond.is_some()
+            || minute.is_some()
+            || month.is_some()
+            || month_code.is_some()
+            || nanosecond.is_some()
+            || second.is_some()
+            || year.is_some();
+        if !had_any_property {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+
+        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
+        let month = match (month, month_code.as_deref()) {
+            (Some(month), _) => month,
+            (None, Some(month_code)) => {
+                Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?
+            }
+            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
+        };
+        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+
+        PlainDateTime::try_new(
+            year,
+            month,
+            day,
+            hour.unwrap_or(0),
+            minute.unwrap_or(0),
+            second.map(|value| value.min(59)).unwrap_or(0),
+            millisecond.unwrap_or(0),
+            microsecond.unwrap_or(0),
+            nanosecond.unwrap_or(0),
+            calendar,
+        )
+    }
+
+    fn temporal_parse_plain_date_time_string(text: &str) -> Result<PlainDateTime, TemporalError> {
+        match PlainDateTime::from_utf8(text.as_bytes()) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Some(normalized) = Self::temporal_normalize_plain_date_time_leap_second(text) {
+                    PlainDateTime::from_utf8(normalized.as_bytes())
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn temporal_normalize_plain_date_time_leap_second(text: &str) -> Option<String> {
+        let time_start = text.find('T')?;
+        let bytes = text.as_bytes();
+        let mut colon_count = 0usize;
+        let mut idx = time_start + 1;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b':' => {
+                    colon_count += 1;
+                    if colon_count == 2 {
+                        let second_start = idx + 1;
+                        if second_start + 1 >= bytes.len() {
+                            return None;
+                        }
+                        if bytes.get(second_start) == Some(&b'6') && bytes.get(second_start + 1) == Some(&b'0') {
+                            let next = bytes.get(second_start + 2).copied();
+                            if matches!(next, None | Some(b'.') | Some(b'[')) {
+                                let mut normalized = text.to_string();
+                                normalized.replace_range(second_start..second_start + 2, "59");
+                                return Some(normalized);
+                            }
+                        }
+                        return None;
+                    }
+                }
+                b'[' => return None,
+                _ => {}
+            }
+            idx += 1;
+        }
+        None
     }
 
     fn temporal_to_duration(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TemporalDuration, TemporalError> {
@@ -2307,10 +2614,15 @@ impl<'gc> VM<'gc> {
         if let Some(relative_to) = self.temporal_relative_to_property_bag_from_value(ctx, value)? {
             return Ok(relative_to);
         }
-        let text = self
-            .temporal_value_string(ctx, value)
-            .ok_or_else(|| TemporalError::r#type().with_message("Invalid Temporal input"))?;
-        RelativeTo::try_from_str(&text)
+        match value {
+            Value::String(_) | Value::Undefined => {
+                let text = self
+                    .temporal_value_string(ctx, value)
+                    .ok_or_else(|| TemporalError::r#type().with_message("Invalid Temporal input"))?;
+                RelativeTo::try_from_str(&text)
+            }
+            _ => Err(TemporalError::r#type().with_message("Invalid Temporal input")),
+        }
     }
 
     fn temporal_relative_to_plain_date_from_value(
@@ -2329,11 +2641,14 @@ impl<'gc> VM<'gc> {
 
     fn temporal_relative_to_zoned_date_time_from_value(
         &mut self,
-        _ctx: &GcContext<'gc>,
+        ctx: &GcContext<'gc>,
         value: &Value<'gc>,
     ) -> Result<Option<ZonedDateTime>, TemporalError> {
-        if let Some(text) = self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR) {
-            return ZonedDateTime::from_utf8(text.as_bytes(), Disambiguation::Compatible, OffsetDisambiguation::Reject).map(Some);
+        if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR).is_some() {
+            return self
+                .temporal_expect_zoned_date_time(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.ZonedDateTime input"))
+                .map(Some);
         }
         if !self.temporal_is_object_like(value) {
             return Ok(None);
@@ -2388,6 +2703,23 @@ impl<'gc> VM<'gc> {
         }
         let year = self.temporal_optional_i32_property(ctx, value, "year")?;
 
+        let has_any_property = !matches!(calendar_value, Value::Undefined)
+            || day.is_some()
+            || hour.is_some()
+            || microsecond.is_some()
+            || millisecond.is_some()
+            || minute.is_some()
+            || month.is_some()
+            || month_code.is_some()
+            || nanosecond.is_some()
+            || offset.is_some()
+            || second.is_some()
+            || !matches!(time_zone_value, Value::Undefined)
+            || year.is_some();
+        if !has_any_property {
+            return Ok(None);
+        }
+
         let Some(year) = year else {
             return Err(TemporalError::r#type().with_message("relativeTo.year is required"));
         };
@@ -2411,8 +2743,9 @@ impl<'gc> VM<'gc> {
 
         let time_zone_text = self.temporal_relative_to_string_property(&time_zone_value, "timeZone")?;
         if time_zone_text == "UTC" {
+            let year_text = Self::temporal_format_iso_year(year);
             let zdt_text = format!(
-                "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}{:03}{:03}Z[UTC]",
+                "{year_text}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}{:03}{:03}Z[UTC]",
                 hour.unwrap_or(0),
                 minute.unwrap_or(0),
                 second.unwrap_or(0),
@@ -2486,6 +2819,16 @@ impl<'gc> VM<'gc> {
         digits.parse::<u8>().ok()
     }
 
+    fn temporal_format_iso_year(year: i32) -> String {
+        if (0..=9999).contains(&year) {
+            format!("{year:04}")
+        } else if year >= 0 {
+            format!("+{year:06}")
+        } else {
+            format!("-{:06}", year.unsigned_abs())
+        }
+    }
+
     fn temporal_validate_offset_string(&self, value: &str) -> Result<(), TemporalError> {
         let valid = if let Some(rest) = value.strip_prefix('+').or_else(|| value.strip_prefix('-')) {
             let base = rest.split('.').next().unwrap_or(rest);
@@ -2514,8 +2857,8 @@ impl<'gc> VM<'gc> {
                 return Ok(Calendar::ISO);
             }
         }
-        self.temporal_calendar_arg(ctx, Some(value))
-            .ok_or_else(|| TemporalError::r#type().with_message("Invalid calendar"))
+        let _ = ctx;
+        self.temporal_calendar_identifier_arg(value)
     }
 
     fn temporal_relative_to_time_zone_arg(&mut self, _ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TimeZone, TemporalError> {
@@ -2658,8 +3001,9 @@ impl<'gc> VM<'gc> {
                         )?
                     };
                     if let Some(offset) = offset {
+                        let year_text = Self::temporal_format_iso_year(year);
                         let mut text = format!(
-                            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}{microsecond:03}{nanosecond:03}{offset}[{}]",
+                            "{year_text}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}{microsecond:03}{nanosecond:03}{offset}[{}]",
                             crate::unicode::utf16_to_utf8(match &time_zone_value {
                                 Value::String(text) => text,
                                 _ => return pdt.to_zoned_date_time(time_zone, Disambiguation::Compatible),
@@ -2687,8 +3031,10 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_to_zoned_date_time_like(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<ZonedDateTime, TemporalError> {
-        if let Some(text) = self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR) {
-            return ZonedDateTime::from_utf8(text.as_bytes(), Disambiguation::Compatible, OffsetDisambiguation::Reject);
+        if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR).is_some() {
+            return self
+                .temporal_expect_zoned_date_time(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.ZonedDateTime input"));
         }
         self.temporal_from_zoned_date_time(ctx, Some(value))
     }

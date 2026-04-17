@@ -235,3 +235,28 @@ fn test_temporal_plain_month_day_with_updates_fields() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"06-03\"");
 }
+
+#[test]
+fn test_temporal_plain_date_with_calendar_accepts_iso_string() {
+    let script = r#"
+        new Temporal.PlainDate(1976, 11, 18)
+            .withCalendar("2020-01-01T00:00:00.000000000")
+            .calendarId
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"iso8601\"");
+}
+
+#[test]
+fn test_temporal_plain_date_time_with_calendar_requires_argument() {
+    let script = r#"
+        try {
+            new Temporal.PlainDateTime(1976, 11, 18, 15, 23, 30).withCalendar(undefined);
+            "nope";
+        } catch (e) {
+            e instanceof TypeError;
+        }
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "true");
+}

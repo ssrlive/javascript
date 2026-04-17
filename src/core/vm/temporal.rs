@@ -376,6 +376,21 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainDate.withCalendar" => {
+                let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first().filter(|value| !matches!(value, Value::Undefined)) else {
+                    self.throw_type_error(ctx, "Temporal.PlainDate.prototype.withCalendar requires a calendar");
+                    return Value::Undefined;
+                };
+                let calendar = match self.temporal_calendar_from_like_with_iso_default(ctx, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let ctor_value = self.temporal_intrinsic_ctor_value("PlainDate");
+                self.temporal_wrap_plain_date(ctx, ctor_value.as_ref().or(receiver), &value.with_calendar(calendar))
+            }
             "temporal.plainDate.toZonedDateTime" => {
                 let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
                     return Value::Undefined;
@@ -967,6 +982,21 @@ impl<'gc> VM<'gc> {
                     }
                     Err(err) => self.temporal_throw(ctx, err),
                 }
+            }
+            "temporal.plainDateTime.withCalendar" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first().filter(|value| !matches!(value, Value::Undefined)) else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.withCalendar requires a calendar");
+                    return Value::Undefined;
+                };
+                let calendar = match self.temporal_calendar_from_like_with_iso_default(ctx, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let ctor_value = self.temporal_intrinsic_ctor_value("PlainDateTime");
+                self.temporal_wrap_plain_date_time(ctx, ctor_value.as_ref().or(receiver), &value.with_calendar(calendar))
             }
             "temporal.plainDateTime.toZonedDateTime" => {
                 let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
@@ -2236,6 +2266,7 @@ impl<'gc> VM<'gc> {
                 ("until", "temporal.plainDate.until", "until", 1.0),
                 ("since", "temporal.plainDate.since", "since", 1.0),
                 ("with", "temporal.plainDate.with", "with", 1.0),
+                ("withCalendar", "temporal.plainDate.withCalendar", "withCalendar", 1.0),
                 ("toPlainDateTime", "temporal.plainDate.toPlainDateTime", "toPlainDateTime", 0.0),
                 ("toZonedDateTime", "temporal.plainDate.toZonedDateTime", "toZonedDateTime", 1.0),
                 ("equals", "temporal.plainDate.equals", "equals", 1.0),
@@ -2298,6 +2329,7 @@ impl<'gc> VM<'gc> {
                 ("round", "temporal.plainDateTime.round", "round", 1.0),
                 ("withPlainTime", "temporal.plainDateTime.withPlainTime", "withPlainTime", 0.0),
                 ("with", "temporal.plainDateTime.with", "with", 1.0),
+                ("withCalendar", "temporal.plainDateTime.withCalendar", "withCalendar", 1.0),
                 ("add", "temporal.plainDateTime.add", "add", 1.0),
                 ("subtract", "temporal.plainDateTime.subtract", "subtract", 1.0),
                 ("until", "temporal.plainDateTime.until", "until", 1.0),
@@ -2721,6 +2753,7 @@ impl<'gc> VM<'gc> {
                 obj,
                 &[
                     ("with", "temporal.plainDate.with"),
+                    ("withCalendar", "temporal.plainDate.withCalendar"),
                     ("toPlainDateTime", "temporal.plainDate.toPlainDateTime"),
                     ("toZonedDateTime", "temporal.plainDate.toZonedDateTime"),
                     ("toString", "temporal.plainDate.toString"),
@@ -2780,6 +2813,7 @@ impl<'gc> VM<'gc> {
                 &[
                     ("round", "temporal.plainDateTime.round"),
                     ("with", "temporal.plainDateTime.with"),
+                    ("withCalendar", "temporal.plainDateTime.withCalendar"),
                     ("withPlainTime", "temporal.plainDateTime.withPlainTime"),
                     ("toZonedDateTime", "temporal.plainDateTime.toZonedDateTime"),
                     ("toString", "temporal.plainDateTime.toString"),

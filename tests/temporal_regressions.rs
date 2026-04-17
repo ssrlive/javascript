@@ -441,3 +441,29 @@ fn test_temporal_duration_constructor_treats_undefined_as_zero() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"P1Y1M1W\"");
 }
+
+#[test]
+fn test_temporal_plain_year_month_calendar_getters_basic() {
+    let script = r#"
+        const value = new Temporal.PlainYearMonth(1976, 11);
+        [value.daysInMonth, value.daysInYear, value.monthsInYear, value.inLeapYear].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"30,366,12,true\"");
+}
+
+#[test]
+fn test_temporal_zoned_date_time_additional_getters_basic() {
+    let script = r#"
+        const value = new Temporal.ZonedDateTime(217178610123456789n, "+01:00");
+        [
+          value.offset,
+          value.offsetNanoseconds,
+          value.dayOfWeek,
+          value.dayOfYear,
+          value.daysInWeek,
+        ].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"+01:00,3600000000000,4,323,7\"");
+}

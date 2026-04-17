@@ -1847,6 +1847,10 @@ impl<'gc> VM<'gc> {
             "temporal.plainYearMonth.get.month" => self.temporal_plain_year_month_number(ctx, receiver, "month"),
             "temporal.plainYearMonth.get.monthCode" => self.temporal_plain_year_month_month_code(ctx, receiver),
             "temporal.plainYearMonth.get.calendarId" => self.temporal_plain_year_month_calendar(ctx, receiver),
+            "temporal.plainYearMonth.get.daysInMonth" => self.temporal_plain_year_month_derived_number(ctx, receiver, "daysInMonth"),
+            "temporal.plainYearMonth.get.daysInYear" => self.temporal_plain_year_month_derived_number(ctx, receiver, "daysInYear"),
+            "temporal.plainYearMonth.get.monthsInYear" => self.temporal_plain_year_month_derived_number(ctx, receiver, "monthsInYear"),
+            "temporal.plainYearMonth.get.inLeapYear" => self.temporal_plain_year_month_in_leap_year(ctx, receiver),
 
             "temporal.plainMonthDay.constructor" => {
                 let Some(month) = args.first().and_then(|v| self.temporal_number_u8(ctx, v, "month")) else {
@@ -2383,6 +2387,11 @@ impl<'gc> VM<'gc> {
             }
             "temporal.zonedDateTime.get.calendarId" => self.temporal_zoned_date_time_calendar(ctx, receiver),
             "temporal.zonedDateTime.get.timeZoneId" => self.temporal_zoned_date_time_time_zone(ctx, receiver),
+            "temporal.zonedDateTime.get.offset" => self.temporal_zoned_date_time_offset(ctx, receiver),
+            "temporal.zonedDateTime.get.offsetNanoseconds" => self.temporal_zoned_date_time_offset_nanoseconds(ctx, receiver),
+            "temporal.zonedDateTime.get.dayOfWeek" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "dayOfWeek"),
+            "temporal.zonedDateTime.get.dayOfYear" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "dayOfYear"),
+            "temporal.zonedDateTime.get.daysInWeek" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "daysInWeek"),
             "temporal.zonedDateTime.get.daysInMonth" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "daysInMonth"),
             "temporal.zonedDateTime.get.daysInYear" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "daysInYear"),
             "temporal.zonedDateTime.get.monthsInYear" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "monthsInYear"),
@@ -2656,6 +2665,10 @@ impl<'gc> VM<'gc> {
                 ("month", "temporal.plainYearMonth.get.month"),
                 ("monthCode", "temporal.plainYearMonth.get.monthCode"),
                 ("calendarId", "temporal.plainYearMonth.get.calendarId"),
+                ("daysInMonth", "temporal.plainYearMonth.get.daysInMonth"),
+                ("daysInYear", "temporal.plainYearMonth.get.daysInYear"),
+                ("monthsInYear", "temporal.plainYearMonth.get.monthsInYear"),
+                ("inLeapYear", "temporal.plainYearMonth.get.inLeapYear"),
             ],
             &object_proto,
         );
@@ -2735,6 +2748,11 @@ impl<'gc> VM<'gc> {
                 ("epochNanoseconds", "temporal.zonedDateTime.get.epochNanoseconds"),
                 ("calendarId", "temporal.zonedDateTime.get.calendarId"),
                 ("timeZoneId", "temporal.zonedDateTime.get.timeZoneId"),
+                ("offset", "temporal.zonedDateTime.get.offset"),
+                ("offsetNanoseconds", "temporal.zonedDateTime.get.offsetNanoseconds"),
+                ("dayOfWeek", "temporal.zonedDateTime.get.dayOfWeek"),
+                ("dayOfYear", "temporal.zonedDateTime.get.dayOfYear"),
+                ("daysInWeek", "temporal.zonedDateTime.get.daysInWeek"),
                 ("daysInMonth", "temporal.zonedDateTime.get.daysInMonth"),
                 ("daysInYear", "temporal.zonedDateTime.get.daysInYear"),
                 ("monthsInYear", "temporal.zonedDateTime.get.monthsInYear"),
@@ -3177,6 +3195,10 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "month", Value::Number(value.month() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "daysInMonth", Value::Number(value.days_in_month() as f64));
+            Self::temporal_store_readonly(&mut borrow, "daysInYear", Value::Number(value.days_in_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "monthsInYear", Value::Number(value.months_in_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "inLeapYear", Value::Boolean(value.in_leap_year()));
         }
         wrapped
     }
@@ -3263,6 +3285,11 @@ impl<'gc> VM<'gc> {
             if let Ok(time_zone_id) = value.time_zone().identifier() {
                 Self::temporal_store_readonly(&mut borrow, "timeZoneId", Value::from(time_zone_id.as_str()));
             }
+            Self::temporal_store_readonly(&mut borrow, "offset", Value::from(value.offset().as_str()));
+            Self::temporal_store_readonly(&mut borrow, "offsetNanoseconds", Value::Number(value.offset_nanoseconds() as f64));
+            Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
+            Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "daysInWeek", Value::Number(value.days_in_week() as f64));
         }
         wrapped
     }
@@ -6355,6 +6382,25 @@ impl<'gc> VM<'gc> {
         Value::from(value.calendar().identifier())
     }
 
+    fn temporal_plain_year_month_derived_number(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, field: &str) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match field {
+            "daysInMonth" => Value::Number(value.days_in_month() as f64),
+            "daysInYear" => Value::Number(value.days_in_year() as f64),
+            "monthsInYear" => Value::Number(value.months_in_year() as f64),
+            _ => Value::Undefined,
+        }
+    }
+
+    fn temporal_plain_year_month_in_leap_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Boolean(value.in_leap_year())
+    }
+
     fn temporal_plain_year_month_month_code(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
         let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
             return Value::Undefined;
@@ -6425,11 +6471,28 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn temporal_zoned_date_time_offset(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::from(value.offset().as_str())
+    }
+
+    fn temporal_zoned_date_time_offset_nanoseconds(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Number(value.offset_nanoseconds() as f64)
+    }
+
     fn temporal_zoned_date_time_calendar_number(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, field: &str) -> Value<'gc> {
         let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
             return Value::Undefined;
         };
         match field {
+            "dayOfWeek" => Value::Number(value.day_of_week() as f64),
+            "dayOfYear" => Value::Number(value.day_of_year() as f64),
+            "daysInWeek" => Value::Number(value.days_in_week() as f64),
             "daysInMonth" => Value::Number(value.days_in_month() as f64),
             "daysInYear" => Value::Number(value.days_in_year() as f64),
             "monthsInYear" => Value::Number(value.months_in_year() as f64),

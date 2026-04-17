@@ -418,3 +418,26 @@ fn test_temporal_plain_date_time_calendar_getters_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"4,323,30,7,366,12,true,47,1976\"");
 }
+
+#[test]
+fn test_temporal_duration_sign_with_and_total_basic() {
+    let script = r#"
+        const duration = Temporal.Duration.from({ years: 5, days: 1 });
+        [
+          duration.sign,
+          duration.with({ years: -1, days: 0, minutes: -1 }).toString(),
+          new Temporal.Duration(0, 0, 0, 0, 1).total("minutes"),
+        ].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"1,-P1YT1M,60\"");
+}
+
+#[test]
+fn test_temporal_duration_constructor_treats_undefined_as_zero() {
+    let script = r#"
+        new Temporal.Duration(1, 1, 1, undefined).toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"P1Y1M1W\"");
+}

@@ -1260,23 +1260,54 @@ impl<'gc> VM<'gc> {
             "temporal.plainDateTime.get.inLeapYear" => self.temporal_plain_date_time_in_leap_year(ctx, receiver),
 
             "temporal.duration.constructor" => {
-                let years = args.first().and_then(|v| self.temporal_number_i64(ctx, v, "years")).unwrap_or(0);
-                let months = args.get(1).and_then(|v| self.temporal_number_i64(ctx, v, "months")).unwrap_or(0);
-                let weeks = args.get(2).and_then(|v| self.temporal_number_i64(ctx, v, "weeks")).unwrap_or(0);
-                let days = args.get(3).and_then(|v| self.temporal_number_i64(ctx, v, "days")).unwrap_or(0);
-                let hours = args.get(4).and_then(|v| self.temporal_number_i64(ctx, v, "hours")).unwrap_or(0);
-                let minutes = args.get(5).and_then(|v| self.temporal_number_i64(ctx, v, "minutes")).unwrap_or(0);
-                let seconds = args.get(6).and_then(|v| self.temporal_number_i64(ctx, v, "seconds")).unwrap_or(0);
+                let years = args
+                    .first()
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "years"))
+                    .unwrap_or(0);
+                let months = args
+                    .get(1)
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "months"))
+                    .unwrap_or(0);
+                let weeks = args
+                    .get(2)
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "weeks"))
+                    .unwrap_or(0);
+                let days = args
+                    .get(3)
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "days"))
+                    .unwrap_or(0);
+                let hours = args
+                    .get(4)
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "hours"))
+                    .unwrap_or(0);
+                let minutes = args
+                    .get(5)
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "minutes"))
+                    .unwrap_or(0);
+                let seconds = args
+                    .get(6)
+                    .filter(|v| !matches!(v, Value::Undefined))
+                    .and_then(|v| self.temporal_number_i64(ctx, v, "seconds"))
+                    .unwrap_or(0);
                 let milliseconds = args
                     .get(7)
+                    .filter(|v| !matches!(v, Value::Undefined))
                     .and_then(|v| self.temporal_number_i64(ctx, v, "milliseconds"))
                     .unwrap_or(0);
                 let microseconds = args
                     .get(8)
+                    .filter(|v| !matches!(v, Value::Undefined))
                     .and_then(|v| self.temporal_number_i128(ctx, v, "microseconds"))
                     .unwrap_or(0);
                 let nanoseconds = args
                     .get(9)
+                    .filter(|v| !matches!(v, Value::Undefined))
                     .and_then(|v| self.temporal_number_i128(ctx, v, "nanoseconds"))
                     .unwrap_or(0);
                 if self.pending_throw.is_some() {
@@ -1443,67 +1474,84 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.Duration.prototype.with requires an object");
                     return Value::Undefined;
                 }
-                let years = self
-                    .temporal_optional_i64_property(ctx, fields, "years")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(current.years());
-                let months = self
-                    .temporal_optional_i64_property(ctx, fields, "months")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(current.months());
-                let weeks = self
-                    .temporal_optional_i64_property(ctx, fields, "weeks")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(current.weeks());
                 let days = self
                     .temporal_optional_i64_property(ctx, fields, "days")
+                    .map_err(|err| self.temporal_throw(ctx, err))
                     .ok()
-                    .flatten()
-                    .unwrap_or(current.days());
+                    .flatten();
                 let hours = self
                     .temporal_optional_i64_property(ctx, fields, "hours")
+                    .map_err(|err| self.temporal_throw(ctx, err))
                     .ok()
-                    .flatten()
-                    .unwrap_or(current.hours());
-                let minutes = self
-                    .temporal_optional_i64_property(ctx, fields, "minutes")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(current.minutes());
-                let seconds = self
-                    .temporal_optional_i64_property(ctx, fields, "seconds")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(current.seconds());
-                let milliseconds = self
-                    .temporal_optional_i64_property(ctx, fields, "milliseconds")
-                    .ok()
-                    .flatten()
-                    .unwrap_or(current.milliseconds());
+                    .flatten();
                 let microseconds = self
                     .temporal_optional_i128_property(ctx, fields, "microseconds")
+                    .map_err(|err| self.temporal_throw(ctx, err))
                     .ok()
-                    .flatten()
-                    .unwrap_or(current.microseconds());
+                    .flatten();
+                let milliseconds = self
+                    .temporal_optional_i64_property(ctx, fields, "milliseconds")
+                    .map_err(|err| self.temporal_throw(ctx, err))
+                    .ok()
+                    .flatten();
+                let minutes = self
+                    .temporal_optional_i64_property(ctx, fields, "minutes")
+                    .map_err(|err| self.temporal_throw(ctx, err))
+                    .ok()
+                    .flatten();
+                let months = self
+                    .temporal_optional_i64_property(ctx, fields, "months")
+                    .map_err(|err| self.temporal_throw(ctx, err))
+                    .ok()
+                    .flatten();
                 let nanoseconds = self
                     .temporal_optional_i128_property(ctx, fields, "nanoseconds")
+                    .map_err(|err| self.temporal_throw(ctx, err))
                     .ok()
-                    .flatten()
-                    .unwrap_or(current.nanoseconds());
+                    .flatten();
+                let seconds = self
+                    .temporal_optional_i64_property(ctx, fields, "seconds")
+                    .map_err(|err| self.temporal_throw(ctx, err))
+                    .ok()
+                    .flatten();
+                let weeks = self
+                    .temporal_optional_i64_property(ctx, fields, "weeks")
+                    .map_err(|err| self.temporal_throw(ctx, err))
+                    .ok()
+                    .flatten();
+                let years = self
+                    .temporal_optional_i64_property(ctx, fields, "years")
+                    .map_err(|err| self.temporal_throw(ctx, err))
+                    .ok()
+                    .flatten();
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if days.is_none()
+                    && hours.is_none()
+                    && microseconds.is_none()
+                    && milliseconds.is_none()
+                    && minutes.is_none()
+                    && months.is_none()
+                    && nanoseconds.is_none()
+                    && seconds.is_none()
+                    && weeks.is_none()
+                    && years.is_none()
+                {
+                    self.throw_type_error(ctx, "Temporal.Duration.prototype.with requires at least one recognized property");
+                    return Value::Undefined;
+                }
                 match TemporalDuration::new(
-                    years,
-                    months,
-                    weeks,
-                    days,
-                    hours,
-                    minutes,
-                    seconds,
-                    milliseconds,
-                    microseconds,
-                    nanoseconds,
+                    years.unwrap_or(current.years()),
+                    months.unwrap_or(current.months()),
+                    weeks.unwrap_or(current.weeks()),
+                    days.unwrap_or(current.days()),
+                    hours.unwrap_or(current.hours()),
+                    minutes.unwrap_or(current.minutes()),
+                    seconds.unwrap_or(current.seconds()),
+                    milliseconds.unwrap_or(current.milliseconds()),
+                    microseconds.unwrap_or(current.microseconds()),
+                    nanoseconds.unwrap_or(current.nanoseconds()),
                 ) {
                     Ok(value) => {
                         self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
@@ -1520,35 +1568,42 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 };
                 let (unit_text, relative_to_value) = if self.temporal_is_object_like(arg) {
-                    let unit_value = self.read_named_property(ctx, arg, "unit");
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    let unit_text = self.temporal_value_string(ctx, &unit_value).unwrap_or_default();
                     let relative_to = self.read_named_property(ctx, arg, "relativeTo");
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    (unit_text, Some(relative_to))
-                } else {
+                    let relative_to_value = if matches!(relative_to, Value::Undefined) {
+                        None
+                    } else {
+                        match self.temporal_relative_to_from_value(ctx, &relative_to) {
+                            Ok(value) => Some(value),
+                            Err(err) => return self.temporal_throw(ctx, err),
+                        }
+                    };
+                    let unit_value = self.read_named_property(ctx, arg, "unit");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    let Some(unit_text) = self.temporal_value_string(ctx, &unit_value) else {
+                        self.throw_type_error(ctx, "Invalid unit");
+                        return Value::Undefined;
+                    };
+                    (unit_text, relative_to_value)
+                } else if let Value::String(_) = arg {
                     let Some(unit_text) = self.temporal_value_string(ctx, arg) else {
                         self.throw_type_error(ctx, "Invalid unit");
                         return Value::Undefined;
                     };
                     (unit_text, None)
+                } else {
+                    self.throw_type_error(ctx, "Invalid unit");
+                    return Value::Undefined;
                 };
                 let Ok(unit) = Unit::from_str(&unit_text) else {
                     self.throw_range_error_object(ctx, "Invalid unit");
                     return Value::Undefined;
                 };
-                let relative_to = match relative_to_value {
-                    Some(value) if !matches!(value, Value::Undefined) => match self.temporal_relative_to_from_value(ctx, &value) {
-                        Ok(value) => Some(value),
-                        Err(err) => return self.temporal_throw(ctx, err),
-                    },
-                    _ => None,
-                };
-                match current.total(unit, relative_to) {
+                match current.total(unit, relative_to_value) {
                     Ok(total) => Value::Number(total.as_inner()),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
@@ -1564,6 +1619,7 @@ impl<'gc> VM<'gc> {
             "temporal.duration.get.microseconds" => self.temporal_duration_number(ctx, receiver, "microseconds"),
             "temporal.duration.get.nanoseconds" => self.temporal_duration_number(ctx, receiver, "nanoseconds"),
             "temporal.duration.get.blank" => self.temporal_duration_blank(ctx, receiver),
+            "temporal.duration.get.sign" => self.temporal_duration_sign(ctx, receiver),
 
             "temporal.plainYearMonth.constructor" => {
                 let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
@@ -2569,6 +2625,7 @@ impl<'gc> VM<'gc> {
                 ("microseconds", "temporal.duration.get.microseconds"),
                 ("nanoseconds", "temporal.duration.get.nanoseconds"),
                 ("blank", "temporal.duration.get.blank"),
+                ("sign", "temporal.duration.get.sign"),
             ],
             &object_proto,
         );
@@ -3090,6 +3147,7 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "microseconds", Value::Number(value.microseconds() as f64));
             Self::temporal_store_readonly(&mut borrow, "nanoseconds", Value::Number(value.nanoseconds() as f64));
             Self::temporal_store_readonly(&mut borrow, "blank", Value::Boolean(value.is_zero()));
+            Self::temporal_store_readonly(&mut borrow, "sign", Value::Number(value.sign() as i8 as f64));
         }
         wrapped
     }
@@ -5936,6 +5994,13 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         Value::Boolean(value.is_zero())
+    }
+
+    fn temporal_duration_sign(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_duration(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Number(value.sign() as i8 as f64)
     }
 
     fn temporal_to_string_options(

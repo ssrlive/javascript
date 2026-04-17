@@ -41,7 +41,7 @@ impl Repl {
                         Err(_) => Ok(format!("\"{}\"", s_utf8)),
                     }
                 }
-                Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
+                Value::Array(_) | Value::Object(_) => Ok(value_to_compact_result_string(&v)),
                 _ => Ok(value_to_string(&v)),
             }
         });

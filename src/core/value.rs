@@ -1,6 +1,6 @@
 use crate::core::function_id::*;
+use crate::core::{ArrayHandle, MapHandle, ObjectHandle, PropAttrs, SetHandle, SymbolHandle, UpvalueCells};
 use crate::core::{Collect, GcTrace};
-use crate::core::{PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmSymbolHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
@@ -66,14 +66,14 @@ pub enum Value<'gc> {
     BigInt(Box<BigInt>),
     String(Vec<u16>),
     Boolean(bool),
-    VmFunction(usize, u8),
-    VmClosure(usize, u8, VmUpvalueCells<'gc>),
-    VmArray(VmArrayHandle<'gc>),
-    VmObject(VmObjectHandle<'gc>),
-    Symbol(VmSymbolHandle<'gc>),
-    VmNativeFunction(FunctionID),
-    VmMap(VmMapHandle<'gc>),
-    VmSet(VmSetHandle<'gc>),
+    Function(usize, u8),
+    Closure(usize, u8, UpvalueCells<'gc>),
+    Array(ArrayHandle<'gc>),
+    Object(ObjectHandle<'gc>),
+    Symbol(SymbolHandle<'gc>),
+    NativeFunction(FunctionID),
+    Map(MapHandle<'gc>),
+    Set(SetHandle<'gc>),
     /// Internal property representation stored in an object's `properties` map.
     /// Contains either a concrete `value` or accessor `getter`/`setter` functions,
     /// plus attribute flags (`writable`, `enumerable`, `configurable`).
@@ -90,7 +90,7 @@ pub enum Value<'gc> {
 impl<'gc> Value<'gc> {
     pub fn is_html_dda(&self) -> bool {
         match self {
-            Value::VmObject(map) => map.borrow().contains_key("__is_html_dda__"),
+            Value::Object(map) => map.borrow().contains_key("__is_html_dda__"),
             _ => false,
         }
     }
@@ -120,10 +120,10 @@ impl<'gc> Value<'gc> {
             Value::BigInt(_) => "bigint",
             Value::Undefined | Value::Uninitialized => "undefined",
             Value::Null => "object",
-            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => "function",
-            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::Property { .. } => "object",
+            Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => "function",
+            Value::Array(_) | Value::Map(_) | Value::Set(_) | Value::Property { .. } => "object",
             Value::Symbol(_) => "symbol",
-            Value::VmObject(map) => {
+            Value::Object(map) => {
                 let b = map.borrow();
                 if let Some(target) = b.get("__proxy_target__") {
                     target.typeof_value()
@@ -173,12 +173,12 @@ impl From<&String> for Value<'_> {
 unsafe impl<'gc> Collect<'gc> for Value<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         match self {
-            Value::VmClosure(_, _, upvals) => upvals.trace(cc),
-            Value::VmArray(handle) => handle.trace(cc),
-            Value::VmObject(handle) => handle.trace(cc),
+            Value::Closure(_, _, upvals) => upvals.trace(cc),
+            Value::Array(handle) => handle.trace(cc),
+            Value::Object(handle) => handle.trace(cc),
             Value::Symbol(handle) => handle.trace(cc),
-            Value::VmMap(handle) => handle.trace(cc),
-            Value::VmSet(handle) => handle.trace(cc),
+            Value::Map(handle) => handle.trace(cc),
+            Value::Set(handle) => handle.trace(cc),
             Value::Property { value, getter, setter, .. } => {
                 if let Some(v) = value {
                     v.trace(cc);
@@ -245,9 +245,9 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             Some(desc) => format!("Symbol({})", utf16_to_utf8(desc)),
             None => "Symbol()".to_string(),
         },
-        Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
-        Value::VmClosure(ip, arity, _) => format!("[VmClosure@{} arity={}]", ip, arity),
-        Value::VmArray(arr) => {
+        Value::Function(ip, arity) => format!("[Function@{} arity={}]", ip, arity),
+        Value::Closure(ip, arity, _) => format!("[Closure@{} arity={}]", ip, arity),
+        Value::Array(arr) => {
             let elems: Vec<String> = arr
                 .borrow()
                 .iter()
@@ -261,7 +261,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
                 .collect();
             format!("[ {} ]", elems.join(", "))
         }
-        Value::VmObject(obj) => {
+        Value::Object(obj) => {
             {
                 let Ok(borrowed) = obj.try_borrow() else {
                     return "[object Object]".to_string();
@@ -301,15 +301,15 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             }
             format!("{{ {} }}", parts.join(", "))
         }
-        Value::VmNativeFunction(id) => format!("[NativeFunction#{}]", id),
-        Value::VmMap(m) => {
+        Value::NativeFunction(id) => format!("[NativeFunction#{}]", id),
+        Value::Map(m) => {
             if m.borrow().is_weak {
                 "[object WeakMap]".to_string()
             } else {
                 "[object Map]".to_string()
             }
         }
-        Value::VmSet(s) => {
+        Value::Set(s) => {
             if s.borrow().is_weak {
                 "[object WeakSet]".to_string()
             } else {
@@ -322,7 +322,7 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
 }
 pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
     match val {
-        Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) | Value::Symbol(_) | Value::VmFunction(..) | Value::VmClosure(..) => {
+        Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) | Value::Symbol(_) | Value::Function(..) | Value::Closure(..) => {
             value_to_string(val)
         }
         Value::String(s) => {
@@ -330,7 +330,7 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
             format!("\"{}\"", rust_str.replace('\\', "\\\\").replace('"', "\\\""))
         }
         Value::Undefined | Value::Null => "null".to_string(),
-        Value::VmArray(arr) => {
+        Value::Array(arr) => {
             let borrow = arr.borrow();
             let parts: Vec<String> = borrow
                 .elements
@@ -346,7 +346,7 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                 .collect();
             format!("[{}]", parts.join(","))
         }
-        Value::VmObject(obj) => {
+        Value::Object(obj) => {
             let borrow = obj.borrow();
             if let Some(Value::String(t)) = borrow.get("__type__")
                 && utf16_to_utf8(t) == "RegExp"
@@ -376,19 +376,19 @@ pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
                 .map(|(k, v)| {
                     let escaped_key = k.replace('\\', "\\\\").replace('"', "\\\"");
                     let rendered = match v {
-                        Value::VmObject(_)
-                        | Value::VmArray(_)
-                        | Value::VmMap(_)
-                        | Value::VmSet(_)
-                        | Value::VmFunction(..)
-                        | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_) => value_to_string(v),
+                        Value::Object(_)
+                        | Value::Array(_)
+                        | Value::Map(_)
+                        | Value::Set(_)
+                        | Value::Function(..)
+                        | Value::Closure(..)
+                        | Value::NativeFunction(_) => value_to_string(v),
                         _ => value_to_compact_result_string(v),
                     };
                     format!("\"{}\":{}", escaped_key, rendered)
                 })
                 .collect();
-            if let Some(Value::VmObject(proto)) = borrow.get("__proto__") {
+            if let Some(Value::Object(proto)) = borrow.get("__proto__") {
                 let own_keys: std::collections::HashSet<String> = borrow.keys().filter(|k| !k.starts_with("__")).cloned().collect();
                 let proto_borrow = proto.borrow();
                 for (k, v) in proto_borrow.iter() {

@@ -107,8 +107,8 @@ pub(crate) fn compare_bigint_number(a: &num_bigint::BigInt, b: f64) -> Option<st
 
 impl<'gc> VM<'gc> {
     pub(super) fn bigint_init_prototype(&mut self, ctx: &GcContext<'gc>) {
-        let object_proto = if let Some(Value::VmObject(o)) = self.globals.get("Object").and_then(|v| {
-            if let Value::VmObject(obj) = v {
+        let object_proto = if let Some(Value::Object(o)) = self.globals.get("Object").and_then(|v| {
+            if let Value::Object(obj) = v {
                 own_data_from_legacy_map(&obj.borrow(), "prototype")
             } else {
                 None
@@ -123,25 +123,25 @@ impl<'gc> VM<'gc> {
         bigint_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_BIGINT as f64));
         Self::insert_property_with_attributes(&mut bigint_map, "name", &Value::from("BigInt"), false, false, true);
         Self::insert_property_with_attributes(&mut bigint_map, "length", &Value::Number(1.0), false, false, true);
-        bigint_map.insert("asUintN".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_ASUINTN));
-        bigint_map.insert("asIntN".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_ASINTN));
+        bigint_map.insert("asUintN".to_string(), Value::NativeFunction(BUILTIN_BIGINT_ASUINTN));
+        bigint_map.insert("asIntN".to_string(), Value::NativeFunction(BUILTIN_BIGINT_ASINTN));
         Self::set_property_attributes(&mut bigint_map, "asUintN", true, false, true);
         Self::set_property_attributes(&mut bigint_map, "asIntN", true, false, true);
 
         let mut bigint_proto = IndexMap::new();
         bigint_proto.insert("__type__".to_string(), Value::from("BigInt"));
-        bigint_proto.insert("__proto__".to_string(), Value::VmObject(object_proto));
-        bigint_proto.insert("toString".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_TOSTRING));
-        bigint_proto.insert("valueOf".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_VALUEOF));
-        bigint_proto.insert("toLocaleString".to_string(), Value::VmNativeFunction(BUILTIN_BIGINT_TOLOCALESTRING));
+        bigint_proto.insert("__proto__".to_string(), Value::Object(object_proto));
+        bigint_proto.insert("toString".to_string(), Value::NativeFunction(BUILTIN_BIGINT_TOSTRING));
+        bigint_proto.insert("valueOf".to_string(), Value::NativeFunction(BUILTIN_BIGINT_VALUEOF));
+        bigint_proto.insert("toLocaleString".to_string(), Value::NativeFunction(BUILTIN_BIGINT_TOLOCALESTRING));
         Self::set_property_attributes(&mut bigint_proto, "toString", true, false, true);
         Self::set_property_attributes(&mut bigint_proto, "valueOf", true, false, true);
         Self::set_property_attributes(&mut bigint_proto, "toLocaleString", true, false, true);
         Self::insert_property_with_attributes(&mut bigint_proto, "@@sym:4", &Value::from("BigInt"), false, false, true);
         let bigint_proto_ptr = new_gc_cell_ptr(ctx, bigint_proto);
-        bigint_map.insert("prototype".to_string(), Value::VmObject(bigint_proto_ptr));
+        bigint_map.insert("prototype".to_string(), Value::Object(bigint_proto_ptr));
         Self::set_property_attributes(&mut bigint_map, "prototype", false, false, false);
-        let bigint_ctor = Value::VmObject(new_gc_cell_ptr(ctx, bigint_map));
+        let bigint_ctor = Value::Object(new_gc_cell_ptr(ctx, bigint_map));
 
         bigint_proto_ptr
             .borrow_mut(ctx)
@@ -288,7 +288,7 @@ impl<'gc> VM<'gc> {
 
         let bi_val = match receiver {
             Value::BigInt(b) => Some((**b).clone()),
-            Value::VmObject(map) => {
+            Value::Object(map) => {
                 let b = map.borrow();
                 if b.get("__type__").map(value_to_string).as_deref() == Some("BigInt") {
                     match b.get("__value__") {

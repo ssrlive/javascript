@@ -77,13 +77,13 @@ impl<'gc> VM<'gc> {
         map.insert("message".to_string(), Value::from(message));
         if let Some(ctor) = self.globals.get("URIError").cloned() {
             map.insert("constructor".to_string(), ctor.clone());
-            if let Value::VmObject(ctor_obj) = ctor
+            if let Value::Object(ctor_obj) = ctor
                 && let Some(proto) = ctor_obj.borrow().get("prototype").cloned()
             {
                 map.insert("__proto__".to_string(), proto);
             }
         }
-        Value::VmObject(new_gc_cell_ptr(ctx, map))
+        Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
     pub(super) fn throw_uri_error(&mut self, ctx: &GcContext<'gc>, message: &str) {

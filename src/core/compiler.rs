@@ -3318,7 +3318,7 @@ impl<'gc> Compiler<'gc> {
 
                 // Push the function value (closure if captures needed)
                 let arity = if fn_has_rest { non_rest_count } else { params.len() as u8 };
-                let func_val = Value::VmFunction(func_ip, arity);
+                let func_val = Value::Function(func_ip, arity);
                 let func_idx = self.chunk.add_constant(func_val);
 
                 if fn_upvalues.is_empty() {
@@ -4690,7 +4690,7 @@ impl<'gc> Compiler<'gc> {
                             .constants
                             .iter()
                             .filter_map(|c| match c {
-                                Value::VmFunction(ip, _) => Some(*ip),
+                                Value::Function(ip, _) => Some(*ip),
                                 _ => None,
                             })
                             .collect();
@@ -4726,7 +4726,7 @@ impl<'gc> Compiler<'gc> {
                         if is_anon_fn {
                             // Find the newly added function IP and name it "default"
                             for c in &self.chunk.constants {
-                                if let Value::VmFunction(ip, _) = c
+                                if let Value::Function(ip, _) = c
                                     && !pre_fn_ips.contains(ip)
                                     && !self.chunk.fn_names.contains_key(ip)
                                 {
@@ -5966,7 +5966,7 @@ impl<'gc> Compiler<'gc> {
                 self.function_depth = old_function_depth;
 
                 let arrow_arity = if arrow_has_rest { arrow_non_rest } else { params.len() as u8 };
-                let func_val = Value::VmFunction(func_ip, arrow_arity);
+                let func_val = Value::Function(func_ip, arrow_arity);
                 let func_idx = self.chunk.add_constant(func_val);
 
                 // Arrow functions ALWAYS use MakeClosure so the VM can
@@ -6441,7 +6441,7 @@ impl<'gc> Compiler<'gc> {
                         }
                         "Function" => {
                             // new Function(p1, p2, ..., body) → push native_fn + all args, Call(N)
-                            let fn_idx = self.chunk.add_constant(Value::VmNativeFunction(BUILTIN_NEW_FUNCTION));
+                            let fn_idx = self.chunk.add_constant(Value::NativeFunction(BUILTIN_NEW_FUNCTION));
                             self.chunk.write_opcode(Opcode::Constant);
                             self.chunk.write_u16(fn_idx);
                             if args.is_empty() {
@@ -9542,7 +9542,7 @@ impl<'gc> Compiler<'gc> {
 
         // Arity = non-rest params only (call site pushes all args, function collects rest)
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };
-        let func_val = Value::VmFunction(func_ip, arity);
+        let func_val = Value::Function(func_ip, arity);
         let func_idx = self.chunk.add_constant(func_val);
 
         // Function expressions must produce a fresh function object each time.
@@ -9971,7 +9971,7 @@ impl<'gc> Compiler<'gc> {
         self.allow_super_call = old_allow_super;
 
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };
-        let func_val = Value::VmFunction(func_ip, arity);
+        let func_val = Value::Function(func_ip, arity);
         let func_idx = self.chunk.add_constant(func_val);
 
         self.chunk.write_opcode(Opcode::MakeClosure);
@@ -10204,7 +10204,7 @@ impl<'gc> Compiler<'gc> {
         self.allow_super_call = old_allow_super;
 
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };
-        let func_val = Value::VmFunction(func_ip, arity);
+        let func_val = Value::Function(func_ip, arity);
         let func_idx = self.chunk.add_constant(func_val);
 
         self.chunk.write_opcode(Opcode::MakeClosure);
@@ -11216,7 +11216,7 @@ impl<'gc> Compiler<'gc> {
         }
 
         // Define constructor as constant, push onto stack
-        let fn_val = Value::VmFunction(fn_start, arity);
+        let fn_val = Value::Function(fn_start, arity);
         let fn_idx = self.chunk.add_constant(fn_val);
         if ctor_upvalues.is_empty() {
             self.chunk.write_opcode(Opcode::Constant);
@@ -11585,7 +11585,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk.fn_names.insert(g_start, format!("get #{}", gname));
                 self.chunk.fn_lengths.insert(g_start, 0);
                 self.chunk.fn_simple_parameter_list.insert(g_start, true);
-                let g_val = Value::VmFunction(g_start, 0);
+                let g_val = Value::Function(g_start, 0);
                 let g_idx = self.chunk.add_constant(g_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(g_idx);
@@ -11632,7 +11632,7 @@ impl<'gc> Compiler<'gc> {
                 self.chunk
                     .fn_simple_parameter_list
                     .insert(s_start, Self::has_simple_parameter_list(params));
-                let s_val = Value::VmFunction(s_start, s_arity);
+                let s_val = Value::Function(s_start, s_arity);
                 let s_idx = self.chunk.add_constant(s_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(s_idx);
@@ -11975,7 +11975,7 @@ impl<'gc> Compiler<'gc> {
 
         // Install: Dup proto, push method, SetProperty/InitProperty, Pop
         self.chunk.write_opcode(Opcode::Dup);
-        let m_val = Value::VmFunction(m_start, m_arity);
+        let m_val = Value::Function(m_start, m_arity);
         let m_idx = self.chunk.add_constant(m_val);
         self.chunk.write_opcode(Opcode::Constant);
         self.chunk.write_u16(m_idx);
@@ -12474,7 +12474,7 @@ impl<'gc> Compiler<'gc> {
                 self.locals = saved_locals;
                 self.const_locals = saved_const_locals;
                 self.patch_jump(sf_jump);
-                let sf_val = Value::VmFunction(sf_start, 0);
+                let sf_val = Value::Function(sf_start, 0);
                 let sf_idx = self.chunk.add_constant(sf_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(sf_idx);
@@ -12520,7 +12520,7 @@ impl<'gc> Compiler<'gc> {
                 self.locals = saved_locals;
                 self.const_locals = saved_const_locals;
                 self.patch_jump(sf_jump);
-                let sf_val = Value::VmFunction(sf_start, 0);
+                let sf_val = Value::Function(sf_start, 0);
                 let sf_idx = self.chunk.add_constant(sf_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(sf_idx);
@@ -12562,7 +12562,7 @@ impl<'gc> Compiler<'gc> {
                 self.try_finally_stack = saved_try_finally_stack;
                 self.patch_jump(sb_jump);
 
-                let sb_val = Value::VmFunction(sb_start, 0);
+                let sb_val = Value::Function(sb_start, 0);
                 let sb_idx = self.chunk.add_constant(sb_val);
                 self.chunk.write_opcode(Opcode::Constant);
                 self.chunk.write_u16(sb_idx);

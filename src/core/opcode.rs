@@ -44,7 +44,7 @@ pub enum Opcode {
     GetThis = 38,
     GetKeys = 39,          // pop object, push array of its string keys
     GetMethod = 40,        // peek object (keep on stack), push method value on top
-    NewError = 41,         // pop message string, push VmObject { message }
+    NewError = 41,         // pop message string, push Object { message }
     Dup = 42,              // duplicate top of stack
     In = 43,               // pop key and object, push bool (key in object)
     InstanceOf = 44,       // pop constructor and value, push bool
@@ -414,12 +414,12 @@ impl<'gc> Chunk<'gc> {
         let ip_offset = self.code.len();
         let const_offset = self.constants.len();
 
-        // 1. Adjust VmFunction IPs in dependency constants
+        // 1. Adjust Function IPs in dependency constants
         let mut adjusted_constants = dep.constants;
         for val in &mut adjusted_constants {
             match val {
-                Value::VmFunction(ip, _) => *ip += ip_offset,
-                Value::VmClosure(ip, _, _) => *ip += ip_offset,
+                Value::Function(ip, _) => *ip += ip_offset,
+                Value::Closure(ip, _, _) => *ip += ip_offset,
                 _ => {}
             }
         }

@@ -97,14 +97,14 @@ pub fn vm_create_tmpfile<'gc>(ctx: &GcContext<'gc>) -> Value<'gc> {
             fn make_host_fn<'a>(ctx: &GcContext<'a>, name: &str) -> Value<'a> {
                 let mut map = IndexMap::new();
                 map.insert("__host_fn__".to_string(), Value::from(name));
-                Value::VmObject(new_gc_cell_ptr(ctx, map))
+                Value::Object(new_gc_cell_ptr(ctx, map))
             }
             obj.insert("puts".to_string(), make_host_fn(ctx, "tmp.puts"));
             obj.insert("readAsString".to_string(), make_host_fn(ctx, "tmp.readAsString"));
             obj.insert("getline".to_string(), make_host_fn(ctx, "tmp.getline"));
             obj.insert("seek".to_string(), make_host_fn(ctx, "tmp.seek"));
             obj.insert("close".to_string(), make_host_fn(ctx, "tmp.close"));
-            Value::VmObject(new_gc_cell_ptr(ctx, obj))
+            Value::Object(new_gc_cell_ptr(ctx, obj))
         }
         Err(_) => Value::Undefined,
     }
@@ -112,7 +112,7 @@ pub fn vm_create_tmpfile<'gc>(ctx: &GcContext<'gc>) -> Value<'gc> {
 /// Dispatch a VM file method call by host-fn name.
 pub fn vm_dispatch_file_method<'gc>(name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
     let file_id = match &receiver {
-        Some(Value::VmObject(obj)) => match obj.borrow().get("__file_id__") {
+        Some(Value::Object(obj)) => match obj.borrow().get("__file_id__") {
             Some(Value::Number(n)) => *n as u64,
             _ => return Value::Undefined,
         },

@@ -1,9 +1,9 @@
-use crate::core::{GcContext, Value, VmObjectHandle};
+use crate::core::{GcContext, ObjectHandle, Value};
 
 pub type FunctionID = usize;
 
 #[inline]
-pub fn get_function_id<'gc>(obj: VmObjectHandle<'gc>) -> Option<FunctionID> {
+pub fn get_function_id<'gc>(obj: ObjectHandle<'gc>) -> Option<FunctionID> {
     obj.borrow().get("__native_id__").and_then(|v| match v {
         Value::Number(n) => Some(*n as FunctionID),
         _ => None,
@@ -12,7 +12,7 @@ pub fn get_function_id<'gc>(obj: VmObjectHandle<'gc>) -> Option<FunctionID> {
 
 #[inline]
 #[allow(dead_code)]
-pub fn set_function_id<'gc>(ctx: &GcContext<'gc>, obj: VmObjectHandle<'gc>, id: FunctionID) {
+pub fn set_function_id<'gc>(ctx: &GcContext<'gc>, obj: ObjectHandle<'gc>, id: FunctionID) {
     obj.borrow_mut(ctx).insert("__native_id__".to_string(), Value::Number(id as f64));
 }
 

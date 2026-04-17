@@ -90,11 +90,11 @@ pub enum Value<'gc> {
     Boolean(bool),
     Undefined,
     Null,
-    VmObject(...),         // IndexMap<String, Value> for properties
-    VmArray(...),          // Vec<Value> + named props
-    VmFunction(...),       // bytecode function
-    VmClosure(...),        // function + captured upvalues
-    VmNativeFunction(FunctionID),  // builtin function by numeric ID
+    Object(...),         // IndexMap<String, Value> for properties
+    Array(...),          // Vec<Value> + named props
+    Function(...),       // bytecode function
+    Closure(...),        // function + captured upvalues
+    NativeFunction(FunctionID),  // builtin function by numeric ID
     Symbol(...),
     Property { value, getter, setter },  // internal property descriptor
 }
@@ -123,12 +123,12 @@ Most handlers pop operands from `self.stack`, compute a result, push it back, an
 
 Builtins are identified by `FunctionID` (a `usize` constant, e.g., `BUILTIN_CONSOLE_LOG = 0`). All builtins are dispatched in `call_native_function` inside `vm.rs`. New builtins require:
 1. A new `const BUILTIN_*: FunctionID` constant
-2. A `Value::VmNativeFunction(BUILTIN_*)` entry set in `initialize_global_constructors`
+2. A `Value::NativeFunction(BUILTIN_*)` entry set in `initialize_global_constructors`
 3. A match arm in `call_native_function`
 
 ### Closures / Upvalues
 
-The compiler tracks captured variables in `UpvalueInfo` entries and emits `MakeClosure` opcodes encoding the function index plus the list of captured variables. At runtime, captured variables live in `VmUpvalueCells` — shared mutable cells so mutations are reflected across all closures.
+The compiler tracks captured variables in `UpvalueInfo` entries and emits `MakeClosure` opcodes encoding the function index plus the list of captured variables. At runtime, captured variables live in `UpvalueCells` — shared mutable cells so mutations are reflected across all closures.
 
 ### Bytecode Encoding
 

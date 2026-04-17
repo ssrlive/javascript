@@ -449,33 +449,33 @@ impl<'gc> VM<'gc> {
     /// executing getter.  Uses `regexp_home_proto_temp` (set by the call-site
     /// before dispatching the host function) when available; falls back to
     /// `self.globals["RegExp"].prototype` for the common single-realm case.
-    fn is_home_regexp_prototype(&self, re_obj: &VmObjectHandle<'gc>) -> bool {
-        if let Some(Value::VmObject(home)) = &self.regexp_home_proto_temp {
+    fn is_home_regexp_prototype(&self, re_obj: &ObjectHandle<'gc>) -> bool {
+        if let Some(Value::Object(home)) = &self.regexp_home_proto_temp {
             return Gc::ptr_eq(*re_obj, *home);
         }
-        if let Some(Value::VmObject(regexp_ctor)) = self.globals.get("RegExp")
-            && let Some(Value::VmObject(proto)) = own_data_from_legacy_map(&regexp_ctor.borrow(), "prototype")
+        if let Some(Value::Object(regexp_ctor)) = self.globals.get("RegExp")
+            && let Some(Value::Object(proto)) = own_data_from_legacy_map(&regexp_ctor.borrow(), "prototype")
         {
             return Gc::ptr_eq(*re_obj, proto);
         }
         false
     }
 
-    fn is_home_regexp_instance(&self, re_obj: &VmObjectHandle<'gc>) -> bool {
+    fn is_home_regexp_instance(&self, re_obj: &ObjectHandle<'gc>) -> bool {
         let borrow = re_obj.borrow();
         if borrow.get("__type__").map(value_to_string).as_deref() != Some("RegExp") {
             return false;
         }
-        let Some(Value::VmObject(proto)) = borrow.get("__proto__").cloned() else {
+        let Some(Value::Object(proto)) = borrow.get("__proto__").cloned() else {
             return false;
         };
         drop(borrow);
         self.is_home_regexp_prototype(&proto)
     }
 
-    fn legacy_regexp_ctor(&self) -> Option<VmObjectHandle<'gc>> {
+    fn legacy_regexp_ctor(&self) -> Option<ObjectHandle<'gc>> {
         match self.globals.get("RegExp") {
-            Some(Value::VmObject(obj)) => Some(*obj),
+            Some(Value::Object(obj)) => Some(*obj),
             _ => None,
         }
     }
@@ -499,7 +499,7 @@ impl<'gc> VM<'gc> {
         property_name: &str,
         operation: &str,
     ) -> bool {
-        let expected = self.legacy_regexp_ctor().map(Value::VmObject).unwrap_or(Value::Undefined);
+        let expected = self.legacy_regexp_ctor().map(Value::Object).unwrap_or(Value::Undefined);
         let Some(actual) = receiver else {
             self.throw_type_error(ctx, &format!("RegExp.{property_name} {operation} called on incompatible receiver"));
             return false;
@@ -565,7 +565,7 @@ impl<'gc> VM<'gc> {
     ) -> Value<'gc> {
         match name {
             "regexp.toString" => match receiver {
-                Some(Value::VmObject(re_obj)) => Value::from(&self.regex_to_string(re_obj)),
+                Some(Value::Object(re_obj)) => Value::from(&self.regex_to_string(re_obj)),
                 _ => {
                     self.throw_type_error(ctx, "RegExp.prototype.toString called on incompatible receiver");
                     Value::Undefined
@@ -573,7 +573,7 @@ impl<'gc> VM<'gc> {
             },
             "regexp.get_source" => {
                 match receiver {
-                    Some(Value::VmObject(re_obj)) => {
+                    Some(Value::Object(re_obj)) => {
                         let borrow = re_obj.borrow();
                         if borrow.get("__type__").map(value_to_string).as_deref() == Some("RegExp") {
                             let raw_u16 = match borrow.get("__regex_pattern__") {
@@ -653,7 +653,7 @@ impl<'gc> VM<'gc> {
                     _ => unreachable!(),
                 };
                 match receiver {
-                    Some(Value::VmObject(re_obj)) => {
+                    Some(Value::Object(re_obj)) => {
                         let borrow = re_obj.borrow();
                         if borrow.get("__type__").map(value_to_string).as_deref() == Some("RegExp") {
                             let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
@@ -679,7 +679,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             "regexp.get_flags" => match receiver {
-                Some(recv @ Value::VmObject(_)) | Some(recv @ Value::VmArray(..)) => {
+                Some(recv @ Value::Object(_)) | Some(recv @ Value::Array(..)) => {
                     let recv = recv.clone();
                     let mut result = String::new();
                     let d = self.read_named_property(ctx, &recv, "hasIndices");
@@ -748,11 +748,7 @@ impl<'gc> VM<'gc> {
             "regexp.symbolMatch" => {
                 let rx = match receiver {
                     Some(
-                        v @ (Value::VmObject(_)
-                        | Value::VmArray(_)
-                        | Value::VmFunction(..)
-                        | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_)),
+                        v @ (Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)),
                     ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.match] requires that 'this' be an Object");
@@ -772,11 +768,7 @@ impl<'gc> VM<'gc> {
             "regexp.symbolMatchAll" => {
                 let rx = match receiver {
                     Some(
-                        v @ (Value::VmObject(_)
-                        | Value::VmArray(_)
-                        | Value::VmFunction(..)
-                        | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_)),
+                        v @ (Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)),
                     ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.matchAll] requires that 'this' be an Object");
@@ -796,11 +788,7 @@ impl<'gc> VM<'gc> {
             "regexp.symbolReplace" => {
                 let rx = match receiver {
                     Some(
-                        v @ (Value::VmObject(_)
-                        | Value::VmArray(_)
-                        | Value::VmFunction(..)
-                        | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_)),
+                        v @ (Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)),
                     ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.replace] requires that 'this' be an Object");
@@ -821,11 +809,7 @@ impl<'gc> VM<'gc> {
             "regexp.symbolSearch" => {
                 let rx = match receiver {
                     Some(
-                        v @ (Value::VmObject(_)
-                        | Value::VmArray(_)
-                        | Value::VmFunction(..)
-                        | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_)),
+                        v @ (Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)),
                     ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.search] requires that 'this' be an Object");
@@ -845,11 +829,7 @@ impl<'gc> VM<'gc> {
             "regexp.symbolSplit" => {
                 let rx = match receiver {
                     Some(
-                        v @ (Value::VmObject(_)
-                        | Value::VmArray(_)
-                        | Value::VmFunction(..)
-                        | Value::VmClosure(..)
-                        | Value::VmNativeFunction(_)),
+                        v @ (Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)),
                     ) if !v.is_symbol_value() => v.clone(),
                     _ => {
                         self.throw_type_error(ctx, "RegExp.prototype[Symbol.split] requires that 'this' be an Object");
@@ -938,7 +918,7 @@ impl<'gc> VM<'gc> {
     /// Initialize RegExp prototype and constructor on the global object.
     pub(super) fn regexp_init_prototype(&mut self, ctx: &GcContext<'gc>) {
         let mut regexp_proto = IndexMap::new();
-        if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+        if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
         {
             regexp_proto.insert("__proto__".to_string(), obj_proto);
@@ -1117,7 +1097,7 @@ impl<'gc> VM<'gc> {
         // Set __proto__ to %IteratorPrototype%
         if let Some(iter_proto_val) = self.globals.get("__IteratorPrototype__").cloned() {
             iter_proto.insert("__proto__".to_string(), iter_proto_val);
-        } else if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+        } else if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
         {
             iter_proto.insert("__proto__".to_string(), obj_proto);
@@ -1130,25 +1110,25 @@ impl<'gc> VM<'gc> {
         iter_proto.insert("__configurable_@@sym:4__".to_string(), Value::Boolean(true));
         // Mark next as non-enumerable, writable, configurable
         mark_nonenumerable(&mut iter_proto, "next");
-        let iter_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, iter_proto));
+        let iter_proto_val = Value::Object(new_gc_cell_ptr(ctx, iter_proto));
         self.globals.insert("RegExpStringIteratorPrototype".to_string(), iter_proto_val);
     }
 
     /// Set `__regexp_home_proto__` on host functions that need `%RegExpPrototype%`
     /// identity checks so cross-realm dispatch can validate against the right home object.
-    pub(super) fn stamp_regexp_getters_with_home_proto(ctx: &GcContext<'gc>, proto: VmObjectHandle<'gc>) {
-        let proto_val = Value::VmObject(proto);
+    pub(super) fn stamp_regexp_getters_with_home_proto(ctx: &GcContext<'gc>, proto: ObjectHandle<'gc>) {
+        let proto_val = Value::Object(proto);
         let host_fn_keys: Vec<String> = proto
             .borrow()
             .iter()
             .filter_map(|(key, value)| match value {
-                Value::VmObject(obj) if obj.borrow().contains_key("__host_fn__") => Some(key.clone()),
+                Value::Object(obj) if obj.borrow().contains_key("__host_fn__") => Some(key.clone()),
                 _ if key.starts_with(GETTER_PREFIX) => Some(key.clone()),
                 _ => None,
             })
             .collect();
         for key in host_fn_keys {
-            if let Some(Value::VmObject(host_fn_obj)) = proto.borrow().get(&key) {
+            if let Some(Value::Object(host_fn_obj)) = proto.borrow().get(&key) {
                 host_fn_obj
                     .borrow_mut(ctx)
                     .insert("__regexp_home_proto__".to_string(), proto_val.clone());
@@ -1207,13 +1187,13 @@ impl<'gc> VM<'gc> {
         map.insert("__type__".to_string(), Value::from("RegExp"));
         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
         map.insert("lastIndex".to_string(), Value::Number(0.0));
-        if let Some(Value::VmObject(ctor)) = self.globals.get("RegExp")
+        if let Some(Value::Object(ctor)) = self.globals.get("RegExp")
             && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
         {
             map.insert("__proto__".to_string(), proto);
         }
         write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
-        Value::VmObject(new_gc_cell_ptr(ctx, map))
+        Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
     /// Handle `new RegExp(pattern, flags)` — initialize the receiver object.
@@ -1223,7 +1203,7 @@ impl<'gc> VM<'gc> {
         receiver: &Value<'gc>,
         args: &[Value<'gc>],
     ) -> Option<Value<'gc>> {
-        if let Value::VmObject(obj) = receiver {
+        if let Value::Object(obj) = receiver {
             let pattern = args.first().cloned().unwrap_or(Value::Undefined);
             let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
@@ -1264,7 +1244,7 @@ impl<'gc> VM<'gc> {
 
     /// Handle `RegExp.prototype.exec` dispatch.
     pub(super) fn regexp_exec_dispatch(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
-        if let Value::VmObject(map) = receiver {
+        if let Value::Object(map) = receiver {
             if map.borrow().get("__type__").map(value_to_string).as_deref() != Some("RegExp") {
                 self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
                 return Value::Undefined;
@@ -1283,7 +1263,7 @@ impl<'gc> VM<'gc> {
 
     /// Handle `RegExp.prototype.test` dispatch.
     pub(super) fn regexp_test_dispatch(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
-        if let Value::VmObject(map) = receiver {
+        if let Value::Object(map) = receiver {
             if map.borrow().get("__type__").map(value_to_string).as_deref() != Some("RegExp") {
                 self.throw_type_error(ctx, "RegExp.prototype.test called on incompatible receiver");
                 return Value::Undefined;
@@ -1306,21 +1286,21 @@ impl<'gc> VM<'gc> {
         &self,
         ctx: &GcContext<'gc>,
         rust_str: &str,
-        re_obj: &VmObjectHandle<'gc>,
+        re_obj: &ObjectHandle<'gc>,
         limit: Option<usize>,
     ) -> Value<'gc> {
         let parts = self.regex_split_string(rust_str, re_obj, limit);
         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(parts));
-        if let Some(Value::VmObject(arr_ctor)) = self.globals.get("Array")
+        if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
             && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
         {
             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
         }
-        Value::VmArray(arr)
+        Value::Array(arr)
     }
 
     /// String.prototype.replace with RegExp pattern.
-    pub(super) fn regexp_string_replace(&self, rust_str: &str, re_obj: &VmObjectHandle<'gc>, replacement: &str) -> Value<'gc> {
+    pub(super) fn regexp_string_replace(&self, rust_str: &str, re_obj: &ObjectHandle<'gc>, replacement: &str) -> Value<'gc> {
         let result = self.regex_replace_string(rust_str, re_obj, replacement, false);
         Value::from(&result)
     }
@@ -1359,7 +1339,7 @@ impl<'gc> VM<'gc> {
         }
         // 3. If R does not have a [[RegExpMatcher]] internal slot, throw a TypeError.
         match rx {
-            Value::VmObject(obj) if obj.borrow().get("__regex_pattern__").is_some() => self.regex_exec(ctx, obj, s),
+            Value::Object(obj) if obj.borrow().get("__regex_pattern__").is_some() => self.regex_exec(ctx, obj, s),
             _ => {
                 self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
                 Value::Null
@@ -1466,7 +1446,7 @@ impl<'gc> VM<'gc> {
                 return if results.is_empty() {
                     Value::Null
                 } else {
-                    Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
                 };
             }
 
@@ -1916,7 +1896,7 @@ impl<'gc> VM<'gc> {
         };
 
         if lim == 0 {
-            return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+            return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
         }
 
         if size == 0 {
@@ -1925,10 +1905,10 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             if !matches!(z, Value::Null) {
-                return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
             }
             results.push(Value::from(s));
-            return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+            return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
         }
 
         let mut p: usize = 0; // previous match end
@@ -1980,7 +1960,7 @@ impl<'gc> VM<'gc> {
             // Add the substring before this match
             results.push(Value::String(s_u16[p..q].to_vec()));
             if results.len() as u32 >= lim {
-                return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
             }
 
             // Add capturing groups
@@ -2006,7 +1986,7 @@ impl<'gc> VM<'gc> {
                 }
                 results.push(cap);
                 if results.len() as u32 >= lim {
-                    return Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
                 }
             }
 
@@ -2016,7 +1996,7 @@ impl<'gc> VM<'gc> {
 
         // Add the tail
         results.push(Value::String(s_u16[p..size].to_vec()));
-        Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
     }
 
     // ── Spec-compliant @@matchAll (ES2024 §22.2.6.9) ───────────────
@@ -2099,11 +2079,11 @@ impl<'gc> VM<'gc> {
             iter_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
         }
 
-        Value::VmObject(iter_obj)
+        Value::Object(iter_obj)
     }
 
     /// %RegExpStringIteratorPrototype%.next() — ES2024 §22.2.9.1
-    pub(super) fn regexp_string_iterator_next(&mut self, ctx: &GcContext<'gc>, obj: &VmObjectHandle<'gc>) -> Value<'gc> {
+    pub(super) fn regexp_string_iterator_next(&mut self, ctx: &GcContext<'gc>, obj: &ObjectHandle<'gc>) -> Value<'gc> {
         // Read internal slots
         let (done, global, full_unicode, regexp, string_val) = {
             let borrow = obj.borrow();
@@ -2191,7 +2171,7 @@ impl<'gc> VM<'gc> {
         let mut result = IndexMap::new();
         result.insert("value".to_string(), value);
         result.insert("done".to_string(), Value::Boolean(done));
-        Value::VmObject(new_gc_cell_ptr(ctx, result))
+        Value::Object(new_gc_cell_ptr(ctx, result))
     }
 
     /// Create a new RegExp from an existing RegExp-like object, copying its
@@ -2213,7 +2193,7 @@ impl<'gc> VM<'gc> {
         // 3. If Type(C) is not Object, throw a TypeError.
         if !matches!(
             c,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)
         ) || c.is_symbol_value()
         {
             self.throw_type_error(ctx, "Species constructor is not an Object");
@@ -2283,7 +2263,7 @@ impl<'gc> VM<'gc> {
         // Step 1: If Type(argument) is not Object, return false.
         if !matches!(
             argument,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..)
+            Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..)
         ) || argument.is_symbol_value()
         {
             return Ok(false);
@@ -2300,7 +2280,7 @@ impl<'gc> VM<'gc> {
             return Ok(matcher.to_truthy());
         }
         // Step 4: If argument has a [[RegExpMatcher]] internal slot, return true.
-        if let Value::VmObject(map) = argument
+        if let Value::Object(map) = argument
             && map.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
         {
             return Ok(true);
@@ -2361,7 +2341,7 @@ impl<'gc> VM<'gc> {
     // ── Internal helpers ──────────────────────────────────────────────
 
     /// Extract stored regex pattern as UTF-16 directly, preserving lone surrogates.
-    pub(super) fn regexp_get_pattern_u16(re_obj: &VmObjectHandle<'gc>) -> Vec<u16> {
+    pub(super) fn regexp_get_pattern_u16(re_obj: &ObjectHandle<'gc>) -> Vec<u16> {
         match re_obj.borrow().get("__regex_pattern__") {
             Some(Value::String(s)) => s.clone(),
             Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
@@ -2373,7 +2353,7 @@ impl<'gc> VM<'gc> {
     fn regexp_compile(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         // Step 1: Let O be the this value.
         let re_obj = match receiver {
-            Some(Value::VmObject(obj)) if self.is_home_regexp_instance(obj) => *obj,
+            Some(Value::Object(obj)) if self.is_home_regexp_instance(obj) => *obj,
             _ => {
                 self.throw_type_error(ctx, "RegExp.prototype.compile called on incompatible receiver");
                 return Value::Undefined;
@@ -2384,7 +2364,7 @@ impl<'gc> VM<'gc> {
         let flags_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
 
         // Step 3: If pattern has [[RegExpMatcher]] (is an actual RegExp)
-        let (pattern_u16, flags) = if let Value::VmObject(pat_obj) = &pattern_arg
+        let (pattern_u16, flags) = if let Value::Object(pat_obj) = &pattern_arg
             && pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
         {
             // Step 3a: If flags is not undefined, throw a TypeError.
@@ -2466,7 +2446,7 @@ impl<'gc> VM<'gc> {
         re_obj.borrow_mut(ctx).insert("lastIndex".to_string(), Value::Number(0.0));
 
         // Step 6: Return O.
-        Value::VmObject(re_obj)
+        Value::Object(re_obj)
     }
 
     /// Extract (pattern, flags) from constructor arguments, handling RegExp-as-source.
@@ -2480,7 +2460,7 @@ impl<'gc> VM<'gc> {
         pattern_is_regexp: bool,
     ) -> (Vec<u16>, String) {
         // Step 3: If pattern has [[RegExpMatcher]] internal slot (actual RegExp)
-        if let Value::VmObject(pat_obj) = pattern
+        if let Value::Object(pat_obj) = pattern
             && pat_obj.borrow().get("__type__").map(value_to_string).as_deref() == Some("RegExp")
         {
             let p = match pat_obj.borrow().get("__regex_pattern__") {
@@ -2575,7 +2555,7 @@ impl<'gc> VM<'gc> {
         None
     }
 
-    fn regex_to_string(&self, re_obj: &VmObjectHandle<'gc>) -> String {
+    fn regex_to_string(&self, re_obj: &ObjectHandle<'gc>) -> String {
         let borrow = re_obj.borrow();
         let raw_u16 = match borrow.get("__regex_pattern__") {
             Some(Value::String(s)) => s.clone(),
@@ -2654,8 +2634,8 @@ impl<'gc> VM<'gc> {
     }
 
     /// Execute a regex match, returning an array result or Null
-    pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &VmObjectHandle<'gc>, input: &str) -> Value<'gc> {
-        let rx = Value::VmObject(*re_obj);
+    pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &ObjectHandle<'gc>, input: &str) -> Value<'gc> {
+        let rx = Value::Object(*re_obj);
         let borrow = re_obj.borrow();
         let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
         let is_global = flags.contains('g');
@@ -2666,7 +2646,7 @@ impl<'gc> VM<'gc> {
         // ToLength(lastIndex) — must call valueOf on objects
         let last_index_num = match &last_index_val {
             Value::Number(n) => *n,
-            Value::VmObject(_) | Value::VmArray(_) => {
+            Value::Object(_) | Value::Array(_) => {
                 let prim = self.try_to_primitive(ctx, &last_index_val, "number");
                 if self.pending_throw.is_some() {
                     return Value::Null;
@@ -2760,7 +2740,7 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 } else {
                     groups_map.insert("__proto__".to_string(), Value::Null);
-                    Value::VmObject(new_gc_cell_ptr(ctx, groups_map))
+                    Value::Object(new_gc_cell_ptr(ctx, groups_map))
                 };
                 arr_data.props.insert("groups".to_string(), groups_value);
 
@@ -2770,7 +2750,7 @@ impl<'gc> VM<'gc> {
                     let mut indices_groups_map = IndexMap::new();
                     // Full match indices
                     let pair = vec![Value::Number(match_start as f64), Value::Number(match_end as f64)];
-                    indices_items.push(Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
+                    indices_items.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
                     // Capturing group indices
                     for cap in &m.captures {
                         match cap {
@@ -2784,7 +2764,7 @@ impl<'gc> VM<'gc> {
                                     (r.start, r.end)
                                 };
                                 let pair = vec![Value::Number(cap_start as f64), Value::Number(cap_end as f64)];
-                                indices_items.push(Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
+                                indices_items.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
                             }
                             None => indices_items.push(Value::Undefined),
                         }
@@ -2801,7 +2781,7 @@ impl<'gc> VM<'gc> {
                                     (r.start, r.end)
                                 };
                                 let pair = vec![Value::Number(group_start as f64), Value::Number(group_end as f64)];
-                                Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(pair)))
+                                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(pair)))
                             }
                             None => Value::Undefined,
                         };
@@ -2817,15 +2797,15 @@ impl<'gc> VM<'gc> {
                         Value::Undefined
                     } else {
                         indices_groups_map.insert("__proto__".to_string(), Value::Null);
-                        Value::VmObject(new_gc_cell_ptr(ctx, indices_groups_map))
+                        Value::Object(new_gc_cell_ptr(ctx, indices_groups_map))
                     };
                     indices_array.props.insert("groups".to_string(), indices_groups_value);
                     arr_data
                         .props
-                        .insert("indices".to_string(), Value::VmArray(new_gc_cell_ptr(ctx, indices_array)));
+                        .insert("indices".to_string(), Value::Array(new_gc_cell_ptr(ctx, indices_array)));
                 }
 
-                let arr = Value::VmArray(new_gc_cell_ptr(ctx, arr_data));
+                let arr = Value::Array(new_gc_cell_ptr(ctx, arr_data));
 
                 self.update_legacy_regexp_static_state(ctx, &input_u16, match_start, match_end, &m.captures, mapped_input);
 
@@ -2852,7 +2832,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Replace string content using a regex pattern
-    fn regex_replace_string(&self, input: &str, re_obj: &VmObjectHandle<'gc>, replacement: &str, replace_all: bool) -> String {
+    fn regex_replace_string(&self, input: &str, re_obj: &ObjectHandle<'gc>, replacement: &str, replace_all: bool) -> String {
         let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
         let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
 
@@ -2969,7 +2949,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Split a string using a regex separator, with optional capturing groups
-    fn regex_split_string(&self, input: &str, re_obj: &VmObjectHandle<'gc>, limit: Option<usize>) -> Vec<Value<'gc>> {
+    fn regex_split_string(&self, input: &str, re_obj: &ObjectHandle<'gc>, limit: Option<usize>) -> Vec<Value<'gc>> {
         let pattern_u16 = Self::regexp_get_pattern_u16(re_obj);
         let flags = re_obj.borrow().get("__regex_flags__").map(value_to_string).unwrap_or_default();
 

@@ -11,7 +11,7 @@ impl<'gc> VM<'gc> {
     ) -> Value<'gc> {
         match name {
             "dataview.get_buffer" => {
-                if let Some(Value::VmObject(view)) = receiver {
+                if let Some(Value::Object(view)) = receiver {
                     let b = view.borrow();
                     if matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "DataView") {
                         return b.get("__dv_buffer__").cloned().unwrap_or(Value::Undefined);
@@ -21,10 +21,10 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             "dataview.get_byteLength" => {
-                if let Some(Value::VmObject(view)) = receiver {
+                if let Some(Value::Object(view)) = receiver {
                     let b = view.borrow();
                     if matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "DataView") {
-                        if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                        if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                             && matches!(GcCell::borrow(buf).get("__detached__"), Some(Value::Boolean(true)))
                         {
                             drop(b);
@@ -32,7 +32,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         // Resizable buffer: dynamic byteLength
-                        if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                        if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                             && matches!(GcCell::borrow(buf).get("__resizable__"), Some(Value::Boolean(true)))
                         {
                             let byte_offset = match b.get("__dv_byteOffset__") {
@@ -71,10 +71,10 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             "dataview.get_byteOffset" => {
-                if let Some(Value::VmObject(view)) = receiver {
+                if let Some(Value::Object(view)) = receiver {
                     let b = view.borrow();
                     if matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "DataView") {
-                        if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                        if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                             && matches!(GcCell::borrow(buf).get("__detached__"), Some(Value::Boolean(true)))
                         {
                             drop(b);
@@ -82,7 +82,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         // Resizable buffer: out-of-bounds check
-                        if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+                        if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                             && matches!(GcCell::borrow(buf).get("__resizable__"), Some(Value::Boolean(true)))
                         {
                             let byte_offset = match b.get("__dv_byteOffset__") {
@@ -123,7 +123,7 @@ impl<'gc> VM<'gc> {
                     Some(v) => v,
                     None => return Value::Undefined,
                 };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let idx = base;
                     if let Some(v) = bytes.borrow().elements.get(idx) {
                         return Value::Number(to_number(v) as u8 as f64);
@@ -136,7 +136,7 @@ impl<'gc> VM<'gc> {
                     Some(v) => v,
                     None => return Value::Undefined,
                 };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned()
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned()
                     && let Some(v) = bytes.borrow().elements.get(base)
                 {
                     return Value::Number((to_number(v) as u8 as i8) as f64);
@@ -148,7 +148,7 @@ impl<'gc> VM<'gc> {
                     Some(v) => v,
                     None => return Value::Undefined,
                 };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned()
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned()
                     && base < bytes.borrow().elements.len()
                 {
                     bytes.borrow_mut(ctx).elements[base] = Value::Number(Self::js_to_uint8(coerced_val) as f64);
@@ -160,7 +160,7 @@ impl<'gc> VM<'gc> {
                     Some(v) => v,
                     None => return Value::Undefined,
                 };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned()
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned()
                     && base < bytes.borrow().elements.len()
                 {
                     bytes.borrow_mut(ctx).elements[base] = Value::Number(Self::js_to_uint8(coerced_val) as f64);
@@ -173,7 +173,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let b0 = to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
                     let b1 = to_number(b.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
@@ -192,7 +192,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let b0 = to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
                     let b1 = to_number(b.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
@@ -213,7 +213,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let n = Self::js_to_uint16(coerced_val);
                 let bs = if little { n.to_le_bytes() } else { n.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -231,7 +231,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let n = Self::js_to_uint16(coerced_val);
                 let bs = if little { n.to_le_bytes() } else { n.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -247,7 +247,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 4] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -266,7 +266,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 4] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -287,7 +287,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let n = Self::js_to_uint32(coerced_val);
                 let bs = if little { n.to_le_bytes() } else { n.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -305,7 +305,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let n = Self::js_to_uint32(coerced_val);
                 let bs = if little { n.to_le_bytes() } else { n.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -321,7 +321,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 2] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -340,7 +340,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let bits = f64_to_f16_bits(coerced_val);
                 let bs = if little { bits.to_le_bytes() } else { bits.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -356,7 +356,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 4] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -377,7 +377,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let bits = (coerced_val as f32).to_bits();
                 let bs = if little { bits.to_le_bytes() } else { bits.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -393,7 +393,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 8] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -418,7 +418,7 @@ impl<'gc> VM<'gc> {
                 let little = args.get(2).map(|v| v.to_truthy()).unwrap_or(false);
                 let bits = f64::to_bits(coerced_val);
                 let bs = if little { bits.to_le_bytes() } else { bits.to_be_bytes() };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &b) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -434,7 +434,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 8] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -457,7 +457,7 @@ impl<'gc> VM<'gc> {
                     None => return Value::Undefined,
                 };
                 let little = args.get(1).map(|v| v.to_truthy()).unwrap_or(false);
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let b = bytes.borrow();
                     let arr: [u8; 8] = [
                         to_number(b.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8,
@@ -476,7 +476,7 @@ impl<'gc> VM<'gc> {
             }
             "dataview.setBigInt64" | "dataview.setBigUint64" => {
                 let view = match receiver {
-                    Some(Value::VmObject(obj)) => *obj,
+                    Some(Value::Object(obj)) => *obj,
                     _ => {
                         self.throw_type_error(ctx, "Method called on incompatible receiver");
                         return Value::Undefined;
@@ -500,7 +500,7 @@ impl<'gc> VM<'gc> {
                     _ => 0,
                 };
                 let buffer = match b.get("__dv_buffer__").cloned() {
-                    Some(Value::VmObject(buf)) => buf,
+                    Some(Value::Object(buf)) => buf,
                     _ => {
                         drop(b);
                         self.throw_type_error(ctx, "DataView buffer is detached");
@@ -570,7 +570,7 @@ impl<'gc> VM<'gc> {
                         n.to_be_bytes().map(|b| b)
                     }
                 };
-                if let Some(Value::VmArray(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(bytes)) = GcCell::borrow(&buffer).get("__buffer_bytes__").cloned() {
                     let mut bm = bytes.borrow_mut(ctx);
                     for (i, &byte_val) in bs.iter().enumerate() {
                         if base + i < bm.elements.len() {
@@ -633,16 +633,16 @@ impl<'gc> VM<'gc> {
             dv_proto.insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, host, name, len, false));
             mark_nonenumerable(&mut dv_proto, name);
         }
-        let dv_proto_val = Value::VmObject(new_gc_cell_ptr(ctx, dv_proto));
+        let dv_proto_val = Value::Object(new_gc_cell_ptr(ctx, dv_proto));
         let mut data_view_map = IndexMap::new();
         data_view_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_DATAVIEW as f64));
         Self::insert_property_with_attributes(&mut data_view_map, "name", &Value::from("DataView"), false, false, true);
         Self::insert_property_with_attributes(&mut data_view_map, "length", &Value::Number(1.0), false, false, true);
         data_view_map.insert("prototype".to_string(), dv_proto_val);
         write_attrs_to_legacy_map(&mut data_view_map, "prototype", PropAttrs::empty());
-        let data_view_ctor = Value::VmObject(new_gc_cell_ptr(ctx, data_view_map));
-        if let Value::VmObject(ctor_obj) = &data_view_ctor
-            && let Some(Value::VmObject(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+        let data_view_ctor = Value::Object(new_gc_cell_ptr(ctx, data_view_map));
+        if let Value::Object(ctor_obj) = &data_view_ctor
+            && let Some(Value::Object(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), data_view_ctor.clone());
             mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");
@@ -661,7 +661,7 @@ impl<'gc> VM<'gc> {
         }
         let buffer = args.first().cloned().unwrap_or(Value::Undefined);
         let is_valid_buffer = match &buffer {
-            Value::VmObject(obj) => {
+            Value::Object(obj) => {
                 let b = obj.borrow();
                 matches!(
                     b.get("__type__"),
@@ -677,7 +677,7 @@ impl<'gc> VM<'gc> {
             let _ = self.handle_throw(ctx, &err);
             return Value::Undefined;
         }
-        let buf_byte_len = if let Value::VmObject(obj) = &buffer {
+        let buf_byte_len = if let Value::Object(obj) = &buffer {
             match obj.borrow().get("byteLength") {
                 Some(Value::Number(n)) => *n as usize,
                 _ => 0,
@@ -690,7 +690,7 @@ impl<'gc> VM<'gc> {
             Some(v) => v,
             None => return Value::Undefined,
         };
-        if let Value::VmObject(buf_obj) = &buffer
+        if let Value::Object(buf_obj) = &buffer
             && matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true)))
         {
             let err = self.make_type_error_object(ctx, "Cannot construct DataView with a detached ArrayBuffer");
@@ -726,15 +726,15 @@ impl<'gc> VM<'gc> {
         if is_auto_length {
             map.insert("__dv_auto_length__".to_string(), Value::Boolean(true));
         }
-        Value::VmObject(new_gc_cell_ptr(ctx, map))
+        Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
     /// Handle DataView in `call_method_builtin`.
     pub(super) fn dataview_call_method_builtin(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
-        if let Value::VmObject(recv_obj) = receiver {
+        if let Value::Object(recv_obj) = receiver {
             let is_valid_buffer = matches!(
                 args.first(),
-                Some(Value::VmObject(buf)) if matches!(
+                Some(Value::Object(buf)) if matches!(
                     buf.borrow().get("__type__"),
                     Some(Value::String(s)) if {
                         let t = crate::unicode::utf16_to_utf8(s);
@@ -750,7 +750,7 @@ impl<'gc> VM<'gc> {
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
-            if let Value::VmObject(out_obj) = out {
+            if let Value::Object(out_obj) = out {
                 let out_b = out_obj.borrow();
                 let mut recv_b = recv_obj.borrow_mut(ctx);
                 for (k, v) in out_b.iter() {
@@ -777,7 +777,7 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, JSError> {
         let buffer = args.first().cloned().unwrap_or(Value::Undefined);
         let is_valid_buffer = match &buffer {
-            Value::VmObject(obj) => {
+            Value::Object(obj) => {
                 let b = obj.borrow();
                 matches!(
                     b.get("__type__"),
@@ -794,13 +794,13 @@ impl<'gc> VM<'gc> {
         }
         let raw_offset = args.get(1).cloned().unwrap_or(Value::Undefined);
         let byte_offset = self.to_index_result(ctx, &raw_offset)?;
-        if let Value::VmObject(buf_obj) = &buffer
+        if let Value::Object(buf_obj) = &buffer
             && matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true)))
         {
             let err = self.make_type_error_object(ctx, "Cannot construct DataView with a detached ArrayBuffer");
             return Err(self.vm_error_to_js_error(ctx, &err));
         }
-        let buf_byte_len = if let Value::VmObject(obj) = &buffer {
+        let buf_byte_len = if let Value::Object(obj) = &buffer {
             match obj.borrow().get("byteLength") {
                 Some(Value::Number(n)) => *n as usize,
                 _ => 0,
@@ -826,14 +826,14 @@ impl<'gc> VM<'gc> {
         };
         let ctor_prototype = self.get_prototype_from_constructor_with_intrinsic(ctx, new_target.unwrap_or(target), "DataView")?;
         // Re-check after OrdinaryCreateFromConstructor (prototype getter may have resized/detached)
-        if let Value::VmObject(buf_obj) = &buffer
+        if let Value::Object(buf_obj) = &buffer
             && matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true)))
         {
             let err = self.make_type_error_object(ctx, "Cannot construct DataView with a detached ArrayBuffer");
             return Err(self.vm_error_to_js_error(ctx, &err));
         }
         // Re-read buffer byte length (may have changed due to resize in prototype getter)
-        let buf_byte_len2 = if let Value::VmObject(obj) = &buffer {
+        let buf_byte_len2 = if let Value::Object(obj) = &buffer {
             match obj.borrow().get("byteLength") {
                 Some(Value::Number(n)) => *n as usize,
                 _ => 0,
@@ -866,7 +866,7 @@ impl<'gc> VM<'gc> {
         if let Some(proto) = ctor_prototype {
             map.insert("__proto__".to_string(), proto);
         }
-        Ok(Value::VmObject(new_gc_cell_ptr(ctx, map)))
+        Ok(Value::Object(new_gc_cell_ptr(ctx, map)))
     }
 
     /// ToIndex conversion that returns Result (for use in construct_value context).
@@ -925,9 +925,9 @@ impl<'gc> VM<'gc> {
         receiver: Option<&Value<'gc>>,
         args: &[Value<'gc>],
         element_size: usize,
-    ) -> Option<(usize, usize, VmObjectHandle<'gc>)> {
+    ) -> Option<(usize, usize, ObjectHandle<'gc>)> {
         let view = match receiver {
-            Some(Value::VmObject(obj)) => *obj,
+            Some(Value::Object(obj)) => *obj,
             _ => {
                 self.throw_type_error(ctx, "Method called on incompatible receiver");
                 return None;
@@ -953,7 +953,7 @@ impl<'gc> VM<'gc> {
             _ => 0,
         };
         let buffer = match b.get("__dv_buffer__").cloned() {
-            Some(Value::VmObject(buf)) => buf,
+            Some(Value::Object(buf)) => buf,
             _ => {
                 drop(b);
                 self.throw_type_error(ctx, "DataView buffer is detached");
@@ -1004,9 +1004,9 @@ impl<'gc> VM<'gc> {
         receiver: Option<&Value<'gc>>,
         args: &[Value<'gc>],
         element_size: usize,
-    ) -> Option<(usize, usize, VmObjectHandle<'gc>, f64)> {
+    ) -> Option<(usize, usize, ObjectHandle<'gc>, f64)> {
         let view = match receiver {
-            Some(Value::VmObject(obj)) => *obj,
+            Some(Value::Object(obj)) => *obj,
             _ => {
                 self.throw_type_error(ctx, "Method called on incompatible receiver");
                 return None;
@@ -1020,7 +1020,7 @@ impl<'gc> VM<'gc> {
                 return None;
             }
             // Check immutability before argument coercion (spec step 3)
-            if let Some(Value::VmObject(buf)) = b.get("__dv_buffer__")
+            if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                 && matches!(GcCell::borrow(buf).get("__immutable__"), Some(Value::Boolean(true)))
             {
                 drop(b);
@@ -1042,7 +1042,7 @@ impl<'gc> VM<'gc> {
             _ => 0,
         };
         let buffer = match b.get("__dv_buffer__").cloned() {
-            Some(Value::VmObject(buf)) => buf,
+            Some(Value::Object(buf)) => buf,
             _ => {
                 drop(b);
                 self.throw_type_error(ctx, "DataView buffer is detached");

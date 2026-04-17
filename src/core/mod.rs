@@ -2913,7 +2913,7 @@ fn collect_hoisted_function_defs<'gc>(chunk: &crate::core::opcode::Chunk<'gc>, h
     let wanted: std::collections::HashSet<&str> = hoisted_locals.iter().map(String::as_str).collect();
     let mut defs = HashMap::new();
     for constant in &chunk.constants {
-        if let Value::VmFunction(ip, arity) = constant
+        if let Value::Function(ip, arity) = constant
             && let Some(name) = chunk.fn_names.get(ip)
             && wanted.contains(name.as_str())
             && !defs.contains_key(name)
@@ -3135,7 +3135,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                 let code_offset = main_code_offset.unwrap_or(0);
                 let seeded_locals = defs
                     .iter()
-                    .map(|(local_name, (ip, arity))| (local_name.clone(), Value::VmFunction(ip + code_offset, *arity)))
+                    .map(|(local_name, (ip, arity))| (local_name.clone(), Value::Function(ip + code_offset, *arity)))
                     .collect::<HashMap<_, _>>();
                 vm.seed_module_locals(main_key, &seeded_locals);
             }
@@ -3145,7 +3145,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                 let code_offset = main_code_offset.unwrap_or(0);
                 let seeded_exports = defs
                     .iter()
-                    .map(|(export_name, (ip, arity))| (export_name.clone(), Value::VmFunction(ip + code_offset, *arity)))
+                    .map(|(export_name, (ip, arity))| (export_name.clone(), Value::Function(ip + code_offset, *arity)))
                     .collect::<HashMap<_, _>>();
                 vm.seed_module_exports(ctx, main_key, &seeded_exports);
             }
@@ -3172,7 +3172,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
         // a bare `import()` completion value into a process-level failure.
         if unwrap_top_level_promise {
             for _ in 0..8 {
-                let step = if let Value::VmObject(obj) = &v {
+                let step = if let Value::Object(obj) = &v {
                     let b = obj.borrow();
                     let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
                     if is_promise {
@@ -3193,7 +3193,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                     break;
                 };
 
-                if rejected && let Value::VmObject(obj) = &next {
+                if rejected && let Value::Object(obj) = &next {
                     let b = obj.borrow();
                     if let Some(Value::String(t)) = b.get("__type__") {
                         let tn = crate::unicode::utf16_to_utf8(t);
@@ -3215,7 +3215,7 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
                     Err(_) => Ok(format!("\"{}\"", s_utf8)),
                 }
             }
-            Value::VmArray(_) | Value::VmObject(_) => Ok(value_to_compact_result_string(&v)),
+            Value::Array(_) | Value::Object(_) => Ok(value_to_compact_result_string(&v)),
             _ => Ok(value_to_string(&v)),
         }
     });

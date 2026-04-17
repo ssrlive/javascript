@@ -50,7 +50,7 @@ impl<'gc> VM<'gc> {
             }
             "date.toTemporalInstant" => {
                 let this = receiver.cloned().unwrap_or(Value::Undefined);
-                let Value::VmObject(obj) = &this else {
+                let Value::Object(obj) = &this else {
                     self.throw_type_error(ctx, "Date.prototype.toTemporalInstant requires that 'this' be a Date");
                     return Value::Undefined;
                 };
@@ -70,7 +70,7 @@ impl<'gc> VM<'gc> {
             }
             "date.toPrimitive" => {
                 let this = receiver.cloned().unwrap_or(Value::Undefined);
-                if !matches!(&this, Value::VmObject(_)) {
+                if !matches!(&this, Value::Object(_)) {
                     self.throw_type_error(ctx, "Date.prototype[Symbol.toPrimitive] requires that 'this' be an Object");
                     return Value::Undefined;
                 }
@@ -84,7 +84,7 @@ impl<'gc> VM<'gc> {
                         let to_str = self.read_named_property(ctx, &this, "toString");
                         if self.is_value_callable(&to_str) {
                             match self.vm_call_function_value(ctx, &to_str, &this, &[]) {
-                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(v) if !matches!(v, Value::Object(_) | Value::Array(_)) => return v,
                                 Ok(_) => {}
                                 Err(e) => {
                                     self.set_pending_throw_from_error(&e);
@@ -95,7 +95,7 @@ impl<'gc> VM<'gc> {
                         let val_of = self.read_named_property(ctx, &this, "valueOf");
                         if self.is_value_callable(&val_of) {
                             match self.vm_call_function_value(ctx, &val_of, &this, &[]) {
-                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(v) if !matches!(v, Value::Object(_) | Value::Array(_)) => return v,
                                 Ok(_) => {}
                                 Err(e) => {
                                     self.set_pending_throw_from_error(&e);
@@ -110,7 +110,7 @@ impl<'gc> VM<'gc> {
                         let val_of = self.read_named_property(ctx, &this, "valueOf");
                         if self.is_value_callable(&val_of) {
                             match self.vm_call_function_value(ctx, &val_of, &this, &[]) {
-                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(v) if !matches!(v, Value::Object(_) | Value::Array(_)) => return v,
                                 Ok(_) => {}
                                 Err(e) => {
                                     self.set_pending_throw_from_error(&e);
@@ -121,7 +121,7 @@ impl<'gc> VM<'gc> {
                         let to_str = self.read_named_property(ctx, &this, "toString");
                         if self.is_value_callable(&to_str) {
                             match self.vm_call_function_value(ctx, &to_str, &this, &[]) {
-                                Ok(v) if !matches!(v, Value::VmObject(_) | Value::VmArray(_)) => return v,
+                                Ok(v) if !matches!(v, Value::Object(_) | Value::Array(_)) => return v,
                                 Ok(_) => {}
                                 Err(e) => {
                                     self.set_pending_throw_from_error(&e);
@@ -144,7 +144,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Date.prototype.toJSON called on null or undefined");
                     return Value::Undefined;
                 }
-                let o = if matches!(&this, Value::VmObject(_) | Value::VmArray(_)) {
+                let o = if matches!(&this, Value::Object(_) | Value::Array(_)) {
                     this.clone()
                 } else {
                     self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&this))
@@ -179,7 +179,7 @@ impl<'gc> VM<'gc> {
             }
             "date.toTimeString" => {
                 let this = receiver.cloned().unwrap_or(Value::Undefined);
-                if let Value::VmObject(obj) = &this
+                if let Value::Object(obj) = &this
                     && let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned()
                 {
                     if ms.is_nan() || ms.is_infinite() {
@@ -206,22 +206,22 @@ impl<'gc> VM<'gc> {
     pub(super) fn date_init_prototype(&mut self, ctx: &GcContext<'gc>) {
         let mut date_map = IndexMap::new();
         Self::init_native_ctor_header(&mut date_map, BUILTIN_CTOR_DATE, "Date", 7.0);
-        date_map.insert("now".to_string(), Value::VmNativeFunction(BUILTIN_DATE_NOW));
-        date_map.insert("parse".to_string(), Value::VmNativeFunction(BUILTIN_DATE_PARSE));
+        date_map.insert("now".to_string(), Value::NativeFunction(BUILTIN_DATE_NOW));
+        date_map.insert("parse".to_string(), Value::NativeFunction(BUILTIN_DATE_PARSE));
         date_map.insert(
             "UTC".to_string(),
             Self::make_host_fn_with_name_len(ctx, "date.UTC", "UTC", 7.0, false),
         );
         let mut date_proto = IndexMap::new();
-        if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+        if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = obj_ctor.borrow().get("prototype").cloned()
         {
             date_proto.insert("__proto__".to_string(), obj_proto);
         }
         for (key, value) in [
-            ("getTime", Value::VmNativeFunction(BUILTIN_DATE_GETTIME)),
-            ("valueOf", Value::VmNativeFunction(BUILTIN_DATE_VALUEOF)),
-            ("toString", Value::VmNativeFunction(BUILTIN_DATE_TOSTRING)),
+            ("getTime", Value::NativeFunction(BUILTIN_DATE_GETTIME)),
+            ("valueOf", Value::NativeFunction(BUILTIN_DATE_VALUEOF)),
+            ("toString", Value::NativeFunction(BUILTIN_DATE_TOSTRING)),
             (
                 "toTimeString",
                 Self::make_host_fn_with_name_len(ctx, "date.toTimeString", "toTimeString", 0.0, false),
@@ -230,44 +230,44 @@ impl<'gc> VM<'gc> {
                 "toTemporalInstant",
                 Self::make_host_fn_with_name_len(ctx, "date.toTemporalInstant", "toTemporalInstant", 0.0, false),
             ),
-            ("toUTCString", Value::VmNativeFunction(BUILTIN_DATE_TOUTCSTRING)),
-            ("toDateString", Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING)),
-            ("setTime", Value::VmNativeFunction(BUILTIN_DATE_SETTIME)),
+            ("toUTCString", Value::NativeFunction(BUILTIN_DATE_TOUTCSTRING)),
+            ("toDateString", Value::NativeFunction(BUILTIN_DATE_TODATESTRING)),
+            ("setTime", Value::NativeFunction(BUILTIN_DATE_SETTIME)),
             ("toJSON", Self::make_host_fn_with_name_len(ctx, "date.toJSON", "toJSON", 1.0, false)),
-            ("toLocaleDateString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING)),
-            ("toLocaleTimeString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING)),
-            ("toLocaleString", Value::VmNativeFunction(BUILTIN_DATE_TOLOCALESTRING)),
-            ("toISOString", Value::VmNativeFunction(BUILTIN_DATE_TOISOSTRING)),
-            ("getFullYear", Value::VmNativeFunction(BUILTIN_DATE_GETFULLYEAR)),
-            ("getMonth", Value::VmNativeFunction(BUILTIN_DATE_GETMONTH)),
-            ("getDate", Value::VmNativeFunction(BUILTIN_DATE_GETDATE)),
-            ("getDay", Value::VmNativeFunction(BUILTIN_DATE_GETDAY)),
-            ("getUTCDay", Value::VmNativeFunction(BUILTIN_DATE_GETUTCDAY)),
-            ("getHours", Value::VmNativeFunction(BUILTIN_DATE_GETHOURS)),
-            ("getMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETMINUTES)),
-            ("getSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETSECONDS)),
-            ("getMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETMILLISECONDS)),
-            ("setFullYear", Value::VmNativeFunction(BUILTIN_DATE_SETFULLYEAR)),
+            ("toLocaleDateString", Value::NativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING)),
+            ("toLocaleTimeString", Value::NativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING)),
+            ("toLocaleString", Value::NativeFunction(BUILTIN_DATE_TOLOCALESTRING)),
+            ("toISOString", Value::NativeFunction(BUILTIN_DATE_TOISOSTRING)),
+            ("getFullYear", Value::NativeFunction(BUILTIN_DATE_GETFULLYEAR)),
+            ("getMonth", Value::NativeFunction(BUILTIN_DATE_GETMONTH)),
+            ("getDate", Value::NativeFunction(BUILTIN_DATE_GETDATE)),
+            ("getDay", Value::NativeFunction(BUILTIN_DATE_GETDAY)),
+            ("getUTCDay", Value::NativeFunction(BUILTIN_DATE_GETUTCDAY)),
+            ("getHours", Value::NativeFunction(BUILTIN_DATE_GETHOURS)),
+            ("getMinutes", Value::NativeFunction(BUILTIN_DATE_GETMINUTES)),
+            ("getSeconds", Value::NativeFunction(BUILTIN_DATE_GETSECONDS)),
+            ("getMilliseconds", Value::NativeFunction(BUILTIN_DATE_GETMILLISECONDS)),
+            ("setFullYear", Value::NativeFunction(BUILTIN_DATE_SETFULLYEAR)),
             (
                 "setUTCFullYear",
                 Self::make_host_fn_with_name_len(ctx, "date.setUTCFullYear", "setUTCFullYear", 3.0, false),
             ),
-            ("setMonth", Value::VmNativeFunction(BUILTIN_DATE_SETMONTH)),
+            ("setMonth", Value::NativeFunction(BUILTIN_DATE_SETMONTH)),
             (
                 "setUTCMonth",
                 Self::make_host_fn_with_name_len(ctx, "date.setUTCMonth", "setUTCMonth", 2.0, false),
             ),
-            ("setDate", Value::VmNativeFunction(BUILTIN_DATE_SETDATE)),
+            ("setDate", Value::NativeFunction(BUILTIN_DATE_SETDATE)),
             (
                 "setUTCDate",
                 Self::make_host_fn_with_name_len(ctx, "date.setUTCDate", "setUTCDate", 1.0, false),
             ),
-            ("setHours", Value::VmNativeFunction(BUILTIN_DATE_SETHOURS)),
+            ("setHours", Value::NativeFunction(BUILTIN_DATE_SETHOURS)),
             (
                 "setUTCHours",
                 Self::make_host_fn_with_name_len(ctx, "date.setUTCHours", "setUTCHours", 4.0, false),
             ),
-            ("setMinutes", Value::VmNativeFunction(BUILTIN_DATE_SETMINUTES)),
+            ("setMinutes", Value::NativeFunction(BUILTIN_DATE_SETMINUTES)),
             (
                 "setUTCMinutes",
                 Self::make_host_fn_with_name_len(ctx, "date.setUTCMinutes", "setUTCMinutes", 3.0, false),
@@ -288,17 +288,17 @@ impl<'gc> VM<'gc> {
                 "setUTCMilliseconds",
                 Self::make_host_fn_with_name_len(ctx, "date.setUTCMilliseconds", "setUTCMilliseconds", 1.0, false),
             ),
-            ("getTimezoneOffset", Value::VmNativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET)),
-            ("getUTCFullYear", Value::VmNativeFunction(BUILTIN_DATE_GETUTCFULLYEAR)),
-            ("getUTCMonth", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMONTH)),
-            ("getUTCDate", Value::VmNativeFunction(BUILTIN_DATE_GETUTCDATE)),
-            ("getUTCHours", Value::VmNativeFunction(BUILTIN_DATE_GETUTCHOURS)),
-            ("getUTCMinutes", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMINUTES)),
-            ("getUTCSeconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCSECONDS)),
-            ("getUTCMilliseconds", Value::VmNativeFunction(BUILTIN_DATE_GETUTCMILLISECONDS)),
+            ("getTimezoneOffset", Value::NativeFunction(BUILTIN_DATE_GETTIMEZONEOFFSET)),
+            ("getUTCFullYear", Value::NativeFunction(BUILTIN_DATE_GETUTCFULLYEAR)),
+            ("getUTCMonth", Value::NativeFunction(BUILTIN_DATE_GETUTCMONTH)),
+            ("getUTCDate", Value::NativeFunction(BUILTIN_DATE_GETUTCDATE)),
+            ("getUTCHours", Value::NativeFunction(BUILTIN_DATE_GETUTCHOURS)),
+            ("getUTCMinutes", Value::NativeFunction(BUILTIN_DATE_GETUTCMINUTES)),
+            ("getUTCSeconds", Value::NativeFunction(BUILTIN_DATE_GETUTCSECONDS)),
+            ("getUTCMilliseconds", Value::NativeFunction(BUILTIN_DATE_GETUTCMILLISECONDS)),
             // Annex B
-            ("getYear", Value::VmNativeFunction(BUILTIN_DATE_GETYEAR)),
-            ("setYear", Value::VmNativeFunction(BUILTIN_DATE_SETYEAR)),
+            ("getYear", Value::NativeFunction(BUILTIN_DATE_GETYEAR)),
+            ("setYear", Value::NativeFunction(BUILTIN_DATE_SETYEAR)),
         ] {
             date_proto.insert(key.to_string(), value);
             mark_nonenumerable(&mut date_proto, key);
@@ -369,7 +369,7 @@ impl<'gc> VM<'gc> {
                 return Some(Value::Number(ms));
             }
             BUILTIN_CTOR_DATE => {
-                if let Value::VmObject(obj) = receiver {
+                if let Value::Object(obj) = receiver {
                     use std::time::{SystemTime, UNIX_EPOCH};
                     let ms = if args.is_empty() {
                         SystemTime::now()
@@ -378,7 +378,7 @@ impl<'gc> VM<'gc> {
                             .unwrap_or(0.0)
                     } else if args.len() == 1 {
                         let prim = match &args[0] {
-                            Value::VmObject(_) | Value::VmArray(_) => self.try_to_primitive(ctx, &args[0], "default"),
+                            Value::Object(_) | Value::Array(_) => self.try_to_primitive(ctx, &args[0], "default"),
                             other => other.clone(),
                         };
                         if self.pending_throw.is_some() {
@@ -437,7 +437,7 @@ impl<'gc> VM<'gc> {
         }
 
         // Date instance methods — receiver must be a Date object with __date_ms__
-        if let Value::VmObject(obj) = receiver {
+        if let Value::Object(obj) = receiver {
             let date_ms = {
                 let borrow = obj.borrow();
                 match borrow.get("__date_ms__") {
@@ -683,14 +683,14 @@ impl<'gc> VM<'gc> {
                     _ => {}
                 }
             }
-            // Receiver is VmObject but doesn't have __date_ms__ — not a Date
+            // Receiver is Object but doesn't have __date_ms__ — not a Date
             if Self::is_date_method(id) {
                 self.throw_type_error(ctx, "this is not a Date object");
                 return Some(Value::Undefined);
             }
         }
         // Non-object receiver for Date methods
-        if Self::is_date_method(id) && !matches!(receiver, Value::VmObject(_)) {
+        if Self::is_date_method(id) && !matches!(receiver, Value::Object(_)) {
             self.throw_type_error(ctx, "this is not a Date object");
             return Some(Value::Undefined);
         }
@@ -750,7 +750,7 @@ impl<'gc> VM<'gc> {
                 .unwrap_or(0.0);
         }
         if args.len() == 1 {
-            if let Value::VmObject(obj) = &args[0] {
+            if let Value::Object(obj) = &args[0] {
                 if let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned() {
                     return Self::time_clip(ms);
                 }
@@ -776,7 +776,7 @@ impl<'gc> VM<'gc> {
                 };
             }
             let prim = match &args[0] {
-                Value::VmArray(_) => self.try_to_primitive(ctx, &args[0], "default"),
+                Value::Array(_) => self.try_to_primitive(ctx, &args[0], "default"),
                 other => other.clone(),
             };
             if self.pending_throw.is_some() {
@@ -883,7 +883,7 @@ impl<'gc> VM<'gc> {
     /// Handle date setter host functions (date.setUTCFullYear, date.setSeconds, etc.)
     fn date_setter_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         let this = receiver.cloned().unwrap_or(Value::Undefined);
-        let Value::VmObject(obj) = &this else {
+        let Value::Object(obj) = &this else {
             self.throw_type_error(ctx, "this is not a Date object");
             return Value::Undefined;
         };

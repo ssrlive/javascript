@@ -2538,7 +2538,7 @@ impl<'gc> VM<'gc> {
 
     pub(super) fn temporal_init_globals(&mut self, ctx: &GcContext<'gc>) {
         let Some(object_proto) = self.globals.get("Object").and_then(|value| match value {
-            Value::VmObject(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+            Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
             _ => None,
         }) else {
             return;
@@ -2911,7 +2911,7 @@ impl<'gc> VM<'gc> {
         }
         now_map.insert("@@sym:4".to_string(), Value::from("Temporal.Now"));
         write_attrs_to_legacy_map(&mut now_map, "@@sym:4", PropAttrs::CONFIGURABLE);
-        let now_obj = Value::VmObject(new_gc_cell_ptr(ctx, now_map));
+        let now_obj = Value::Object(new_gc_cell_ptr(ctx, now_map));
 
         let mut temporal_map = IndexMap::new();
         temporal_map.insert("__proto__".to_string(), object_proto);
@@ -2931,7 +2931,7 @@ impl<'gc> VM<'gc> {
         temporal_map.insert("@@sym:4".to_string(), Value::from("Temporal"));
         write_attrs_to_legacy_map(&mut temporal_map, "@@sym:4", PropAttrs::CONFIGURABLE);
 
-        let temporal_value = Value::VmObject(new_gc_cell_ptr(ctx, temporal_map));
+        let temporal_value = Value::Object(new_gc_cell_ptr(ctx, temporal_map));
         self.globals.insert("Temporal".to_string(), temporal_value.clone());
         {
             let mut global_this = self.global_this.borrow_mut(ctx);
@@ -2955,7 +2955,7 @@ impl<'gc> VM<'gc> {
     ) -> Value<'gc> {
         let ctor = Self::make_host_fn_with_name_len(ctx, ctor_host_name, ctor_name, ctor_length, true);
         let ctor_obj = match ctor {
-            Value::VmObject(obj) => obj,
+            Value::Object(obj) => obj,
             _ => unreachable!("host functions are objects"),
         };
         {
@@ -3022,7 +3022,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_slot_string_if_kind(&self, value: &Value<'gc>, kind: &str, slot: &str) -> Option<String> {
-        let Value::VmObject(obj) = value else {
+        let Value::Object(obj) = value else {
             return None;
         };
         let borrow = obj.borrow();
@@ -3037,14 +3037,14 @@ impl<'gc> VM<'gc> {
 
     fn temporal_intrinsic_ctor_value(&self, kind: &str) -> Option<Value<'gc>> {
         let temporal = self.globals.get("Temporal")?;
-        let Value::VmObject(obj) = temporal else {
+        let Value::Object(obj) = temporal else {
             return None;
         };
         own_data_from_legacy_map(&obj.borrow(), kind)
     }
 
-    fn temporal_expect_object(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, kind: &str) -> Option<VmObjectHandle<'gc>> {
-        let Some(Value::VmObject(obj)) = receiver.cloned() else {
+    fn temporal_expect_object(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, kind: &str) -> Option<ObjectHandle<'gc>> {
+        let Some(Value::Object(obj)) = receiver.cloned() else {
             self.throw_type_error(ctx, &format!("Temporal.{kind} method called on incompatible receiver"));
             return None;
         };
@@ -3053,7 +3053,7 @@ impl<'gc> VM<'gc> {
 
     fn temporal_ctor_prototype(&self, ctor_value: Option<&Value<'gc>>) -> Option<Value<'gc>> {
         ctor_value.and_then(|value| match value {
-            Value::VmObject(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+            Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
             _ => None,
         })
     }
@@ -3084,14 +3084,14 @@ impl<'gc> VM<'gc> {
 
     fn temporal_has_own_or_inherited_property(&self, _ctx: &GcContext<'gc>, value: &Value<'gc>, key: &str) -> bool {
         match value {
-            Value::VmObject(obj) => obj.borrow().contains_key(key),
-            Value::VmArray(arr) => arr.borrow().props.contains_key(key),
+            Value::Object(obj) => obj.borrow().contains_key(key),
+            Value::Array(arr) => arr.borrow().props.contains_key(key),
             _ => false,
         }
     }
 
-    fn temporal_attach_bound_methods(&self, ctx: &GcContext<'gc>, obj: &VmObjectHandle<'gc>, names: &[(&str, &str)]) {
-        let receiver = Value::VmObject(*obj);
+    fn temporal_attach_bound_methods(&self, ctx: &GcContext<'gc>, obj: &ObjectHandle<'gc>, names: &[(&str, &str)]) {
+        let receiver = Value::Object(*obj);
         let mut borrow = obj.borrow_mut(ctx);
         for (key, host_name) in names {
             let value = Self::make_bound_host_fn(ctx, host_name, &receiver);
@@ -3131,7 +3131,7 @@ impl<'gc> VM<'gc> {
         for (key, value) in extra_slots {
             Self::temporal_store_slot(&mut map, key, value.clone());
         }
-        Value::VmObject(new_gc_cell_ptr(ctx, map))
+        Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
     pub(super) fn temporal_wrap_instant(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &Instant) -> Value<'gc> {
@@ -3144,7 +3144,7 @@ impl<'gc> VM<'gc> {
                 .unwrap_or_else(|_| format!("{}ns", value.as_i128())),
             &[(SLOT_EPOCH_NS, Value::from(value.as_i128().to_string().as_str()))],
         );
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3170,7 +3170,7 @@ impl<'gc> VM<'gc> {
 
     fn temporal_wrap_plain_date(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainDate) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainDate", &value.to_string(), &[]);
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3222,7 +3222,7 @@ impl<'gc> VM<'gc> {
                 .unwrap_or_else(|_| "00:00:00".to_string()),
             &[],
         );
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3253,7 +3253,7 @@ impl<'gc> VM<'gc> {
         value: &PlainDateTime,
     ) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainDateTime", &value.to_string(), &[]);
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3304,7 +3304,7 @@ impl<'gc> VM<'gc> {
 
     fn temporal_wrap_duration(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &TemporalDuration) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(ctx, ctor_value, "Duration", &value.to_string(), &[]);
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3352,7 +3352,7 @@ impl<'gc> VM<'gc> {
             &value.to_string(),
             &[(SLOT_REFERENCE_DAY, Value::from(value.reference_day().to_string().as_str()))],
         );
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3393,7 +3393,7 @@ impl<'gc> VM<'gc> {
             &value.to_string(),
             &[(SLOT_REFERENCE_YEAR, Value::from(value.reference_year().to_string().as_str()))],
         );
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -3427,7 +3427,7 @@ impl<'gc> VM<'gc> {
             &value.to_string(),
             &[(SLOT_EPOCH_NS, Value::from(value.to_instant().as_i128().to_string().as_str()))],
         );
-        if let Value::VmObject(obj) = &wrapped {
+        if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
                 obj,
@@ -4395,7 +4395,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_calendar_slot_id(&self, value: &Value<'gc>) -> Option<String> {
-        let Value::VmObject(obj) = value else {
+        let Value::Object(obj) = value else {
             return None;
         };
         let borrow = obj.borrow();
@@ -4968,7 +4968,7 @@ impl<'gc> VM<'gc> {
     fn temporal_to_duration(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TemporalDuration, TemporalError> {
         if matches!(
             value,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(_, _) | Value::VmClosure(_, _, _) | Value::VmNativeFunction(_)
+            Value::Object(_) | Value::Array(_) | Value::Function(_, _) | Value::Closure(_, _, _) | Value::NativeFunction(_)
         ) {
             return self.temporal_duration_from_object_like(ctx, value);
         }
@@ -5041,7 +5041,7 @@ impl<'gc> VM<'gc> {
         }
         if !matches!(
             options,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(_, _) | Value::VmClosure(_, _, _) | Value::VmNativeFunction(_)
+            Value::Object(_) | Value::Array(_) | Value::Function(_, _) | Value::Closure(_, _, _) | Value::NativeFunction(_)
         ) {
             return Err(TemporalError::r#type().with_message("Options must be an object"));
         }
@@ -5777,7 +5777,7 @@ impl<'gc> VM<'gc> {
     fn temporal_is_object_like(&self, value: &Value<'gc>) -> bool {
         matches!(
             value,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(_, _) | Value::VmClosure(_, _, _) | Value::VmNativeFunction(_)
+            Value::Object(_) | Value::Array(_) | Value::Function(_, _) | Value::Closure(_, _, _) | Value::NativeFunction(_)
         )
     }
 
@@ -6188,7 +6188,7 @@ impl<'gc> VM<'gc> {
 
     fn temporal_expect_duration(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<TemporalDuration> {
         let receiver = receiver?;
-        if let Value::VmObject(obj) = receiver {
+        if let Value::Object(obj) = receiver {
             let borrow = obj.borrow();
             if matches!(own_data_from_legacy_map(&borrow, SLOT_KIND), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(&kind) == "Duration")
             {
@@ -6298,7 +6298,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_zoned_date_time_slot_string(&self, receiver: Option<&Value<'gc>>, key: &str) -> Option<String> {
-        let Some(Value::VmObject(obj)) = receiver.cloned() else {
+        let Some(Value::Object(obj)) = receiver.cloned() else {
             return None;
         };
         match own_data_from_legacy_map(&obj.borrow(), key) {

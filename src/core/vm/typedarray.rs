@@ -223,12 +223,12 @@ pub(crate) fn coerce_typed_array_value(n: f64, ta_name: &str) -> f64 {
 
 impl<'gc> VM<'gc> {
     /// Check whether a TypedArray's underlying ArrayBuffer is detached.
-    /// `arr` must be a VmArrayHandle that has `__typedarray_name__` in props.
-    pub(crate) fn is_typed_array_buffer_detached(arr: &VmArrayHandle<'gc>) -> bool {
+    /// `arr` must be a ArrayHandle that has `__typedarray_name__` in props.
+    pub(crate) fn is_typed_array_buffer_detached(arr: &ArrayHandle<'gc>) -> bool {
         let b = arr.borrow();
-        if let Some(Value::VmObject(buf)) = b.props.get("__typedarray_buffer__") {
+        if let Some(Value::Object(buf)) = b.props.get("__typedarray_buffer__") {
             matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
-        } else if let Some(Value::VmObject(buf)) = b.props.get("buffer") {
+        } else if let Some(Value::Object(buf)) = b.props.get("buffer") {
             matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
         } else {
             false
@@ -237,7 +237,7 @@ impl<'gc> VM<'gc> {
 
     /// Spec `IsValidIntegerIndex(O, index)`.
     /// Returns true if `numeric_index` is a valid integer index for the typed array.
-    pub(crate) fn is_valid_integer_index(arr: &VmArrayHandle<'gc>, numeric_index: f64) -> bool {
+    pub(crate) fn is_valid_integer_index(arr: &ArrayHandle<'gc>, numeric_index: f64) -> bool {
         if Self::is_typed_array_buffer_detached(arr) {
             return false;
         }
@@ -268,7 +268,7 @@ impl<'gc> VM<'gc> {
             "typedarray.get_buffer" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 match this_val {
-                    Value::VmArray(arr) => {
+                    Value::Array(arr) => {
                         let a = arr.borrow();
                         if a.props.get("__typedarray_name__").is_none() {
                             self.throw_type_error(ctx, "get TypedArray.prototype.buffer called on incompatible receiver");
@@ -289,7 +289,7 @@ impl<'gc> VM<'gc> {
             "typedarray.get_byteLength" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 match this_val {
-                    Value::VmArray(arr) => {
+                    Value::Array(arr) => {
                         let a = arr.borrow();
                         if a.props.get("__typedarray_name__").is_none() {
                             self.throw_type_error(ctx, "get TypedArray.prototype.byteLength called on incompatible receiver");
@@ -300,13 +300,13 @@ impl<'gc> VM<'gc> {
                             _ => 1,
                         };
                         // Check for detached buffer
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                         {
                             return Value::Number(0.0);
                         }
                         // Resizable buffer: compute dynamic length
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
                         {
                             let byte_offset = match a.props.get("__byte_offset__") {
@@ -346,14 +346,14 @@ impl<'gc> VM<'gc> {
             "typedarray.get_byteOffset" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 match this_val {
-                    Value::VmArray(arr) => {
+                    Value::Array(arr) => {
                         let a = arr.borrow();
                         if a.props.get("__typedarray_name__").is_none() {
                             self.throw_type_error(ctx, "get TypedArray.prototype.byteOffset called on incompatible receiver");
                             return Value::Undefined;
                         }
                         // Check for detached buffer
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                         {
                             return Value::Number(0.0);
@@ -363,7 +363,7 @@ impl<'gc> VM<'gc> {
                             _ => 0,
                         };
                         // Resizable buffer: out-of-bounds check
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
                         {
                             let bpe = match a.props.get("__bytes_per_element__") {
@@ -400,20 +400,20 @@ impl<'gc> VM<'gc> {
             "typedarray.get_length" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 match this_val {
-                    Value::VmArray(arr) => {
+                    Value::Array(arr) => {
                         let a = arr.borrow();
                         if a.props.get("__typedarray_name__").is_none() {
                             self.throw_type_error(ctx, "get TypedArray.prototype.length called on incompatible receiver");
                             return Value::Undefined;
                         }
                         // Check for detached buffer
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                         {
                             return Value::Number(0.0);
                         }
                         // Resizable buffer: compute dynamic length
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
                         {
                             let bpe = match a.props.get("__bytes_per_element__") {
@@ -456,7 +456,7 @@ impl<'gc> VM<'gc> {
             "typedarray.get_toStringTag" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 match this_val {
-                    Value::VmArray(arr) => {
+                    Value::Array(arr) => {
                         let a = arr.borrow();
                         match a.props.get("__typedarray_name__") {
                             Some(v) => v.clone(),
@@ -471,7 +471,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "set") {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = &this_val {
+                if let Value::Array(arr) = &this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 let source = args.first().cloned().unwrap_or(Value::Undefined);
@@ -502,7 +502,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                let Value::VmArray(target_arr) = &this_val else {
+                let Value::Array(target_arr) = &this_val else {
                     self.throw_type_error(ctx, "TypedArray.prototype.set called on incompatible receiver");
                     return Value::Undefined;
                 };
@@ -522,13 +522,13 @@ impl<'gc> VM<'gc> {
 
                 // Check if source is a TypedArray
                 let source_is_ta = match &source {
-                    Value::VmArray(src) => src.borrow().props.contains_key("__typedarray_name__"),
+                    Value::Array(src) => src.borrow().props.contains_key("__typedarray_name__"),
                     _ => false,
                 };
 
                 if source_is_ta {
                     // TypedArray source path
-                    let Value::VmArray(src_arr) = &source else { unreachable!() };
+                    let Value::Array(src_arr) = &source else { unreachable!() };
 
                     // Sync source if backed by resizable buffer
                     self.sync_resizable_ta_elements(ctx, src_arr);
@@ -536,7 +536,7 @@ impl<'gc> VM<'gc> {
                     // Check if source buffer is detached (step 12)
                     {
                         let s = src_arr.borrow();
-                        if let Some(Value::VmObject(buf)) = s.props.get("__typedarray_buffer__")
+                        if let Some(Value::Object(buf)) = s.props.get("__typedarray_buffer__")
                             && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                         {
                             drop(s);
@@ -583,8 +583,8 @@ impl<'gc> VM<'gc> {
                     // Get source buffer bytes
                     let src_bytes: Vec<Value<'gc>> = {
                         let s = src_arr.borrow();
-                        if let Some(Value::VmObject(buf)) = s.props.get("__typedarray_buffer__") {
-                            if let Some(Value::VmArray(bb)) = buf.borrow().get("__buffer_bytes__").cloned() {
+                        if let Some(Value::Object(buf)) = s.props.get("__typedarray_buffer__") {
+                            if let Some(Value::Array(bb)) = buf.borrow().get("__buffer_bytes__").cloned() {
                                 bb.borrow().elements.clone()
                             } else {
                                 Vec::new()
@@ -794,7 +794,7 @@ impl<'gc> VM<'gc> {
             "typedarray.subarray" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
                 // Don't validate detached buffer here - spec says subarray coerces args first
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     self.throw_type_error(ctx, "%TypedArray%.prototype.subarray called on incompatible receiver");
                     return Value::Undefined;
                 };
@@ -883,7 +883,7 @@ impl<'gc> VM<'gc> {
                     let mut data = VmArrayData::new(elems);
                     data.props.insert("__typedarray_name__".to_string(), Value::from(ta_name.as_str()));
                     data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
-                    Value::VmArray(new_gc_cell_ptr(ctx, data))
+                    Value::Array(new_gc_cell_ptr(ctx, data))
                 }
             }
             "typedarray.from" => {
@@ -911,7 +911,7 @@ impl<'gc> VM<'gc> {
 
                 // Collect source items
                 let items: Vec<Value<'gc>> = match &source {
-                    Value::VmArray(src) => src.borrow().elements.clone(),
+                    Value::Array(src) => src.borrow().elements.clone(),
                     _ => {
                         // Try iterator protocol
                         let iterator_method = self.read_named_property(ctx, &source, "@@sym:1");
@@ -928,11 +928,7 @@ impl<'gc> VM<'gc> {
                             let iterator = iterator.unwrap();
                             if !matches!(
                                 iterator,
-                                Value::VmObject(_)
-                                    | Value::VmArray(_)
-                                    | Value::VmFunction(..)
-                                    | Value::VmClosure(..)
-                                    | Value::VmNativeFunction(_)
+                                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)
                             ) {
                                 self.throw_type_error(ctx, "iterator must return an object");
                                 return Value::Undefined;
@@ -954,11 +950,11 @@ impl<'gc> VM<'gc> {
                                 let result = result.unwrap();
                                 if !matches!(
                                     result,
-                                    Value::VmObject(_)
-                                        | Value::VmArray(_)
-                                        | Value::VmFunction(..)
-                                        | Value::VmClosure(..)
-                                        | Value::VmNativeFunction(_)
+                                    Value::Object(_)
+                                        | Value::Array(_)
+                                        | Value::Function(..)
+                                        | Value::Closure(..)
+                                        | Value::NativeFunction(_)
                                 ) {
                                     self.throw_type_error(ctx, "iterator result is not an object");
                                     return Value::Undefined;
@@ -1001,15 +997,11 @@ impl<'gc> VM<'gc> {
                 let has_mapping = matches!(&map_fn, Some(mf) if !matches!(mf, Value::Undefined));
                 let result = self.construct_value(ctx, &ctor, &[Value::Number(items.len() as f64)], None);
                 match result {
-                    Ok(ta @ Value::VmArray(_)) => {
+                    Ok(ta @ Value::Array(_)) => {
                         if !self.validate_typed_array(ctx, &ta, "from") {
                             return Value::Undefined;
                         }
-                        let ta_len = if let Value::VmArray(a) = &ta {
-                            a.borrow().elements.len()
-                        } else {
-                            0
-                        };
+                        let ta_len = if let Value::Array(a) = &ta { a.borrow().elements.len() } else { 0 };
                         if ta_len < items.len() {
                             self.throw_type_error(ctx, "TypedArray is too small");
                             return Value::Undefined;
@@ -1060,23 +1052,19 @@ impl<'gc> VM<'gc> {
                 let len = args.len();
                 let result = self.construct_value(ctx, &ctor, &[Value::Number(len as f64)], None);
                 match result {
-                    Ok(ta @ Value::VmArray(_)) => {
+                    Ok(ta @ Value::Array(_)) => {
                         if !self.validate_typed_array(ctx, &ta, "of") {
                             return Value::Undefined;
                         }
                         // TypedArrayCreate: verify length >= required
-                        let ta_len = if let Value::VmArray(a) = &ta {
-                            a.borrow().elements.len()
-                        } else {
-                            0
-                        };
+                        let ta_len = if let Value::Array(a) = &ta { a.borrow().elements.len() } else { 0 };
                         if ta_len < len {
                             self.throw_type_error(ctx, "TypedArray is too small");
                             return Value::Undefined;
                         }
                         // Per spec, each Set call coerces the value, which may resize the buffer.
                         // After coercion, if the index is out of bounds, the Set is a no-op.
-                        let ta_name = if let Value::VmArray(a) = &ta {
+                        let ta_name = if let Value::Array(a) = &ta {
                             match a.borrow().props.get("__typedarray_name__") {
                                 Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
                                 _ => "Uint8Array".to_string(),
@@ -1099,7 +1087,7 @@ impl<'gc> VM<'gc> {
                                     return Value::Undefined;
                                 }
                                 // After coercion, sync and check bounds
-                                if let Value::VmArray(a) = &ta {
+                                if let Value::Array(a) = &ta {
                                     self.sync_resizable_ta_elements(ctx, a);
                                     if i < a.borrow().elements.len() {
                                         let coerced = coerce_bigint_for_ta(&bi, &ta_name);
@@ -1116,7 +1104,7 @@ impl<'gc> VM<'gc> {
                                     return Value::Undefined;
                                 }
                                 // After coercion, sync and check bounds
-                                if let Value::VmArray(a) = &ta {
+                                if let Value::Array(a) = &ta {
                                     self.sync_resizable_ta_elements(ctx, a);
                                     if i < a.borrow().elements.len() {
                                         let converted = Self::typed_array_coerce_value(num, &ta_name);
@@ -1146,7 +1134,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "values") {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = &this_val {
+                if let Value::Array(arr) = &this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 // Create a "value" iterator directly
@@ -1158,14 +1146,14 @@ impl<'gc> VM<'gc> {
                 if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
                     obj.insert("__proto__".to_string(), proto);
                 }
-                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+                Value::Object(new_gc_cell_ptr(ctx, obj))
             }
             "typedarray.entries" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
                 if !self.validate_typed_array(ctx, &this_val, "entries") {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = &this_val {
+                if let Value::Array(arr) = &this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 // Create an "entry" iterator directly (key+value pairs)
@@ -1177,14 +1165,14 @@ impl<'gc> VM<'gc> {
                 if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
                     obj.insert("__proto__".to_string(), proto);
                 }
-                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+                Value::Object(new_gc_cell_ptr(ctx, obj))
             }
             "typedarray.keys_iter" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
                 if !self.validate_typed_array(ctx, &this_val, "keys") {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = &this_val {
+                if let Value::Array(arr) = &this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 // Create a "key" iterator directly
@@ -1196,7 +1184,7 @@ impl<'gc> VM<'gc> {
                 if let Some(proto) = self.globals.get("__ArrayIteratorPrototype__").cloned() {
                     obj.insert("__proto__".to_string(), proto);
                 }
-                Value::VmObject(new_gc_cell_ptr(ctx, obj))
+                Value::Object(new_gc_cell_ptr(ctx, obj))
             }
             // Delegating methods: validate this is TypedArray, then call Array builtin
             "typedarray.join"
@@ -1219,7 +1207,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 // Sync elements for resizable buffer before delegating
-                if let Value::VmArray(arr) = this_val {
+                if let Value::Array(arr) = this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 // Map to corresponding Array builtin
@@ -1251,7 +1239,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "fill") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -1389,7 +1377,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "sort") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -1593,7 +1581,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "reverse") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -1642,7 +1630,7 @@ impl<'gc> VM<'gc> {
                     }
                 };
                 let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let len = if let Value::VmArray(arr) = &this_val {
+                let len = if let Value::Array(arr) = &this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                     arr.borrow().elements.len()
                 } else {
@@ -1652,7 +1640,7 @@ impl<'gc> VM<'gc> {
                 let Some(result) = self.typed_array_species_create(ctx, &this_val, &[Value::Number(len as f64)]) else {
                     return Value::Undefined;
                 };
-                let res_ta_name = if let Value::VmArray(res_arr) = &result {
+                let res_ta_name = if let Value::Array(res_arr) = &result {
                     res_arr
                         .borrow()
                         .props
@@ -1663,7 +1651,7 @@ impl<'gc> VM<'gc> {
                     String::new()
                 };
                 for k in 0..len {
-                    let k_value = if let Value::VmArray(arr) = &this_val {
+                    let k_value = if let Value::Array(arr) = &this_val {
                         self.maybe_sync_resizable_ta(ctx, arr);
                         arr.borrow().elements.get(k).cloned().unwrap_or(Value::Undefined)
                     } else {
@@ -1681,7 +1669,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    if let Value::VmArray(res_arr) = &result {
+                    if let Value::Array(res_arr) = &result {
                         if is_bigint_typed_array(&res_ta_name) {
                             let bi = match &mapped {
                                 Value::BigInt(b) => (**b).clone(),
@@ -1712,7 +1700,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, this_val, "filter") {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = this_val {
+                if let Value::Array(arr) = this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 let old_ta_method = self.in_typed_array_method;
@@ -1724,7 +1712,7 @@ impl<'gc> VM<'gc> {
                 }
                 // Extract filtered elements
                 let elements = match &filtered {
-                    Value::VmArray(arr) => arr.borrow().elements.clone(),
+                    Value::Array(arr) => arr.borrow().elements.clone(),
                     _ => return filtered,
                 };
                 let len = elements.len();
@@ -1733,7 +1721,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 };
                 // Copy filtered values into result
-                if let Value::VmArray(res_arr) = &result {
+                if let Value::Array(res_arr) = &result {
                     let ta_name = res_arr
                         .borrow()
                         .props
@@ -1771,7 +1759,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 // Get source info
-                let (len, ta_name, bpe) = if let Value::VmArray(arr) = &this_val {
+                let (len, ta_name, bpe) = if let Value::Array(arr) = &this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                     let a = arr.borrow();
                     let name = a.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
@@ -1834,9 +1822,9 @@ impl<'gc> VM<'gc> {
 
                 // Step 15.a-b: Re-check OOB after species create (buffer may have been
                 // resized during argument coercion or species constructor)
-                if let Value::VmArray(src_arr) = &this_val {
+                if let Value::Array(src_arr) = &this_val {
                     // Check detached
-                    if let Some(Value::VmObject(buf)) = src_arr.borrow().props.get("__typedarray_buffer__")
+                    if let Some(Value::Object(buf)) = src_arr.borrow().props.get("__typedarray_buffer__")
                         && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                     {
                         self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
@@ -1850,9 +1838,9 @@ impl<'gc> VM<'gc> {
                     }
                 }
 
-                if let Value::VmArray(res_arr) = &result {
+                if let Value::Array(res_arr) = &result {
                     // Step 15.c: srcLength = TypedArrayLength(O) after potential resize
-                    let src_len = if let Value::VmArray(src_arr) = &this_val {
+                    let src_len = if let Value::Array(src_arr) = &this_val {
                         src_arr.borrow().elements.len() as i64
                     } else {
                         0
@@ -1867,7 +1855,7 @@ impl<'gc> VM<'gc> {
                         .get("__typedarray_name__")
                         .map(value_to_string)
                         .unwrap_or_default();
-                    let src_buf = if let Value::VmArray(src_arr) = &this_val {
+                    let src_buf = if let Value::Array(src_arr) = &this_val {
                         src_arr.borrow().props.get("__typedarray_buffer__").cloned()
                     } else {
                         None
@@ -1875,14 +1863,14 @@ impl<'gc> VM<'gc> {
                     let res_buf = res_arr.borrow().props.get("__typedarray_buffer__").cloned();
 
                     let same_buffer = match (&src_buf, &res_buf) {
-                        (Some(Value::VmObject(a)), Some(Value::VmObject(b))) => Gc::ptr_eq(*a, *b),
+                        (Some(Value::Object(a)), Some(Value::Object(b))) => Gc::ptr_eq(*a, *b),
                         _ => false,
                     };
 
                     if ta_name == res_ta_name {
                         // Same element type: copy raw bytes so Float16/NaN payloads preserve
                         // exact bit patterns instead of round-tripping through f64 values.
-                        let src_byte_offset = if let Value::VmArray(src_arr) = &this_val {
+                        let src_byte_offset = if let Value::Array(src_arr) = &this_val {
                             match src_arr.borrow().props.get("__byte_offset__") {
                                 Some(Value::Number(n)) => *n as usize,
                                 _ => 0,
@@ -1895,17 +1883,17 @@ impl<'gc> VM<'gc> {
                             _ => 0,
                         };
 
-                        let src_buf_bytes = if let Some(Value::VmObject(buf_obj)) = &src_buf {
+                        let src_buf_bytes = if let Some(Value::Object(buf_obj)) = &src_buf {
                             buf_obj.borrow().get("__buffer_bytes__").cloned()
                         } else {
                             None
                         };
-                        let res_buf_bytes = if let Some(Value::VmObject(buf_obj)) = &res_buf {
+                        let res_buf_bytes = if let Some(Value::Object(buf_obj)) = &res_buf {
                             buf_obj.borrow().get("__buffer_bytes__").cloned()
                         } else {
                             None
                         };
-                        if let (Some(Value::VmArray(src_bytes)), Some(Value::VmArray(dst_bytes))) = (src_buf_bytes, res_buf_bytes) {
+                        if let (Some(Value::Array(src_bytes)), Some(Value::Array(dst_bytes))) = (src_buf_bytes, res_buf_bytes) {
                             let src_start_byte = src_byte_offset + k as usize * bpe;
                             let target_start_byte = res_byte_offset;
                             if same_buffer {
@@ -1944,7 +1932,7 @@ impl<'gc> VM<'gc> {
                         }
                     } else {
                         // Different buffer or different type: element-by-element set
-                        let src_elements: Vec<Value<'gc>> = if let Value::VmArray(src_arr) = &this_val {
+                        let src_elements: Vec<Value<'gc>> = if let Value::Array(src_arr) = &this_val {
                             let a = src_arr.borrow();
                             let start = (k as usize).min(a.elements.len());
                             let end = (k as usize + actual_count).min(a.elements.len());
@@ -1981,7 +1969,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "copyWithin") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -2037,7 +2025,7 @@ impl<'gc> VM<'gc> {
                 // Re-check after argument coercion (buffer may have been resized)
                 {
                     let a = arr.borrow();
-                    if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                    if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                         && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                     {
                         drop(a);
@@ -2105,8 +2093,8 @@ impl<'gc> VM<'gc> {
                     }
                     // Sync to buffer
                     let a = arr.borrow();
-                    if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
-                        && let Some(Value::VmArray(buf_bytes)) = buf.borrow().get("__buffer_bytes__").cloned()
+                    if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
+                        && let Some(Value::Array(buf_bytes)) = buf.borrow().get("__buffer_bytes__").cloned()
                     {
                         let byte_offset = match a.props.get("__byte_offset__") {
                             Some(Value::Number(n)) => *n as usize,
@@ -2134,7 +2122,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, this_val, "toLocaleString") {
                     return Value::Undefined;
                 }
-                if let Value::VmArray(arr) = this_val {
+                if let Value::Array(arr) = this_val {
                     self.sync_resizable_ta_elements(ctx, arr);
                 }
                 self.call_host_fn(ctx, "array.toLocaleString", Some(this_val), args)
@@ -2144,7 +2132,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "toReversed") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -2167,7 +2155,7 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                let Value::VmArray(res_arr) = &result else {
+                let Value::Array(res_arr) = &result else {
                     return result;
                 };
                 let res_ta_name = match res_arr.borrow().props.get("__typedarray_name__") {
@@ -2212,7 +2200,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "toSorted") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -2235,7 +2223,7 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                let Value::VmArray(res_arr) = &result else {
+                let Value::Array(res_arr) = &result else {
                     return result;
                 };
                 let res_ta_name = match res_arr.borrow().props.get("__typedarray_name__") {
@@ -2413,7 +2401,7 @@ impl<'gc> VM<'gc> {
                 if !self.validate_typed_array(ctx, &this_val, "with") {
                     return Value::Undefined;
                 }
-                let Value::VmArray(arr) = &this_val else {
+                let Value::Array(arr) = &this_val else {
                     return Value::Undefined;
                 };
                 self.sync_resizable_ta_elements(ctx, arr);
@@ -2486,7 +2474,7 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                let Value::VmArray(res_arr) = &result else {
+                let Value::Array(res_arr) = &result else {
                     return result;
                 };
 
@@ -2535,7 +2523,7 @@ impl<'gc> VM<'gc> {
     /// Returns true if valid. Sets pending_throw and returns false otherwise.
     fn validate_typed_array(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, method: &str) -> bool {
         match val {
-            Value::VmArray(arr) => {
+            Value::Array(arr) => {
                 let a = arr.borrow();
                 if !a.props.contains_key("__typedarray_name__") {
                     drop(a);
@@ -2543,7 +2531,7 @@ impl<'gc> VM<'gc> {
                     return false;
                 }
                 // Check for detached buffer
-                if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                     && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
                 {
                     drop(a);
@@ -2551,7 +2539,7 @@ impl<'gc> VM<'gc> {
                     return false;
                 }
                 // IsTypedArrayOutOfBounds — resizable buffer
-                if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+                if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                     && matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
                 {
                     let bpe = match a.props.get("__bytes_per_element__") {
@@ -2594,7 +2582,7 @@ impl<'gc> VM<'gc> {
     /// Implements SpeciesConstructor(O, defaultConstructor) for TypedArrays.
     /// Returns the species constructor, or None if a throw was set.
     fn typed_array_species_constructor(&mut self, ctx: &GcContext<'gc>, this_val: &Value<'gc>) -> Option<Value<'gc>> {
-        let ta_name = if let Value::VmArray(arr) = this_val {
+        let ta_name = if let Value::Array(arr) = this_val {
             arr.borrow()
                 .props
                 .get("__typedarray_name__")
@@ -2621,7 +2609,7 @@ impl<'gc> VM<'gc> {
         // Step 4: If Type(C) is not Object, throw TypeError
         if !matches!(
             ctor,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
+            Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)
         ) || ctor.is_symbol_value()
         {
             self.throw_type_error(ctx, "Constructor is not an object");
@@ -2630,7 +2618,7 @@ impl<'gc> VM<'gc> {
 
         // Step 5: Let S be ? Get(C, @@species)
         let mut species_ctor = ctor.clone();
-        if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
+        if let Some(Value::Object(symbol_ctor)) = self.globals.get("Symbol")
             && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {
@@ -2659,7 +2647,7 @@ impl<'gc> VM<'gc> {
     /// using the intrinsic constructor (ignores @@species).
     fn typed_array_create_same_type(&mut self, ctx: &GcContext<'gc>, exemplar: &Value<'gc>, args: &[Value<'gc>]) -> Option<Value<'gc>> {
         let ta_name = match exemplar {
-            Value::VmArray(arr) => match arr.borrow().props.get("__typedarray_name__") {
+            Value::Array(arr) => match arr.borrow().props.get("__typedarray_name__") {
                 Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
                 _ => return None,
             },
@@ -2703,15 +2691,15 @@ impl<'gc> VM<'gc> {
             && *requested_len >= 0.0
         {
             // Sync elements for resizable buffer TAs to get current length
-            if let Value::VmArray(arr) = &result {
+            if let Value::Array(arr) = &result {
                 self.maybe_sync_resizable_ta(ctx, arr);
             }
             let actual_len = match &result {
-                Value::VmArray(arr) => {
+                Value::Array(arr) => {
                     let a = arr.borrow();
                     // Use dynamic TypedArrayLength for resizable buffers
                     if matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true))) {
-                        if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__") {
+                        if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__") {
                             let buf_byte_len = match buf.borrow().get("byteLength") {
                                 Some(Value::Number(n)) => *n as usize,
                                 _ => 0,
@@ -2749,7 +2737,7 @@ impl<'gc> VM<'gc> {
 
     /// Wrap a plain Array result as the same TypedArray type as `source`.
     fn _wrap_as_typed_array(&mut self, ctx: &GcContext<'gc>, source: &Value<'gc>, result: &Value<'gc>) -> Value<'gc> {
-        let (ta_name, bpe) = if let Value::VmArray(arr) = source {
+        let (ta_name, bpe) = if let Value::Array(arr) = source {
             let a = arr.borrow();
             let name = a.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
             let bpe = match a.props.get("__bytes_per_element__") {
@@ -2776,13 +2764,13 @@ impl<'gc> VM<'gc> {
         };
         // Extract elements from result
         let elements = match result {
-            Value::VmArray(arr) => arr.borrow().elements.clone(),
+            Value::Array(arr) => arr.borrow().elements.clone(),
             _ => return result.clone(),
         };
         let len = elements.len();
         // Create a new TypedArray with the same type
         let ta_instance_proto: Option<Value<'gc>> = self.globals.get(&ta_name).and_then(|v| {
-            if let Value::VmObject(o) = v {
+            if let Value::Object(o) = v {
                 own_data_from_legacy_map(&o.borrow(), "prototype")
             } else {
                 None
@@ -2806,7 +2794,7 @@ impl<'gc> VM<'gc> {
         if let Some(proto) = &ta_instance_proto {
             data.props.insert("__proto__".to_string(), proto.clone());
         }
-        Value::VmArray(new_gc_cell_ptr(ctx, data))
+        Value::Array(new_gc_cell_ptr(ctx, data))
     }
 
     // ECMAScript ToUint8 (wrapping)
@@ -3035,14 +3023,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Sync a TypedArray element write to the underlying buffer bytes.
-    pub(super) fn sync_ta_element_to_buffer(
-        &self,
-        ctx: &GcContext<'gc>,
-        arr: &VmArrayHandle<'gc>,
-        idx: usize,
-        new_num: f64,
-        ta_name: &str,
-    ) {
+    pub(super) fn sync_ta_element_to_buffer(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>, idx: usize, new_num: f64, ta_name: &str) {
         let (buffer, byte_offset, bpe) = {
             let a = arr.borrow();
             let buffer = a.props.get("__typedarray_buffer__").cloned();
@@ -3064,8 +3045,8 @@ impl<'gc> VM<'gc> {
                 .unwrap_or(1);
             (buffer, byte_offset, bpe)
         };
-        if let Some(Value::VmObject(buf_obj)) = buffer
-            && let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
+        if let Some(Value::Object(buf_obj)) = buffer
+            && let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
         {
             let base = byte_offset + idx * bpe;
             let mut bb = buf_bytes.borrow_mut(ctx);
@@ -3150,7 +3131,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Sync elements array from the backing buffer bytes (for shared buffer scenarios)
-    fn sync_ta_elements_from_buffer(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>, ta_name: &str, bpe: usize, len: usize) {
+    fn sync_ta_elements_from_buffer(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>, ta_name: &str, bpe: usize, len: usize) {
         let (buffer, byte_offset) = {
             let a = arr.borrow();
             let buffer = a.props.get("__typedarray_buffer__").cloned();
@@ -3162,12 +3143,12 @@ impl<'gc> VM<'gc> {
             (buffer, byte_offset)
         };
         // Extract buf_bytes in its own scope so buf_obj borrow is dropped
-        let buf_bytes = if let Some(Value::VmObject(buf_obj)) = &buffer {
+        let buf_bytes = if let Some(Value::Object(buf_obj)) = &buffer {
             buf_obj.borrow().get("__buffer_bytes__").cloned()
         } else {
             None
         };
-        if let Some(Value::VmArray(buf_bytes)) = buf_bytes {
+        if let Some(Value::Array(buf_bytes)) = buf_bytes {
             let bb = buf_bytes.borrow();
             let mut a = arr.borrow_mut(ctx);
             for i in 0..len {
@@ -3186,12 +3167,12 @@ impl<'gc> VM<'gc> {
         buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
         buf_map.insert(
             "__buffer_bytes__".to_string(),
-            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
         );
         if let Some(proto) = self.ctor_prototype_from_globals(ctx, "ArrayBuffer") {
             buf_map.insert("__proto__".to_string(), proto);
         }
-        Value::VmObject(new_gc_cell_ptr(ctx, buf_map))
+        Value::Object(new_gc_cell_ptr(ctx, buf_map))
     }
 
     fn create_immutable_array_buffer(&mut self, ctx: &GcContext<'gc>, bytes: Vec<Value<'gc>>) -> Value<'gc> {
@@ -3200,25 +3181,25 @@ impl<'gc> VM<'gc> {
         buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
         buf_map.insert(
             "__buffer_bytes__".to_string(),
-            Value::VmArray(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
         );
         buf_map.insert("__immutable__".to_string(), Value::Boolean(true));
         if let Some(proto) = self.ctor_prototype_from_globals(ctx, "ArrayBuffer") {
             buf_map.insert("__proto__".to_string(), proto);
         }
-        Value::VmObject(new_gc_cell_ptr(ctx, buf_map))
+        Value::Object(new_gc_cell_ptr(ctx, buf_map))
     }
 
     /// If `arr` is a TypedArray backed by a resizable buffer, sync its
     /// elements vector so that `elements.len()` reflects the current
     /// dynamic length after any buffer resize.  No-op for non-resizable TAs.
-    pub(super) fn maybe_sync_resizable_ta(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) {
+    pub(super) fn maybe_sync_resizable_ta(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>) {
         let needs_sync = {
             let b = arr.borrow();
             b.props.contains_key("__typedarray_name__")
                 && matches!(
                     b.props.get("__typedarray_buffer__"),
-                    Some(Value::VmObject(buf)) if matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                    Some(Value::Object(buf)) if matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
                 )
         };
         if needs_sync {
@@ -3226,25 +3207,25 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    /// Check if a VmArray is a TypedArray backed by a resizable buffer.
-    pub(super) fn is_ta_resizable(arr: &VmArrayHandle<'gc>) -> bool {
+    /// Check if a Array is a TypedArray backed by a resizable buffer.
+    pub(super) fn is_ta_resizable(arr: &ArrayHandle<'gc>) -> bool {
         let b = arr.borrow();
         b.props.contains_key("__typedarray_name__")
             && matches!(
                 b.props.get("__typedarray_buffer__"),
-                Some(Value::VmObject(buf)) if matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
+                Some(Value::Object(buf)) if matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true)))
             )
     }
 
     /// Returns true if a resizable-backed TypedArray is out of bounds
     /// (buffer shrank below the TA's view). Non-resizable TAs always return false.
-    pub(super) fn is_typed_array_oob(&self, arr: &VmArrayHandle<'gc>) -> bool {
+    pub(super) fn is_typed_array_oob(&self, arr: &ArrayHandle<'gc>) -> bool {
         let b = arr.borrow();
         if !b.props.contains_key("__typedarray_name__") {
             return false;
         }
         let buf = match b.props.get("__typedarray_buffer__") {
-            Some(Value::VmObject(o)) => *o,
+            Some(Value::Object(o)) => *o,
             _ => return false,
         };
         if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {
@@ -3276,7 +3257,7 @@ impl<'gc> VM<'gc> {
 
     /// Read element `index` from a TypedArray, syncing from buffer first if resizable.
     /// Returns Undefined when out of bounds (e.g. buffer was shrunk).
-    pub(super) fn ta_get_element(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>, index: usize) -> Value<'gc> {
+    pub(super) fn ta_get_element(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>, index: usize) -> Value<'gc> {
         self.maybe_sync_resizable_ta(ctx, arr);
         let borrow = arr.borrow();
         if index < borrow.elements.len() {
@@ -3289,10 +3270,10 @@ impl<'gc> VM<'gc> {
     /// For resizable-buffer-backed TypedArrays, sync the elements vector
     /// to reflect the current buffer state (dynamic length after resize).
     /// Returns the new length, or None if not a resizable TA (caller uses elements.len()).
-    pub(super) fn sync_resizable_ta_elements(&self, ctx: &GcContext<'gc>, arr: &VmArrayHandle<'gc>) -> Option<usize> {
+    pub(super) fn sync_resizable_ta_elements(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>) -> Option<usize> {
         let a = arr.borrow();
         let buf = match a.props.get("__typedarray_buffer__") {
-            Some(Value::VmObject(b)) => *b,
+            Some(Value::Object(b)) => *b,
             _ => return None,
         };
         if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {
@@ -3339,7 +3320,7 @@ impl<'gc> VM<'gc> {
         };
         let buf_bytes_val = buf.borrow().get("__buffer_bytes__").cloned();
         drop(a);
-        if let Some(Value::VmArray(buf_bytes)) = buf_bytes_val {
+        if let Some(Value::Array(buf_bytes)) = buf_bytes_val {
             let bb = buf_bytes.borrow();
             let mut a = arr.borrow_mut(ctx);
             a.elements.resize(new_len, Value::Number(0.0));
@@ -3462,14 +3443,14 @@ impl<'gc> VM<'gc> {
 
         // Get prototype from constructor for __proto__ on instances
         let ta_instance_proto: Option<Value<'gc>> = self.globals.get(typedarray_name).and_then(|v| {
-            if let Value::VmObject(o) = v {
+            if let Value::Object(o) = v {
                 own_data_from_legacy_map(&o.borrow(), "prototype")
             } else {
                 None
             }
         });
 
-        if let Some(Value::VmArray(src_arr)) = args.first()
+        if let Some(Value::Array(src_arr)) = args.first()
             && src_arr.borrow().props.contains_key("__typedarray_name__")
         {
             // Sync resizable source TA and check for out-of-bounds (ValidateTypedArray)
@@ -3514,7 +3495,7 @@ impl<'gc> VM<'gc> {
             } else {
                 for v in elements_clone.iter() {
                     let num = match v {
-                        Value::VmObject(_) | Value::VmArray(_) => match self.extract_number_with_coercion(ctx, v) {
+                        Value::Object(_) | Value::Array(_) => match self.extract_number_with_coercion(ctx, v) {
                             Some(n) => n,
                             None => {
                                 if self.pending_throw.is_some() {
@@ -3553,11 +3534,11 @@ impl<'gc> VM<'gc> {
             if let Some(proto) = &ta_instance_proto {
                 data.props.insert("__proto__".to_string(), proto.clone());
             }
-            return Value::VmArray(new_gc_cell_ptr(ctx, data));
+            return Value::Array(new_gc_cell_ptr(ctx, data));
         }
 
-        // Regular VmArray (non-TypedArray) — use iterator protocol like VmObject
-        if let Some(Value::VmArray(_)) = args.first() {
+        // Regular Array (non-TypedArray) — use iterator protocol like Object
+        if let Some(Value::Array(_)) = args.first() {
             let obj_val = args.first().unwrap().clone();
             let iter_fn = self.read_named_property(ctx, &obj_val, "@@sym:1");
             if self.pending_throw.is_some() {
@@ -3679,10 +3660,10 @@ impl<'gc> VM<'gc> {
             if let Some(proto) = &ta_instance_proto {
                 data.props.insert("__proto__".to_string(), proto.clone());
             }
-            return Value::VmArray(new_gc_cell_ptr(ctx, data));
+            return Value::Array(new_gc_cell_ptr(ctx, data));
         }
 
-        // Symbol check: must reject Symbols before they reach the VmObject path
+        // Symbol check: must reject Symbols before they reach the Object path
         if let Some(first) = args.first()
             && first.is_symbol_value()
         {
@@ -3690,7 +3671,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
 
-        if let Some(Value::VmObject(buf_obj)) = args.first() {
+        if let Some(Value::Object(buf_obj)) = args.first() {
             let buffer_type = buf_obj.borrow().get("__type__").map(value_to_string).unwrap_or_default();
             let is_array_buffer = matches!(
                 buf_obj.borrow().get("__type__"),
@@ -3828,7 +3809,7 @@ impl<'gc> VM<'gc> {
                     initial_len = (byte_len - byte_offset) / bytes_per_element;
                 }
                 // Decode elements from buffer bytes
-                let elements = if let Some(Value::VmArray(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
+                let elements = if let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
                     let bb = buf_bytes.borrow();
                     let mut elems = Vec::with_capacity(initial_len);
                     for i in 0..initial_len {
@@ -3845,7 +3826,7 @@ impl<'gc> VM<'gc> {
                 let mut data = VmArrayData::new(elements);
                 data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
                 data.props.insert("__buffer_type__".to_string(), Value::from(&buffer_type));
-                data.props.insert("buffer".to_string(), Value::VmObject(*buf_obj));
+                data.props.insert("buffer".to_string(), Value::Object(*buf_obj));
                 mark_nonenumerable(&mut data.props, "buffer");
                 data.props.insert("__byte_offset__".to_string(), Value::Number(byte_offset as f64));
                 data.props
@@ -3857,14 +3838,14 @@ impl<'gc> VM<'gc> {
                 if let Some(len) = explicit_len {
                     data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
                 }
-                data.props.insert("__typedarray_buffer__".to_string(), Value::VmObject(*buf_obj));
+                data.props.insert("__typedarray_buffer__".to_string(), Value::Object(*buf_obj));
                 if let Some(proto) = &ta_instance_proto {
                     data.props.insert("__proto__".to_string(), proto.clone());
                 }
-                return Value::VmArray(new_gc_cell_ptr(ctx, data));
+                return Value::Array(new_gc_cell_ptr(ctx, data));
             }
             // Check for Symbol.iterator first (iterable object)
-            let obj_val = Value::VmObject(*buf_obj);
+            let obj_val = Value::Object(*buf_obj);
             let iter_fn = self.read_named_property(ctx, &obj_val, "@@sym:1");
             if self.pending_throw.is_some() {
                 return Value::Undefined;
@@ -4015,12 +3996,12 @@ impl<'gc> VM<'gc> {
             if let Some(proto) = &ta_instance_proto {
                 data.props.insert("__proto__".to_string(), proto.clone());
             }
-            return Value::VmArray(new_gc_cell_ptr(ctx, data));
+            return Value::Array(new_gc_cell_ptr(ctx, data));
         }
 
         // Object-arg catch-all: functions and other object-like values use iterator protocol
         if let Some(first) = args.first() {
-            let is_object_like = matches!(first, Value::VmClosure(..) | Value::VmFunction(..) | Value::VmNativeFunction(_));
+            let is_object_like = matches!(first, Value::Closure(..) | Value::Function(..) | Value::NativeFunction(_));
             if is_object_like {
                 let obj_val = first.clone();
                 let iter_fn = self.read_named_property(ctx, &obj_val, "@@sym:1");
@@ -4143,7 +4124,7 @@ impl<'gc> VM<'gc> {
                 if let Some(proto) = &ta_instance_proto {
                     data.props.insert("__proto__".to_string(), proto.clone());
                 }
-                return Value::VmArray(new_gc_cell_ptr(ctx, data));
+                return Value::Array(new_gc_cell_ptr(ctx, data));
             }
         }
 
@@ -4201,7 +4182,7 @@ impl<'gc> VM<'gc> {
         if let Some(proto) = &ta_instance_proto {
             data.props.insert("__proto__".to_string(), proto.clone());
         }
-        Value::VmArray(new_gc_cell_ptr(ctx, data))
+        Value::Array(new_gc_cell_ptr(ctx, data))
     }
 
     pub(super) fn initialize_typed_arrays(&mut self, ctx: &GcContext<'gc>, array_to_string_fn_for_ta: Value<'gc>) {
@@ -4210,7 +4191,7 @@ impl<'gc> VM<'gc> {
         // Chain: instance.__proto__ → XxxArray.prototype → %TypedArray%.prototype → Object.prototype
         //        XxxArray.__proto__ → %TypedArray% → Function.prototype
         let mut ta_proto_map = IndexMap::new();
-        if let Some(Value::VmObject(obj_ctor)) = self.globals.get("Object")
+        if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
             && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
         {
             ta_proto_map.insert("__proto__".to_string(), obj_proto);
@@ -4397,7 +4378,7 @@ impl<'gc> VM<'gc> {
         ] {
             mark_nonenumerable(&mut ta_proto_map, key);
         }
-        let ta_proto = Value::VmObject(new_gc_cell_ptr(ctx, ta_proto_map));
+        let ta_proto = Value::Object(new_gc_cell_ptr(ctx, ta_proto_map));
 
         // %TypedArray% constructor (abstract — cannot be called directly)
         let mut typed_array_ctor_map = IndexMap::new();
@@ -4422,8 +4403,8 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut typed_array_ctor_map, "of");
         Self::insert_species_getter(&mut typed_array_ctor_map, ctx);
         // Set constructor backref on prototype
-        let typed_array_ctor = Value::VmObject(new_gc_cell_ptr(ctx, typed_array_ctor_map));
-        if let Value::VmObject(p) = &ta_proto {
+        let typed_array_ctor = Value::Object(new_gc_cell_ptr(ctx, typed_array_ctor_map));
+        if let Value::Object(p) = &ta_proto {
             p.borrow_mut(ctx).insert("constructor".to_string(), typed_array_ctor.clone());
             mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
         }
@@ -4481,14 +4462,14 @@ impl<'gc> VM<'gc> {
                     mark_nonenumerable(&mut ctor_map, display);
                 }
             }
-            let per_proto_obj = Value::VmObject(new_gc_cell_ptr(ctx, per_proto));
+            let per_proto_obj = Value::Object(new_gc_cell_ptr(ctx, per_proto));
             ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
             write_attrs_to_legacy_map(&mut ctor_map, "prototype", PropAttrs::empty());
             // XxxArray.__proto__ = %TypedArray%
             ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
-            let ctor_val = Value::VmObject(new_gc_cell_ptr(ctx, ctor_map));
+            let ctor_val = Value::Object(new_gc_cell_ptr(ctx, ctor_map));
             // constructor backref (must point to same GC object)
-            if let Value::VmObject(p) = &per_proto_obj {
+            if let Value::Object(p) = &per_proto_obj {
                 p.borrow_mut(ctx).insert("constructor".to_string(), ctor_val.clone());
                 mark_nonenumerable(&mut p.borrow_mut(ctx), "constructor");
             }
@@ -4794,7 +4775,7 @@ impl<'gc> VM<'gc> {
 
     fn validate_uint8array(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, method: &str) -> bool {
         match val {
-            Value::VmArray(arr) => {
+            Value::Array(arr) => {
                 let a = arr.borrow();
                 match a.props.get("__typedarray_name__").map(value_to_string) {
                     Some(ref s) if s == "Uint8Array" => true,
@@ -4813,9 +4794,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn check_uint8array_not_detached(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> bool {
-        if let Value::VmArray(arr) = val {
+        if let Value::Array(arr) = val {
             let a = arr.borrow();
-            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__")
+            if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__")
                 && matches!(buf.borrow().get("__detached__"), Some(Value::Boolean(true)))
             {
                 drop(a);
@@ -4828,16 +4809,16 @@ impl<'gc> VM<'gc> {
 
     /// Read raw bytes from a Uint8Array's backing buffer.
     fn get_uint8array_bytes(&self, val: &Value<'gc>) -> Vec<u8> {
-        if let Value::VmArray(arr) = val {
+        if let Value::Array(arr) = val {
             let a = arr.borrow();
             let byte_offset = match a.props.get("__byte_offset__") {
                 Some(Value::Number(n)) => *n as usize,
                 _ => 0,
             };
             let len = a.elements.len();
-            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__") {
+            if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__") {
                 let buf_b = buf.borrow();
-                if let Some(Value::VmArray(buf_bytes)) = buf_b.get("__buffer_bytes__") {
+                if let Some(Value::Array(buf_bytes)) = buf_b.get("__buffer_bytes__") {
                     let bb = buf_bytes.borrow();
                     let mut result = Vec::with_capacity(len);
                     for i in 0..len {
@@ -4870,15 +4851,15 @@ impl<'gc> VM<'gc> {
 
     /// Write bytes into a Uint8Array's backing buffer.
     fn write_bytes_to_uint8array(&self, ctx: &GcContext<'gc>, ta: &Value<'gc>, bytes: &[u8]) {
-        if let Value::VmArray(arr) = ta {
+        if let Value::Array(arr) = ta {
             let a = arr.borrow();
             let byte_offset = match a.props.get("__byte_offset__") {
                 Some(Value::Number(n)) => *n as usize,
                 _ => 0,
             };
-            if let Some(Value::VmObject(buf)) = a.props.get("__typedarray_buffer__").cloned() {
+            if let Some(Value::Object(buf)) = a.props.get("__typedarray_buffer__").cloned() {
                 let buf_b = buf.borrow();
-                if let Some(Value::VmArray(buf_bytes)) = buf_b.get("__buffer_bytes__").cloned() {
+                if let Some(Value::Array(buf_bytes)) = buf_b.get("__buffer_bytes__").cloned() {
                     drop(buf_b);
                     drop(a);
                     let mut bb = buf_bytes.borrow_mut(ctx);
@@ -4924,12 +4905,12 @@ impl<'gc> VM<'gc> {
         data.props.insert("__bytes_per_element__".to_string(), Value::Number(1.0));
         data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
         data.props.insert("__length_tracking__".to_string(), Value::Boolean(false));
-        if let Some(Value::VmObject(ctor)) = self.globals.get("Uint8Array")
+        if let Some(Value::Object(ctor)) = self.globals.get("Uint8Array")
             && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
         {
             data.props.insert("__proto__".to_string(), proto);
         }
-        Value::VmArray(new_gc_cell_ptr(ctx, data))
+        Value::Array(new_gc_cell_ptr(ctx, data))
     }
 
     pub(super) fn create_immutable_uint8array_from_bytes(&mut self, ctx: &GcContext<'gc>, bytes: Vec<u8>) -> Value<'gc> {
@@ -4947,12 +4928,12 @@ impl<'gc> VM<'gc> {
         data.props.insert("__bytes_per_element__".to_string(), Value::Number(1.0));
         data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
         data.props.insert("__length_tracking__".to_string(), Value::Boolean(false));
-        if let Some(Value::VmObject(ctor)) = self.globals.get("Uint8Array")
+        if let Some(Value::Object(ctor)) = self.globals.get("Uint8Array")
             && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
         {
             data.props.insert("__proto__".to_string(), proto);
         }
-        Value::VmArray(new_gc_cell_ptr(ctx, data))
+        Value::Array(new_gc_cell_ptr(ctx, data))
     }
 
     // ── Method implementations ──
@@ -5098,7 +5079,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
         let target_len = match this {
-            Value::VmArray(arr) => arr.borrow().elements.len(),
+            Value::Array(arr) => arr.borrow().elements.len(),
             _ => 0,
         };
         let (bytes, read, error) = self.base64_decode_core(&input_str, use_url, &last_chunk, Some(target_len));
@@ -5111,7 +5092,7 @@ impl<'gc> VM<'gc> {
         let mut result_map = IndexMap::new();
         result_map.insert("read".to_string(), Value::Number(read as f64));
         result_map.insert("written".to_string(), Value::Number(written as f64));
-        Value::VmObject(new_gc_cell_ptr(ctx, result_map))
+        Value::Object(new_gc_cell_ptr(ctx, result_map))
     }
 
     fn uint8array_set_from_hex(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
@@ -5130,7 +5111,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
         let target_len = match this {
-            Value::VmArray(arr) => arr.borrow().elements.len(),
+            Value::Array(arr) => arr.borrow().elements.len(),
             _ => 0,
         };
         let (bytes, read, error) = Self::hex_decode_core(&input_str, Some(target_len));
@@ -5143,6 +5124,6 @@ impl<'gc> VM<'gc> {
         let mut result_map = IndexMap::new();
         result_map.insert("read".to_string(), Value::Number(read as f64));
         result_map.insert("written".to_string(), Value::Number(written as f64));
-        Value::VmObject(new_gc_cell_ptr(ctx, result_map))
+        Value::Object(new_gc_cell_ptr(ctx, result_map))
     }
 }

@@ -122,3 +122,61 @@ fn test_temporal_plain_date_time_with_plain_time_defaults_to_midnight() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"2015-12-07T00:00:00\"");
 }
+
+#[test]
+fn test_temporal_plain_year_month_from_constrains_month() {
+    let script = r#"
+        Temporal.PlainYearMonth.from({ year: 2021, month: 13 }, { overflow: "constrain" })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2021-12\"");
+}
+
+#[test]
+fn test_temporal_plain_month_day_from_uses_year_for_overflow_only() {
+    let script = r#"
+        Temporal.PlainMonthDay.from({ year: 2021, monthCode: "M02", day: 29 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"02-28\"");
+}
+
+#[test]
+fn test_temporal_plain_year_month_from_rejects_utc_designator() {
+    let script = r#"
+        try {
+            Temporal.PlainYearMonth.from("2021-07-16T00:00Z");
+            "nope";
+        } catch (e) {
+            e instanceof RangeError;
+        }
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn test_temporal_plain_month_day_from_out_of_range_year_only_affects_overflow() {
+    let script = r#"
+        Temporal.PlainMonthDay.from({ year: -999999, monthCode: "M02", day: 29 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"02-28\"");
+}
+
+#[test]
+fn test_temporal_plain_month_day_from_invalid_month_code_still_throws_with_numeric_month() {
+    let script = r#"
+        try {
+            Temporal.PlainMonthDay.from({ month: 1, monthCode: "M00", day: 17 });
+            "nope";
+        } catch (e) {
+            e instanceof RangeError;
+        }
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "true");
+}

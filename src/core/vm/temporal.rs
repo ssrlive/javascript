@@ -41,7 +41,10 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.instant.from" => match self.temporal_from_instant(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_instant(ctx, receiver, &value),
+                Ok(value) => {
+                    let ctor_value = self.temporal_intrinsic_ctor_value("Instant");
+                    self.temporal_wrap_instant(ctx, ctor_value.as_ref().or(receiver), &value)
+                }
                 Err(err) => self.temporal_throw(ctx, err),
             },
             "temporal.instant.compare" => {
@@ -229,7 +232,10 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.plainDate.from" => match self.temporal_from_plain_date(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_plain_date(ctx, receiver, &value),
+                Ok(value) => {
+                    let ctor_value = self.temporal_intrinsic_ctor_value("PlainDate");
+                    self.temporal_wrap_plain_date(ctx, ctor_value.as_ref().or(receiver), &value)
+                }
                 Err(err) => self.temporal_throw(ctx, err),
             },
             "temporal.plainDate.compare" => {
@@ -538,7 +544,10 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.plainTime.from" => match self.temporal_from_plain_time(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_plain_time(ctx, receiver, &value),
+                Ok(value) => {
+                    let ctor_value = self.temporal_intrinsic_ctor_value("PlainTime");
+                    self.temporal_wrap_plain_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                }
                 Err(err) => self.temporal_throw(ctx, err),
             },
             "temporal.plainTime.compare" => {
@@ -799,7 +808,10 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.plainDateTime.from" => match self.temporal_from_plain_date_time(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_plain_date_time(ctx, receiver, &value),
+                Ok(value) => {
+                    let ctor_value = self.temporal_intrinsic_ctor_value("PlainDateTime");
+                    self.temporal_wrap_plain_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                }
                 Err(err) => self.temporal_throw(ctx, err),
             },
             "temporal.plainDateTime.compare" => {
@@ -1387,10 +1399,15 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainYearMonth.from" => match self.temporal_from_plain_year_month(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_plain_year_month(ctx, receiver, &value),
-                Err(err) => self.temporal_throw(ctx, err),
-            },
+            "temporal.plainYearMonth.from" => {
+                match self.temporal_plain_year_month_from_arg(ctx, args.first(), args.get(1)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainYearMonth");
+                        self.temporal_wrap_plain_year_month(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainYearMonth.compare" => {
                 let Some(first) = args.first() else {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth.compare requires two arguments");
@@ -1400,11 +1417,11 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth.compare requires two arguments");
                     return Value::Undefined;
                 };
-                let one = match self.temporal_from_plain_year_month(ctx, Some(first)) {
+                let one = match self.temporal_from_plain_year_month(ctx, Some(first), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let two = match self.temporal_from_plain_year_month(ctx, Some(second)) {
+                let two = match self.temporal_from_plain_year_month(ctx, Some(second), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1472,7 +1489,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth.prototype.until requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_year_month(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_year_month(ctx, Some(arg), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1495,7 +1512,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth.prototype.since requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_year_month(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_year_month(ctx, Some(arg), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1518,7 +1535,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth.prototype.equals requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_year_month(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_year_month(ctx, Some(arg), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1527,15 +1544,15 @@ impl<'gc> VM<'gc> {
                         == (other.year(), other.month(), other.reference_day(), other.calendar().identifier()),
                 )
             }
-            "temporal.plainYearMonth.toString" | "temporal.plainYearMonth.toJSON" => {
-                self.temporal_repr_result(ctx, receiver, "PlainYearMonth")
-            }
+            "temporal.plainYearMonth.toString" => self.temporal_plain_year_month_to_string(ctx, receiver, args.first()),
+            "temporal.plainYearMonth.toJSON" => self.temporal_plain_year_month_to_string(ctx, receiver, None),
             "temporal.plainYearMonth.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainYearMonth to a primitive value");
                 Value::Undefined
             }
             "temporal.plainYearMonth.get.year" => self.temporal_plain_year_month_number(ctx, receiver, "year"),
             "temporal.plainYearMonth.get.month" => self.temporal_plain_year_month_number(ctx, receiver, "month"),
+            "temporal.plainYearMonth.get.monthCode" => self.temporal_plain_year_month_month_code(ctx, receiver),
             "temporal.plainYearMonth.get.calendarId" => self.temporal_plain_year_month_calendar(ctx, receiver),
 
             "temporal.plainMonthDay.constructor" => {
@@ -1563,10 +1580,15 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainMonthDay.from" => match self.temporal_from_plain_month_day(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_plain_month_day(ctx, receiver, &value),
-                Err(err) => self.temporal_throw(ctx, err),
-            },
+            "temporal.plainMonthDay.from" => {
+                match self.temporal_plain_month_day_from_arg(ctx, args.first(), args.get(1)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainMonthDay");
+                        self.temporal_wrap_plain_month_day(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainMonthDay.compare" => {
                 let Some(first) = args.first() else {
                     self.throw_type_error(ctx, "Temporal.PlainMonthDay.compare requires two arguments");
@@ -1576,11 +1598,11 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainMonthDay.compare requires two arguments");
                     return Value::Undefined;
                 };
-                let one = match self.temporal_from_plain_month_day(ctx, Some(first)) {
+                let one = match self.temporal_from_plain_month_day(ctx, Some(first), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let two = match self.temporal_from_plain_month_day(ctx, Some(second)) {
+                let two = match self.temporal_from_plain_month_day(ctx, Some(second), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1596,7 +1618,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainMonthDay.prototype.equals requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_month_day(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_month_day(ctx, Some(arg), Overflow::Constrain) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1614,9 +1636,8 @@ impl<'gc> VM<'gc> {
                     ),
                 )
             }
-            "temporal.plainMonthDay.toString" | "temporal.plainMonthDay.toJSON" => {
-                self.temporal_repr_result(ctx, receiver, "PlainMonthDay")
-            }
+            "temporal.plainMonthDay.toString" => self.temporal_plain_month_day_to_string(ctx, receiver, args.first()),
+            "temporal.plainMonthDay.toJSON" => self.temporal_plain_month_day_to_string(ctx, receiver, None),
             "temporal.plainMonthDay.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainMonthDay to a primitive value");
                 Value::Undefined
@@ -1657,7 +1678,10 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.zonedDateTime.from" => match self.temporal_from_zoned_date_time(ctx, args.first()) {
-                Ok(value) => self.temporal_wrap_zoned_date_time(ctx, receiver, &value),
+                Ok(value) => {
+                    let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                    self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                }
                 Err(err) => self.temporal_throw(ctx, err),
             },
             "temporal.zonedDateTime.compare" => {
@@ -2223,6 +2247,7 @@ impl<'gc> VM<'gc> {
             &[
                 ("year", "temporal.plainYearMonth.get.year"),
                 ("month", "temporal.plainYearMonth.get.month"),
+                ("monthCode", "temporal.plainYearMonth.get.monthCode"),
                 ("calendarId", "temporal.plainYearMonth.get.calendarId"),
             ],
             &object_proto,
@@ -2693,6 +2718,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = obj.borrow_mut(ctx);
             Self::temporal_store_readonly(&mut borrow, "year", Value::Number(value.year() as f64));
             Self::temporal_store_readonly(&mut borrow, "month", Value::Number(value.month() as f64));
+            Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
         }
         wrapped
@@ -4007,7 +4033,28 @@ impl<'gc> VM<'gc> {
         if digits.len() != 2 {
             return None;
         }
-        digits.parse::<u8>().ok()
+        let month = digits.parse::<u8>().ok()?;
+        (1..=12).contains(&month).then_some(month)
+    }
+
+    fn temporal_positive_overflow_u8(value: i32, overflow: Overflow, clamp_max: i32, name: &str) -> Result<u8, TemporalError> {
+        let invalid = match name {
+            "month" => "Invalid month",
+            "day" => "Invalid day",
+            _ => "Invalid temporal field",
+        };
+        if value <= 0 {
+            return Err(TemporalError::range().with_message(invalid));
+        }
+        match overflow {
+            Overflow::Reject => {
+                u8::try_from(value).map_err(|_| TemporalError::range().with_message(invalid))
+            }
+            Overflow::Constrain => {
+                let constrained = value.min(clamp_max).min(u8::MAX as i32);
+                Ok(constrained as u8)
+            }
+        }
     }
 
     fn temporal_format_iso_year(year: i32) -> String {
@@ -4052,6 +4099,346 @@ impl<'gc> VM<'gc> {
         self.temporal_calendar_identifier_arg(value)
     }
 
+    fn temporal_calendar_from_like_with_iso_default(
+        &mut self,
+        _ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+    ) -> Result<Calendar, TemporalError> {
+        if matches!(value, Value::Undefined) {
+            return Ok(Calendar::ISO);
+        }
+        if let Some(calendar_id) = self.temporal_calendar_slot_id(value) {
+            return Calendar::from_str(&calendar_id.to_ascii_lowercase())
+                .map_err(|_| TemporalError::range().with_message("Invalid calendar"));
+        }
+        let Value::String(text) = value else {
+            return Err(TemporalError::r#type().with_message("Invalid calendar"));
+        };
+        let text = crate::unicode::utf16_to_utf8(text);
+        if let Ok(calendar) = Calendar::from_str(&text.to_ascii_lowercase()) {
+            return Ok(calendar);
+        }
+        if PlainDate::from_utf8(text.as_bytes()).is_ok()
+            || PlainMonthDay::from_utf8(text.as_bytes()).is_ok()
+            || PlainYearMonth::from_utf8(text.as_bytes()).is_ok()
+            || Self::temporal_parse_plain_date_time_string(&text).is_ok()
+        {
+            return Ok(Calendar::ISO);
+        }
+        Err(TemporalError::range().with_message("Invalid calendar"))
+    }
+
+    fn temporal_parse_plain_year_month_string(&self, text: &str) -> Result<PlainYearMonth, TemporalError> {
+        if text.contains('Z') {
+            return Err(TemporalError::range().with_message("Invalid Temporal.PlainYearMonth string"));
+        }
+        PlainYearMonth::from_utf8(text.as_bytes())
+            .or_else(|err| PlainDate::from_utf8(text.as_bytes()).and_then(|value| value.to_plain_year_month()).or(Err(err)))
+            .or_else(|err| {
+                Self::temporal_parse_plain_date_time_string(text)
+                    .map(|value| value.to_plain_date().to_plain_year_month())
+                    .and_then(|value| value)
+                    .or(Err(err))
+            })
+            .or_else(|err| {
+                ZonedDateTime::from_utf8(text.as_bytes(), Disambiguation::Compatible, OffsetDisambiguation::Reject)
+                    .map(|value| value.to_plain_date().to_plain_year_month())
+                    .and_then(|value| value)
+                    .or(Err(err))
+            })
+    }
+
+    fn temporal_parse_plain_month_day_string(&self, text: &str) -> Result<PlainMonthDay, TemporalError> {
+        if text.contains('Z') {
+            return Err(TemporalError::range().with_message("Invalid Temporal.PlainMonthDay string"));
+        }
+        PlainMonthDay::from_utf8(text.as_bytes())
+            .or_else(|err| {
+                PlainDate::from_utf8(text.as_bytes()).and_then(|date| {
+                    PlainMonthDay::new_with_overflow(
+                        date.month(),
+                        date.day(),
+                        date.calendar().clone(),
+                        Overflow::Constrain,
+                        Some(date.year()),
+                    )
+                }).or(Err(err))
+            })
+            .or_else(|err| {
+                Self::temporal_parse_plain_date_time_string(text).and_then(|value| {
+                    let date = value.to_plain_date();
+                    PlainMonthDay::new_with_overflow(
+                        date.month(),
+                        date.day(),
+                        date.calendar().clone(),
+                        Overflow::Constrain,
+                        Some(date.year()),
+                    )
+                }).or(Err(err))
+            })
+            .or_else(|err| {
+                ZonedDateTime::from_utf8(text.as_bytes(), Disambiguation::Compatible, OffsetDisambiguation::Reject)
+                    .and_then(|value| {
+                        let date = value.to_plain_date();
+                        PlainMonthDay::new_with_overflow(
+                            date.month(),
+                            date.day(),
+                            date.calendar().clone(),
+                            Overflow::Constrain,
+                            Some(date.year()),
+                        )
+                    })
+                    .or(Err(err))
+            })
+    }
+
+    fn temporal_validate_month_code_syntax(text: &str) -> Result<(), TemporalError> {
+        let bytes = text.as_bytes();
+        let valid = matches!(bytes, [b'M', a, b] if a.is_ascii_digit() && b.is_ascii_digit())
+            || matches!(bytes, [b'M', a, b, b'L'] if a.is_ascii_digit() && b.is_ascii_digit());
+        if valid {
+            Ok(())
+        } else {
+            Err(TemporalError::range().with_message("Invalid monthCode"))
+        }
+    }
+
+    fn temporal_month_code_string_property(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        name: &str,
+    ) -> Result<Option<String>, TemporalError> {
+        let raw = self.read_named_property(ctx, value, name);
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        match raw {
+            Value::Undefined => Ok(None),
+            Value::String(text) => {
+                let text = crate::unicode::utf16_to_utf8(&text);
+                Self::temporal_validate_month_code_syntax(&text)?;
+                Ok(Some(text))
+            }
+            _ => {
+                let prim = self.try_to_primitive(ctx, &raw, "string");
+                if self.pending_throw.is_some() {
+                    return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+                }
+                let Value::String(text) = prim else {
+                    return Err(TemporalError::r#type().with_message("monthCode must be a string"));
+                };
+                let text = crate::unicode::utf16_to_utf8(&text);
+                Self::temporal_validate_month_code_syntax(&text)?;
+                Ok(Some(text))
+            }
+        }
+    }
+
+    fn temporal_iso_in_leap_year(year: i32) -> bool {
+        (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0)
+    }
+
+    fn temporal_iso_days_in_month(year: i32, month: u8) -> u8 {
+        match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if Self::temporal_iso_in_leap_year(year) => 29,
+            2 => 28,
+            _ => 31,
+        }
+    }
+
+    fn temporal_plain_year_month_from_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<PlainYearMonth, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth requires an argument"));
+        };
+        if self.temporal_slot_string_if_kind(value, "PlainYearMonth", SLOT_REPR).is_some() {
+            let _ = self.temporal_overflow_option_arg(ctx, options)?;
+            return self
+                .temporal_expect_plain_year_month(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.PlainYearMonth input"));
+        }
+        if let Value::String(text) = value {
+            let text = crate::unicode::utf16_to_utf8(text);
+            let result = self.temporal_parse_plain_year_month_string(&text)?;
+            let _ = self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(result);
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainYearMonth input"));
+        }
+
+        let calendar_value = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let month = {
+            let raw = self.read_named_property(ctx, value, "month");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+            }
+            match raw {
+                Value::Undefined => None,
+                _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "month")?),
+            }
+        };
+        let month_code = self.temporal_month_code_string_property(ctx, value, "monthCode")?;
+        let year = {
+            let raw = self.read_named_property(ctx, value, "year");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+            }
+            match raw {
+                Value::Undefined => None,
+                _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "year")?),
+            }
+        };
+
+        if month.is_none() && month_code.is_none() && year.is_none() {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+
+        let overflow = self.temporal_overflow_option_arg(ctx, options)?;
+        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
+        let month_from_code = match month_code.as_deref() {
+            Some(month_code) => Some(Self::temporal_month_from_code(Some(month_code))),
+            None => None,
+        };
+        if month_code.is_some() && month_from_code == Some(None) {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        if let (Some(month), Some(Some(month_from_code))) = (month, month_from_code)
+            && month != month_from_code as i32
+        {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        let month = match (month, month_from_code) {
+            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
+            (None, Some(Some(month_code))) => month_code,
+            (None, Some(None)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
+            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
+        };
+        PlainYearMonth::new_with_overflow(year, month, Some(1), calendar, overflow)
+    }
+
+    fn temporal_plain_month_day_from_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<PlainMonthDay, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay requires an argument"));
+        };
+        if self.temporal_slot_string_if_kind(value, "PlainMonthDay", SLOT_REPR).is_some() {
+            let _ = self.temporal_overflow_option_arg(ctx, options)?;
+            return self
+                .temporal_expect_plain_month_day(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+        if let Value::String(text) = value {
+            let text = crate::unicode::utf16_to_utf8(text);
+            let result = self.temporal_parse_plain_month_day_string(&text)?;
+            let _ = self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(result);
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+
+        let calendar_value = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+        let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let day = {
+            let raw = self.read_named_property(ctx, value, "day");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+            }
+            match raw {
+                Value::Undefined => None,
+                _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "day")?),
+            }
+        };
+        let month = {
+            let raw = self.read_named_property(ctx, value, "month");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+            }
+            match raw {
+                Value::Undefined => None,
+                _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "month")?),
+            }
+        };
+        let month_code = self.temporal_month_code_string_property(ctx, value, "monthCode")?;
+        let year = {
+            let raw = self.read_named_property(ctx, value, "year");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+            }
+            match raw {
+                Value::Undefined => None,
+                _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "year")?),
+            }
+        };
+
+        if day.is_none() && month.is_none() && month_code.is_none() && year.is_none() {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+
+        let overflow = self.temporal_overflow_option_arg(ctx, options)?;
+        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+        let month_from_code = match month_code.as_deref() {
+            Some(month_code) => Some(Self::temporal_month_from_code(Some(month_code))),
+            None => None,
+        };
+        if month_code.is_some() && month_from_code == Some(None) {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        if let (Some(month), Some(Some(month_from_code))) = (month, month_from_code)
+            && month != month_from_code as i32
+        {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        let month = match (month, month_from_code) {
+            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
+            (None, Some(Some(value))) => value,
+            (None, Some(None)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
+            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
+        };
+        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
+        let overflow_year = year.unwrap_or(1972);
+        if calendar.identifier() == "iso8601" {
+            let max_day = Self::temporal_iso_days_in_month(overflow_year, month);
+            let day = match overflow {
+                Overflow::Constrain => day.min(max_day),
+                Overflow::Reject => {
+                    if day > max_day {
+                        return Err(TemporalError::range().with_message("Date is not within ISO date time limits."));
+                    }
+                    day
+                }
+            };
+            return PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Reject, Some(1972));
+        }
+        let overflow_applied = PlainMonthDay::new_with_overflow(month, day, calendar.clone(), overflow, Some(overflow_year))?;
+        PlainMonthDay::new_with_overflow(
+            overflow_applied.month_code().to_month_integer(),
+            overflow_applied.day(),
+            calendar,
+            Overflow::Reject,
+            Some(1972),
+        )
+    }
+
     fn temporal_relative_to_time_zone_arg(&mut self, _ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TimeZone, TemporalError> {
         let text = self.temporal_relative_to_string_property(value, "timeZone")?;
         if text.is_empty() || text.starts_with("-000000") || text.contains("[+23:59:60]") {
@@ -4093,6 +4480,7 @@ impl<'gc> VM<'gc> {
         &mut self,
         ctx: &GcContext<'gc>,
         value: Option<&Value<'gc>>,
+        overflow: Overflow,
     ) -> Result<PlainYearMonth, TemporalError> {
         let Some(value) = value else {
             return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth requires an argument"));
@@ -4116,7 +4504,7 @@ impl<'gc> VM<'gc> {
         }
         if let Value::String(text) = value {
             let text = crate::unicode::utf16_to_utf8(text);
-            return PlainYearMonth::from_utf8(text.as_bytes());
+            return self.temporal_parse_plain_year_month_string(&text);
         }
         if !self.temporal_is_object_like(value) {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainYearMonth input"));
@@ -4126,8 +4514,8 @@ impl<'gc> VM<'gc> {
         if self.pending_throw.is_some() {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
-        let calendar = self.temporal_calendar_with_iso_default(ctx, &calendar_value)?;
-        let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
+        let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let month = self.temporal_optional_i32_property(ctx, value, "month")?;
         let month_code = {
             let month_code_value = self.read_named_property(ctx, value, "monthCode");
             if self.pending_throw.is_some() {
@@ -4147,17 +4535,32 @@ impl<'gc> VM<'gc> {
         }
 
         let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let month = match (month, month_code.as_deref()) {
-            (Some(month), _) => month,
-            (None, Some(month_code)) => {
-                Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?
+        let month_from_code = match month_code.as_deref() {
+            Some(month_code) => {
+                Some(Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?)
             }
+            None => None,
+        };
+        if let (Some(month), Some(month_from_code)) = (month, month_from_code)
+            && month != month_from_code as i32
+        {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        let month = match (month, month_from_code) {
+            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
+            (None, Some(month_code)) => month_code,
             (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
         };
-        PlainYearMonth::try_new(year, month, None, calendar)
+        let date = PlainDate::new_with_overflow(year, month, 1, calendar, overflow)?;
+        date.to_plain_year_month()
     }
 
-    fn temporal_from_plain_month_day(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainMonthDay, TemporalError> {
+    fn temporal_from_plain_month_day(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+        overflow: Overflow,
+    ) -> Result<PlainMonthDay, TemporalError> {
         let Some(value) = value else {
             return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay requires an argument"));
         };
@@ -4172,8 +4575,8 @@ impl<'gc> VM<'gc> {
                 date.month(),
                 date.day(),
                 date.calendar().clone(),
-                Overflow::Constrain,
-                Some(date.year()),
+                Overflow::Reject,
+                Some(1972),
             );
         }
         if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_REPR) {
@@ -4182,8 +4585,8 @@ impl<'gc> VM<'gc> {
                 date.month(),
                 date.day(),
                 date.calendar().clone(),
-                Overflow::Constrain,
-                Some(date.year()),
+                Overflow::Reject,
+                Some(1972),
             );
         }
         if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR).is_some() {
@@ -4195,13 +4598,13 @@ impl<'gc> VM<'gc> {
                 date.month(),
                 date.day(),
                 date.calendar().clone(),
-                Overflow::Constrain,
-                Some(date.year()),
+                Overflow::Reject,
+                Some(1972),
             );
         }
         if let Value::String(text) = value {
             let text = crate::unicode::utf16_to_utf8(text);
-            return PlainMonthDay::from_utf8(text.as_bytes());
+            return self.temporal_parse_plain_month_day_string(&text);
         }
         if !self.temporal_is_object_like(value) {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
@@ -4212,9 +4615,9 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
         }
         let day = self
-            .temporal_optional_u8_property(ctx, value, "day")?
+            .temporal_optional_i32_property(ctx, value, "day")?
             .ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
-        let month_value = self.temporal_optional_u8_property(ctx, value, "month")?;
+        let month_value = self.temporal_optional_i32_property(ctx, value, "month")?;
         let month_code_value = self.read_named_property(ctx, value, "monthCode");
         if self.pending_throw.is_some() {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
@@ -4223,17 +4626,28 @@ impl<'gc> VM<'gc> {
             Value::Undefined => None,
             _ => Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?),
         };
-        let _year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
-        let month = match month_value.or_else(|| Self::temporal_month_from_code(month_code.as_deref())) {
-            Some(value) => value,
-            None => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
+        let year = self.temporal_optional_i32_property(ctx, value, "year")?;
+        let month_from_code = match month_code.as_deref() {
+            Some(month_code) => {
+                Some(Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?)
+            }
+            None => None,
         };
-        let calendar = if matches!(calendar_value, Value::Undefined) {
-            Calendar::ISO
-        } else {
-            self.temporal_calendar_identifier_arg(&calendar_value)?
+        if let (Some(month), Some(month_from_code)) = (month_value, month_from_code)
+            && month != month_from_code as i32
+        {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        let month = match (month_value, month_from_code) {
+            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
+            (None, Some(value)) => value,
+            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
         };
-        PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Constrain, None)
+        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
+        let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let overflow_year = year.unwrap_or(1972);
+        let date = PlainDate::new_with_overflow(overflow_year, month, day, calendar.clone(), overflow)?;
+        PlainMonthDay::new_with_overflow(date.month(), date.day(), calendar, Overflow::Reject, Some(1972))
     }
 
     fn temporal_from_zoned_date_time(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<ZonedDateTime, TemporalError> {
@@ -4750,6 +5164,26 @@ impl<'gc> VM<'gc> {
         ))
     }
 
+    fn temporal_display_calendar_option(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<DisplayCalendar, TemporalError> {
+        let Some(options) = options else {
+            return Ok(DisplayCalendar::Auto);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(DisplayCalendar::Auto);
+        }
+        if !self.temporal_is_object_like(options) {
+            return Err(TemporalError::r#type().with_message("Options must be an object"));
+        }
+        match self.temporal_get_option_string(ctx, options, "calendarName")? {
+            Some(text) => DisplayCalendar::from_str(&text),
+            None => Ok(DisplayCalendar::Auto),
+        }
+    }
+
     fn temporal_instant_to_string(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -4821,6 +5255,38 @@ impl<'gc> VM<'gc> {
             Ok(text) => Value::from(text),
             Err(err) => self.temporal_throw(ctx, err),
         }
+    }
+
+    fn temporal_plain_year_month_to_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        let display_calendar = match self.temporal_display_calendar_option(ctx, options) {
+            Ok(value) => value,
+            Err(err) => return self.temporal_throw(ctx, err),
+        };
+        Value::from(value.to_ixdtf_string(display_calendar))
+    }
+
+    fn temporal_plain_month_day_to_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        let display_calendar = match self.temporal_display_calendar_option(ctx, options) {
+            Ok(value) => value,
+            Err(err) => return self.temporal_throw(ctx, err),
+        };
+        Value::from(value.to_ixdtf_string(display_calendar))
     }
 
     fn temporal_duration_to_string(
@@ -4980,6 +5446,13 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         Value::from(value.calendar().identifier())
+    }
+
+    fn temporal_plain_year_month_month_code(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::from(value.month_code().as_str())
     }
 
     fn temporal_plain_month_day_month_code(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {

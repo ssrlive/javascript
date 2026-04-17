@@ -1705,6 +1705,22 @@ impl<'gc> VM<'gc> {
             }
             "temporal.plainYearMonth.toString" => self.temporal_plain_year_month_to_string(ctx, receiver, args.first()),
             "temporal.plainYearMonth.toJSON" => self.temporal_plain_year_month_to_string(ctx, receiver, None),
+            "temporal.plainYearMonth.toPlainDate" => {
+                let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let fields = match self.temporal_plain_year_month_to_plain_date_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.to_plain_date(Some(fields)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainDate");
+                        self.temporal_wrap_plain_date(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainYearMonth.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainYearMonth to a primitive value");
                 Value::Undefined
@@ -1824,6 +1840,22 @@ impl<'gc> VM<'gc> {
             }
             "temporal.plainMonthDay.toString" => self.temporal_plain_month_day_to_string(ctx, receiver, args.first()),
             "temporal.plainMonthDay.toJSON" => self.temporal_plain_month_day_to_string(ctx, receiver, None),
+            "temporal.plainMonthDay.toPlainDate" => {
+                let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let fields = match self.temporal_plain_month_day_to_plain_date_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.to_plain_date(Some(fields)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainDate");
+                        self.temporal_wrap_plain_date(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainMonthDay.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainMonthDay to a primitive value");
                 Value::Undefined
@@ -2433,6 +2465,7 @@ impl<'gc> VM<'gc> {
                 ("since", "temporal.plainYearMonth.since", "since", 1.0),
                 ("with", "temporal.plainYearMonth.with", "with", 1.0),
                 ("equals", "temporal.plainYearMonth.equals", "equals", 1.0),
+                ("toPlainDate", "temporal.plainYearMonth.toPlainDate", "toPlainDate", 1.0),
                 ("toString", "temporal.plainYearMonth.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainYearMonth.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainYearMonth.valueOf", "valueOf", 0.0),
@@ -2458,6 +2491,7 @@ impl<'gc> VM<'gc> {
             &[
                 ("with", "temporal.plainMonthDay.with", "with", 1.0),
                 ("equals", "temporal.plainMonthDay.equals", "equals", 1.0),
+                ("toPlainDate", "temporal.plainMonthDay.toPlainDate", "toPlainDate", 1.0),
                 ("toString", "temporal.plainMonthDay.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainMonthDay.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainMonthDay.valueOf", "valueOf", 0.0),
@@ -2910,6 +2944,7 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("toPlainDate", "temporal.plainYearMonth.toPlainDate"),
                     ("with", "temporal.plainYearMonth.with"),
                     ("toString", "temporal.plainYearMonth.toString"),
                     ("toJSON", "temporal.plainYearMonth.toJSON"),
@@ -2938,6 +2973,7 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("toPlainDate", "temporal.plainMonthDay.toPlainDate"),
                     ("with", "temporal.plainMonthDay.with"),
                     ("toString", "temporal.plainMonthDay.toString"),
                     ("toJSON", "temporal.plainMonthDay.toJSON"),
@@ -3725,6 +3761,40 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
         Ok(fields)
+    }
+
+    fn temporal_plain_year_month_to_plain_date_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+    ) -> Result<CalendarFields, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth.prototype.toPlainDate requires an object"));
+        };
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth.prototype.toPlainDate requires an object"));
+        }
+        let day = self
+            .temporal_optional_trunc_u8_property(ctx, value, "day")?
+            .ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+        Ok(CalendarFields::new().with_day(day))
+    }
+
+    fn temporal_plain_month_day_to_plain_date_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+    ) -> Result<CalendarFields, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay.prototype.toPlainDate requires an object"));
+        };
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay.prototype.toPlainDate requires an object"));
+        }
+        let year = self
+            .temporal_optional_trunc_i32_property(ctx, value, "year")?
+            .ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
+        Ok(CalendarFields::new().with_year(year))
     }
 
     fn temporal_zoned_date_time_with_fields_arg(

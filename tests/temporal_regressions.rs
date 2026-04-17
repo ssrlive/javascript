@@ -271,3 +271,25 @@ fn test_temporal_instant_to_zoned_date_time_iso_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"1970-01-01T00:00:00+00:00[UTC]\"");
 }
+
+#[test]
+fn test_temporal_plain_year_month_to_plain_date_basic() {
+    let script = r#"
+        Temporal.PlainYearMonth.from("2002-01")
+            .toPlainDate({ day: 22 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2002-01-22\"");
+}
+
+#[test]
+fn test_temporal_plain_month_day_to_plain_date_basic() {
+    let script = r#"
+        Temporal.PlainMonthDay.from("01-22")
+            .toPlainDate({ year: 2002 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2002-01-22\"");
+}

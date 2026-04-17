@@ -521,3 +521,42 @@ fn test_temporal_plain_time_from_property_bag_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"12:34:56.987654321\"");
 }
+
+#[test]
+fn test_temporal_plain_date_to_string_calendar_name() {
+    let script = r#"
+        new Temporal.PlainDate(2000, 5, 2).toString({ calendarName: "always" })
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2000-05-02[u-ca=iso8601]\"");
+}
+
+#[test]
+fn test_temporal_now_returns_intrinsic_instances() {
+    let script = r#"
+        [
+          Temporal.Now.instant() instanceof Temporal.Instant,
+          Temporal.Now.plainDateISO() instanceof Temporal.PlainDate,
+          Temporal.Now.plainTimeISO("UTC") instanceof Temporal.PlainTime,
+          Temporal.Now.plainDateTimeISO() instanceof Temporal.PlainDateTime,
+          typeof Temporal.Now.timeZoneId()
+        ].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"true,true,true,true,string\"");
+}
+
+#[test]
+fn test_temporal_constructor_requires_new() {
+    let script = r#"
+        let ok = false;
+        try {
+          Temporal.Instant(0n);
+        } catch (err) {
+          ok = err instanceof TypeError;
+        }
+        ok
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "true");
+}

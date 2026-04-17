@@ -42439,7 +42439,10 @@ impl<'gc> VM<'gc> {
                                 } else if host_name == "shadowRealm.constructor" {
                                     self.vm_construct_shadow_realm(ctx, map, new_target)
                                 } else if host_name.starts_with("temporal.") {
-                                    let value = self.call_host_fn(ctx, &host_name, Some(target), args);
+                                    let ctor_receiver = new_target.cloned().unwrap_or_else(|| target.clone());
+                                    self.new_target_stack.push(ctor_receiver.clone());
+                                    let value = self.call_host_fn(ctx, &host_name, Some(&ctor_receiver), args);
+                                    self.new_target_stack.pop();
                                     if let Some(thrown) = self.pending_throw.take() {
                                         Err(self.vm_error_to_js_error(ctx, &thrown))
                                     } else {

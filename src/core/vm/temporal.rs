@@ -32,12 +32,15 @@ impl<'gc> VM<'gc> {
     ) -> Value<'gc> {
         match name {
             "temporal.instant.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "Instant") else {
+                    return Value::Undefined;
+                };
                 let Some(epoch_ns) = args.first().and_then(|v| self.temporal_bigint_i128(ctx, v, "epochNanoseconds")) else {
                     self.throw_type_error(ctx, "Temporal.Instant requires an epochNanoseconds argument");
                     return Value::Undefined;
                 };
                 match Instant::try_new(epoch_ns) {
-                    Ok(value) => self.temporal_wrap_instant(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_instant(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -263,6 +266,9 @@ impl<'gc> VM<'gc> {
             }
 
             "temporal.plainDate.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainDate") else {
+                    return Value::Undefined;
+                };
                 let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
                     self.throw_type_error(ctx, "Temporal.PlainDate requires year, month, and day");
                     return Value::Undefined;
@@ -285,7 +291,7 @@ impl<'gc> VM<'gc> {
                     PlainDate::try_new(year, month, day, calendar)
                 };
                 match result {
-                    Ok(value) => self.temporal_wrap_plain_date(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_plain_date(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -612,9 +618,17 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainDate.toString" | "temporal.plainDate.toJSON" | "temporal.plainDate.toLocaleString" => {
-                self.temporal_repr_result(ctx, receiver, "PlainDate")
+            "temporal.plainDate.toString" => {
+                let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let display_calendar = match self.temporal_calendar_name_option_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Value::from(value.to_ixdtf_string(display_calendar))
             }
+            "temporal.plainDate.toJSON" | "temporal.plainDate.toLocaleString" => self.temporal_repr_result(ctx, receiver, "PlainDate"),
             "temporal.plainDate.equals" => {
                 let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
                     return Value::Undefined;
@@ -654,6 +668,9 @@ impl<'gc> VM<'gc> {
             "temporal.plainDate.get.inLeapYear" => self.temporal_plain_date_in_leap_year(ctx, receiver),
 
             "temporal.plainTime.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainTime") else {
+                    return Value::Undefined;
+                };
                 let hour = args.first().and_then(|v| self.temporal_number_u8(ctx, v, "hour")).unwrap_or(0);
                 let minute = args.get(1).and_then(|v| self.temporal_number_u8(ctx, v, "minute")).unwrap_or(0);
                 let second = args.get(2).and_then(|v| self.temporal_number_u8(ctx, v, "second")).unwrap_or(0);
@@ -676,7 +693,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 match PlainTime::try_new(hour, minute, second, millisecond, microsecond, nanosecond) {
-                    Ok(value) => self.temporal_wrap_plain_time(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_plain_time(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -911,6 +928,9 @@ impl<'gc> VM<'gc> {
             "temporal.plainTime.get.nanosecond" => self.temporal_plain_time_number(ctx, receiver, "nanosecond"),
 
             "temporal.plainDateTime.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainDateTime") else {
+                    return Value::Undefined;
+                };
                 let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
                     self.throw_type_error(ctx, "Temporal.PlainDateTime requires year, month, and day");
                     return Value::Undefined;
@@ -965,7 +985,7 @@ impl<'gc> VM<'gc> {
                     )
                 };
                 match result {
-                    Ok(value) => self.temporal_wrap_plain_date_time(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_plain_date_time(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -1301,6 +1321,9 @@ impl<'gc> VM<'gc> {
             "temporal.plainDateTime.get.inLeapYear" => self.temporal_plain_date_time_in_leap_year(ctx, receiver),
 
             "temporal.duration.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "Duration") else {
+                    return Value::Undefined;
+                };
                 let years = args
                     .first()
                     .filter(|v| !matches!(v, Value::Undefined))
@@ -1366,7 +1389,7 @@ impl<'gc> VM<'gc> {
                     microseconds,
                     nanoseconds,
                 ) {
-                    Ok(value) => self.temporal_wrap_duration(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_duration(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -1664,6 +1687,9 @@ impl<'gc> VM<'gc> {
             "temporal.duration.get.sign" => self.temporal_duration_sign(ctx, receiver),
 
             "temporal.plainYearMonth.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainYearMonth") else {
+                    return Value::Undefined;
+                };
                 let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth requires year and month");
                     return Value::Undefined;
@@ -1689,7 +1715,7 @@ impl<'gc> VM<'gc> {
                     PlainYearMonth::try_new(year, month, reference_day, calendar)
                 };
                 match result {
-                    Ok(value) => self.temporal_wrap_plain_year_month(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_plain_year_month(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -1898,6 +1924,9 @@ impl<'gc> VM<'gc> {
             "temporal.plainYearMonth.get.inLeapYear" => self.temporal_plain_year_month_in_leap_year(ctx, receiver),
 
             "temporal.plainMonthDay.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainMonthDay") else {
+                    return Value::Undefined;
+                };
                 let Some(month) = args.first().and_then(|v| self.temporal_number_u8(ctx, v, "month")) else {
                     self.throw_type_error(ctx, "Temporal.PlainMonthDay requires month and day");
                     return Value::Undefined;
@@ -1918,7 +1947,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 match PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Reject, reference_year) {
-                    Ok(value) => self.temporal_wrap_plain_month_day(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_plain_month_day(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -2031,6 +2060,9 @@ impl<'gc> VM<'gc> {
             "temporal.plainMonthDay.get.calendarId" => self.temporal_plain_month_day_calendar(ctx, receiver),
 
             "temporal.zonedDateTime.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "ZonedDateTime") else {
+                    return Value::Undefined;
+                };
                 let Some(epoch_ns) = args.first().and_then(|v| self.temporal_bigint_i128(ctx, v, "epochNanoseconds")) else {
                     self.throw_type_error(ctx, "Temporal.ZonedDateTime requires epochNanoseconds and timeZone");
                     return Value::Undefined;
@@ -2057,7 +2089,7 @@ impl<'gc> VM<'gc> {
                     ZonedDateTime::try_new(epoch_ns, time_zone, calendar)
                 };
                 match result {
-                    Ok(value) => self.temporal_wrap_zoned_date_time(ctx, receiver, &value),
+                    Ok(value) => self.temporal_wrap_zoned_date_time(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
@@ -2453,6 +2485,13 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_instant(ctx, None, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.now.timeZoneId" => match Temporal::local_now().zoned_date_time_iso(None) {
+                Ok(value) => match value.time_zone().identifier() {
+                    Ok(identifier) => Value::from(identifier.as_str()),
+                    Err(err) => self.temporal_throw(ctx, err),
+                },
+                Err(err) => self.temporal_throw(ctx, err),
+            },
             "temporal.now.plainDateISO" => match Temporal::local_now().plain_date_iso(self.temporal_now_time_zone(ctx, args.first())) {
                 Ok(value) => self.temporal_wrap_plain_date(ctx, None, &value),
                 Err(err) => self.temporal_throw(ctx, err),
@@ -2845,6 +2884,7 @@ impl<'gc> VM<'gc> {
         now_map.insert("__proto__".to_string(), object_proto.clone());
         for (key, host_name, length) in [
             ("instant", "temporal.now.instant", 0.0),
+            ("timeZoneId", "temporal.now.timeZoneId", 0.0),
             ("plainDateISO", "temporal.now.plainDateISO", 0.0),
             ("plainTimeISO", "temporal.now.plainTimeISO", 0.0),
             ("plainDateTimeISO", "temporal.now.plainDateTimeISO", 0.0),
@@ -3002,6 +3042,14 @@ impl<'gc> VM<'gc> {
         })
     }
 
+    fn temporal_constructor_new_target(&mut self, ctx: &GcContext<'gc>, kind: &str) -> Option<Value<'gc>> {
+        let Some(new_target) = self.new_target_stack.last().cloned() else {
+            self.throw_type_error(ctx, &format!("Temporal.{kind} constructor must be called with new"));
+            return None;
+        };
+        Some(new_target)
+    }
+
     fn temporal_store_slot(map: &mut IndexMap<String, Value<'gc>>, key: &str, value: Value<'gc>) {
         Self::insert_property_with_attributes(map, key, &value, true, false, true);
     }
@@ -3036,7 +3084,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_wrap_value(
-        &self,
+        &mut self,
         ctx: &GcContext<'gc>,
         ctor_value: Option<&Value<'gc>>,
         kind: &str,
@@ -3044,7 +3092,21 @@ impl<'gc> VM<'gc> {
         extra_slots: &[(&str, Value<'gc>)],
     ) -> Value<'gc> {
         let mut map = IndexMap::new();
-        if let Some(proto) = self.temporal_ctor_prototype(ctor_value) {
+        let prototype_source = ctor_value.cloned().or_else(|| self.temporal_intrinsic_ctor_value(kind));
+        let prototype = match prototype_source.as_ref() {
+            Some(source) if self.is_constructor_value(source) => {
+                match self.get_prototype_from_constructor_with_intrinsic(ctx, source, kind) {
+                    Ok(proto) => proto,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                }
+            }
+            Some(_) => self.temporal_ctor_prototype(prototype_source.as_ref()),
+            None => None,
+        };
+        if let Some(proto) = prototype {
             map.insert("__proto__".to_string(), proto);
         }
         Self::temporal_store_slot(&mut map, "__type__", Value::from(&format!("Temporal.{kind}")));
@@ -3056,7 +3118,7 @@ impl<'gc> VM<'gc> {
         Value::VmObject(new_gc_cell_ptr(ctx, map))
     }
 
-    pub(super) fn temporal_wrap_instant(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &Instant) -> Value<'gc> {
+    pub(super) fn temporal_wrap_instant(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &Instant) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(
             ctx,
             ctor_value,
@@ -3090,7 +3152,7 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_plain_date(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainDate) -> Value<'gc> {
+    fn temporal_wrap_plain_date(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainDate) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainDate", &value.to_string(), &[]);
         if let Value::VmObject(obj) = &wrapped {
             self.temporal_attach_bound_methods(
@@ -3134,7 +3196,7 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_plain_time(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainTime) -> Value<'gc> {
+    fn temporal_wrap_plain_time(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainTime) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(
             ctx,
             ctor_value,
@@ -3168,7 +3230,12 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_plain_date_time(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainDateTime) -> Value<'gc> {
+    fn temporal_wrap_plain_date_time(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_value: Option<&Value<'gc>>,
+        value: &PlainDateTime,
+    ) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainDateTime", &value.to_string(), &[]);
         if let Value::VmObject(obj) = &wrapped {
             self.temporal_attach_bound_methods(
@@ -3219,7 +3286,7 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_duration(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &TemporalDuration) -> Value<'gc> {
+    fn temporal_wrap_duration(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &TemporalDuration) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(ctx, ctor_value, "Duration", &value.to_string(), &[]);
         if let Value::VmObject(obj) = &wrapped {
             self.temporal_attach_bound_methods(
@@ -3256,7 +3323,12 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_plain_year_month(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainYearMonth) -> Value<'gc> {
+    fn temporal_wrap_plain_year_month(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_value: Option<&Value<'gc>>,
+        value: &PlainYearMonth,
+    ) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(
             ctx,
             ctor_value,
@@ -3292,7 +3364,12 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_plain_month_day(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainMonthDay) -> Value<'gc> {
+    fn temporal_wrap_plain_month_day(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_value: Option<&Value<'gc>>,
+        value: &PlainMonthDay,
+    ) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(
             ctx,
             ctor_value,
@@ -3321,7 +3398,12 @@ impl<'gc> VM<'gc> {
         wrapped
     }
 
-    fn temporal_wrap_zoned_date_time(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &ZonedDateTime) -> Value<'gc> {
+    fn temporal_wrap_zoned_date_time(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_value: Option<&Value<'gc>>,
+        value: &ZonedDateTime,
+    ) -> Value<'gc> {
         let wrapped = self.temporal_wrap_value(
             ctx,
             ctor_value,
@@ -3407,21 +3489,6 @@ impl<'gc> VM<'gc> {
         let text = self.temporal_value_string(ctx, value)?;
         match Calendar::from_str(&text) {
             Ok(calendar) => Some(calendar),
-            Err(err) => {
-                self.temporal_throw(ctx, err);
-                None
-            }
-        }
-    }
-
-    fn temporal_time_zone_arg(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<TimeZone> {
-        let value = value?;
-        if matches!(value, Value::Undefined) {
-            return None;
-        }
-        let text = self.temporal_value_string(ctx, value)?;
-        match TimeZone::try_from_str(&text) {
-            Ok(time_zone) => Some(time_zone),
             Err(err) => {
                 self.temporal_throw(ctx, err);
                 None
@@ -4305,9 +4372,24 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_now_time_zone(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<TimeZone> {
+        let Some(value) = value else {
+            return None;
+        };
+        if matches!(value, Value::Undefined) {
+            return None;
+        }
         match value {
-            Some(Value::Undefined) | None => None,
-            other => self.temporal_time_zone_arg(ctx, other),
+            Value::String(_) => match self.temporal_time_zone_with_iso_string_arg(ctx, Some(value)) {
+                Ok(time_zone) => time_zone,
+                Err(err) => {
+                    self.temporal_throw(ctx, err);
+                    None
+                }
+            },
+            _ => {
+                self.throw_type_error(ctx, "Invalid time zone");
+                None
+            }
         }
     }
 
@@ -6204,6 +6286,26 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         Value::Number(value.sign() as i8 as f64)
+    }
+
+    fn temporal_calendar_name_option_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<DisplayCalendar, TemporalError> {
+        let Some(options) = options else {
+            return Ok(DisplayCalendar::Auto);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(DisplayCalendar::Auto);
+        }
+        if !self.temporal_is_object_like(options) {
+            return Err(TemporalError::r#type().with_message("Options must be an object"));
+        }
+        match self.temporal_get_option_string(ctx, options, "calendarName")? {
+            Some(text) => DisplayCalendar::from_str(&text),
+            None => Ok(DisplayCalendar::Auto),
+        }
     }
 
     fn temporal_to_string_options(

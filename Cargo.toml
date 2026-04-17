@@ -21,7 +21,7 @@ os = ["libc", "windows-sys"]
 std = []
 
 [dependencies]
-bitflags = { version = "2.11.0", default-features = false, features = [] }
+bitflags = { version = "2.11.1", default-features = false, features = [] }
 chrono = { version = "0.4.44", features = ["serde"] }
 crossbeam-channel = "0.5.15"
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae", features = [
@@ -40,7 +40,7 @@ thiserror = "2.0.18"
 unicode-normalization = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.184", optional = true }
+libc = { version = "0.2.185", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = [
@@ -51,7 +51,7 @@ windows-sys = { version = "0.61.2", optional = true, features = [
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-ctor = "0.9.1"
+ctor = "0.10.0"
 env_logger = { version = "0.11.10" }
 
 [[bench]]

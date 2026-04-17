@@ -269,21 +269,21 @@ impl<'gc> VM<'gc> {
                 let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainDate") else {
                     return Value::Undefined;
                 };
-                let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainDate requires year, month, and day");
-                    return Value::Undefined;
+                let year = match self.temporal_required_trunc_i32_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let Some(month) = args.get(1).and_then(|v| self.temporal_number_u8(ctx, v, "month")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainDate requires year, month, and day");
-                    return Value::Undefined;
+                let month = match self.temporal_required_trunc_u8_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let Some(day) = args.get(2).and_then(|v| self.temporal_number_u8(ctx, v, "day")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainDate requires year, month, and day");
-                    return Value::Undefined;
+                let day = match self.temporal_required_trunc_u8_arg(ctx, args.get(2)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let calendar = match self.temporal_calendar_arg(ctx, args.get(3)) {
-                    Some(calendar) => calendar,
-                    None => return Value::Undefined,
+                let calendar = match self.temporal_constructor_calendar_arg(args.get(3)) {
+                    Ok(calendar) => calendar,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
                 let result = if calendar == Calendar::ISO {
                     PlainDate::try_new_iso(year, month, day)
@@ -295,7 +295,7 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainDate.from" => match self.temporal_from_plain_date(ctx, args.first()) {
+            "temporal.plainDate.from" => match self.temporal_from_plain_date(ctx, args.first(), args.get(1)) {
                 Ok(value) => {
                     let ctor_value = self.temporal_intrinsic_ctor_value("PlainDate");
                     self.temporal_wrap_plain_date(ctx, ctor_value.as_ref().or(receiver), &value)
@@ -311,11 +311,11 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDate.compare requires two arguments");
                     return Value::Undefined;
                 };
-                let one = match self.temporal_from_plain_date(ctx, Some(first)) {
+                let one = match self.temporal_from_plain_date(ctx, Some(first), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let two = match self.temporal_from_plain_date(ctx, Some(second)) {
+                let two = match self.temporal_from_plain_date(ctx, Some(second), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -375,7 +375,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDate.prototype.until requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_date(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_date(ctx, Some(arg), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -398,7 +398,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDate.prototype.since requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_date(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_date(ctx, Some(arg), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -637,7 +637,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDate.prototype.equals requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_date(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_date(ctx, Some(arg), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -671,27 +671,30 @@ impl<'gc> VM<'gc> {
                 let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainTime") else {
                     return Value::Undefined;
                 };
-                let hour = args.first().and_then(|v| self.temporal_number_u8(ctx, v, "hour")).unwrap_or(0);
-                let minute = args.get(1).and_then(|v| self.temporal_number_u8(ctx, v, "minute")).unwrap_or(0);
-                let second = args.get(2).and_then(|v| self.temporal_number_u8(ctx, v, "second")).unwrap_or(0);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                let millisecond = args
-                    .get(3)
-                    .and_then(|v| self.temporal_number_u16(ctx, v, "millisecond"))
-                    .unwrap_or(0);
-                let microsecond = args
-                    .get(4)
-                    .and_then(|v| self.temporal_number_u16(ctx, v, "microsecond"))
-                    .unwrap_or(0);
-                let nanosecond = args
-                    .get(5)
-                    .and_then(|v| self.temporal_number_u16(ctx, v, "nanosecond"))
-                    .unwrap_or(0);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
+                let hour = match self.temporal_optional_trunc_u8_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let minute = match self.temporal_optional_trunc_u8_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let second = match self.temporal_optional_trunc_u8_arg(ctx, args.get(2)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let millisecond = match self.temporal_optional_trunc_u16_arg(ctx, args.get(3)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let microsecond = match self.temporal_optional_trunc_u16_arg(ctx, args.get(4)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let nanosecond = match self.temporal_optional_trunc_u16_arg(ctx, args.get(5)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
                 match PlainTime::try_new(hour, minute, second, millisecond, microsecond, nanosecond) {
                     Ok(value) => self.temporal_wrap_plain_time(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
@@ -931,42 +934,45 @@ impl<'gc> VM<'gc> {
                 let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainDateTime") else {
                     return Value::Undefined;
                 };
-                let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainDateTime requires year, month, and day");
-                    return Value::Undefined;
+                let year = match self.temporal_required_trunc_i32_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let Some(month) = args.get(1).and_then(|v| self.temporal_number_u8(ctx, v, "month")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainDateTime requires year, month, and day");
-                    return Value::Undefined;
+                let month = match self.temporal_required_trunc_u8_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let Some(day) = args.get(2).and_then(|v| self.temporal_number_u8(ctx, v, "day")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainDateTime requires year, month, and day");
-                    return Value::Undefined;
+                let day = match self.temporal_required_trunc_u8_arg(ctx, args.get(2)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let hour = args.get(3).and_then(|v| self.temporal_number_u8(ctx, v, "hour")).unwrap_or(0);
-                let minute = args.get(4).and_then(|v| self.temporal_number_u8(ctx, v, "minute")).unwrap_or(0);
-                let second = args.get(5).and_then(|v| self.temporal_number_u8(ctx, v, "second")).unwrap_or(0);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                let millisecond = args
-                    .get(6)
-                    .and_then(|v| self.temporal_number_u16(ctx, v, "millisecond"))
-                    .unwrap_or(0);
-                let microsecond = args
-                    .get(7)
-                    .and_then(|v| self.temporal_number_u16(ctx, v, "microsecond"))
-                    .unwrap_or(0);
-                let nanosecond = args
-                    .get(8)
-                    .and_then(|v| self.temporal_number_u16(ctx, v, "nanosecond"))
-                    .unwrap_or(0);
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-                let calendar = match self.temporal_calendar_arg(ctx, args.get(9)) {
-                    Some(calendar) => calendar,
-                    None => return Value::Undefined,
+                let hour = match self.temporal_optional_trunc_u8_arg(ctx, args.get(3)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let minute = match self.temporal_optional_trunc_u8_arg(ctx, args.get(4)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let second = match self.temporal_optional_trunc_u8_arg(ctx, args.get(5)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let millisecond = match self.temporal_optional_trunc_u16_arg(ctx, args.get(6)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let microsecond = match self.temporal_optional_trunc_u16_arg(ctx, args.get(7)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let nanosecond = match self.temporal_optional_trunc_u16_arg(ctx, args.get(8)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let calendar = match self.temporal_constructor_calendar_arg(args.get(9)) {
+                    Ok(calendar) => calendar,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
                 let result = if calendar == Calendar::ISO {
                     PlainDateTime::try_new_iso(year, month, day, hour, minute, second, millisecond, microsecond, nanosecond)
@@ -989,7 +995,7 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainDateTime.from" => match self.temporal_from_plain_date_time(ctx, args.first()) {
+            "temporal.plainDateTime.from" => match self.temporal_from_plain_date_time(ctx, args.first(), args.get(1)) {
                 Ok(value) => {
                     let ctor_value = self.temporal_intrinsic_ctor_value("PlainDateTime");
                     self.temporal_wrap_plain_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
@@ -1005,11 +1011,11 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDateTime.compare requires two arguments");
                     return Value::Undefined;
                 };
-                let one = match self.temporal_from_plain_date_time(ctx, Some(first)) {
+                let one = match self.temporal_from_plain_date_time(ctx, Some(first), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let two = match self.temporal_from_plain_date_time(ctx, Some(second)) {
+                let two = match self.temporal_from_plain_date_time(ctx, Some(second), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1164,7 +1170,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.equals requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_date_time(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_date_time(ctx, Some(arg), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1252,7 +1258,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.until requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_date_time(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_date_time(ctx, Some(arg), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1275,7 +1281,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.since requires an argument");
                     return Value::Undefined;
                 };
-                let other = match self.temporal_from_plain_date_time(ctx, Some(arg)) {
+                let other = match self.temporal_from_plain_date_time(ctx, Some(arg), None) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1690,25 +1696,25 @@ impl<'gc> VM<'gc> {
                 let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainYearMonth") else {
                     return Value::Undefined;
                 };
-                let Some(year) = args.first().and_then(|v| self.temporal_number_i32(ctx, v, "year")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainYearMonth requires year and month");
-                    return Value::Undefined;
+                let year = match self.temporal_required_trunc_i32_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let Some(month) = args.get(1).and_then(|v| self.temporal_number_u8(ctx, v, "month")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainYearMonth requires year and month");
-                    return Value::Undefined;
+                let month = match self.temporal_required_trunc_u8_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let calendar = match self.temporal_calendar_arg(ctx, args.get(2)) {
-                    Some(calendar) => calendar,
-                    None => return Value::Undefined,
+                let calendar = match self.temporal_constructor_calendar_arg(args.get(2)) {
+                    Ok(calendar) => calendar,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
                 let reference_day = match args.get(3) {
                     Some(Value::Undefined) | None => Some(1),
-                    Some(value) => self.temporal_number_u8(ctx, value, "referenceDay"),
+                    Some(value) => match self.temporal_trunc_u8_field(ctx, value, "referenceDay") {
+                        Ok(value) => Some(value),
+                        Err(err) => return self.temporal_throw(ctx, err),
+                    },
                 };
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
                 let result = if calendar == Calendar::ISO {
                     PlainYearMonth::try_new_iso(year, month, reference_day)
                 } else {
@@ -1927,25 +1933,25 @@ impl<'gc> VM<'gc> {
                 let Some(new_target) = self.temporal_constructor_new_target(ctx, "PlainMonthDay") else {
                     return Value::Undefined;
                 };
-                let Some(month) = args.first().and_then(|v| self.temporal_number_u8(ctx, v, "month")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainMonthDay requires month and day");
-                    return Value::Undefined;
+                let month = match self.temporal_required_trunc_u8_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let Some(day) = args.get(1).and_then(|v| self.temporal_number_u8(ctx, v, "day")) else {
-                    self.throw_type_error(ctx, "Temporal.PlainMonthDay requires month and day");
-                    return Value::Undefined;
+                let day = match self.temporal_required_trunc_u8_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let calendar = match self.temporal_calendar_arg(ctx, args.get(2)) {
-                    Some(calendar) => calendar,
-                    None => return Value::Undefined,
+                let calendar = match self.temporal_constructor_calendar_arg(args.get(2)) {
+                    Ok(calendar) => calendar,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
                 let reference_year = match args.get(3) {
                     Some(Value::Undefined) | None => None,
-                    Some(value) => self.temporal_number_i32(ctx, value, "referenceYear"),
+                    Some(value) => match self.temporal_trunc_i32_field(ctx, value, "referenceYear") {
+                        Ok(value) => Some(value),
+                        Err(err) => return self.temporal_throw(ctx, err),
+                    },
                 };
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
                 match PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Reject, reference_year) {
                     Ok(value) => self.temporal_wrap_plain_month_day(ctx, Some(&new_target), &value),
                     Err(err) => self.temporal_throw(ctx, err),
@@ -2079,9 +2085,9 @@ impl<'gc> VM<'gc> {
                     }
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let calendar = match self.temporal_calendar_arg(ctx, args.get(2)) {
-                    Some(calendar) => calendar,
-                    None => return Value::Undefined,
+                let calendar = match self.temporal_constructor_calendar_arg(args.get(2)) {
+                    Ok(calendar) => calendar,
+                    Err(err) => return self.temporal_throw(ctx, err),
                 };
                 let result = if calendar == Calendar::ISO {
                     ZonedDateTime::try_new_iso(epoch_ns, time_zone)
@@ -3479,23 +3485,6 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn temporal_calendar_arg(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<Calendar> {
-        let Some(value) = value else {
-            return Some(Calendar::ISO);
-        };
-        if matches!(value, Value::Undefined) {
-            return Some(Calendar::ISO);
-        }
-        let text = self.temporal_value_string(ctx, value)?;
-        match Calendar::from_str(&text) {
-            Ok(calendar) => Some(calendar),
-            Err(err) => {
-                self.temporal_throw(ctx, err);
-                None
-            }
-        }
-    }
-
     fn temporal_time_zone_identifier_arg(
         &mut self,
         _ctx: &GcContext<'gc>,
@@ -3598,6 +3587,41 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::range().with_message("Invalid temporal field"));
         }
         Ok(truncated as u16)
+    }
+
+    fn temporal_required_trunc_i32_arg(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<i32, TemporalError> {
+        match value {
+            Some(value) => self.temporal_trunc_i32_field(ctx, value, ""),
+            None => Err(TemporalError::range().with_message("Invalid temporal field")),
+        }
+    }
+
+    fn temporal_required_trunc_u8_arg(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<u8, TemporalError> {
+        match value {
+            Some(value) => self.temporal_trunc_u8_field(ctx, value, ""),
+            None => Err(TemporalError::range().with_message("Invalid temporal field")),
+        }
+    }
+
+    fn temporal_optional_trunc_u8_arg(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<u8, TemporalError> {
+        match value {
+            None | Some(Value::Undefined) => Ok(0),
+            Some(value) => self.temporal_trunc_u8_field(ctx, value, ""),
+        }
+    }
+
+    fn temporal_optional_trunc_u16_arg(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<u16, TemporalError> {
+        match value {
+            None | Some(Value::Undefined) => Ok(0),
+            Some(value) => self.temporal_trunc_u16_field(ctx, value, ""),
+        }
+    }
+
+    fn temporal_constructor_calendar_arg(&self, value: Option<&Value<'gc>>) -> Result<Calendar, TemporalError> {
+        match value {
+            None | Some(Value::Undefined) => Ok(Calendar::ISO),
+            Some(value) => self.temporal_calendar_identifier_arg(value),
+        }
     }
 
     fn temporal_optional_trunc_i32_property(
@@ -4346,8 +4370,12 @@ impl<'gc> VM<'gc> {
         let Value::String(text) = value else {
             return Err(TemporalError::r#type().with_message("Invalid calendar"));
         };
-        let text = crate::unicode::utf16_to_utf8(text);
-        Calendar::from_str(&text.to_ascii_lowercase()).map_err(|_| TemporalError::range().with_message("Invalid calendar"))
+        let text = crate::unicode::utf16_to_utf8(text).to_ascii_lowercase();
+        let calendar = Calendar::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid calendar"))?;
+        if calendar.identifier() != text {
+            return Err(TemporalError::range().with_message("Invalid calendar"));
+        }
+        Ok(calendar)
     }
 
     fn temporal_calendar_slot_id(&self, value: &Value<'gc>) -> Option<String> {
@@ -4372,9 +4400,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_now_time_zone(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<TimeZone> {
-        let Some(value) = value else {
-            return None;
-        };
+        let value = value?;
         if matches!(value, Value::Undefined) {
             return None;
         }
@@ -4563,17 +4589,25 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn temporal_from_plain_date(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainDate, TemporalError> {
+    fn temporal_from_plain_date(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<PlainDate, TemporalError> {
         let Some(value) = value else {
             return Err(TemporalError::r#type().with_message("Temporal.PlainDate requires an argument"));
         };
         if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_REPR) {
+            self.temporal_overflow_option_arg(ctx, options)?;
             return PlainDate::from_utf8(text.as_bytes());
         }
         if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_REPR) {
+            self.temporal_overflow_option_arg(ctx, options)?;
             return PlainDateTime::from_utf8(text.as_bytes()).map(|value| value.to_plain_date());
         }
         if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR).is_some() {
+            self.temporal_overflow_option_arg(ctx, options)?;
             return self
                 .temporal_expect_zoned_date_time(ctx, Some(value))
                 .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.ZonedDateTime input"))
@@ -4582,7 +4616,10 @@ impl<'gc> VM<'gc> {
         if let Value::String(text) = value {
             let text = crate::unicode::utf16_to_utf8(text);
             return match PlainDate::from_utf8(text.as_bytes()) {
-                Ok(value) => Ok(value),
+                Ok(value) => {
+                    self.temporal_overflow_option_arg(ctx, options)?;
+                    Ok(value)
+                }
                 Err(err) => Self::temporal_parse_plain_date_time_string(&text)
                     .map(|value| value.to_plain_date())
                     .or(Err(err)),
@@ -4596,9 +4633,9 @@ impl<'gc> VM<'gc> {
         if self.pending_throw.is_some() {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
-        let calendar = self.temporal_calendar_with_iso_default(ctx, &calendar_value)?;
-        let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
+        let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let day = self.temporal_optional_trunc_i32_property(ctx, value, "day")?;
+        let month = self.temporal_optional_trunc_i32_property(ctx, value, "month")?;
         let month_code = {
             let month_code_value = self.read_named_property(ctx, value, "monthCode");
             if self.pending_throw.is_some() {
@@ -4607,26 +4644,43 @@ impl<'gc> VM<'gc> {
             if matches!(month_code_value, Value::Undefined) {
                 None
             } else {
-                Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?)
+                Some(self.temporal_month_code_property(ctx, &month_code_value)?)
             }
         };
+        let month_code_syntax = match month_code.as_deref() {
+            Some(month_code) => {
+                Some(Self::temporal_month_code_syntax(month_code).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?)
+            }
+            None => None,
+        };
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        let overflow = self.temporal_overflow_option_arg(ctx, options)?;
 
-        let had_any_property = month.is_some() || month_code.is_some() || year.is_some();
+        let had_any_property = day.is_some() || month.is_some() || month_code.is_some() || year.is_some();
         if !had_any_property {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
 
         let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let month = match (month, month_code.as_deref()) {
-            (Some(month), _) => month,
-            (None, Some(month_code)) => {
-                Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?
-            }
+        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+        let month_from_code = match month_code_syntax {
+            Some((_, true)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
+            Some((month, false)) if !(1..=12).contains(&month) => return Err(TemporalError::range().with_message("Invalid monthCode")),
+            Some((month, false)) => Some(month),
+            None => None,
+        };
+        if let (Some(month), Some(month_from_code)) = (month, month_from_code)
+            && month != month_from_code as i32
+        {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        let month = match (month, month_from_code) {
+            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
+            (None, Some(month)) => month,
             (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
         };
-        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
-        PlainDate::try_new(year, month, day, calendar)
+        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
+        PlainDate::new_with_overflow(year, month, day, calendar, overflow)
     }
 
     fn temporal_plain_time_from_arg(
@@ -4710,20 +4764,29 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn temporal_from_plain_date_time(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainDateTime, TemporalError> {
+    fn temporal_from_plain_date_time(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<PlainDateTime, TemporalError> {
         let Some(value) = value else {
             return Err(TemporalError::r#type().with_message("Temporal.PlainDateTime requires an argument"));
         };
         if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_REPR) {
+            self.temporal_overflow_option_arg(ctx, options)?;
             return PlainDateTime::from_utf8(text.as_bytes());
         }
         if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_REPR) {
             let date = PlainDate::from_utf8(text.as_bytes())?;
+            self.temporal_overflow_option_arg(ctx, options)?;
             return PlainDateTime::try_new(date.year(), date.month(), date.day(), 0, 0, 0, 0, 0, 0, date.calendar().clone());
         }
         if let Value::String(text) = value {
             let text = crate::unicode::utf16_to_utf8(text);
-            return Self::temporal_parse_plain_date_time_string(&text);
+            let parsed = Self::temporal_parse_plain_date_time_string(&text)?;
+            self.temporal_overflow_option_arg(ctx, options)?;
+            return Ok(parsed);
         }
         if !self.temporal_is_object_like(value) {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainDateTime input"));
@@ -4733,14 +4796,13 @@ impl<'gc> VM<'gc> {
         if self.pending_throw.is_some() {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
-        let calendar = self.temporal_calendar_with_iso_default(ctx, &calendar_value)?;
-
-        let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let day = self.temporal_optional_trunc_i32_property(ctx, value, "day")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
         let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
-        let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
+        let month = self.temporal_optional_trunc_i32_property(ctx, value, "month")?;
         let month_code = {
             let month_code_value = self.read_named_property(ctx, value, "monthCode");
             if self.pending_throw.is_some() {
@@ -4749,12 +4811,19 @@ impl<'gc> VM<'gc> {
             if matches!(month_code_value, Value::Undefined) {
                 None
             } else {
-                Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?)
+                Some(self.temporal_month_code_property(ctx, &month_code_value)?)
             }
+        };
+        let month_code_syntax = match month_code.as_deref() {
+            Some(month_code) => {
+                Some(Self::temporal_month_code_syntax(month_code).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?)
+            }
+            None => None,
         };
         let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
         let second = self.temporal_optional_trunc_u8_property(ctx, value, "second")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        let overflow = self.temporal_overflow_option_arg(ctx, options)?;
 
         let had_any_property = day.is_some()
             || hour.is_some()
@@ -4771,25 +4840,65 @@ impl<'gc> VM<'gc> {
         }
 
         let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let month = match (month, month_code.as_deref()) {
-            (Some(month), _) => month,
-            (None, Some(month_code)) => {
-                Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?
-            }
+        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+        let month_from_code = match month_code_syntax {
+            Some((_, true)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
+            Some((month, false)) if !(1..=12).contains(&month) => return Err(TemporalError::range().with_message("Invalid monthCode")),
+            Some((month, false)) => Some(month),
+            None => None,
+        };
+        if let (Some(month), Some(month_from_code)) = (month, month_from_code)
+            && month != month_from_code as i32
+        {
+            return Err(TemporalError::range().with_message("Invalid monthCode"));
+        }
+        let month = match (month, month_from_code) {
+            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
+            (None, Some(month)) => month,
             (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
         };
-        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
+        let date = PlainDate::new_with_overflow(year, month, day, calendar.clone(), overflow)?;
+
+        let hour = match overflow {
+            Overflow::Constrain => hour.unwrap_or(0).min(23),
+            Overflow::Reject => hour.unwrap_or(0),
+        };
+        let minute = match overflow {
+            Overflow::Constrain => minute.unwrap_or(0).min(59),
+            Overflow::Reject => minute.unwrap_or(0),
+        };
+        let second = match overflow {
+            Overflow::Constrain => match second {
+                Some(60) => 59,
+                Some(value) => value.min(59),
+                None => 0,
+            },
+            Overflow::Reject => second.unwrap_or(0),
+        };
+        let millisecond = match overflow {
+            Overflow::Constrain => millisecond.unwrap_or(0).min(999),
+            Overflow::Reject => millisecond.unwrap_or(0),
+        };
+        let microsecond = match overflow {
+            Overflow::Constrain => microsecond.unwrap_or(0).min(999),
+            Overflow::Reject => microsecond.unwrap_or(0),
+        };
+        let nanosecond = match overflow {
+            Overflow::Constrain => nanosecond.unwrap_or(0).min(999),
+            Overflow::Reject => nanosecond.unwrap_or(0),
+        };
 
         PlainDateTime::try_new(
-            year,
-            month,
-            day,
-            hour.unwrap_or(0),
-            minute.unwrap_or(0),
-            second.map(|value| value.min(59)).unwrap_or(0),
-            millisecond.unwrap_or(0),
-            microsecond.unwrap_or(0),
-            nanosecond.unwrap_or(0),
+            date.year(),
+            date.month(),
+            date.day(),
+            hour,
+            minute,
+            second,
+            millisecond,
+            microsecond,
+            nanosecond,
             calendar,
         )
     }
@@ -5136,6 +5245,23 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn temporal_month_code_property(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<String, TemporalError> {
+        match value {
+            Value::String(text) => Ok(crate::unicode::utf16_to_utf8(text)),
+            v if self.temporal_is_object_like(v) => {
+                let prim = self.try_to_primitive(ctx, v, "string");
+                if self.pending_throw.is_some() {
+                    return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+                }
+                match prim {
+                    Value::String(text) => Ok(crate::unicode::utf16_to_utf8(&text)),
+                    _ => Err(TemporalError::r#type().with_message("Value must be a string")),
+                }
+            }
+            _ => Err(TemporalError::r#type().with_message("Value must be a string")),
+        }
+    }
+
     fn temporal_month_from_code(month_code: Option<&str>) -> Option<u8> {
         let code = month_code?;
         let digits = code.strip_prefix('M')?;
@@ -5144,6 +5270,19 @@ impl<'gc> VM<'gc> {
         }
         let month = digits.parse::<u8>().ok()?;
         (1..=12).contains(&month).then_some(month)
+    }
+
+    fn temporal_month_code_syntax(month_code: &str) -> Option<(u8, bool)> {
+        let body = month_code.strip_prefix('M')?;
+        let (digits, leap) = if let Some(digits) = body.strip_suffix('L') {
+            (digits, true)
+        } else {
+            (body, false)
+        };
+        if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some((digits.parse::<u8>().ok()?, leap))
     }
 
     fn temporal_positive_overflow_u8(value: i32, overflow: Overflow, clamp_max: i32, name: &str) -> Result<u8, TemporalError> {

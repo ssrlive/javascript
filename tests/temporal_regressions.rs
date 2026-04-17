@@ -467,3 +467,35 @@ fn test_temporal_zoned_date_time_additional_getters_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"+01:00,3600000000000,4,323,7\"");
 }
+
+#[test]
+fn test_temporal_to_locale_string_and_era_getters_basic() {
+    let script = r#"
+        const date = new Temporal.PlainDate(2000, 3, 6);
+        const dateTime = new Temporal.PlainDateTime(2000, 3, 6, 1, 2, 3);
+        const yearMonth = new Temporal.PlainYearMonth(2000, 3);
+        const zoned = new Temporal.ZonedDateTime(952300923000000000n, "UTC");
+        [
+          date.toLocaleString(),
+          dateTime.toLocaleString(),
+          new Temporal.PlainTime(1, 2, 3).toLocaleString(),
+          Temporal.Duration.from("PT1H").toLocaleString(),
+          yearMonth.toLocaleString(),
+          new Temporal.PlainMonthDay(3, 6).toLocaleString(),
+          zoned.toLocaleString(),
+          String(date.era),
+          String(date.eraYear),
+          String(dateTime.era),
+          String(dateTime.eraYear),
+          String(yearMonth.era),
+          String(yearMonth.eraYear),
+          String(zoned.era),
+          String(zoned.eraYear),
+        ].join("|")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(
+        result,
+        "\"2000-03-06|2000-03-06T01:02:03|01:02:03|PT1H|2000-03|03-06|2000-03-06T00:02:03+00:00[UTC]|undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined\""
+    );
+}

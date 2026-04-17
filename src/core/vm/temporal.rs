@@ -205,6 +205,7 @@ impl<'gc> VM<'gc> {
                 Value::Boolean(value == other)
             }
             "temporal.instant.toString" => self.temporal_instant_to_string(ctx, receiver, args.first()),
+            "temporal.instant.toLocaleString" => self.temporal_instant_to_string(ctx, receiver, None),
             "temporal.instant.toJSON" => self.temporal_instant_to_string(ctx, receiver, None),
             "temporal.instant.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.Instant to a primitive value");
@@ -579,7 +580,9 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainDate.toString" | "temporal.plainDate.toJSON" => self.temporal_repr_result(ctx, receiver, "PlainDate"),
+            "temporal.plainDate.toString" | "temporal.plainDate.toJSON" | "temporal.plainDate.toLocaleString" => {
+                self.temporal_repr_result(ctx, receiver, "PlainDate")
+            }
             "temporal.plainDate.equals" => {
                 let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
                     return Value::Undefined;
@@ -606,6 +609,8 @@ impl<'gc> VM<'gc> {
             "temporal.plainDate.get.monthCode" => self.temporal_plain_date_month_code(ctx, receiver),
             "temporal.plainDate.get.day" => self.temporal_plain_date_number(ctx, receiver, "day"),
             "temporal.plainDate.get.calendarId" => self.temporal_plain_date_calendar(ctx, receiver),
+            "temporal.plainDate.get.era" => self.temporal_plain_date_era(ctx, receiver),
+            "temporal.plainDate.get.eraYear" => self.temporal_plain_date_era_year(ctx, receiver),
             "temporal.plainDate.get.dayOfWeek" => self.temporal_plain_date_derived_number(ctx, receiver, "dayOfWeek"),
             "temporal.plainDate.get.dayOfYear" => self.temporal_plain_date_derived_number(ctx, receiver, "dayOfYear"),
             "temporal.plainDate.get.weekOfYear" => self.temporal_plain_date_week_of_year(ctx, receiver),
@@ -860,6 +865,7 @@ impl<'gc> VM<'gc> {
                 )
             }
             "temporal.plainTime.toString" => self.temporal_plain_time_to_string(ctx, receiver, args.first()),
+            "temporal.plainTime.toLocaleString" => self.temporal_plain_time_to_string(ctx, receiver, None),
             "temporal.plainTime.toJSON" => self.temporal_plain_time_to_string(ctx, receiver, None),
             "temporal.plainTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainTime to a primitive value");
@@ -1233,6 +1239,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.plainDateTime.toString" => self.temporal_plain_date_time_to_string(ctx, receiver, args.first()),
+            "temporal.plainDateTime.toLocaleString" => self.temporal_plain_date_time_to_string(ctx, receiver, None),
             "temporal.plainDateTime.toJSON" => self.temporal_plain_date_time_to_string(ctx, receiver, None),
             "temporal.plainDateTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainDateTime to a primitive value");
@@ -1249,6 +1256,8 @@ impl<'gc> VM<'gc> {
             "temporal.plainDateTime.get.nanosecond" => self.temporal_plain_date_time_number(ctx, receiver, "nanosecond"),
             "temporal.plainDateTime.get.monthCode" => self.temporal_plain_date_time_month_code(ctx, receiver),
             "temporal.plainDateTime.get.calendarId" => self.temporal_plain_date_time_calendar(ctx, receiver),
+            "temporal.plainDateTime.get.era" => self.temporal_plain_date_time_era(ctx, receiver),
+            "temporal.plainDateTime.get.eraYear" => self.temporal_plain_date_time_era_year(ctx, receiver),
             "temporal.plainDateTime.get.dayOfWeek" => self.temporal_plain_date_time_derived_number(ctx, receiver, "dayOfWeek"),
             "temporal.plainDateTime.get.dayOfYear" => self.temporal_plain_date_time_derived_number(ctx, receiver, "dayOfYear"),
             "temporal.plainDateTime.get.weekOfYear" => self.temporal_plain_date_time_week_of_year(ctx, receiver),
@@ -1371,6 +1380,7 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.duration.toString" => self.temporal_duration_to_string(ctx, receiver, args.first()),
+            "temporal.duration.toLocaleString" => self.temporal_duration_to_string(ctx, receiver, None),
             "temporal.duration.toJSON" => self.temporal_duration_to_string(ctx, receiver, None),
             "temporal.duration.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.Duration to a primitive value");
@@ -1822,6 +1832,7 @@ impl<'gc> VM<'gc> {
                 )
             }
             "temporal.plainYearMonth.toString" => self.temporal_plain_year_month_to_string(ctx, receiver, args.first()),
+            "temporal.plainYearMonth.toLocaleString" => self.temporal_plain_year_month_to_string(ctx, receiver, None),
             "temporal.plainYearMonth.toJSON" => self.temporal_plain_year_month_to_string(ctx, receiver, None),
             "temporal.plainYearMonth.toPlainDate" => {
                 let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
@@ -1847,6 +1858,8 @@ impl<'gc> VM<'gc> {
             "temporal.plainYearMonth.get.month" => self.temporal_plain_year_month_number(ctx, receiver, "month"),
             "temporal.plainYearMonth.get.monthCode" => self.temporal_plain_year_month_month_code(ctx, receiver),
             "temporal.plainYearMonth.get.calendarId" => self.temporal_plain_year_month_calendar(ctx, receiver),
+            "temporal.plainYearMonth.get.era" => self.temporal_plain_year_month_era(ctx, receiver),
+            "temporal.plainYearMonth.get.eraYear" => self.temporal_plain_year_month_era_year(ctx, receiver),
             "temporal.plainYearMonth.get.daysInMonth" => self.temporal_plain_year_month_derived_number(ctx, receiver, "daysInMonth"),
             "temporal.plainYearMonth.get.daysInYear" => self.temporal_plain_year_month_derived_number(ctx, receiver, "daysInYear"),
             "temporal.plainYearMonth.get.monthsInYear" => self.temporal_plain_year_month_derived_number(ctx, receiver, "monthsInYear"),
@@ -1959,6 +1972,7 @@ impl<'gc> VM<'gc> {
                 )
             }
             "temporal.plainMonthDay.toString" => self.temporal_plain_month_day_to_string(ctx, receiver, args.first()),
+            "temporal.plainMonthDay.toLocaleString" => self.temporal_plain_month_day_to_string(ctx, receiver, None),
             "temporal.plainMonthDay.toJSON" => self.temporal_plain_month_day_to_string(ctx, receiver, None),
             "temporal.plainMonthDay.toPlainDate" => {
                 let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
@@ -2216,6 +2230,7 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.zonedDateTime.toLocaleString" => self.temporal_zoned_date_time_to_string(ctx, receiver, None),
             "temporal.zonedDateTime.toString" | "temporal.zonedDateTime.toJSON" => {
                 self.temporal_zoned_date_time_to_string(ctx, receiver, args.first())
             }
@@ -2387,6 +2402,8 @@ impl<'gc> VM<'gc> {
             }
             "temporal.zonedDateTime.get.calendarId" => self.temporal_zoned_date_time_calendar(ctx, receiver),
             "temporal.zonedDateTime.get.timeZoneId" => self.temporal_zoned_date_time_time_zone(ctx, receiver),
+            "temporal.zonedDateTime.get.era" => self.temporal_zoned_date_time_era(ctx, receiver),
+            "temporal.zonedDateTime.get.eraYear" => self.temporal_zoned_date_time_era_year(ctx, receiver),
             "temporal.zonedDateTime.get.offset" => self.temporal_zoned_date_time_offset(ctx, receiver),
             "temporal.zonedDateTime.get.offsetNanoseconds" => self.temporal_zoned_date_time_offset_nanoseconds(ctx, receiver),
             "temporal.zonedDateTime.get.dayOfWeek" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "dayOfWeek"),
@@ -2464,6 +2481,7 @@ impl<'gc> VM<'gc> {
                 ("since", "temporal.instant.since", "since", 1.0),
                 ("equals", "temporal.instant.equals", "equals", 1.0),
                 ("toString", "temporal.instant.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.instant.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.instant.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.instant.valueOf", "valueOf", 0.0),
             ],
@@ -2496,6 +2514,7 @@ impl<'gc> VM<'gc> {
                 ("toZonedDateTime", "temporal.plainDate.toZonedDateTime", "toZonedDateTime", 1.0),
                 ("equals", "temporal.plainDate.equals", "equals", 1.0),
                 ("toString", "temporal.plainDate.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.plainDate.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.plainDate.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainDate.valueOf", "valueOf", 0.0),
             ],
@@ -2505,6 +2524,8 @@ impl<'gc> VM<'gc> {
                 ("monthCode", "temporal.plainDate.get.monthCode"),
                 ("day", "temporal.plainDate.get.day"),
                 ("calendarId", "temporal.plainDate.get.calendarId"),
+                ("era", "temporal.plainDate.get.era"),
+                ("eraYear", "temporal.plainDate.get.eraYear"),
                 ("dayOfWeek", "temporal.plainDate.get.dayOfWeek"),
                 ("dayOfYear", "temporal.plainDate.get.dayOfYear"),
                 ("weekOfYear", "temporal.plainDate.get.weekOfYear"),
@@ -2536,6 +2557,7 @@ impl<'gc> VM<'gc> {
                 ("since", "temporal.plainTime.since", "since", 1.0),
                 ("equals", "temporal.plainTime.equals", "equals", 1.0),
                 ("toString", "temporal.plainTime.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.plainTime.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.plainTime.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainTime.valueOf", "valueOf", 0.0),
             ],
@@ -2573,6 +2595,7 @@ impl<'gc> VM<'gc> {
                 ("toZonedDateTime", "temporal.plainDateTime.toZonedDateTime", "toZonedDateTime", 1.0),
                 ("equals", "temporal.plainDateTime.equals", "equals", 1.0),
                 ("toString", "temporal.plainDateTime.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.plainDateTime.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.plainDateTime.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainDateTime.valueOf", "valueOf", 0.0),
             ],
@@ -2588,6 +2611,8 @@ impl<'gc> VM<'gc> {
                 ("nanosecond", "temporal.plainDateTime.get.nanosecond"),
                 ("monthCode", "temporal.plainDateTime.get.monthCode"),
                 ("calendarId", "temporal.plainDateTime.get.calendarId"),
+                ("era", "temporal.plainDateTime.get.era"),
+                ("eraYear", "temporal.plainDateTime.get.eraYear"),
                 ("dayOfWeek", "temporal.plainDateTime.get.dayOfWeek"),
                 ("dayOfYear", "temporal.plainDateTime.get.dayOfYear"),
                 ("weekOfYear", "temporal.plainDateTime.get.weekOfYear"),
@@ -2612,6 +2637,7 @@ impl<'gc> VM<'gc> {
             ],
             &[
                 ("toString", "temporal.duration.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.duration.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.duration.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.duration.valueOf", "valueOf", 0.0),
                 ("abs", "temporal.duration.abs", "abs", 0.0),
@@ -2657,6 +2683,7 @@ impl<'gc> VM<'gc> {
                 ("equals", "temporal.plainYearMonth.equals", "equals", 1.0),
                 ("toPlainDate", "temporal.plainYearMonth.toPlainDate", "toPlainDate", 1.0),
                 ("toString", "temporal.plainYearMonth.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.plainYearMonth.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.plainYearMonth.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainYearMonth.valueOf", "valueOf", 0.0),
             ],
@@ -2665,6 +2692,8 @@ impl<'gc> VM<'gc> {
                 ("month", "temporal.plainYearMonth.get.month"),
                 ("monthCode", "temporal.plainYearMonth.get.monthCode"),
                 ("calendarId", "temporal.plainYearMonth.get.calendarId"),
+                ("era", "temporal.plainYearMonth.get.era"),
+                ("eraYear", "temporal.plainYearMonth.get.eraYear"),
                 ("daysInMonth", "temporal.plainYearMonth.get.daysInMonth"),
                 ("daysInYear", "temporal.plainYearMonth.get.daysInYear"),
                 ("monthsInYear", "temporal.plainYearMonth.get.monthsInYear"),
@@ -2687,6 +2716,7 @@ impl<'gc> VM<'gc> {
                 ("equals", "temporal.plainMonthDay.equals", "equals", 1.0),
                 ("toPlainDate", "temporal.plainMonthDay.toPlainDate", "toPlainDate", 1.0),
                 ("toString", "temporal.plainMonthDay.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.plainMonthDay.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.plainMonthDay.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainMonthDay.valueOf", "valueOf", 0.0),
             ],
@@ -2730,6 +2760,7 @@ impl<'gc> VM<'gc> {
                 ),
                 ("equals", "temporal.zonedDateTime.equals", "equals", 1.0),
                 ("toString", "temporal.zonedDateTime.toString", "toString", 0.0),
+                ("toLocaleString", "temporal.zonedDateTime.toLocaleString", "toLocaleString", 0.0),
                 ("toJSON", "temporal.zonedDateTime.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.zonedDateTime.valueOf", "valueOf", 0.0),
             ],
@@ -2748,6 +2779,8 @@ impl<'gc> VM<'gc> {
                 ("epochNanoseconds", "temporal.zonedDateTime.get.epochNanoseconds"),
                 ("calendarId", "temporal.zonedDateTime.get.calendarId"),
                 ("timeZoneId", "temporal.zonedDateTime.get.timeZoneId"),
+                ("era", "temporal.zonedDateTime.get.era"),
+                ("eraYear", "temporal.zonedDateTime.get.eraYear"),
                 ("offset", "temporal.zonedDateTime.get.offset"),
                 ("offsetNanoseconds", "temporal.zonedDateTime.get.offsetNanoseconds"),
                 ("dayOfWeek", "temporal.zonedDateTime.get.dayOfWeek"),
@@ -2997,6 +3030,7 @@ impl<'gc> VM<'gc> {
                     ("round", "temporal.instant.round"),
                     ("toZonedDateTimeISO", "temporal.instant.toZonedDateTimeISO"),
                     ("toString", "temporal.instant.toString"),
+                    ("toLocaleString", "temporal.instant.toLocaleString"),
                     ("toJSON", "temporal.instant.toJSON"),
                     ("valueOf", "temporal.instant.valueOf"),
                 ],
@@ -3026,6 +3060,7 @@ impl<'gc> VM<'gc> {
                     ("toPlainYearMonth", "temporal.plainDate.toPlainYearMonth"),
                     ("toZonedDateTime", "temporal.plainDate.toZonedDateTime"),
                     ("toString", "temporal.plainDate.toString"),
+                    ("toLocaleString", "temporal.plainDate.toLocaleString"),
                     ("toJSON", "temporal.plainDate.toJSON"),
                     ("valueOf", "temporal.plainDate.valueOf"),
                 ],
@@ -3036,6 +3071,8 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "day", Value::Number(value.day() as f64));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
             Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
             Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
             if let Some(week_of_year) = value.week_of_year() {
@@ -3071,6 +3108,7 @@ impl<'gc> VM<'gc> {
                     ("round", "temporal.plainTime.round"),
                     ("with", "temporal.plainTime.with"),
                     ("toString", "temporal.plainTime.toString"),
+                    ("toLocaleString", "temporal.plainTime.toLocaleString"),
                     ("toJSON", "temporal.plainTime.toJSON"),
                     ("valueOf", "temporal.plainTime.valueOf"),
                 ],
@@ -3101,6 +3139,7 @@ impl<'gc> VM<'gc> {
                     ("toPlainTime", "temporal.plainDateTime.toPlainTime"),
                     ("toZonedDateTime", "temporal.plainDateTime.toZonedDateTime"),
                     ("toString", "temporal.plainDateTime.toString"),
+                    ("toLocaleString", "temporal.plainDateTime.toLocaleString"),
                     ("toJSON", "temporal.plainDateTime.toJSON"),
                     ("valueOf", "temporal.plainDateTime.valueOf"),
                 ],
@@ -3117,6 +3156,8 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "nanosecond", Value::Number(value.nanosecond() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
             Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
             Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
             if let Some(week_of_year) = value.week_of_year() {
@@ -3142,6 +3183,7 @@ impl<'gc> VM<'gc> {
                 obj,
                 &[
                     ("toString", "temporal.duration.toString"),
+                    ("toLocaleString", "temporal.duration.toLocaleString"),
                     ("toJSON", "temporal.duration.toJSON"),
                     ("valueOf", "temporal.duration.valueOf"),
                     ("abs", "temporal.duration.abs"),
@@ -3186,6 +3228,7 @@ impl<'gc> VM<'gc> {
                     ("toPlainDate", "temporal.plainYearMonth.toPlainDate"),
                     ("with", "temporal.plainYearMonth.with"),
                     ("toString", "temporal.plainYearMonth.toString"),
+                    ("toLocaleString", "temporal.plainYearMonth.toLocaleString"),
                     ("toJSON", "temporal.plainYearMonth.toJSON"),
                     ("valueOf", "temporal.plainYearMonth.valueOf"),
                 ],
@@ -3195,6 +3238,8 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "month", Value::Number(value.month() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
             Self::temporal_store_readonly(&mut borrow, "daysInMonth", Value::Number(value.days_in_month() as f64));
             Self::temporal_store_readonly(&mut borrow, "daysInYear", Value::Number(value.days_in_year() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthsInYear", Value::Number(value.months_in_year() as f64));
@@ -3219,6 +3264,7 @@ impl<'gc> VM<'gc> {
                     ("toPlainDate", "temporal.plainMonthDay.toPlainDate"),
                     ("with", "temporal.plainMonthDay.with"),
                     ("toString", "temporal.plainMonthDay.toString"),
+                    ("toLocaleString", "temporal.plainMonthDay.toLocaleString"),
                     ("toJSON", "temporal.plainMonthDay.toJSON"),
                     ("valueOf", "temporal.plainMonthDay.valueOf"),
                 ],
@@ -3261,6 +3307,7 @@ impl<'gc> VM<'gc> {
                     ("getTimeZoneTransition", "temporal.zonedDateTime.getTimeZoneTransition"),
                     ("equals", "temporal.zonedDateTime.equals"),
                     ("toString", "temporal.zonedDateTime.toString"),
+                    ("toLocaleString", "temporal.zonedDateTime.toLocaleString"),
                     ("toJSON", "temporal.zonedDateTime.toJSON"),
                     ("valueOf", "temporal.zonedDateTime.valueOf"),
                 ],
@@ -3282,6 +3329,8 @@ impl<'gc> VM<'gc> {
                 Value::BigInt(Box::new(BigInt::from(value.to_instant().as_i128()))),
             );
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
             if let Ok(time_zone_id) = value.time_zone().identifier() {
                 Self::temporal_store_readonly(&mut borrow, "timeZoneId", Value::from(time_zone_id.as_str()));
             }
@@ -5874,6 +5923,20 @@ impl<'gc> VM<'gc> {
         Value::Boolean(value.in_leap_year())
     }
 
+    fn temporal_plain_date_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
+    }
+
+    fn temporal_plain_date_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
+    }
+
     fn temporal_plain_date_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
         let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
             return Value::Undefined;
@@ -5961,6 +6024,20 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         Value::Boolean(value.in_leap_year())
+    }
+
+    fn temporal_plain_date_time_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
+    }
+
+    fn temporal_plain_date_time_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
     }
 
     fn temporal_plain_date_time_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -6401,6 +6478,20 @@ impl<'gc> VM<'gc> {
         Value::Boolean(value.in_leap_year())
     }
 
+    fn temporal_plain_year_month_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
+    }
+
+    fn temporal_plain_year_month_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
+    }
+
     fn temporal_plain_year_month_month_code(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
         let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
             return Value::Undefined;
@@ -6515,6 +6606,20 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         Value::Boolean(value.in_leap_year())
+    }
+
+    fn temporal_zoned_date_time_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
+    }
+
+    fn temporal_zoned_date_time_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(_) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Undefined
     }
 
     fn temporal_zoned_date_time_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {

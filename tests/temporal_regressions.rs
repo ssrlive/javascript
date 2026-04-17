@@ -293,3 +293,47 @@ fn test_temporal_plain_month_day_to_plain_date_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"2002-01-22\"");
 }
+
+#[test]
+fn test_temporal_plain_date_to_plain_year_month_basic() {
+    let script = r#"
+        new Temporal.PlainDate(1970, 12, 24)
+            .toPlainYearMonth()
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"1970-12\"");
+}
+
+#[test]
+fn test_temporal_plain_date_time_to_plain_date_basic() {
+    let script = r#"
+        new Temporal.PlainDateTime(2021, 12, 11, 1, 2, 3, 4, 5, 6)
+            .toPlainDate()
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2021-12-11\"");
+}
+
+#[test]
+fn test_temporal_plain_date_time_to_plain_time_basic() {
+    let script = r#"
+        Temporal.PlainDateTime.from("2020-02-12T11:42:56.987654321+01:00[Europe/Amsterdam]")
+            .toPlainTime()
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"11:42:56.987654321\"");
+}
+
+#[test]
+fn test_temporal_zoned_date_time_to_instant_basic() {
+    let script = r#"
+        Temporal.ZonedDateTime.from("2019-10-29T10:46:38.271986102+01:00[+01:00]")
+            .toInstant()
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2019-10-29T09:46:38.271986102Z\"");
+}

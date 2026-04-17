@@ -260,3 +260,14 @@ fn test_temporal_plain_date_time_with_calendar_requires_argument() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "true");
 }
+
+#[test]
+fn test_temporal_instant_to_zoned_date_time_iso_basic() {
+    let script = r#"
+        Temporal.Instant.from("1970-01-01T00:00:00Z")
+            .toZonedDateTimeISO("UTC")
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"1970-01-01T00:00:00+00:00[UTC]\"");
+}

@@ -81,6 +81,30 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.instant.toZonedDateTimeISO" => {
+                let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first().filter(|value| !matches!(value, Value::Undefined)) else {
+                    self.throw_type_error(ctx, "Temporal.Instant.prototype.toZonedDateTimeISO requires a timeZone");
+                    return Value::Undefined;
+                };
+                let time_zone = match self.temporal_time_zone_with_iso_string_arg(ctx, Some(arg)) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.throw_type_error(ctx, "Temporal.Instant.prototype.toZonedDateTimeISO requires a timeZone");
+                        return Value::Undefined;
+                    }
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.to_zoned_date_time_iso(time_zone) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                        self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.instant.add" => {
                 let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
                     return Value::Undefined;
@@ -2235,6 +2259,7 @@ impl<'gc> VM<'gc> {
             ],
             &[
                 ("round", "temporal.instant.round", "round", 1.0),
+                ("toZonedDateTimeISO", "temporal.instant.toZonedDateTimeISO", "toZonedDateTimeISO", 1.0),
                 ("add", "temporal.instant.add", "add", 1.0),
                 ("subtract", "temporal.instant.subtract", "subtract", 1.0),
                 ("until", "temporal.instant.until", "until", 1.0),
@@ -2729,6 +2754,7 @@ impl<'gc> VM<'gc> {
                 obj,
                 &[
                     ("round", "temporal.instant.round"),
+                    ("toZonedDateTimeISO", "temporal.instant.toZonedDateTimeISO"),
                     ("toString", "temporal.instant.toString"),
                     ("toJSON", "temporal.instant.toJSON"),
                     ("valueOf", "temporal.instant.valueOf"),

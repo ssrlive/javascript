@@ -3,6 +3,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 use std::str::FromStr;
+use temporal_rs::provider::TransitionDirection;
 use temporal_rs::fields::{CalendarFields, DateTimeFields, YearMonthCalendarFields, ZonedDateTimeFields};
 use temporal_rs::options::{
     DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation, Overflow, RelativeTo,
@@ -2072,6 +2073,23 @@ impl<'gc> VM<'gc> {
                 let ctor_value = self.temporal_intrinsic_ctor_value("Instant");
                 self.temporal_wrap_instant(ctx, ctor_value.as_ref(), &value.to_instant())
             }
+            "temporal.zonedDateTime.getTimeZoneTransition" => {
+                let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let direction = match self.temporal_transition_direction_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.get_time_zone_transition(direction) {
+                    Ok(Some(value)) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                        self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Ok(None) => Value::Null,
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.zonedDateTime.equals" => {
                 let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -2564,6 +2582,7 @@ impl<'gc> VM<'gc> {
                 ("toPlainDate", "temporal.zonedDateTime.toPlainDate", "toPlainDate", 0.0),
                 ("toPlainTime", "temporal.zonedDateTime.toPlainTime", "toPlainTime", 0.0),
                 ("toInstant", "temporal.zonedDateTime.toInstant", "toInstant", 0.0),
+                ("getTimeZoneTransition", "temporal.zonedDateTime.getTimeZoneTransition", "getTimeZoneTransition", 1.0),
                 ("equals", "temporal.zonedDateTime.equals", "equals", 1.0),
                 ("toString", "temporal.zonedDateTime.toString", "toString", 0.0),
                 ("toJSON", "temporal.zonedDateTime.toJSON", "toJSON", 0.0),
@@ -3055,6 +3074,7 @@ impl<'gc> VM<'gc> {
                     ("toPlainDate", "temporal.zonedDateTime.toPlainDate"),
                     ("toPlainTime", "temporal.zonedDateTime.toPlainTime"),
                     ("toInstant", "temporal.zonedDateTime.toInstant"),
+                    ("getTimeZoneTransition", "temporal.zonedDateTime.getTimeZoneTransition"),
                     ("equals", "temporal.zonedDateTime.equals"),
                     ("toString", "temporal.zonedDateTime.toString"),
                     ("toJSON", "temporal.zonedDateTime.toJSON"),
@@ -3829,6 +3849,39 @@ impl<'gc> VM<'gc> {
             .temporal_optional_trunc_i32_property(ctx, value, "year")?
             .ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
         Ok(CalendarFields::new().with_year(year))
+    }
+
+    fn temporal_transition_direction_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+    ) -> Result<TransitionDirection, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.ZonedDateTime.prototype.getTimeZoneTransition requires an argument"));
+        };
+        if matches!(value, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("Temporal.ZonedDateTime.prototype.getTimeZoneTransition requires an argument"));
+        }
+        let direction = match value {
+            Value::String(text) => crate::unicode::utf16_to_utf8(text),
+            value if self.temporal_is_object_like(value) => {
+                let direction_value = self.read_named_property(ctx, value, "direction");
+                if self.pending_throw.is_some() {
+                    return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+                }
+                if matches!(direction_value, Value::Undefined) {
+                    return Err(TemporalError::range().with_message("Invalid direction"));
+                }
+                self.temporal_value_string(ctx, &direction_value)
+                    .ok_or_else(|| TemporalError::r#type().with_message("Invalid Temporal input"))?
+            }
+            _ => return Err(TemporalError::r#type().with_message("Invalid direction options")),
+        };
+        match direction.as_str() {
+            "next" => Ok(TransitionDirection::Next),
+            "previous" => Ok(TransitionDirection::Previous),
+            _ => Err(TemporalError::range().with_message("Invalid direction")),
+        }
     }
 
     fn temporal_zoned_date_time_with_fields_arg(

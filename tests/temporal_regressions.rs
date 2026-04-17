@@ -337,3 +337,12 @@ fn test_temporal_zoned_date_time_to_instant_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"2019-10-29T09:46:38.271986102Z\"");
 }
+
+#[test]
+fn test_temporal_zoned_date_time_get_time_zone_transition_utc_returns_null() {
+    let script = r#"
+        new Temporal.ZonedDateTime(0n, "UTC").getTimeZoneTransition("next")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "null");
+}

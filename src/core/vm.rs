@@ -16,6 +16,7 @@ use std::fmt::Write as _;
 mod bigint;
 mod dataview;
 mod date;
+mod intl;
 mod regexp;
 mod runner;
 mod temporal;
@@ -5189,6 +5190,9 @@ impl<'gc> VM<'gc> {
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         if name.starts_with("temporal.") {
             return self.temporal_handle_host_fn(ctx, name, receiver, args);
+        }
+        if name.starts_with("intl.") {
+            return self.intl_handle_host_fn(ctx, name, receiver, args);
         }
         match name {
             "Function.prototype.restrictedThrow" => {
@@ -12962,28 +12966,6 @@ impl<'gc> VM<'gc> {
                 let recv = receiver.unwrap_or(&Value::Undefined);
                 self.call_method_builtin(ctx, BUILTIN_ITERATOR_NEXT, recv, args)
             }
-            "intl.segmenter.segment" => {
-                let mut obj = IndexMap::new();
-                if let Some(Value::Object(segmenter)) = receiver {
-                    let borrow = segmenter.borrow();
-                    if let Some(proto) = borrow.get("__segments_proto__").cloned() {
-                        obj.insert("__proto__".to_string(), proto);
-                    }
-                    if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
-                        obj.insert("__segment_iter_proto__".to_string(), proto);
-                    }
-                }
-                Value::Object(new_gc_cell_ptr(ctx, obj))
-            }
-            "intl.segments.iterator" => {
-                let mut obj = IndexMap::new();
-                if let Some(Value::Object(segments)) = receiver
-                    && let Some(proto) = segments.borrow().get("__segment_iter_proto__").cloned()
-                {
-                    obj.insert("__proto__".to_string(), proto);
-                }
-                Value::Object(new_gc_cell_ptr(ctx, obj))
-            }
             "string.symbolIterator" => {
                 let source = match receiver {
                     Some(Value::String(s)) => Some(s.clone()),
@@ -19230,6 +19212,7 @@ impl<'gc> VM<'gc> {
         }
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "Object");
         self.temporal_init_globals(ctx);
+        self.intl_init_globals(ctx);
 
         // Constructors created before Object may still need their prototype chains wired.
         if let Some(Value::Array(array_proto)) = self.ctor_prototype_from_globals(ctx, "Array")
@@ -38894,64 +38877,6 @@ impl<'gc> VM<'gc> {
         result
     }
 
-    fn make_dynamic_intl_placeholder(&self, ctx: &GcContext<'gc>) -> Value<'gc> {
-        let mut segment_iterator_proto = IndexMap::new();
-        segment_iterator_proto.insert(
-            "next".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "iterator.next", "next", 0.0, false),
-        );
-        mark_nonenumerable(&mut segment_iterator_proto, "next");
-        let segment_iterator_proto = Value::Object(new_gc_cell_ptr(ctx, segment_iterator_proto));
-
-        let mut segments_proto = IndexMap::new();
-        segments_proto.insert(
-            "@@sym:1".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "intl.segments.iterator", "[Symbol.iterator]", 0.0, false),
-        );
-        mark_nonenumerable(&mut segments_proto, "@@sym:1");
-        let segments_proto = Value::Object(new_gc_cell_ptr(ctx, segments_proto));
-
-        let mut segmenter_proto = IndexMap::new();
-        segmenter_proto.insert(
-            "segment".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "intl.segmenter.segment", "segment", 1.0, false),
-        );
-        mark_nonenumerable(&mut segmenter_proto, "segment");
-        let segmenter_proto = Value::Object(new_gc_cell_ptr(ctx, segmenter_proto));
-
-        let segmenter_ctor = Self::make_host_fn_with_name_len(ctx, "intl.segmenter.ctor", "Segmenter", 0.0, true);
-        if let Value::Object(ctor_obj) = &segmenter_ctor {
-            let mut ctor = ctor_obj.borrow_mut(ctx);
-            ctor.insert("prototype".to_string(), segmenter_proto.clone());
-            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
-            ctor.insert("__segments_proto__".to_string(), segments_proto.clone());
-            ctor.insert("__segment_iter_proto__".to_string(), segment_iterator_proto.clone());
-        }
-        if let Value::Object(proto_obj) = &segmenter_proto {
-            proto_obj.borrow_mut(ctx).insert("constructor".to_string(), segmenter_ctor.clone());
-            mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");
-        }
-
-        let mut intl = IndexMap::new();
-        for (name, host_name) in [
-            ("Collator", "intl.collator"),
-            ("DateTimeFormat", "intl.dateTimeFormat"),
-            ("DisplayNames", "intl.displayNames"),
-            ("DurationFormat", "intl.durationFormat"),
-            ("ListFormat", "intl.listFormat"),
-            ("Locale", "intl.locale"),
-            ("NumberFormat", "intl.numberFormat"),
-            ("PluralRules", "intl.pluralRules"),
-            ("RelativeTimeFormat", "intl.relativeTimeFormat"),
-        ] {
-            intl.insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, host_name, name, 0.0, false));
-            mark_nonenumerable(&mut intl, name);
-        }
-        intl.insert("Segmenter".to_string(), segmenter_ctor);
-        mark_nonenumerable(&mut intl, "Segmenter");
-        Value::Object(new_gc_cell_ptr(ctx, intl))
-    }
-
     fn dynamic_function_placeholder_bindings(&self, ctx: &GcContext<'gc>) -> Vec<(String, Value<'gc>)> {
         let mut bindings = Vec::new();
         if !self.globals.contains_key("escape") {
@@ -42350,26 +42275,15 @@ impl<'gc> VM<'gc> {
                                     } else {
                                         Ok(value)
                                     }
-                                } else if host_name == "intl.segmenter.ctor" {
-                                    let (proto, segments_proto, segment_iter_proto) = {
-                                        let borrow = map.borrow();
-                                        (
-                                            borrow.get("prototype").cloned(),
-                                            borrow.get("__segments_proto__").cloned(),
-                                            borrow.get("__segment_iter_proto__").cloned(),
-                                        )
-                                    };
-                                    let mut obj = IndexMap::new();
-                                    if let Some(proto) = proto {
-                                        obj.insert("__proto__".to_string(), proto);
+                                } else if host_name.starts_with("intl.") {
+                                    let ctor_receiver = new_target.cloned().unwrap_or_else(|| target.clone());
+                                    match self.intl_construct_host_fn(ctx, &host_name, &ctor_receiver, args) {
+                                        Some(result) => result,
+                                        None => {
+                                            let err = self.make_type_error_object(ctx, "Target is not a constructor");
+                                            Err(self.vm_error_to_js_error(ctx, &err))
+                                        }
                                     }
-                                    if let Some(proto) = segments_proto {
-                                        obj.insert("__segments_proto__".to_string(), proto);
-                                    }
-                                    if let Some(proto) = segment_iter_proto {
-                                        obj.insert("__segment_iter_proto__".to_string(), proto);
-                                    }
-                                    Ok(Value::Object(new_gc_cell_ptr(ctx, obj)))
                                 } else {
                                     let err = self.make_type_error_object(ctx, "Target is not a constructor");
                                     Err(self.vm_error_to_js_error(ctx, &err))

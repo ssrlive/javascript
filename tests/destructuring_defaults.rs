@@ -28,6 +28,30 @@ fn test_array_destructuring_with_defaults() {
     assert_eq!(result, "10");
 }
 
+#[test]
+fn test_object_parameter_destructuring_with_defaults() {
+    let script = r#"
+        function f({ smallestUnit = "nanoseconds", largestUnit = "auto", roundingMode = "halfExpand", roundingIncrement = 1 } = {}) {
+            return `${smallestUnit}|${largestUnit}|${roundingMode}|${roundingIncrement}`;
+        }
+        f({ largestUnit: "years" })
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"nanoseconds|years|halfExpand|1\"");
+}
+
+#[test]
+fn test_array_parameter_destructuring_with_defaults() {
+    let script = r#"
+        function f([a = 2, b = 5, c = 7] = []) {
+            return a + b + c;
+        }
+        f([10])
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "22");
+}
+
 // Temporary debug test to inspect tokenization of the scripts used above
 #[test]
 fn debug_tokenize_destructuring_defaults() {

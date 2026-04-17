@@ -3189,6 +3189,7 @@ impl<'gc> Compiler<'gc> {
                     self.emit_hoisted_var_slots(body);
                 }
                 self.emit_parameter_default_initializers(params, 0)?;
+                self.emit_parameter_pattern_binding_slots(params);
                 self.emit_parameter_pattern_bindings(params, 0)?;
                 if Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
@@ -5855,6 +5856,7 @@ impl<'gc> Compiler<'gc> {
                     self.emit_hoisted_var_slots(body);
                 }
                 self.emit_parameter_default_initializers(params, 0)?;
+                self.emit_parameter_pattern_binding_slots(params);
                 self.emit_parameter_pattern_bindings(params, 0)?;
                 if Self::has_parameter_expressions(params) {
                     self.emit_hoisted_var_slots(body);
@@ -9406,6 +9408,7 @@ impl<'gc> Compiler<'gc> {
             self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_parameter_default_initializers(params, param_local_offset)?;
+        self.emit_parameter_pattern_binding_slots(params);
         self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
@@ -9764,6 +9767,28 @@ impl<'gc> Compiler<'gc> {
         Ok(())
     }
 
+    fn emit_parameter_pattern_binding_slots(&mut self, params: &[DestructuringElement]) {
+        let mut names = Vec::new();
+        for param in params {
+            match param {
+                DestructuringElement::NestedArray(..) | DestructuringElement::NestedObject(..) | DestructuringElement::RestPattern(..) => {
+                    Self::collect_destructuring_binding_names(param, &mut names)
+                }
+                _ => {}
+            }
+        }
+
+        for name in names {
+            if self.locals.iter().any(|existing| existing == &name) {
+                continue;
+            }
+            let undef_idx = self.chunk.add_constant(Value::Undefined);
+            self.chunk.write_opcode(Opcode::Constant);
+            self.chunk.write_u16(undef_idx);
+            self.locals.push(name);
+        }
+    }
+
     fn collect_destructuring_binding_names(elem: &DestructuringElement, out: &mut Vec<String>) {
         match elem {
             DestructuringElement::Variable(name, _) | DestructuringElement::Rest(name) => {
@@ -9878,6 +9903,7 @@ impl<'gc> Compiler<'gc> {
             self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_parameter_default_initializers(params, param_local_offset)?;
+        self.emit_parameter_pattern_binding_slots(params);
         self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
@@ -10050,6 +10076,7 @@ impl<'gc> Compiler<'gc> {
             self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
         }
         self.emit_parameter_default_initializers(params, param_local_offset)?;
+        self.emit_parameter_pattern_binding_slots(params);
         self.emit_parameter_pattern_bindings(params, param_local_offset)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots_with_shadow(body, named_self_shadow);
@@ -11117,6 +11144,7 @@ impl<'gc> Compiler<'gc> {
             self.emit_hoisted_var_slots(&ctor_body);
         }
         self.emit_parameter_default_initializers(&ctor_params, 0)?;
+        self.emit_parameter_pattern_binding_slots(&ctor_params);
         self.emit_parameter_pattern_bindings(&ctor_params, 0)?;
         if Self::has_parameter_expressions(&ctor_params) {
             self.emit_hoisted_var_slots(&ctor_body);
@@ -11921,6 +11949,7 @@ impl<'gc> Compiler<'gc> {
             self.emit_hoisted_var_slots(body);
         }
         self.emit_parameter_default_initializers(params, 0)?;
+        self.emit_parameter_pattern_binding_slots(params);
         self.emit_parameter_pattern_bindings(params, 0)?;
         if Self::has_parameter_expressions(params) {
             self.emit_hoisted_var_slots(body);

@@ -48,6 +48,38 @@ impl<'gc> VM<'gc> {
                 }
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.instant.fromEpochMilliseconds" => {
+                let Some(arg) = args.first() else {
+                    self.throw_range_error_object(ctx, "epochMilliseconds must be a finite integer");
+                    return Value::Undefined;
+                };
+                let Some(epoch_ms) = self.temporal_number_i64(ctx, arg, "epochMilliseconds") else {
+                    return Value::Undefined;
+                };
+                match Instant::from_epoch_milliseconds(epoch_ms) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("Instant");
+                        self.temporal_wrap_instant(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.instant.fromEpochNanoseconds" => {
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "epochNanoseconds is required");
+                    return Value::Undefined;
+                };
+                let Some(epoch_ns) = self.temporal_bigint_i128(ctx, arg, "epochNanoseconds") else {
+                    return Value::Undefined;
+                };
+                match Instant::try_new(epoch_ns) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("Instant");
+                        self.temporal_wrap_instant(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.instant.compare" => {
                 let Some(first) = args.first() else {
                     self.throw_type_error(ctx, "Temporal.Instant.compare requires two arguments");
@@ -2465,6 +2497,18 @@ impl<'gc> VM<'gc> {
             "Temporal.Instant",
             &[
                 ("from", "temporal.instant.from", "from", 1.0),
+                (
+                    "fromEpochMilliseconds",
+                    "temporal.instant.fromEpochMilliseconds",
+                    "fromEpochMilliseconds",
+                    1.0,
+                ),
+                (
+                    "fromEpochNanoseconds",
+                    "temporal.instant.fromEpochNanoseconds",
+                    "fromEpochNanoseconds",
+                    1.0,
+                ),
                 ("compare", "temporal.instant.compare", "compare", 2.0),
             ],
             &[

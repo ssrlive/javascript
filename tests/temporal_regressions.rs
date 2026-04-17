@@ -499,3 +499,15 @@ fn test_temporal_to_locale_string_and_era_getters_basic() {
         "\"2000-03-06|2000-03-06T01:02:03|01:02:03|PT1H|2000-03|03-06|2000-03-06T00:02:03+00:00[UTC]|undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined\""
     );
 }
+
+#[test]
+fn test_temporal_instant_from_epoch_factories_basic() {
+    let script = r#"
+        [
+          Temporal.Instant.fromEpochMilliseconds(217175010123).epochNanoseconds,
+          Temporal.Instant.fromEpochNanoseconds(217175010123456789n).epochNanoseconds,
+        ].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"217175010123000000,217175010123456789\"");
+}

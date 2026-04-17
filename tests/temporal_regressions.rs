@@ -124,6 +124,34 @@ fn test_temporal_plain_date_time_with_plain_time_defaults_to_midnight() {
 }
 
 #[test]
+fn test_temporal_zoned_date_time_from_accepts_zoned_date_time_time_zone_object() {
+    let script = r#"
+        Temporal.ZonedDateTime.from({
+            year: 2000,
+            month: 5,
+            day: 2,
+            timeZone: new Temporal.ZonedDateTime(0n, "UTC")
+        }).timeZoneId
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"UTC\"");
+}
+
+#[test]
+fn test_temporal_zoned_date_time_from_rejects_mismatched_offset_by_default() {
+    let script = r#"
+        try {
+            Temporal.ZonedDateTime.from("1970-01-01T00:00-04:15[+01:00]");
+            "nope";
+        } catch (e) {
+            e instanceof RangeError;
+        }
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn test_temporal_plain_year_month_from_constrains_month() {
     let script = r#"
         Temporal.PlainYearMonth.from({ year: 2021, month: 13 }, { overflow: "constrain" })

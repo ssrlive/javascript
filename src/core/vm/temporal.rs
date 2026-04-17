@@ -18,6 +18,8 @@ use temporal_rs::{
 const SLOT_KIND: &str = "__temporal_kind__";
 const SLOT_REPR: &str = "__temporal_repr__";
 const SLOT_EPOCH_NS: &str = "__temporal_epoch_nanoseconds__";
+const SLOT_REFERENCE_DAY: &str = "__temporal_reference_day__";
+const SLOT_REFERENCE_YEAR: &str = "__temporal_reference_year__";
 
 impl<'gc> VM<'gc> {
     pub(super) fn temporal_handle_host_fn(
@@ -42,6 +44,25 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_instant(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.instant.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.Instant.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.Instant.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_from_instant(ctx, Some(first)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_from_instant(ctx, Some(second)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Self::temporal_compare_result(one.as_i128().cmp(&two.as_i128()))
+            }
             "temporal.instant.add" => {
                 let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
                     return Value::Undefined;
@@ -195,6 +216,25 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_plain_date(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.plainDate.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDate.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.PlainDate.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_from_plain_date(ctx, Some(first)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_from_plain_date(ctx, Some(second)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Self::temporal_compare_result((one.year(), one.month(), one.day()).cmp(&(two.year(), two.month(), two.day())))
+            }
             "temporal.plainDate.add" => {
                 let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
                     return Value::Undefined;
@@ -287,13 +327,170 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainDate.toZonedDateTime" => {
+                let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDate.prototype.toZonedDateTime requires a timeZone");
+                    return Value::Undefined;
+                };
+
+                let (time_zone_like, plain_time_like) = if self.temporal_is_object_like(arg) {
+                    let time_zone_like = self.read_named_property(ctx, arg, "timeZone");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if matches!(time_zone_like, Value::Undefined) {
+                        (arg.clone(), Value::Undefined)
+                    } else {
+                        let plain_time_like = self.read_named_property(ctx, arg, "plainTime");
+                        if self.pending_throw.is_some() {
+                            return Value::Undefined;
+                        }
+                        (time_zone_like, plain_time_like)
+                    }
+                } else {
+                    (arg.clone(), Value::Undefined)
+                };
+
+                let time_zone = match self.temporal_time_zone_with_iso_string_arg(ctx, Some(&time_zone_like)) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.throw_type_error(ctx, "Temporal.PlainDate.prototype.toZonedDateTime requires a timeZone");
+                        return Value::Undefined;
+                    }
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let plain_time = match self
+                    .temporal_to_plain_time_like(ctx, (!matches!(plain_time_like, Value::Undefined)).then_some(&plain_time_like))
+                {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let (hour, minute, second, millisecond, microsecond, nanosecond) = match plain_time {
+                    Some(value) => (
+                        value.hour(),
+                        value.minute(),
+                        value.second(),
+                        value.millisecond(),
+                        value.microsecond(),
+                        value.nanosecond(),
+                    ),
+                    None => (0, 0, 0, 0, 0, 0),
+                };
+                let date_time = if value.calendar() == &Calendar::ISO {
+                    PlainDateTime::try_new_iso(
+                        value.year(),
+                        value.month(),
+                        value.day(),
+                        hour,
+                        minute,
+                        second,
+                        millisecond,
+                        microsecond,
+                        nanosecond,
+                    )
+                } else {
+                    PlainDateTime::try_new(
+                        value.year(),
+                        value.month(),
+                        value.day(),
+                        hour,
+                        minute,
+                        second,
+                        millisecond,
+                        microsecond,
+                        nanosecond,
+                        value.calendar().clone(),
+                    )
+                };
+                match date_time.and_then(|value| value.to_zoned_date_time(time_zone, Disambiguation::Compatible)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                        self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.plainDate.toPlainDateTime" => {
+                let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let plain_time = match self.temporal_to_plain_time_like(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let (hour, minute, second, millisecond, microsecond, nanosecond) = match plain_time {
+                    Some(value) => (
+                        value.hour(),
+                        value.minute(),
+                        value.second(),
+                        value.millisecond(),
+                        value.microsecond(),
+                        value.nanosecond(),
+                    ),
+                    None => (0, 0, 0, 0, 0, 0),
+                };
+                let date_time = if value.calendar() == &Calendar::ISO {
+                    PlainDateTime::try_new_iso(
+                        value.year(),
+                        value.month(),
+                        value.day(),
+                        hour,
+                        minute,
+                        second,
+                        millisecond,
+                        microsecond,
+                        nanosecond,
+                    )
+                } else {
+                    PlainDateTime::try_new(
+                        value.year(),
+                        value.month(),
+                        value.day(),
+                        hour,
+                        minute,
+                        second,
+                        millisecond,
+                        microsecond,
+                        nanosecond,
+                        value.calendar().clone(),
+                    )
+                };
+                match date_time {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainDateTime");
+                        self.temporal_wrap_plain_date_time(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainDate.toString" | "temporal.plainDate.toJSON" => self.temporal_repr_result(ctx, receiver, "PlainDate"),
+            "temporal.plainDate.equals" => {
+                let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDate.prototype.equals requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_from_plain_date(ctx, Some(arg)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Value::Boolean(
+                    (value.year(), value.month(), value.day(), value.calendar().identifier())
+                        == (other.year(), other.month(), other.day(), other.calendar().identifier()),
+                )
+            }
             "temporal.plainDate.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainDate to a primitive value");
                 Value::Undefined
             }
             "temporal.plainDate.get.year" => self.temporal_plain_date_number(ctx, receiver, "year"),
             "temporal.plainDate.get.month" => self.temporal_plain_date_number(ctx, receiver, "month"),
+            "temporal.plainDate.get.monthCode" => self.temporal_plain_date_month_code(ctx, receiver),
             "temporal.plainDate.get.day" => self.temporal_plain_date_number(ctx, receiver, "day"),
             "temporal.plainDate.get.calendarId" => self.temporal_plain_date_calendar(ctx, receiver),
 
@@ -328,6 +525,50 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_plain_time(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.plainTime.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainTime.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.PlainTime.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_to_plain_time_like(ctx, Some(first)) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.throw_type_error(ctx, "Temporal.PlainTime.compare requires two arguments");
+                        return Value::Undefined;
+                    }
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_to_plain_time_like(ctx, Some(second)) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.throw_type_error(ctx, "Temporal.PlainTime.compare requires two arguments");
+                        return Value::Undefined;
+                    }
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Self::temporal_compare_result(
+                    (
+                        one.hour(),
+                        one.minute(),
+                        one.second(),
+                        one.millisecond(),
+                        one.microsecond(),
+                        one.nanosecond(),
+                    )
+                        .cmp(&(
+                            two.hour(),
+                            two.minute(),
+                            two.second(),
+                            two.millisecond(),
+                            two.microsecond(),
+                            two.nanosecond(),
+                        )),
+                )
+            }
             "temporal.plainTime.add" => {
                 let Some(value) = self.temporal_expect_plain_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -420,6 +661,40 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainTime.equals" => {
+                let Some(value) = self.temporal_expect_plain_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainTime.prototype.equals requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_to_plain_time_like(ctx, Some(arg)) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        self.throw_type_error(ctx, "Temporal.PlainTime.prototype.equals requires an argument");
+                        return Value::Undefined;
+                    }
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Value::Boolean(
+                    (
+                        value.hour(),
+                        value.minute(),
+                        value.second(),
+                        value.millisecond(),
+                        value.microsecond(),
+                        value.nanosecond(),
+                    ) == (
+                        other.hour(),
+                        other.minute(),
+                        other.second(),
+                        other.millisecond(),
+                        other.microsecond(),
+                        other.nanosecond(),
+                    ),
+                )
+            }
             "temporal.plainTime.toString" | "temporal.plainTime.toJSON" => self.temporal_repr_result(ctx, receiver, "PlainTime"),
             "temporal.plainTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainTime to a primitive value");
@@ -495,6 +770,48 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_plain_date_time(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.plainDateTime.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_from_plain_date_time(ctx, Some(first)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_from_plain_date_time(ctx, Some(second)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Self::temporal_compare_result(
+                    (
+                        one.year(),
+                        one.month(),
+                        one.day(),
+                        one.hour(),
+                        one.minute(),
+                        one.second(),
+                        one.millisecond(),
+                        one.microsecond(),
+                        one.nanosecond(),
+                    )
+                        .cmp(&(
+                            two.year(),
+                            two.month(),
+                            two.day(),
+                            two.hour(),
+                            two.minute(),
+                            two.second(),
+                            two.millisecond(),
+                            two.microsecond(),
+                            two.nanosecond(),
+                        )),
+                )
+            }
             "temporal.plainDateTime.toZonedDateTime" => {
                 let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -522,6 +839,44 @@ impl<'gc> VM<'gc> {
                     }
                     Err(err) => self.temporal_throw(ctx, err),
                 }
+            }
+            "temporal.plainDateTime.equals" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.equals requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_from_plain_date_time(ctx, Some(arg)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Value::Boolean(
+                    (
+                        value.year(),
+                        value.month(),
+                        value.day(),
+                        value.hour(),
+                        value.minute(),
+                        value.second(),
+                        value.millisecond(),
+                        value.microsecond(),
+                        value.nanosecond(),
+                        value.calendar().identifier(),
+                    ) == (
+                        other.year(),
+                        other.month(),
+                        other.day(),
+                        other.hour(),
+                        other.minute(),
+                        other.second(),
+                        other.millisecond(),
+                        other.microsecond(),
+                        other.nanosecond(),
+                        other.calendar().identifier(),
+                    ),
+                )
             }
             "temporal.plainDateTime.add" => {
                 let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
@@ -951,6 +1306,29 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_plain_year_month(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.plainYearMonth.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainYearMonth.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.PlainYearMonth.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_from_plain_year_month(ctx, Some(first)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_from_plain_year_month(ctx, Some(second)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Self::temporal_compare_result((one.year(), one.month(), one.reference_day()).cmp(&(
+                    two.year(),
+                    two.month(),
+                    two.reference_day(),
+                )))
+            }
             "temporal.plainYearMonth.add" => {
                 let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
                     return Value::Undefined;
@@ -1047,6 +1425,23 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainYearMonth.equals" => {
+                let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainYearMonth.prototype.equals requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_from_plain_year_month(ctx, Some(arg)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Value::Boolean(
+                    (value.year(), value.month(), value.reference_day(), value.calendar().identifier())
+                        == (other.year(), other.month(), other.reference_day(), other.calendar().identifier()),
+                )
+            }
             "temporal.plainYearMonth.toString" | "temporal.plainYearMonth.toJSON" => {
                 self.temporal_repr_result(ctx, receiver, "PlainYearMonth")
             }
@@ -1087,6 +1482,53 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_plain_month_day(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.plainMonthDay.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainMonthDay.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.PlainMonthDay.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_from_plain_month_day(ctx, Some(first)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_from_plain_month_day(ctx, Some(second)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let one_month = Self::temporal_month_from_code(Some(one.month_code().as_str())).unwrap_or(0);
+                let two_month = Self::temporal_month_from_code(Some(two.month_code().as_str())).unwrap_or(0);
+                Self::temporal_compare_result((one_month, one.day()).cmp(&(two_month, two.day())))
+            }
+            "temporal.plainMonthDay.equals" => {
+                let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainMonthDay.prototype.equals requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_from_plain_month_day(ctx, Some(arg)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Value::Boolean(
+                    (
+                        value.month_code().as_str(),
+                        value.day(),
+                        value.reference_year(),
+                        value.calendar().identifier(),
+                    ) == (
+                        other.month_code().as_str(),
+                        other.day(),
+                        other.reference_year(),
+                        other.calendar().identifier(),
+                    ),
+                )
+            }
             "temporal.plainMonthDay.toString" | "temporal.plainMonthDay.toJSON" => {
                 self.temporal_repr_result(ctx, receiver, "PlainMonthDay")
             }
@@ -1133,6 +1575,25 @@ impl<'gc> VM<'gc> {
                 Ok(value) => self.temporal_wrap_zoned_date_time(ctx, receiver, &value),
                 Err(err) => self.temporal_throw(ctx, err),
             },
+            "temporal.zonedDateTime.compare" => {
+                let Some(first) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.ZonedDateTime.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let Some(second) = args.get(1) else {
+                    self.throw_type_error(ctx, "Temporal.ZonedDateTime.compare requires two arguments");
+                    return Value::Undefined;
+                };
+                let one = match self.temporal_to_zoned_date_time_like(ctx, first) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let two = match self.temporal_to_zoned_date_time_like(ctx, second) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                Self::temporal_compare_result(one.to_instant().as_i128().cmp(&two.to_instant().as_i128()))
+            }
             "temporal.zonedDateTime.withTimeZone" => {
                 let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -1224,6 +1685,20 @@ impl<'gc> VM<'gc> {
                 };
                 let ctor_value = self.temporal_intrinsic_ctor_value("PlainDateTime");
                 self.temporal_wrap_plain_date_time(ctx, ctor_value.as_ref(), &value.to_plain_date_time())
+            }
+            "temporal.zonedDateTime.toPlainDate" => {
+                let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let ctor_value = self.temporal_intrinsic_ctor_value("PlainDate");
+                self.temporal_wrap_plain_date(ctx, ctor_value.as_ref(), &value.to_plain_date())
+            }
+            "temporal.zonedDateTime.toPlainTime" => {
+                let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let ctor_value = self.temporal_intrinsic_ctor_value("PlainTime");
+                self.temporal_wrap_plain_time(ctx, ctor_value.as_ref(), &value.to_plain_time())
             }
             "temporal.zonedDateTime.equals" => {
                 let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
@@ -1438,7 +1913,10 @@ impl<'gc> VM<'gc> {
             "Instant",
             1.0,
             "Temporal.Instant",
-            &[("from", "temporal.instant.from", "from", 1.0)],
+            &[
+                ("from", "temporal.instant.from", "from", 1.0),
+                ("compare", "temporal.instant.compare", "compare", 2.0),
+            ],
             &[
                 ("add", "temporal.instant.add", "add", 1.0),
                 ("subtract", "temporal.instant.subtract", "subtract", 1.0),
@@ -1461,12 +1939,18 @@ impl<'gc> VM<'gc> {
             "PlainDate",
             3.0,
             "Temporal.PlainDate",
-            &[("from", "temporal.plainDate.from", "from", 1.0)],
+            &[
+                ("from", "temporal.plainDate.from", "from", 1.0),
+                ("compare", "temporal.plainDate.compare", "compare", 2.0),
+            ],
             &[
                 ("add", "temporal.plainDate.add", "add", 1.0),
                 ("subtract", "temporal.plainDate.subtract", "subtract", 1.0),
                 ("until", "temporal.plainDate.until", "until", 1.0),
                 ("since", "temporal.plainDate.since", "since", 1.0),
+                ("toPlainDateTime", "temporal.plainDate.toPlainDateTime", "toPlainDateTime", 0.0),
+                ("toZonedDateTime", "temporal.plainDate.toZonedDateTime", "toZonedDateTime", 1.0),
+                ("equals", "temporal.plainDate.equals", "equals", 1.0),
                 ("toString", "temporal.plainDate.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainDate.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainDate.valueOf", "valueOf", 0.0),
@@ -1474,6 +1958,7 @@ impl<'gc> VM<'gc> {
             &[
                 ("year", "temporal.plainDate.get.year"),
                 ("month", "temporal.plainDate.get.month"),
+                ("monthCode", "temporal.plainDate.get.monthCode"),
                 ("day", "temporal.plainDate.get.day"),
                 ("calendarId", "temporal.plainDate.get.calendarId"),
             ],
@@ -1485,12 +1970,16 @@ impl<'gc> VM<'gc> {
             "PlainTime",
             0.0,
             "Temporal.PlainTime",
-            &[("from", "temporal.plainTime.from", "from", 1.0)],
+            &[
+                ("from", "temporal.plainTime.from", "from", 1.0),
+                ("compare", "temporal.plainTime.compare", "compare", 2.0),
+            ],
             &[
                 ("add", "temporal.plainTime.add", "add", 1.0),
                 ("subtract", "temporal.plainTime.subtract", "subtract", 1.0),
                 ("until", "temporal.plainTime.until", "until", 1.0),
                 ("since", "temporal.plainTime.since", "since", 1.0),
+                ("equals", "temporal.plainTime.equals", "equals", 1.0),
                 ("toString", "temporal.plainTime.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainTime.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainTime.valueOf", "valueOf", 0.0),
@@ -1511,13 +2000,17 @@ impl<'gc> VM<'gc> {
             "PlainDateTime",
             3.0,
             "Temporal.PlainDateTime",
-            &[("from", "temporal.plainDateTime.from", "from", 1.0)],
+            &[
+                ("from", "temporal.plainDateTime.from", "from", 1.0),
+                ("compare", "temporal.plainDateTime.compare", "compare", 2.0),
+            ],
             &[
                 ("add", "temporal.plainDateTime.add", "add", 1.0),
                 ("subtract", "temporal.plainDateTime.subtract", "subtract", 1.0),
                 ("until", "temporal.plainDateTime.until", "until", 1.0),
                 ("since", "temporal.plainDateTime.since", "since", 1.0),
                 ("toZonedDateTime", "temporal.plainDateTime.toZonedDateTime", "toZonedDateTime", 1.0),
+                ("equals", "temporal.plainDateTime.equals", "equals", 1.0),
                 ("toString", "temporal.plainDateTime.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainDateTime.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainDateTime.valueOf", "valueOf", 0.0),
@@ -1578,12 +2071,16 @@ impl<'gc> VM<'gc> {
             "PlainYearMonth",
             2.0,
             "Temporal.PlainYearMonth",
-            &[("from", "temporal.plainYearMonth.from", "from", 1.0)],
+            &[
+                ("from", "temporal.plainYearMonth.from", "from", 1.0),
+                ("compare", "temporal.plainYearMonth.compare", "compare", 2.0),
+            ],
             &[
                 ("add", "temporal.plainYearMonth.add", "add", 1.0),
                 ("subtract", "temporal.plainYearMonth.subtract", "subtract", 1.0),
                 ("until", "temporal.plainYearMonth.until", "until", 1.0),
                 ("since", "temporal.plainYearMonth.since", "since", 1.0),
+                ("equals", "temporal.plainYearMonth.equals", "equals", 1.0),
                 ("toString", "temporal.plainYearMonth.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainYearMonth.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainYearMonth.valueOf", "valueOf", 0.0),
@@ -1601,8 +2098,12 @@ impl<'gc> VM<'gc> {
             "PlainMonthDay",
             2.0,
             "Temporal.PlainMonthDay",
-            &[("from", "temporal.plainMonthDay.from", "from", 1.0)],
             &[
+                ("from", "temporal.plainMonthDay.from", "from", 1.0),
+                ("compare", "temporal.plainMonthDay.compare", "compare", 2.0),
+            ],
+            &[
+                ("equals", "temporal.plainMonthDay.equals", "equals", 1.0),
                 ("toString", "temporal.plainMonthDay.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainMonthDay.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.plainMonthDay.valueOf", "valueOf", 0.0),
@@ -1620,7 +2121,10 @@ impl<'gc> VM<'gc> {
             "ZonedDateTime",
             2.0,
             "Temporal.ZonedDateTime",
-            &[("from", "temporal.zonedDateTime.from", "from", 1.0)],
+            &[
+                ("from", "temporal.zonedDateTime.from", "from", 1.0),
+                ("compare", "temporal.zonedDateTime.compare", "compare", 2.0),
+            ],
             &[
                 ("withTimeZone", "temporal.zonedDateTime.withTimeZone", "withTimeZone", 1.0),
                 ("withPlainTime", "temporal.zonedDateTime.withPlainTime", "withPlainTime", 0.0),
@@ -1630,6 +2134,8 @@ impl<'gc> VM<'gc> {
                 ("since", "temporal.zonedDateTime.since", "since", 1.0),
                 ("until", "temporal.zonedDateTime.until", "until", 1.0),
                 ("toPlainDateTime", "temporal.zonedDateTime.toPlainDateTime", "toPlainDateTime", 0.0),
+                ("toPlainDate", "temporal.zonedDateTime.toPlainDate", "toPlainDate", 0.0),
+                ("toPlainTime", "temporal.zonedDateTime.toPlainTime", "toPlainTime", 0.0),
                 ("equals", "temporal.zonedDateTime.equals", "equals", 1.0),
                 ("toString", "temporal.zonedDateTime.toString", "toString", 0.0),
                 ("toJSON", "temporal.zonedDateTime.toJSON", "toJSON", 0.0),
@@ -1825,6 +2331,14 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(map, key, &value, false, false, true);
     }
 
+    fn temporal_compare_result(ordering: Ordering) -> Value<'gc> {
+        Value::Number(match ordering {
+            Ordering::Less => -1.0,
+            Ordering::Equal => 0.0,
+            Ordering::Greater => 1.0,
+        })
+    }
+
     fn temporal_has_own_or_inherited_property(&self, _ctx: &GcContext<'gc>, value: &Value<'gc>, key: &str) -> bool {
         match value {
             Value::VmObject(obj) => obj.borrow().contains_key(key),
@@ -1901,6 +2415,8 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("toPlainDateTime", "temporal.plainDate.toPlainDateTime"),
+                    ("toZonedDateTime", "temporal.plainDate.toZonedDateTime"),
                     ("toString", "temporal.plainDate.toString"),
                     ("toJSON", "temporal.plainDate.toJSON"),
                     ("valueOf", "temporal.plainDate.valueOf"),
@@ -1909,6 +2425,7 @@ impl<'gc> VM<'gc> {
             let mut borrow = obj.borrow_mut(ctx);
             Self::temporal_store_readonly(&mut borrow, "year", Value::Number(value.year() as f64));
             Self::temporal_store_readonly(&mut borrow, "month", Value::Number(value.month() as f64));
+            Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "day", Value::Number(value.day() as f64));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
         }
@@ -2009,7 +2526,13 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_wrap_plain_year_month(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainYearMonth) -> Value<'gc> {
-        let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainYearMonth", &value.to_string(), &[]);
+        let wrapped = self.temporal_wrap_value(
+            ctx,
+            ctor_value,
+            "PlainYearMonth",
+            &value.to_string(),
+            &[(SLOT_REFERENCE_DAY, Value::from(value.reference_day().to_string().as_str()))],
+        );
         if let Value::VmObject(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
@@ -2029,7 +2552,13 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_wrap_plain_month_day(&self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, value: &PlainMonthDay) -> Value<'gc> {
-        let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainMonthDay", &value.to_string(), &[]);
+        let wrapped = self.temporal_wrap_value(
+            ctx,
+            ctor_value,
+            "PlainMonthDay",
+            &value.to_string(),
+            &[(SLOT_REFERENCE_YEAR, Value::from(value.reference_year().to_string().as_str()))],
+        );
         if let Value::VmObject(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
@@ -2069,6 +2598,8 @@ impl<'gc> VM<'gc> {
                     ("since", "temporal.zonedDateTime.since"),
                     ("until", "temporal.zonedDateTime.until"),
                     ("toPlainDateTime", "temporal.zonedDateTime.toPlainDateTime"),
+                    ("toPlainDate", "temporal.zonedDateTime.toPlainDate"),
+                    ("toPlainTime", "temporal.zonedDateTime.toPlainTime"),
                     ("equals", "temporal.zonedDateTime.equals"),
                     ("toString", "temporal.zonedDateTime.toString"),
                     ("toJSON", "temporal.zonedDateTime.toJSON"),
@@ -3375,8 +3906,10 @@ impl<'gc> VM<'gc> {
         let Some(value) = value else {
             return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth requires an argument"));
         };
-        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainYearMonth", SLOT_REPR) {
-            return PlainYearMonth::from_utf8(text.as_bytes());
+        if self.temporal_slot_string_if_kind(value, "PlainYearMonth", SLOT_REPR).is_some() {
+            return self
+                .temporal_expect_plain_year_month(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.PlainYearMonth input"));
         }
         if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_REPR) {
             return PlainDate::from_utf8(text.as_bytes()).and_then(|value| value.to_plain_year_month());
@@ -3434,7 +3967,82 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_from_plain_month_day(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<PlainMonthDay, TemporalError> {
-        self.temporal_from_string_like(ctx, value, "PlainMonthDay", PlainMonthDay::from_utf8)
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay requires an argument"));
+        };
+        if self.temporal_slot_string_if_kind(value, "PlainMonthDay", SLOT_REPR).is_some() {
+            return self
+                .temporal_expect_plain_month_day(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_REPR) {
+            let date = PlainDate::from_utf8(text.as_bytes())?;
+            return PlainMonthDay::new_with_overflow(
+                date.month(),
+                date.day(),
+                date.calendar().clone(),
+                Overflow::Constrain,
+                Some(date.year()),
+            );
+        }
+        if let Some(text) = self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_REPR) {
+            let date = PlainDateTime::from_utf8(text.as_bytes())?.to_plain_date();
+            return PlainMonthDay::new_with_overflow(
+                date.month(),
+                date.day(),
+                date.calendar().clone(),
+                Overflow::Constrain,
+                Some(date.year()),
+            );
+        }
+        if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_REPR).is_some() {
+            let date = self
+                .temporal_expect_zoned_date_time(ctx, Some(value))
+                .ok_or_else(|| TemporalError::range().with_message("Invalid Temporal.PlainMonthDay input"))?
+                .to_plain_date();
+            return PlainMonthDay::new_with_overflow(
+                date.month(),
+                date.day(),
+                date.calendar().clone(),
+                Overflow::Constrain,
+                Some(date.year()),
+            );
+        }
+        if let Value::String(text) = value {
+            let text = crate::unicode::utf16_to_utf8(text);
+            return PlainMonthDay::from_utf8(text.as_bytes());
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+
+        let calendar_value = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+        let day = self
+            .temporal_optional_u8_property(ctx, value, "day")?
+            .ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
+        let month_value = self.temporal_optional_u8_property(ctx, value, "month")?;
+        let month_code_value = self.read_named_property(ctx, value, "monthCode");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
+        }
+        let month_code = match month_code_value {
+            Value::Undefined => None,
+            _ => Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?),
+        };
+        let _year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        let month = match month_value.or_else(|| Self::temporal_month_from_code(month_code.as_deref())) {
+            Some(value) => value,
+            None => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
+        };
+        let calendar = if matches!(calendar_value, Value::Undefined) {
+            Calendar::ISO
+        } else {
+            self.temporal_calendar_identifier_arg(&calendar_value)?
+        };
+        PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Constrain, None)
     }
 
     fn temporal_from_zoned_date_time(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<ZonedDateTime, TemporalError> {
@@ -3605,16 +4213,16 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Temporal.PlainTime-like object must have a time field"));
         }
         PlainTime::try_new(
-            hour.unwrap_or(0),
-            minute.unwrap_or(0),
+            hour.unwrap_or(0).min(23),
+            minute.unwrap_or(0).min(59),
             match second {
                 Some(60) => 59,
-                Some(value) => value,
+                Some(value) => value.min(59),
                 None => 0,
             },
-            millisecond.unwrap_or(0),
-            microsecond.unwrap_or(0),
-            nanosecond.unwrap_or(0),
+            millisecond.unwrap_or(0).min(999),
+            microsecond.unwrap_or(0).min(999),
+            nanosecond.unwrap_or(0).min(999),
         )
         .map(Some)
     }
@@ -3721,12 +4329,34 @@ impl<'gc> VM<'gc> {
 
     fn temporal_expect_plain_year_month(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainYearMonth> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainYearMonth", SLOT_REPR)?;
-        PlainYearMonth::from_utf8(repr.as_bytes()).ok()
+        let parsed = PlainYearMonth::from_utf8(repr.as_bytes()).ok()?;
+        let Some(reference_day) = self.temporal_slot_string_value(ctx, receiver, "PlainYearMonth", SLOT_REFERENCE_DAY) else {
+            return Some(parsed);
+        };
+        let reference_day = u8::from_str(&reference_day).ok()?;
+        if parsed.calendar() == &Calendar::ISO {
+            PlainYearMonth::try_new_iso(parsed.year(), parsed.month(), Some(reference_day)).ok()
+        } else {
+            PlainYearMonth::try_new(parsed.year(), parsed.month(), Some(reference_day), parsed.calendar().clone()).ok()
+        }
     }
 
     fn temporal_expect_plain_month_day(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainMonthDay> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REPR)?;
-        PlainMonthDay::from_utf8(repr.as_bytes()).ok()
+        let parsed = PlainMonthDay::from_utf8(repr.as_bytes()).ok()?;
+        let Some(reference_year) = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REFERENCE_YEAR) else {
+            return Some(parsed);
+        };
+        let reference_year = i32::from_str(&reference_year).ok()?;
+        let month = Self::temporal_month_from_code(Some(parsed.month_code().as_str()))?;
+        PlainMonthDay::new_with_overflow(
+            month,
+            parsed.day(),
+            parsed.calendar().clone(),
+            Overflow::Constrain,
+            Some(reference_year),
+        )
+        .ok()
     }
 
     fn temporal_expect_zoned_date_time(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<ZonedDateTime> {
@@ -3779,6 +4409,13 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         Value::from(value.calendar().identifier())
+    }
+
+    fn temporal_plain_date_month_code(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::from(value.month_code().as_str())
     }
 
     fn temporal_plain_time_number(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, field: &str) -> Value<'gc> {

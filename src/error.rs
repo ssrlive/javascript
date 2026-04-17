@@ -49,6 +49,21 @@ pub enum JSErrorKind {
     RegExpError(#[from] regress::Error),
 }
 
+impl From<temporal_rs::TemporalError> for JSErrorKind {
+    fn from(err: temporal_rs::TemporalError) -> Self {
+        let message = err.into_message().to_string();
+        match err.kind() {
+            temporal_rs::error::ErrorKind::Type => Self::TypeError { message },
+            temporal_rs::error::ErrorKind::Range => Self::RangeError { message },
+            temporal_rs::error::ErrorKind::Syntax => Self::SyntaxError { message },
+            temporal_rs::error::ErrorKind::Generic => Self::RuntimeError { message },
+            temporal_rs::error::ErrorKind::Assert => Self::RuntimeError {
+                message: format!("Temporal internal error: {message}"),
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct JSErrorData {
     pub kind: JSErrorKind,
@@ -213,6 +228,12 @@ impl From<std::num::ParseFloatError> for JSError {
             "<unknown>".to_string(),
             None,
         )
+    }
+}
+
+impl From<temporal_rs::TemporalError> for JSError {
+    fn from(err: temporal_rs::TemporalError) -> Self {
+        JSError::new(JSErrorKind::from(err), "<unknown>".to_string(), "<unknown>".to_string(), None)
     }
 }
 

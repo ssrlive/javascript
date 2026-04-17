@@ -3228,93 +3228,24 @@ impl<'gc> VM<'gc> {
         } else {
             vec![args_val]
         };
-        let arg_count = spread_args.len();
-        for arg in spread_args {
-            self.stack.push(arg);
-        }
-        let callee_idx = self.stack.len() - arg_count - 1;
-        let constructor = self.stack[callee_idx].clone();
+        let constructor = self.stack.pop().expect("VM Stack underflow on NewCallSpread constructor");
         if !self.is_constructor_value(&constructor) {
-            self.stack.truncate(callee_idx);
             let mut err_map = IndexMap::new();
             err_map.insert("__type__".to_string(), Value::from("TypeError"));
             err_map.insert("message".to_string(), Value::from("is not a constructor"));
             self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
             return Ok(OpcodeAction::Continue);
         }
-        match constructor {
-            Value::VmFunction(target_ip, _arity) | Value::VmClosure(target_ip, _arity, _) => {
-                if self.chunk.async_function_ips.contains(&target_ip) {
-                    self.stack.truncate(callee_idx);
-                    let mut err_map = IndexMap::new();
-                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                    err_map.insert("message".to_string(), Value::from("is not a constructor"));
-                    self.handle_throw(ctx, &Value::VmObject(new_gc_cell_ptr(ctx, err_map)))?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                let new_obj = new_gc_cell_ptr(ctx, IndexMap::new());
-                let fn_props = self
-                    .get_fn_props_for_value(ctx, &constructor)
-                    .unwrap_or_else(|| self.get_fn_props(ctx, target_ip, _arity));
-                if let Some(proto) = own_data_from_legacy_map(&fn_props.borrow(), "prototype") {
-                    new_obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
-                }
-                let this_val = Value::VmObject(new_obj);
-                self.this_stack.push(this_val);
-                self.new_target_stack.push(constructor.clone());
-                let closure_uv = if let Value::VmClosure(_, _, uv) = constructor {
-                    (**uv).to_vec()
+        match self.construct_value(ctx, &constructor, &spread_args, Some(&constructor)) {
+            Ok(result) => self.stack.push(result),
+            Err(err) => {
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
                 } else {
-                    Vec::new()
-                };
-                let _pre_call_depth = self.frames.len();
-                let frame = CallFrame {
-                    return_ip: self.ip,
-                    bp: callee_idx + 1,
-                    is_method: false,
-                    arg_count,
-                    func_ip: target_ip,
-                    arguments_obj: None,
-                    upvalues: closure_uv,
-                    saved_args: None,
-                    local_cells: HashMap::new(),
-                    this_tdz: None,
-                };
-                self.push_call_frame_for_function(frame);
-                self.ip = target_ip;
-                let saved_try_stack = std::mem::take(&mut self.try_stack);
-                let result = self.run_inner(ctx, self.frames.len());
-                self.try_stack = saved_try_stack;
-                self.this_stack.pop();
-                self.new_target_stack.pop();
-                match result {
-                    Ok(val) => match &val {
-                        Value::VmObject(_) => self.stack.push(val),
-                        _ => self.stack.push(Value::VmObject(new_obj)),
-                    },
-                    Err(e) => {
-                        let thrown = self.vm_value_from_error(ctx, &e);
-                        self.pending_throw = Some(thrown);
-                        return Ok(OpcodeAction::Continue);
-                    }
+                    let thrown = self.vm_value_from_error(ctx, &err);
+                    self.handle_throw(ctx, &thrown)?;
                 }
-            }
-            Value::VmNativeFunction(id) => {
-                let args: Vec<Value<'gc>> = self.stack.drain(callee_idx + 1..).collect();
-                self.stack.pop(); // pop constructor
-                let result = if id == BUILTIN_CTOR_ARRAYBUFFER {
-                    self.new_target_stack.push(constructor.clone());
-                    let out = self.call_builtin(ctx, id, &args);
-                    self.new_target_stack.pop();
-                    out
-                } else {
-                    self.call_builtin(ctx, id, &args)
-                };
-                self.stack.push(result);
-            }
-            _ => {
-                self.stack.truncate(callee_idx);
-                self.stack.push(Value::Undefined);
+                return Ok(OpcodeAction::Continue);
             }
         }
         Ok(OpcodeAction::Continue)

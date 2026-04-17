@@ -35,6 +35,7 @@ regress = { version = "0.11", git = "https://github.com/ssrlive/regress.git", re
     "utf16",
 ] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
+temporal_rs = "0.2.3"
 thiserror = "2.0.18"
 unicode-normalization = "0.1.25"
 

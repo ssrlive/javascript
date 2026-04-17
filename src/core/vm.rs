@@ -18,6 +18,7 @@ mod dataview;
 mod date;
 mod regexp;
 mod runner;
+mod temporal;
 mod typedarray;
 mod uri;
 
@@ -5188,6 +5189,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        if name.starts_with("temporal.") {
+            return self.temporal_handle_host_fn(ctx, name, receiver, args);
+        }
         match name {
             "Function.prototype.restrictedThrow" => {
                 self.throw_type_error(
@@ -14263,6 +14267,7 @@ impl<'gc> VM<'gc> {
             || name.starts_with("number.")
             || name.starts_with("bigint.")
             || name.starts_with("date.")
+            || name.starts_with("temporal.")
             || name.starts_with("global.")
             || name.starts_with("typedarray.")
             || name.starts_with("dataview.")
@@ -19301,6 +19306,7 @@ impl<'gc> VM<'gc> {
             Self::insert_constructor_backref(ctx, &symbol_proto, &Value::VmObject(*symbol_ctor));
         }
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "Object");
+        self.temporal_init_globals(ctx);
 
         // Constructors created before Object may still need their prototype chains wired.
         if let Some(Value::VmArray(array_proto)) = self.ctor_prototype_from_globals(ctx, "Array")
@@ -42432,6 +42438,13 @@ impl<'gc> VM<'gc> {
                                     self.vm_construct_disposable_stack(ctx, map, true, new_target)
                                 } else if host_name == "shadowRealm.constructor" {
                                     self.vm_construct_shadow_realm(ctx, map, new_target)
+                                } else if host_name.starts_with("temporal.") {
+                                    let value = self.call_host_fn(ctx, &host_name, Some(target), args);
+                                    if let Some(thrown) = self.pending_throw.take() {
+                                        Err(self.vm_error_to_js_error(ctx, &thrown))
+                                    } else {
+                                        Ok(value)
+                                    }
                                 } else if host_name == "intl.segmenter.ctor" {
                                     let (proto, segments_proto, segment_iter_proto) = {
                                         let borrow = map.borrow();

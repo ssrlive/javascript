@@ -48,6 +48,26 @@ impl<'gc> VM<'gc> {
                     Value::Number(Self::make_date_from_components(yr, month, day, hour, minute, second, millis, false))
                 }
             }
+            "date.toTemporalInstant" => {
+                let this = receiver.cloned().unwrap_or(Value::Undefined);
+                let Value::VmObject(obj) = &this else {
+                    self.throw_type_error(ctx, "Date.prototype.toTemporalInstant requires that 'this' be a Date");
+                    return Value::Undefined;
+                };
+                let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned() else {
+                    self.throw_type_error(ctx, "Date.prototype.toTemporalInstant requires that 'this' be a Date");
+                    return Value::Undefined;
+                };
+                if !ms.is_finite() {
+                    self.throw_range_error_object(ctx, "Date value is invalid");
+                    return Value::Undefined;
+                }
+                let epoch_ns = (ms as i128) * 1_000_000;
+                match temporal_rs::Instant::try_new(epoch_ns) {
+                    Ok(instant) => self.temporal_wrap_instant(ctx, None, &instant),
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "date.toPrimitive" => {
                 let this = receiver.cloned().unwrap_or(Value::Undefined);
                 if !matches!(&this, Value::VmObject(_)) {
@@ -205,6 +225,10 @@ impl<'gc> VM<'gc> {
             (
                 "toTimeString",
                 Self::make_host_fn_with_name_len(ctx, "date.toTimeString", "toTimeString", 0.0, false),
+            ),
+            (
+                "toTemporalInstant",
+                Self::make_host_fn_with_name_len(ctx, "date.toTemporalInstant", "toTemporalInstant", 0.0, false),
             ),
             ("toUTCString", Value::VmNativeFunction(BUILTIN_DATE_TOUTCSTRING)),
             ("toDateString", Value::VmNativeFunction(BUILTIN_DATE_TODATESTRING)),

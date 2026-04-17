@@ -8,7 +8,7 @@
 /*.mjs
 /tools/*.*
 /examples
-/plan.md
+/plan*.md
 /brief.md
 /brief_zh.md
 /*.js

@@ -7,7 +7,7 @@ use crate::core::property_descriptor::{
     read_attrs_from_legacy_map, remove_getter, remove_property_completely, remove_setter, set_getter, set_setter, unmark_nonconfigurable,
     unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
 };
-use crate::core::value::{VmArrayData, VmMapData, VmSetData, value_to_string};
+use crate::core::value::{VmArrayData, VmMapData, VmSetData, VmSymbolData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use indexmap::IndexMap;
@@ -43,6 +43,8 @@ pub type VmObjectHandle<'gc> = VmStrong<'gc, IndexMap<String, Value<'gc>>>;
 pub type VmObjectWeakHandle<'gc> = VmWeak<'gc, IndexMap<String, Value<'gc>>>;
 pub type VmMapHandle<'gc> = VmStrong<'gc, VmMapData<'gc>>;
 pub type VmSetHandle<'gc> = VmStrong<'gc, VmSetData<'gc>>;
+pub type VmSymbolHandle<'gc> = VmStrong<'gc, VmSymbolData>;
+pub type VmSymbolWeakHandle<'gc> = VmWeak<'gc, VmSymbolData>;
 
 static VM_OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static VM_NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
@@ -747,7 +749,7 @@ pub struct VM<'gc> {
     global_this: VmObjectHandle<'gc>,
     symbol_counter: u64,
     symbol_registry: HashMap<String, Value<'gc>>,         // Symbol.for() registry
-    symbol_values: HashMap<u64, VmObjectWeakHandle<'gc>>, // symbol_id → Symbol VmObject (weak cache)
+    symbol_values: HashMap<u64, VmSymbolWeakHandle<'gc>>, // symbol_id → Symbol primitive (weak cache)
     pending_throw: Option<Value<'gc>>,                    // deferred throw from call_builtin
     preserved_throw_value: Option<Value<'gc>>,
     preserved_throw_message: Option<String>,
@@ -3264,8 +3266,8 @@ impl<'gc> VM<'gc> {
 
     #[inline]
     fn cache_symbol_value(&mut self, id: u64, value: &Value<'gc>) {
-        if let Value::VmObject(obj) = value {
-            self.symbol_values.insert(id, Self::downgrade_handle(*obj));
+        if let Value::Symbol(sym) = value {
+            self.symbol_values.insert(id, Self::downgrade_handle(*sym));
         }
     }
 
@@ -3274,7 +3276,21 @@ impl<'gc> VM<'gc> {
         self.symbol_values
             .get(&id)
             .and_then(|weak| Self::upgrade_handle(ctx, *weak))
-            .map(Value::VmObject)
+            .map(Value::Symbol)
+    }
+
+    #[inline]
+    fn create_symbol(&mut self, ctx: &GcContext<'gc>, id: u64, description: Option<Vec<u16>>, registered: bool) -> Value<'gc> {
+        let value = Value::Symbol(new_gc_cell_ptr(
+            ctx,
+            VmSymbolData {
+                id,
+                description,
+                registered,
+            },
+        ));
+        self.cache_symbol_value(id, &value);
+        value
     }
 
     fn collect_vm_weak_cache_garbage(&mut self, ctx: &GcContext<'gc>) -> usize {
@@ -5393,33 +5409,17 @@ impl<'gc> VM<'gc> {
             }
             "symbol.valueOf" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
-                match this_val {
-                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => this_val.clone(),
-                    Value::VmObject(obj) => {
-                        let borrow = obj.borrow();
-                        if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Symbol") {
-                            borrow.get("__value__").cloned().unwrap_or(Value::Undefined)
-                        } else {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert(
-                                "message".to_string(),
-                                Value::from("Symbol.prototype.valueOf requires that 'this' be a Symbol"),
-                            );
-                            self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                            Value::Undefined
-                        }
-                    }
-                    _ => {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                        err_map.insert(
-                            "message".to_string(),
-                            Value::from("Symbol.prototype.valueOf requires that 'this' be a Symbol"),
-                        );
-                        self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
-                        Value::Undefined
-                    }
+                if let Some(symbol) = self.symbol_primitive_from_wrapper(this_val) {
+                    symbol
+                } else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                    err_map.insert(
+                        "message".to_string(),
+                        Value::from("Symbol.prototype.valueOf requires that 'this' be a Symbol"),
+                    );
+                    self.pending_throw = Some(Value::VmObject(new_gc_cell_ptr(ctx, err_map)));
+                    Value::Undefined
                 }
             }
             "symbol.toString" => {
@@ -5427,66 +5427,26 @@ impl<'gc> VM<'gc> {
                 if self.pending_throw.is_some() {
                     return Value::Undefined;
                 }
-                match sym {
-                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
-                        let borrow = obj.borrow();
-                        match borrow.get("__description__") {
-                            Some(Value::String(d)) => Value::from(&format!("Symbol({})", crate::unicode::utf16_to_utf8(d))),
-                            _ => Value::from("Symbol()"),
-                        }
-                    }
-                    _ => Value::Undefined,
-                }
+                self.symbol_display_string(&sym).map(Value::from).unwrap_or(Value::Undefined)
             }
             "symbol.getDescription" => {
                 // Symbol.prototype.description getter
                 let this_val = receiver.unwrap_or(&Value::Undefined);
-                match this_val {
-                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
-                        obj.borrow().get("__description__").cloned().unwrap_or(Value::Undefined)
-                    }
-                    Value::VmObject(obj) => {
-                        let borrow = obj.borrow();
-                        if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Symbol") {
-                            if let Some(inner) = borrow.get("__value__") {
-                                match inner {
-                                    Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => {
-                                        sym.borrow().get("__description__").cloned().unwrap_or(Value::Undefined)
-                                    }
-                                    _ => Value::Undefined,
-                                }
-                            } else {
-                                Value::Undefined
-                            }
-                        } else {
-                            self.throw_type_error(ctx, "Symbol.prototype.description requires that 'this' be a Symbol");
-                            Value::Undefined
-                        }
-                    }
-                    _ => {
-                        self.throw_type_error(ctx, "Symbol.prototype.description requires that 'this' be a Symbol");
-                        Value::Undefined
-                    }
+                if let Some(symbol) = self.symbol_primitive_from_wrapper(this_val) {
+                    self.symbol_description(&symbol).map(Value::String).unwrap_or(Value::Undefined)
+                } else {
+                    self.throw_type_error(ctx, "Symbol.prototype.description requires that 'this' be a Symbol");
+                    Value::Undefined
                 }
             }
             "symbol.toPrimitive" => {
                 // Symbol.prototype[@@toPrimitive](hint)
                 let this_val = receiver.unwrap_or(&Value::Undefined);
-                match this_val {
-                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => this_val.clone(),
-                    Value::VmObject(obj) => {
-                        let borrow = obj.borrow();
-                        if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Symbol") {
-                            borrow.get("__value__").cloned().unwrap_or(Value::Undefined)
-                        } else {
-                            self.throw_type_error(ctx, "Symbol.prototype[@@toPrimitive] requires that 'this' be a Symbol");
-                            Value::Undefined
-                        }
-                    }
-                    _ => {
-                        self.throw_type_error(ctx, "Symbol.prototype[@@toPrimitive] requires that 'this' be a Symbol");
-                        Value::Undefined
-                    }
+                if let Some(symbol) = self.symbol_primitive_from_wrapper(this_val) {
+                    symbol
+                } else {
+                    self.throw_type_error(ctx, "Symbol.prototype[@@toPrimitive] requires that 'this' be a Symbol");
+                    Value::Undefined
                 }
             }
             "boolean.toString" => {
@@ -10667,11 +10627,7 @@ impl<'gc> VM<'gc> {
                 let Some(target) = args.first().cloned() else {
                     return Value::Boolean(false);
                 };
-                let target_is_object = match &target {
-                    Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
-                    Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
-                    _ => false,
-                };
+                let target_is_object = self.is_spec_object_value(&target);
                 if !target_is_object {
                     return Value::Boolean(false);
                 }
@@ -11640,9 +11596,8 @@ impl<'gc> VM<'gc> {
                 };
                 if matches!(
                     desc_val,
-                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_)
-                ) || matches!(desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
-                {
+                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::Symbol(_)
+                ) {
                     self.throw_type_error(ctx, "Property description must be an object");
                     return Value::Undefined;
                 }
@@ -14875,61 +14830,60 @@ impl<'gc> VM<'gc> {
             self.fn_home_objects.insert(*ip, obj.clone());
         }
 
-        if let Value::VmObject(map) = &obj {
-            if map.borrow().contains_key("__vm_symbol__") {
-                if let Some(proto_val) = self.ctor_prototype_from_globals(ctx, "Symbol") {
-                    let mut cur = Some(proto_val);
-                    while let Some(ref cv) = cur {
-                        if let Value::VmObject(pm) = cv
-                            && pm.borrow().contains_key("__proxy_target__")
-                            && let Some(result) = self.try_proxy_set(ctx, cv, key, val, Some(obj))?
+        if obj.is_symbol_value() {
+            if let Some(proto_val) = self.ctor_prototype_from_globals(ctx, "Symbol") {
+                let mut cur = Some(proto_val);
+                while let Some(ref cv) = cur {
+                    if let Value::VmObject(pm) = cv
+                        && pm.borrow().contains_key("__proxy_target__")
+                        && let Some(result) = self.try_proxy_set(ctx, cv, key, val, Some(obj))?
+                    {
+                        if matches!(result, Value::Boolean(false)) && self.current_execution_is_strict() {
+                            let err = self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
+                            self.handle_throw(ctx, &err)?;
+                        }
+                        return Ok(val.clone());
+                    }
+                    if let Value::VmObject(m) = cv {
+                        let borrow = m.borrow();
+                        if let Some(sf) = lookup_setter(&borrow, key).cloned() {
+                            drop(borrow);
+                            let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
+                            return Ok(val.clone());
+                        }
+                        if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
+                            && !matches!(&**sf, Value::Undefined)
                         {
-                            if matches!(result, Value::Boolean(false)) && self.current_execution_is_strict() {
+                            let sf_clone = (**sf).clone();
+                            drop(borrow);
+                            let _ = self.vm_call_function_value(ctx, &sf_clone, obj, std::slice::from_ref(val))?;
+                            return Ok(val.clone());
+                        }
+                        if has_readonly_mark(&borrow, key) {
+                            drop(borrow);
+                            if self.current_execution_is_strict() {
                                 let err =
                                     self.make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
                                 self.handle_throw(ctx, &err)?;
                             }
                             return Ok(val.clone());
                         }
-                        if let Value::VmObject(m) = cv {
-                            let borrow = m.borrow();
-                            if let Some(sf) = lookup_setter(&borrow, key).cloned() {
-                                drop(borrow);
-                                let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
-                                return Ok(val.clone());
-                            }
-                            if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
-                                && !matches!(&**sf, Value::Undefined)
-                            {
-                                let sf_clone = (**sf).clone();
-                                drop(borrow);
-                                let _ = self.vm_call_function_value(ctx, &sf_clone, obj, std::slice::from_ref(val))?;
-                                return Ok(val.clone());
-                            }
-                            if has_readonly_mark(&borrow, key) {
-                                drop(borrow);
-                                if self.current_execution_is_strict() {
-                                    let err = self
-                                        .make_type_error_object(ctx, &format!("Cannot assign to read only property '{}' of object", key));
-                                    self.handle_throw(ctx, &err)?;
-                                }
-                                return Ok(val.clone());
-                            }
-                            cur = borrow.get("__proto__").cloned();
-                        } else {
-                            break;
-                        }
+                        cur = borrow.get("__proto__").cloned();
+                    } else {
+                        break;
                     }
                 }
-                if self.current_execution_is_strict() {
-                    let err = self.make_type_error_object(
-                        ctx,
-                        &format!("Cannot create property '{}' on symbol '{}'", key, value_to_string(obj)),
-                    );
-                    self.handle_throw(ctx, &err)?;
-                }
-                return Ok(val.clone());
             }
+            if self.current_execution_is_strict() {
+                let err = self.make_type_error_object(
+                    ctx,
+                    &format!("Cannot create property '{}' on symbol '{}'", key, value_to_string(obj)),
+                );
+                self.handle_throw(ctx, &err)?;
+            }
+            return Ok(val.clone());
+        }
+        if let Value::VmObject(map) = &obj {
             let borrow = map.borrow();
             let is_frozen = matches!(borrow.get("__frozen__"), Some(Value::Boolean(true)));
             let is_non_ext = matches!(borrow.get("__non_extensible__"), Some(Value::Boolean(true)));
@@ -16222,29 +16176,21 @@ impl<'gc> VM<'gc> {
             _ => return,
         };
 
-        let inferred = if let Some(symbol_name) = key_value.and_then(|raw| match raw {
-            Value::VmObject(sym_obj) if sym_obj.borrow().contains_key("__vm_symbol__") => {
-                let desc_val = own_data_from_legacy_map(&sym_obj.borrow(), "__description__").unwrap_or(Value::Undefined);
-                Some(match desc_val {
-                    Value::String(desc) => {
-                        let desc = crate::unicode::utf16_to_utf8(&desc);
-                        if desc.is_empty() { String::new() } else { format!("[{}]", desc) }
-                    }
-                    _ => String::new(),
-                })
-            }
-            _ => None,
+        let inferred = if let Some(symbol_name) = key_value.and_then(|raw| {
+            self.symbol_description(raw).map(|desc| {
+                let desc = crate::unicode::utf16_to_utf8(&desc);
+                if desc.is_empty() { String::new() } else { format!("[{}]", desc) }
+            })
         }) {
             symbol_name
         } else if let Some(id_str) = key.strip_prefix("@@sym:") {
             if let Ok(id) = id_str.parse::<u64>() {
-                if let Some(Value::VmObject(sym_obj)) = self.get_symbol_value(ctx, id) {
-                    match own_data_from_legacy_map(&sym_obj.borrow(), "__description__").unwrap_or(Value::Undefined) {
-                        Value::String(desc) => {
-                            let desc = crate::unicode::utf16_to_utf8(&desc);
-                            if desc.is_empty() { String::new() } else { format!("[{}]", desc) }
-                        }
-                        _ => String::new(),
+                if let Some(symbol) = self.get_symbol_value(ctx, id) {
+                    if let Some(desc) = self.symbol_description(&symbol) {
+                        let desc = crate::unicode::utf16_to_utf8(&desc);
+                        if desc.is_empty() { String::new() } else { format!("[{}]", desc) }
+                    } else {
+                        String::new()
                     }
                 } else {
                     String::new()
@@ -17065,18 +17011,10 @@ impl<'gc> VM<'gc> {
                 let wrapper_value = Value::VmObject(new_gc_cell_ptr(ctx, wrapper));
                 self.read_named_property_with_receiver(ctx, &wrapper_value, key, obj)
             }
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+            Value::Symbol(_) => {
                 // Symbol primitives: use dynamic prototype resolution like
                 // Number/String/Boolean so cross-realm property access uses
                 // the current realm's Symbol.prototype, not the creating realm's.
-                {
-                    let borrow = map.borrow();
-                    if let Some(val) = own_data_from_legacy_map(&borrow, key)
-                        && !key.starts_with("__")
-                    {
-                        return val;
-                    }
-                }
                 if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Symbol") {
                     self.read_named_property_with_receiver(ctx, &proto, key, obj)
                 } else {
@@ -17837,43 +17775,24 @@ impl<'gc> VM<'gc> {
         // Well-known symbols are proper VmObject symbols with fixed IDs:
         // iterator=1, hasInstance=2, toPrimitive=3, toStringTag=4, species=5,
         // asyncIterator=6, match=7, replace=8, search=9, split=10, matchAll=11
-        let make_well_known_symbol = |id: u64, name: &str| -> Value<'gc> {
-            let mut m = IndexMap::new();
-            m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
-            m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
-            m.insert("__description__".to_string(), Value::from(&format!("Symbol.{}", name)));
-            Value::VmObject(new_gc_cell_ptr(ctx, m))
+        let make_well_known_symbol = |vm: &mut Self, id: u64, name: &str| {
+            vm.create_symbol(ctx, id, Some(crate::unicode::utf8_to_utf16(&format!("Symbol.{}", name))), false)
         };
-        let sym_iterator = make_well_known_symbol(1, "iterator");
-        let sym_has_instance = make_well_known_symbol(2, "hasInstance");
-        let sym_to_primitive = make_well_known_symbol(3, "toPrimitive");
-        let sym_to_string_tag = make_well_known_symbol(4, "toStringTag");
-        let sym_species = make_well_known_symbol(5, "species");
-        let sym_async_iterator = make_well_known_symbol(6, "asyncIterator");
-        let sym_match = make_well_known_symbol(7, "match");
-        let sym_replace = make_well_known_symbol(8, "replace");
-        let sym_search = make_well_known_symbol(9, "search");
-        let sym_split = make_well_known_symbol(10, "split");
-        let sym_match_all = make_well_known_symbol(11, "matchAll");
-        let sym_dispose = make_well_known_symbol(12, "dispose");
-        let sym_async_dispose = make_well_known_symbol(13, "asyncDispose");
-        let sym_unscopables = make_well_known_symbol(14, "unscopables");
-        let sym_is_concat_spreadable = make_well_known_symbol(15, "isConcatSpreadable");
-        self.cache_symbol_value(1, &sym_iterator);
-        self.cache_symbol_value(2, &sym_has_instance);
-        self.cache_symbol_value(3, &sym_to_primitive);
-        self.cache_symbol_value(4, &sym_to_string_tag);
-        self.cache_symbol_value(5, &sym_species);
-        self.cache_symbol_value(6, &sym_async_iterator);
-        self.cache_symbol_value(7, &sym_match);
-        self.cache_symbol_value(8, &sym_replace);
-        self.cache_symbol_value(9, &sym_search);
-        self.cache_symbol_value(10, &sym_split);
-        self.cache_symbol_value(11, &sym_match_all);
-        self.cache_symbol_value(12, &sym_dispose);
-        self.cache_symbol_value(13, &sym_async_dispose);
-        self.cache_symbol_value(14, &sym_unscopables);
-        self.cache_symbol_value(15, &sym_is_concat_spreadable);
+        let sym_iterator = make_well_known_symbol(self, 1, "iterator");
+        let sym_has_instance = make_well_known_symbol(self, 2, "hasInstance");
+        let sym_to_primitive = make_well_known_symbol(self, 3, "toPrimitive");
+        let sym_to_string_tag = make_well_known_symbol(self, 4, "toStringTag");
+        let sym_species = make_well_known_symbol(self, 5, "species");
+        let sym_async_iterator = make_well_known_symbol(self, 6, "asyncIterator");
+        let sym_match = make_well_known_symbol(self, 7, "match");
+        let sym_replace = make_well_known_symbol(self, 8, "replace");
+        let sym_search = make_well_known_symbol(self, 9, "search");
+        let sym_split = make_well_known_symbol(self, 10, "split");
+        let sym_match_all = make_well_known_symbol(self, 11, "matchAll");
+        let sym_dispose = make_well_known_symbol(self, 12, "dispose");
+        let sym_async_dispose = make_well_known_symbol(self, 13, "asyncDispose");
+        let sym_unscopables = make_well_known_symbol(self, 14, "unscopables");
+        let sym_is_concat_spreadable = make_well_known_symbol(self, 15, "isConcatSpreadable");
         self.symbol_counter = 15; // user symbols start from 16+
 
         let mut sym_obj = IndexMap::new();
@@ -20178,11 +20097,7 @@ impl<'gc> VM<'gc> {
                 _ => None,
             })
             .and_then(|v| match v {
-                Value::VmObject(sym) => sym.borrow().get("__symbol_id__").cloned(),
-                _ => None,
-            })
-            .and_then(|v| match v {
-                Value::Number(id) => Some(format!("@@sym:{}", id as u64)),
+                Value::Symbol(sym) => Some(format!("@@sym:{}", sym.borrow().id)),
                 _ => None,
             })
             .unwrap_or_else(|| "@@sym:4".to_string());
@@ -20194,11 +20109,7 @@ impl<'gc> VM<'gc> {
                 _ => None,
             })
             .and_then(|v| match v {
-                Value::VmObject(sym) => sym.borrow().get("__symbol_id__").cloned(),
-                _ => None,
-            })
-            .and_then(|v| match v {
-                Value::Number(id) => Some(format!("@@sym:{}", id as u64)),
+                Value::Symbol(sym) => Some(format!("@@sym:{}", sym.borrow().id)),
                 _ => None,
             })
             .unwrap_or_else(|| "@@sym:6".to_string());
@@ -20536,15 +20447,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn vm_to_string(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
+        if let Some(symbol_string) = self.symbol_display_string(val) {
+            return symbol_string;
+        }
         if let Value::VmObject(map) = val {
             let borrow = map.borrow();
-            // VM Symbol toString
-            if borrow.contains_key("__vm_symbol__") {
-                return match borrow.get("__description__") {
-                    Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
-                    _ => "Symbol()".to_string(),
-                };
-            }
             drop(borrow);
             // Use try_to_primitive which properly walks the prototype chain
             let prim = self.try_to_primitive(ctx, val, "string");
@@ -21169,22 +21076,7 @@ impl<'gc> VM<'gc> {
 
     /// ToNumber with object coercion: ToPrimitive(hint "number") then to_number.
     fn vm_coerce_to_number(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> f64 {
-        if matches!(
-            val,
-            Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
-        ) {
-            if val.is_symbol_value() {
-                self.pending_throw = Some(self.make_type_error_object(ctx, "Cannot convert a Symbol value to a number"));
-                return f64::NAN;
-            }
-            let prim = self.try_to_primitive(ctx, val, "number");
-            if self.pending_throw.is_some() {
-                return f64::NAN;
-            }
-            to_number(&prim)
-        } else {
-            to_number(val)
-        }
+        self.extract_number_with_coercion(ctx, val).unwrap_or(f64::NAN)
     }
 
     /// ToString with object coercion for string method arguments.
@@ -22034,15 +21926,11 @@ impl<'gc> VM<'gc> {
 
     /// Display a value for console.log (uses inspect-style format for arrays/objects)
     fn vm_display_string(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
+        if let Some(symbol_string) = self.symbol_display_string(val) {
+            return symbol_string;
+        }
         if let Value::VmObject(map) = val {
             let borrow = map.borrow();
-            // VM Symbol display
-            if borrow.contains_key("__vm_symbol__") {
-                return match borrow.get("__description__") {
-                    Some(Value::String(d)) => format!("Symbol({})", crate::unicode::utf16_to_utf8(d)),
-                    _ => "Symbol()".to_string(),
-                };
-            }
             if let Some(formatted) = Self::format_vm_error_object(&borrow) {
                 return formatted;
             }
@@ -22724,8 +22612,8 @@ impl<'gc> VM<'gc> {
     fn is_primitive_value(value: &Value<'gc>) -> bool {
         matches!(
             value,
-            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Null | Value::Undefined | Value::BigInt(_)
-        ) || value.is_symbol_value()
+            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Null | Value::Undefined | Value::BigInt(_) | Value::Symbol(_)
+        )
     }
 
     /// GetWrappedValue: wrap a value for crossing the ShadowRealm boundary.
@@ -22737,20 +22625,7 @@ impl<'gc> VM<'gc> {
         realm_id: usize,
         owner_realm_id: Option<usize>,
     ) -> Result<Value<'gc>, ()> {
-        // Symbols need special handling: reassign __proto__ to caller realm's Symbol.prototype
         if value.is_symbol_value() {
-            if let Value::VmObject(obj) = value {
-                let caller_sym_proto = self.globals.get("Symbol").and_then(|s| {
-                    if let Value::VmObject(sym_ctor) = s {
-                        own_data_from_legacy_map(&sym_ctor.borrow(), "prototype")
-                    } else {
-                        None
-                    }
-                });
-                if let Some(proto) = caller_sym_proto {
-                    obj.borrow_mut(ctx).insert("__proto__".to_string(), proto);
-                }
-            }
             return Ok(value.clone());
         }
         if Self::is_primitive_value(value) {
@@ -23507,14 +23382,10 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 };
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
-                let is_registered_symbol = if let Value::VmObject(ref obj) = target {
-                    let b = obj.borrow();
-                    b.contains_key("__vm_symbol__") && b.contains_key("__registered__")
-                } else {
-                    false
-                };
+                let is_registered_symbol = self.is_registered_symbol(&target);
                 let is_valid = match &target {
                     Value::VmObject(_) if !is_registered_symbol => true,
+                    Value::Symbol(_) if !is_registered_symbol => true,
                     Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
                     _ => false,
                 };
@@ -24228,11 +24099,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    let proto_is_object = match &proto_candidate {
-                        Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-                        Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
-                        _ => false,
-                    };
+                    let proto_is_object = self.is_spec_object_value(&proto_candidate);
                     if proto_is_object {
                         proto_candidate
                     } else {
@@ -24773,11 +24640,7 @@ impl<'gc> VM<'gc> {
                         self.pending_throw = Some(thrown);
                         return Value::Undefined;
                     }
-                    let proto_is_object = match &proto_candidate {
-                        Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-                        Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
-                        _ => false,
-                    };
+                    let proto_is_object = self.is_spec_object_value(&proto_candidate);
                     if proto_is_object {
                         proto_candidate
                     } else {
@@ -27783,9 +27646,7 @@ impl<'gc> VM<'gc> {
                 }
                 // ToObject(target): box primitives if needed
                 let target_obj = match &target_arg {
-                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
-                        self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&target_arg))
-                    }
+                    Value::Symbol(_) => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&target_arg)),
                     Value::VmObject(_) | Value::VmArray(_) => target_arg.clone(),
                     _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&target_arg)),
                 };
@@ -28650,6 +28511,10 @@ impl<'gc> VM<'gc> {
                     self.ctor_prototype_from_globals(ctx, "String").unwrap_or(Value::Null)
                 } else if matches!(target, Value::Boolean(_)) {
                     self.ctor_prototype_from_globals(ctx, "Boolean").unwrap_or(Value::Null)
+                } else if matches!(target, Value::BigInt(_)) {
+                    self.ctor_prototype_from_globals(ctx, "BigInt").unwrap_or(Value::Null)
+                } else if matches!(target, Value::Symbol(_)) {
+                    self.ctor_prototype_from_globals(ctx, "Symbol").unwrap_or(Value::Null)
                 } else {
                     Value::Null
                 }
@@ -28765,9 +28630,14 @@ impl<'gc> VM<'gc> {
                 let desc_val = args.get(2).cloned().unwrap_or(Value::Undefined);
                 if matches!(
                     desc_val,
-                    Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_)
-                ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
-                {
+                    Value::Undefined
+                        | Value::Null
+                        | Value::Number(_)
+                        | Value::Boolean(_)
+                        | Value::String(_)
+                        | Value::BigInt(_)
+                        | Value::Symbol(_)
+                ) {
                     self.throw_type_error(ctx, "Property description must be an object");
                     return Value::Undefined;
                 }
@@ -29172,9 +29042,6 @@ impl<'gc> VM<'gc> {
                             Some(Value::Number(n)) => Some(*n as usize),
                             _ => None,
                         };
-                        if borrow.contains_key("__vm_symbol__") {
-                            return Value::Undefined;
-                        }
                         // Module namespace exotic object [[GetOwnProperty]] (§10.4.6.4)
                         if borrow.contains_key("__module_namespace__") {
                             if Self::namespace_is_symbol_like_key(obj, &key) {
@@ -29496,9 +29363,14 @@ impl<'gc> VM<'gc> {
                     }
                     if matches!(
                         desc_val,
-                        Value::Undefined | Value::Null | Value::Number(_) | Value::Boolean(_) | Value::String(_) | Value::BigInt(_)
-                    ) || matches!(&desc_val, Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__"))
-                    {
+                        Value::Undefined
+                            | Value::Null
+                            | Value::Number(_)
+                            | Value::Boolean(_)
+                            | Value::String(_)
+                            | Value::BigInt(_)
+                            | Value::Symbol(_)
+                    ) {
                         self.throw_type_error(ctx, "Property description must be an object");
                         return Value::Undefined;
                     }
@@ -29840,16 +29712,15 @@ impl<'gc> VM<'gc> {
                             }
                             return Value::VmObject(new_gc_cell_ptr(ctx, obj));
                         }
-                        Value::VmObject(_)
+                        Value::Symbol(_)
+                        | Value::VmObject(_)
                         | Value::VmArray(_)
                         | Value::VmMap(_)
                         | Value::VmSet(_)
                         | Value::VmFunction(..)
                         | Value::VmClosure(..)
                         | Value::VmNativeFunction(_) => {
-                            if let Value::VmObject(sym_obj) = arg
-                                && sym_obj.borrow().contains_key("__vm_symbol__")
-                            {
+                            if matches!(arg, Value::Symbol(_)) {
                                 let mut wrapper = IndexMap::new();
                                 wrapper.insert("__type__".to_string(), Value::from("Symbol"));
                                 wrapper.insert("__value__".to_string(), arg.clone());
@@ -30177,7 +30048,7 @@ impl<'gc> VM<'gc> {
                 map
             }
             BUILTIN_SYMBOL => {
-                // Symbol(description?) — create a unique symbol-like VmObject
+                // Symbol(description?) — create a unique symbol primitive
                 // 1.b. If description is undefined, let descString be undefined.
                 // 1.c. Else, let descString be ? ToString(description).
                 let desc = if let Some(v) = args.first() {
@@ -30197,20 +30068,7 @@ impl<'gc> VM<'gc> {
                 };
                 self.symbol_counter += 1;
                 let id = self.symbol_counter;
-                let mut m = IndexMap::new();
-                m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
-                m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
-                if let Some(d) = &desc {
-                    m.insert("__description__".to_string(), Value::from(d));
-                }
-                if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
-                    && let Some(proto) = symbol_ctor.borrow().get("prototype").cloned()
-                {
-                    m.insert("__proto__".to_string(), proto);
-                }
-                let val = Value::VmObject(new_gc_cell_ptr(ctx, m));
-                self.cache_symbol_value(id, &val);
-                val
+                self.create_symbol(ctx, id, desc.map(|s| crate::unicode::utf8_to_utf16(&s)), false)
             }
             BUILTIN_SYMBOL_FOR => {
                 // Symbol.for(key) — return or create a registered symbol
@@ -30231,18 +30089,7 @@ impl<'gc> VM<'gc> {
                 }
                 self.symbol_counter += 1;
                 let id = self.symbol_counter;
-                let mut m = IndexMap::new();
-                m.insert("__vm_symbol__".to_string(), Value::Boolean(true));
-                m.insert("__symbol_id__".to_string(), Value::Number(id as f64));
-                m.insert("__registered__".to_string(), Value::Boolean(true));
-                m.insert("__description__".to_string(), Value::from(&key));
-                if let Some(Value::VmObject(symbol_ctor)) = self.globals.get("Symbol")
-                    && let Some(proto) = symbol_ctor.borrow().get("prototype").cloned()
-                {
-                    m.insert("__proto__".to_string(), proto);
-                }
-                let val = Value::VmObject(new_gc_cell_ptr(ctx, m));
-                self.cache_symbol_value(id, &val);
+                let val = self.create_symbol(ctx, id, Some(crate::unicode::utf8_to_utf16(&key)), true);
                 self.symbol_registry.insert(key, val.clone());
                 val
             }
@@ -30250,10 +30097,10 @@ impl<'gc> VM<'gc> {
                 // Symbol.keyFor(sym) — return key if registered, else undefined
                 let sym = args.first().cloned().unwrap_or(Value::Undefined);
                 match &sym {
-                    Value::VmObject(obj) if obj.borrow().contains_key("__vm_symbol__") => {
-                        let borrow = obj.borrow();
-                        if borrow.get("__registered__").is_some()
-                            && let Some(Value::String(desc)) = borrow.get("__description__")
+                    Value::Symbol(symbol) => {
+                        let borrow = symbol.borrow();
+                        if borrow.registered
+                            && let Some(desc) = &borrow.description
                         {
                             return Value::String(desc.clone());
                         }
@@ -32938,11 +32785,7 @@ impl<'gc> VM<'gc> {
             for item in items {
                 // IsConcatSpreadable(item) per §23.1.3.1.1
                 let spreadable = {
-                    let is_obj = match &item {
-                        Value::VmObject(o) => !o.borrow().contains_key("__vm_symbol__"),
-                        Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
-                        _ => false,
-                    };
+                    let is_obj = self.is_spec_object_value(&item);
                     if is_obj {
                         let sym_val = self.read_named_property(ctx, &item, "@@sym:15");
                         if self.pending_throw.is_some() {
@@ -33793,11 +33636,7 @@ impl<'gc> VM<'gc> {
 
                     for arg in args {
                         // IsConcatSpreadable check
-                        let is_obj = match arg {
-                            Value::VmObject(o) => !o.borrow().contains_key("__vm_symbol__"),
-                            Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
-                            _ => false,
-                        };
+                        let is_obj = self.is_spec_object_value(arg);
                         let spreadable = if is_obj {
                             let sym_val = self.read_named_property(ctx, arg, "@@sym:15");
                             if self.pending_throw.is_some() {
@@ -35005,6 +34844,10 @@ impl<'gc> VM<'gc> {
             || matches!(id, BUILTIN_STRING_AT | BUILTIN_STRING_ISWELLFORMED | BUILTIN_STRING_TOWELLFORMED);
         let string_val: Option<Vec<u16>> = match &receiver {
             Value::String(s) => Some(s.clone()),
+            Value::Symbol(_) if is_string_method => {
+                self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
+                return Value::Undefined;
+            }
             Value::VmObject(map) => {
                 let b = map.borrow();
                 if b.get("__type__").map(|v| value_to_string(v)).as_deref() == Some("String") {
@@ -35012,11 +34855,6 @@ impl<'gc> VM<'gc> {
                         Some(Value::String(s)) => Some(s.clone()),
                         _ => None,
                     }
-                } else if is_string_method && b.contains_key("__vm_symbol__") {
-                    // ToString(Symbol) must throw TypeError
-                    drop(b);
-                    self.throw_type_error(ctx, "Cannot convert a Symbol value to a string");
-                    return Value::Undefined;
                 } else if is_string_value_method {
                     drop(b);
                     self.throw_type_error(ctx, "String.prototype.toString requires that 'this' be a String");
@@ -37448,12 +37286,7 @@ impl<'gc> VM<'gc> {
                 return self.call_method_builtin(ctx, BUILTIN_FN_HASINSTANCE, &bound_target, std::slice::from_ref(&v));
             }
             // Step 3: If Type(O) is not Object, return false
-            // Note: Symbols are VmObjects with __vm_symbol__ but are NOT objects per spec
-            let v_is_object = match &v {
-                Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
-                Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
-                _ => false,
-            };
+            let v_is_object = self.is_spec_object_value(&v);
             if !v_is_object {
                 return Value::Boolean(false);
             }
@@ -37463,12 +37296,7 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             // Step 5: If Type(P) is not Object, throw TypeError
-            // Note: Symbols are VmObjects with __vm_symbol__ but are NOT objects per spec
-            let proto_is_object = match &rhs_proto {
-                Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
-                Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
-                _ => false,
-            };
+            let proto_is_object = self.is_spec_object_value(&rhs_proto);
             if !proto_is_object {
                 self.throw_type_error(ctx, "Function has non-object prototype in instanceof check");
                 return Value::Undefined;
@@ -37635,13 +37463,14 @@ impl<'gc> VM<'gc> {
                         }
                         return Value::from(&format!("[object {}]", builtin_tag));
                     }
-                    if b.contains_key("__vm_symbol__") {
+                    if let Some(symbol_string) = self.symbol_display_string(receiver) {
                         drop(b);
                         let proto = self.ctor_prototype_from_globals(ctx, "Symbol");
                         if let Some(Value::String(tag)) = self.lookup_proto_chain(proto.as_ref(), "@@sym:4") {
                             let tag_str = crate::unicode::utf16_to_utf8(&tag);
                             return Value::from(&format!("[object {}]", tag_str));
                         }
+                        let _ = symbol_string;
                         "Object"
                     } else {
                         let builtin_type_tag = b.get("__type__").and_then(|v| {
@@ -38425,10 +38254,7 @@ impl<'gc> VM<'gc> {
                 if let Some(key) = keys.get(i) {
                     let key_str = match key {
                         Value::String(s) => crate::unicode::utf16_to_utf8(s),
-                        Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => match sym.borrow().get("__symbol_id__") {
-                            Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
-                            _ => continue,
-                        },
+                        Value::Symbol(sym) => format!("@@sym:{}", sym.borrow().id),
                         Value::Number(n) => {
                             if *n == (*n as u32) as f64 && *n >= 0.0 {
                                 format!("{}", *n as u32)
@@ -38468,10 +38294,7 @@ impl<'gc> VM<'gc> {
     fn value_to_property_key(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
         match val {
             Value::String(s) => crate::unicode::utf16_to_utf8(s),
-            Value::VmObject(sym) if sym.borrow().contains_key("__vm_symbol__") => match sym.borrow().get("__symbol_id__") {
-                Some(Value::Number(id)) => format!("@@sym:{}", *id as u64),
-                _ => self.vm_to_string(ctx, val),
-            },
+            Value::Symbol(sym) => format!("@@sym:{}", sym.borrow().id),
             Value::Number(n) => {
                 if *n == (*n as u32) as f64 && *n >= 0.0 {
                     format!("{}", *n as u32)
@@ -39311,31 +39134,13 @@ impl<'gc> VM<'gc> {
 
     /// Try to coerce a value via [Symbol.toPrimitive] if present.
     fn try_to_primitive(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, hint: &str) -> Value<'gc> {
-        let is_object_like = |v: &Value<'gc>| match v {
-            Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-            Value::VmArray(_)
-            | Value::VmMap(_)
-            | Value::VmSet(_)
-            | Value::VmFunction(..)
-            | Value::VmClosure(..)
-            | Value::VmNativeFunction(_) => true,
-            _ => false,
-        };
-
         if !matches!(
             val,
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_)
         ) {
             return val.clone();
         }
-
-        if let Value::VmObject(map) = val {
-            // VM symbols are represented as dedicated objects but behave as
-            // primitive Symbols for coercion semantics.
-            if map.borrow().contains_key("__vm_symbol__") {
-                return val.clone();
-            }
-
+        if let Value::VmObject(_) = val {
             let func = self.read_named_property(ctx, val, "@@sym:3");
             if self.pending_throw.is_some() {
                 return Value::Undefined;
@@ -39351,7 +39156,7 @@ impl<'gc> VM<'gc> {
                     .call_internal_callback_with_isolated_try_stack(|vm| vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)]))
                 {
                     Ok(r) => {
-                        if is_object_like(&r) {
+                        if self.is_spec_object_value(&r) {
                             self.pending_throw = Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
                             return Value::Undefined;
                         }
@@ -39380,7 +39185,7 @@ impl<'gc> VM<'gc> {
                     .call_internal_callback_with_isolated_try_stack(|vm| vm.vm_call_function_value(ctx, &func, val, &[Value::from(hint)]))
                 {
                     Ok(r) => {
-                        if is_object_like(&r) {
+                        if self.is_spec_object_value(&r) {
                             self.pending_throw = Some(self.make_type_error_object(ctx, "Symbol.toPrimitive must return a primitive value"));
                             return Value::Undefined;
                         }
@@ -39425,7 +39230,7 @@ impl<'gc> VM<'gc> {
             }
             match self.call_internal_callback_with_isolated_try_stack(|vm| vm.vm_call_function_value(ctx, &method, val, &[])) {
                 Ok(out) => {
-                    if !is_object_like(&out) {
+                    if !self.is_spec_object_value(&out) {
                         return out;
                     }
                 }
@@ -39558,6 +39363,7 @@ impl<'gc> VM<'gc> {
             (Value::String(x), Value::String(y)) => x == y,
             (Value::Boolean(x), Value::Boolean(y)) => x == y,
             (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => true,
+            (Value::Symbol(a_sym), Value::Symbol(b_sym)) => Gc::ptr_eq(*a_sym, *b_sym),
             (Value::VmObject(a_rc), Value::VmObject(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmArray(a_rc), Value::VmArray(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
@@ -39736,12 +39542,7 @@ impl<'gc> VM<'gc> {
 
     fn loose_eq_to_primitive(&mut self, ctx: &GcContext<'gc>, v: &Value<'gc>) -> Value<'gc> {
         let prim = self.try_to_primitive(ctx, v, "default");
-        // VM symbols are VmObject but semantically primitive — treat them as such.
-        let is_still_object = match &prim {
-            Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-            Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
-            _ => false,
-        };
+        let is_still_object = self.is_spec_object_value(&prim);
         if !is_still_object {
             return prim;
         }
@@ -39752,11 +39553,7 @@ impl<'gc> VM<'gc> {
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) | Value::VmObject(_)
         ) && let Ok(out) = self.vm_call_function_value(ctx, &value_of_fn, &prim, &[])
         {
-            let out_is_object = match &out {
-                Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-                Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
-                _ => false,
-            };
+            let out_is_object = self.is_spec_object_value(&out);
             if !out_is_object {
                 return out;
             }
@@ -39839,19 +39636,8 @@ impl<'gc> VM<'gc> {
                 let num = Value::Number(if *bv { 1.0 } else { 0.0 });
                 self.loose_equal(ctx, a, &num)
             }
-            // Object vs primitive: ToPrimitive(object) then recurse.
-            // But VM symbols (VmObject with __vm_symbol__) are primitive Symbols — they never
-            // equal String/Number/BigInt per spec §7.2.14.
-            (Value::VmObject(map), Value::String(_) | Value::Number(_) | Value::BigInt(_))
-                if map.borrow().contains_key("__vm_symbol__") =>
-            {
-                false
-            }
-            (Value::String(_) | Value::Number(_) | Value::BigInt(_), Value::VmObject(map))
-                if map.borrow().contains_key("__vm_symbol__") =>
-            {
-                false
-            }
+            (Value::Symbol(_), Value::String(_) | Value::Number(_) | Value::BigInt(_)) => false,
+            (Value::String(_) | Value::Number(_) | Value::BigInt(_), Value::Symbol(_)) => false,
             (
                 Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_),
                 Value::String(_) | Value::Number(_) | Value::BigInt(_),
@@ -39866,25 +39652,16 @@ impl<'gc> VM<'gc> {
                 let prim = self.loose_eq_to_primitive(ctx, b);
                 self.loose_equal(ctx, a, &prim)
             }
-            // Reference equality for objects/arrays/maps/sets
-            // Symbols are VmObject with __vm_symbol__; when one side is a symbol and the
-            // other is a plain object, ToPrimitive the non-symbol side (spec §7.2.14 step 10).
-            (Value::VmObject(a_rc), Value::VmObject(b_rc)) => {
-                let a_sym = a.is_symbol_value();
-                let b_sym = b.is_symbol_value();
-                if a_sym && !b_sym {
-                    let prim = self.loose_eq_to_primitive(ctx, b);
-                    return self.loose_equal(ctx, a, &prim);
-                }
-                if b_sym && !a_sym {
-                    let prim = self.loose_eq_to_primitive(ctx, a);
-                    return self.loose_equal(ctx, &prim, b);
-                }
-                if a_sym && b_sym {
-                    return self.symbol_id(a) == self.symbol_id(b);
-                }
-                Gc::ptr_eq(*a_rc, *b_rc)
+            (Value::Symbol(_), Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_)) => {
+                let prim = self.loose_eq_to_primitive(ctx, b);
+                self.loose_equal(ctx, a, &prim)
             }
+            (Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_), Value::Symbol(_)) => {
+                let prim = self.loose_eq_to_primitive(ctx, a);
+                self.loose_equal(ctx, &prim, b)
+            }
+            (Value::Symbol(a_sym), Value::Symbol(b_sym)) => Gc::ptr_eq(*a_sym, *b_sym),
+            (Value::VmObject(a_rc), Value::VmObject(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmArray(a_rc), Value::VmArray(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmMap(a_rc), Value::VmMap(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
             (Value::VmSet(a_rc), Value::VmSet(b_rc)) => Gc::ptr_eq(*a_rc, *b_rc),
@@ -40145,12 +39922,9 @@ impl<'gc> VM<'gc> {
     /// CanBeHeldWeakly(v): Objects and non-registered Symbols can be held weakly.
     fn can_be_held_weakly(&self, value: &Value<'gc>) -> bool {
         match value {
+            Value::Symbol(symbol) => !symbol.borrow().registered,
             Value::VmObject(obj) => {
-                let b = obj.borrow();
-                // Registered symbols (Symbol.for) cannot be held weakly
-                if b.contains_key("__vm_symbol__") {
-                    return !b.contains_key("__registered__");
-                }
+                let _ = obj;
                 true
             }
             Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
@@ -40174,11 +39948,6 @@ impl<'gc> VM<'gc> {
     }
 
     fn collect_object_map_keys(&self, map: &IndexMap<String, Value<'gc>>, enumerable_only: bool) -> Vec<String> {
-        if map.contains_key("__vm_symbol__") {
-            // Symbol wrapper objects expose no own string-keyed properties.
-            return Vec::new();
-        }
-
         let mut is_string_wrapper = false;
         let mut keys: Vec<String> =
             if let (Some(Value::String(type_name)), Some(Value::String(str_val))) = (map.get("__type__"), map.get("__value__")) {
@@ -43123,9 +42892,7 @@ impl<'gc> VM<'gc> {
     /// SameValue comparison (like Object.is)
     fn values_same(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
         match (a, b) {
-            (Value::VmObject(_), Value::VmObject(_)) if a.is_symbol_value() && b.is_symbol_value() => {
-                self.symbol_id(a) == self.symbol_id(b)
-            }
+            (Value::Symbol(a_sym), Value::Symbol(b_sym)) => Gc::ptr_eq(*a_sym, *b_sym),
             (Value::VmObject(a), Value::VmObject(b)) => Gc::ptr_eq(*a, *b),
             (Value::VmArray(a), Value::VmArray(b)) => Gc::ptr_eq(*a, *b),
             (Value::VmMap(a), Value::VmMap(b)) => Gc::ptr_eq(*a, *b),
@@ -43155,16 +42922,59 @@ impl<'gc> VM<'gc> {
 
     fn symbol_id(&self, val: &Value<'gc>) -> Option<u64> {
         match val {
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => map
-                .borrow()
-                .get("__symbol_id__")
-                .and_then(|v| if let Value::Number(n) = v { Some(*n as u64) } else { None }),
+            Value::Symbol(sym) => Some(sym.borrow().id),
+            _ => None,
+        }
+    }
+
+    fn symbol_description(&self, val: &Value<'gc>) -> Option<Vec<u16>> {
+        match val {
+            Value::Symbol(sym) => sym.borrow().description.clone(),
+            _ => None,
+        }
+    }
+
+    fn is_registered_symbol(&self, val: &Value<'gc>) -> bool {
+        match val {
+            Value::Symbol(sym) => sym.borrow().registered,
+            _ => false,
+        }
+    }
+
+    fn symbol_display_string(&self, val: &Value<'gc>) -> Option<String> {
+        self.symbol_description(val)
+            .map(|desc| format!("Symbol({})", crate::unicode::utf16_to_utf8(&desc)))
+            .or_else(|| val.is_symbol_value().then(|| "Symbol()".to_string()))
+    }
+
+    fn symbol_primitive_from_wrapper(&self, value: &Value<'gc>) -> Option<Value<'gc>> {
+        match value {
+            Value::Symbol(_) => Some(value.clone()),
+            Value::VmObject(obj) => {
+                let borrow = obj.borrow();
+                if matches!(borrow.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Symbol") {
+                    match borrow.get("__value__") {
+                        Some(inner @ Value::Symbol(_)) => Some(inner.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
     fn symbol_key_string(&self, val: &Value<'gc>) -> Option<String> {
         self.symbol_id(val).map(|id| format!("@@sym:{}", id))
+    }
+
+    fn is_spec_object_value(&self, value: &Value<'gc>) -> bool {
+        match value {
+            Value::VmObject(_) | Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => !value.is_symbol_value(),
+            Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
+            _ => false,
+        }
     }
 
     fn same_constructor_identity(&self, a: &Value<'gc>, b: &Value<'gc>) -> bool {
@@ -43527,13 +43337,7 @@ impl<'gc> VM<'gc> {
             return make_fallback(self);
         }
 
-        // Spec step 7: "If Type(C) is Object" — only true spec-level Objects,
-        // not primitive symbols (which the engine stores as VmObject with __vm_symbol__).
-        let ctor_is_object = match &ctor {
-            Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-            Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => true,
-            _ => false,
-        };
+        let ctor_is_object = self.is_spec_object_value(&ctor);
 
         if self.is_constructor_value(&ctor)
             && let Some(Value::VmObject(origin_global)) = self.constructor_origin_global(ctx, &ctor)
@@ -43857,17 +43661,17 @@ impl<'gc> VM<'gc> {
                     value
                 }
             }
-            Value::VmObject(obj) => {
-                if obj.borrow().contains_key("__vm_symbol__") {
-                    let symbol = Value::VmObject(obj);
-                    if let Some(id) = self.symbol_id(&symbol) {
-                        if let Some(local_symbol) = self.get_symbol_value(ctx, id) {
-                            return local_symbol;
-                        }
-                        self.cache_symbol_value(id, &symbol);
+            Value::Symbol(sym) => {
+                let symbol = Value::Symbol(sym);
+                if let Some(id) = self.symbol_id(&symbol) {
+                    if let Some(local_symbol) = self.get_symbol_value(ctx, id) {
+                        return local_symbol;
                     }
-                    return symbol;
+                    self.cache_symbol_value(id, &symbol);
                 }
+                symbol
+            }
+            Value::VmObject(obj) => {
                 // Only stamp the top-level object — do NOT recurse, because
                 // sub-objects may be parent-realm objects (e.g. a proxy's target
                 // or handler) and stamping them would pollute the parent realm's
@@ -44087,13 +43891,7 @@ impl<'gc> VM<'gc> {
 
     fn resolve_dynamic_constructor_proto(&self, proto_candidate: Value<'gc>, fallback_proto: Value<'gc>) -> Value<'gc> {
         match proto_candidate {
-            Value::VmObject(obj) => {
-                if obj.borrow().contains_key("__vm_symbol__") {
-                    fallback_proto
-                } else {
-                    Value::VmObject(obj)
-                }
-            }
+            Value::VmObject(obj) => Value::VmObject(obj),
             Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => proto_candidate,
             _ => fallback_proto,
         }
@@ -44259,11 +44057,16 @@ impl<'gc> VM<'gc> {
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Undefined, Value::Undefined) => true,
             (Value::Null, Value::Null) => true,
-            (Value::VmObject(_), Value::VmObject(_)) if a.is_symbol_value() && b.is_symbol_value() => {
-                self.symbol_id(a) == self.symbol_id(b)
-            }
+            (Value::Symbol(a_sym), Value::Symbol(b_sym)) => Gc::ptr_eq(*a_sym, *b_sym),
             (Value::VmObject(a), Value::VmObject(b)) => Gc::ptr_eq(*a, *b),
             (Value::VmArray(a), Value::VmArray(b)) => Gc::ptr_eq(*a, *b),
+            (Value::VmMap(a), Value::VmMap(b)) => Gc::ptr_eq(*a, *b),
+            (Value::VmSet(a), Value::VmSet(b)) => Gc::ptr_eq(*a, *b),
+            (Value::VmFunction(a_ip, a_arity), Value::VmFunction(b_ip, b_arity)) => a_ip == b_ip && a_arity == b_arity,
+            (Value::VmClosure(a_ip, a_arity, a_uv), Value::VmClosure(b_ip, b_arity, b_uv)) => {
+                a_ip == b_ip && a_arity == b_arity && Gc::ptr_eq(*a_uv, *b_uv)
+            }
+            (Value::VmNativeFunction(a_id), Value::VmNativeFunction(b_id)) => a_id == b_id,
             _ => false,
         }
     }

@@ -678,82 +678,73 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            "regexp.get_flags" => {
-                match receiver {
-                    Some(recv @ Value::VmObject(_)) | Some(recv @ Value::VmArray(..)) => {
-                        // Symbol wrapper objects should throw TypeError (they're primitives)
-                        if let Value::VmObject(obj) = recv
-                            && matches!(obj.borrow().get("__vm_symbol__"), Some(Value::Boolean(true)))
-                        {
-                            self.throw_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
-                            return Value::Undefined;
-                        }
-                        let recv = recv.clone();
-                        let mut result = String::new();
-                        let d = self.read_named_property(ctx, &recv, "hasIndices");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if d.to_truthy() {
-                            result.push('d');
-                        }
-                        let g = self.read_named_property(ctx, &recv, "global");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if g.to_truthy() {
-                            result.push('g');
-                        }
-                        let i = self.read_named_property(ctx, &recv, "ignoreCase");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if i.to_truthy() {
-                            result.push('i');
-                        }
-                        let m = self.read_named_property(ctx, &recv, "multiline");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if m.to_truthy() {
-                            result.push('m');
-                        }
-                        let s = self.read_named_property(ctx, &recv, "dotAll");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if s.to_truthy() {
-                            result.push('s');
-                        }
-                        let u = self.read_named_property(ctx, &recv, "unicode");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if u.to_truthy() {
-                            result.push('u');
-                        }
-                        let v = self.read_named_property(ctx, &recv, "unicodeSets");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if v.to_truthy() {
-                            result.push('v');
-                        }
-                        let y = self.read_named_property(ctx, &recv, "sticky");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        if y.to_truthy() {
-                            result.push('y');
-                        }
-                        Value::from(&result)
+            "regexp.get_flags" => match receiver {
+                Some(recv @ Value::VmObject(_)) | Some(recv @ Value::VmArray(..)) => {
+                    let recv = recv.clone();
+                    let mut result = String::new();
+                    let d = self.read_named_property(ctx, &recv, "hasIndices");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
                     }
-                    _ => {
-                        self.throw_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
-                        Value::Undefined
+                    if d.to_truthy() {
+                        result.push('d');
                     }
+                    let g = self.read_named_property(ctx, &recv, "global");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if g.to_truthy() {
+                        result.push('g');
+                    }
+                    let i = self.read_named_property(ctx, &recv, "ignoreCase");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if i.to_truthy() {
+                        result.push('i');
+                    }
+                    let m = self.read_named_property(ctx, &recv, "multiline");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if m.to_truthy() {
+                        result.push('m');
+                    }
+                    let s = self.read_named_property(ctx, &recv, "dotAll");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if s.to_truthy() {
+                        result.push('s');
+                    }
+                    let u = self.read_named_property(ctx, &recv, "unicode");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if u.to_truthy() {
+                        result.push('u');
+                    }
+                    let v = self.read_named_property(ctx, &recv, "unicodeSets");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if v.to_truthy() {
+                        result.push('v');
+                    }
+                    let y = self.read_named_property(ctx, &recv, "sticky");
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if y.to_truthy() {
+                        result.push('y');
+                    }
+                    Value::from(&result)
                 }
-            }
+                _ => {
+                    self.throw_type_error(ctx, "RegExp.prototype.flags getter called on incompatible receiver");
+                    Value::Undefined
+                }
+            },
             "regexp.symbolMatch" => {
                 let rx = match receiver {
                     Some(
@@ -1359,13 +1350,7 @@ impl<'gc> VM<'gc> {
                 return Value::Null;
             }
             // a. If result is not an Object and result is not null, throw a TypeError.
-            // Note: Symbols are stored as VmObject with __vm_symbol__ but are primitives per spec.
-            let is_object = match &result {
-                Value::Null => true,
-                Value::VmObject(obj) => !obj.borrow().contains_key("__vm_symbol__"),
-                Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) => true,
-                _ => false,
-            };
+            let is_object = matches!(&result, Value::Null) || self.is_spec_object_value(&result);
             if is_object {
                 return result;
             }

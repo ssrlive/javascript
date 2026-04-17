@@ -2438,6 +2438,9 @@ impl<'gc> VM<'gc> {
             (Value::Null, Value::Null) | (Value::Undefined, Value::Undefined) => {
                 self.stack.push(Value::Boolean(false));
             }
+            (Value::Symbol(a_sym), Value::Symbol(b_sym)) => {
+                self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_sym, *b_sym)));
+            }
             (Value::VmObject(a_rc), Value::VmObject(b_rc)) => {
                 self.stack.push(Value::Boolean(!Gc::ptr_eq(*a_rc, *b_rc)));
             }
@@ -3328,11 +3331,7 @@ impl<'gc> VM<'gc> {
         }
 
         let from_obj = match &source {
-            // VM Symbol values are represented as objects with __vm_symbol__,
-            // but object rest/spread must still box them via ToObject.
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
-                self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&source))
-            }
+            Value::Symbol(_) => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&source)),
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
                 source.clone()
             }
@@ -3468,11 +3467,7 @@ impl<'gc> VM<'gc> {
         }
 
         let from_obj = match &source {
-            // VM Symbol values are represented as objects with __vm_symbol__,
-            // but object rest/spread must still box them via ToObject.
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
-                self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&source))
-            }
+            Value::Symbol(_) => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(&source)),
             Value::VmObject(_) | Value::VmArray(_) | Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => {
                 source.clone()
             }
@@ -4169,12 +4164,6 @@ impl<'gc> VM<'gc> {
                             || borrow.contains_key("__fn_body__")
                             || borrow.contains_key("__bound_target__");
                         let mut proto = borrow.get("__proto__").cloned();
-                        // Cross-realm fix: symbol values should resolve properties
-                        // through the current realm's Symbol.prototype, not the
-                        // symbol's own __proto__ (which may be from a foreign realm).
-                        if borrow.contains_key("__vm_symbol__") {
-                            proto = self.ctor_prototype_from_globals(ctx, "Symbol");
-                        }
                         drop(borrow);
                         if proto.is_none()
                             && let Some(type_name) = type_name.as_deref()
@@ -4497,6 +4486,10 @@ impl<'gc> VM<'gc> {
                     self.stack.push(v);
                 }
             },
+            Value::Symbol(_) => {
+                let v = self.read_named_property(ctx, &obj, &key);
+                self.stack.push(v);
+            }
             Value::VmMap(m) => match key.as_str() {
                 "size" => self.stack.push(Value::Number(m.borrow().entries.len() as f64)),
                 "set" => self.stack.push(Value::VmNativeFunction(if m.borrow().is_weak {
@@ -6286,16 +6279,7 @@ impl<'gc> VM<'gc> {
                     }
                     // If super() returned an object, bind it as `this`
                     if let Some(result) = self.stack.last() {
-                        let is_object = match result {
-                            Value::VmObject(m) => !m.borrow().contains_key("__vm_symbol__"),
-                            Value::VmArray(_)
-                            | Value::VmMap(_)
-                            | Value::VmSet(_)
-                            | Value::VmFunction(..)
-                            | Value::VmClosure(..)
-                            | Value::VmNativeFunction(_) => true,
-                            _ => false,
-                        };
+                        let is_object = self.is_spec_object_value(result);
                         if is_object {
                             // Patch __proto__ to new_target.prototype for
                             // VmArray/VmMap/VmSet returned by native super()
@@ -6660,6 +6644,7 @@ impl<'gc> VM<'gc> {
                     self.read_named_property_with_receiver(ctx, &wrapped, &key, &obj)
                 }
             },
+            Value::Symbol(_) => self.read_named_property(ctx, &obj, &key),
             Value::VmMap(m) => match key.as_str() {
                 "set" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_SET } else { BUILTIN_MAP_SET }),
                 "get" => Value::VmNativeFunction(if m.borrow().is_weak { BUILTIN_WEAKMAP_GET } else { BUILTIN_MAP_GET }),
@@ -6926,8 +6911,7 @@ impl<'gc> VM<'gc> {
     fn run_opcode_to_number(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let val = self.stack.pop().expect("VM Stack underflow on ToNumber");
         match &val {
-            // VM symbols are primitive Symbols — ToNumber throws TypeError
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+            Value::Symbol(_) => {
                 self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                 self.stack.push(Value::Number(f64::NAN));
             }
@@ -6941,8 +6925,7 @@ impl<'gc> VM<'gc> {
                             self.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
                             self.stack.push(Value::Number(f64::NAN));
                         }
-                        // ToPrimitive may return a symbol (e.g. valueOf on Symbol wrapper)
-                        Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                        Value::Symbol(_) => {
                             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                             self.stack.push(Value::Number(f64::NAN));
                         }
@@ -6966,8 +6949,7 @@ impl<'gc> VM<'gc> {
             Value::Number(_) | Value::BigInt(_) => {
                 self.stack.push(val);
             }
-            // VM symbols are primitive Symbols — ToNumeric throws TypeError
-            Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+            Value::Symbol(_) => {
                 self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                 self.stack.push(Value::Number(f64::NAN));
             }
@@ -6978,7 +6960,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     match &prim {
                         Value::BigInt(_) => self.stack.push(prim),
-                        Value::VmObject(map) if map.borrow().contains_key("__vm_symbol__") => {
+                        Value::Symbol(_) => {
                             self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                             self.stack.push(Value::Number(f64::NAN));
                         }
@@ -7875,16 +7857,7 @@ impl<'gc> VM<'gc> {
                     Ok(val) => {
                         // If constructor returned an object, use it; otherwise use `this`
                         let is_derived = self.chunk.derived_constructor_ips.contains(&target_ip);
-                        let is_real_object = match &val {
-                            Value::VmObject(map) => !map.borrow().contains_key("__vm_symbol__"),
-                            Value::VmArray(_)
-                            | Value::VmMap(_)
-                            | Value::VmSet(_)
-                            | Value::VmFunction(..)
-                            | Value::VmClosure(..)
-                            | Value::VmNativeFunction(_) => true,
-                            _ => false,
-                        };
+                        let is_real_object = self.is_spec_object_value(&val);
                         if is_real_object {
                             self.stack.push(val);
                         } else if is_derived && !matches!(&val, Value::Undefined) {
@@ -8730,15 +8703,7 @@ impl<'gc> VM<'gc> {
     // Opcode::AssertIterResult
     fn run_opcode_assert_iter_result(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         if let Some(top) = self.stack.last() {
-            let is_object = match top {
-                Value::VmObject(h) => {
-                    let b = h.borrow();
-                    // Symbols are VmObject internally but are not JS objects
-                    !b.contains_key("__vm_symbol__")
-                }
-                Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) => true,
-                _ => false,
-            };
+            let is_object = self.is_spec_object_value(top);
             if !is_object {
                 let err = self.make_type_error_object(ctx, "Iterator result is not an object");
                 self.handle_throw(ctx, &err)?;

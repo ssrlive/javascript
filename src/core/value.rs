@@ -1,6 +1,6 @@
 use crate::core::function_id::*;
 use crate::core::{Collect, GcTrace};
-use crate::core::{PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmUpvalueCells};
+use crate::core::{PropAttrs, VmArrayHandle, VmMapHandle, VmObjectHandle, VmSetHandle, VmSymbolHandle, VmUpvalueCells};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
@@ -19,6 +19,14 @@ pub struct VmMapData<'gc> {
 pub struct VmSetData<'gc> {
     pub values: Vec<Value<'gc>>,
     pub is_weak: bool,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct VmSymbolData {
+    pub id: u64,
+    pub description: Option<Vec<u16>>,
+    pub registered: bool,
 }
 
 /// Array storage with optional named properties (e.g. `arr.foo = "bar"`).
@@ -62,6 +70,7 @@ pub enum Value<'gc> {
     VmClosure(usize, u8, VmUpvalueCells<'gc>),
     VmArray(VmArrayHandle<'gc>),
     VmObject(VmObjectHandle<'gc>),
+    Symbol(VmSymbolHandle<'gc>),
     VmNativeFunction(FunctionID),
     VmMap(VmMapHandle<'gc>),
     VmSet(VmSetHandle<'gc>),
@@ -113,11 +122,10 @@ impl<'gc> Value<'gc> {
             Value::Null => "object",
             Value::VmFunction(..) | Value::VmClosure(..) | Value::VmNativeFunction(_) => "function",
             Value::VmArray(_) | Value::VmMap(_) | Value::VmSet(_) | Value::Property { .. } => "object",
+            Value::Symbol(_) => "symbol",
             Value::VmObject(map) => {
                 let b = map.borrow();
-                if b.contains_key("__vm_symbol__") {
-                    "symbol"
-                } else if let Some(target) = b.get("__proxy_target__") {
+                if let Some(target) = b.get("__proxy_target__") {
                     target.typeof_value()
                 } else if b.contains_key("__fn_body__")
                     || b.contains_key("__native_id__")
@@ -133,10 +141,7 @@ impl<'gc> Value<'gc> {
     }
 
     pub fn is_symbol_value(&self) -> bool {
-        match self {
-            Value::VmObject(map) => map.borrow().contains_key("__vm_symbol__"),
-            _ => false,
-        }
+        matches!(self, Value::Symbol(_))
     }
 }
 
@@ -171,6 +176,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             Value::VmClosure(_, _, upvals) => upvals.trace(cc),
             Value::VmArray(handle) => handle.trace(cc),
             Value::VmObject(handle) => handle.trace(cc),
+            Value::Symbol(handle) => handle.trace(cc),
             Value::VmMap(handle) => handle.trace(cc),
             Value::VmSet(handle) => handle.trace(cc),
             Value::Property { value, getter, setter, .. } => {
@@ -235,6 +241,10 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::Null => "null".to_string(),
         Value::Property { .. } => "[Property]".to_string(),
         Value::Uninitialized => "[uninitialized]".to_string(),
+        Value::Symbol(sym) => match &sym.borrow().description {
+            Some(desc) => format!("Symbol({})", utf16_to_utf8(desc)),
+            None => "Symbol()".to_string(),
+        },
         Value::VmFunction(ip, arity) => format!("[VmFunction@{} arity={}]", ip, arity),
         Value::VmClosure(ip, arity, _) => format!("[VmClosure@{} arity={}]", ip, arity),
         Value::VmArray(arr) => {
@@ -312,7 +322,9 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
 }
 pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
     match val {
-        Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) | Value::VmFunction(..) | Value::VmClosure(..) => value_to_string(val),
+        Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) | Value::Symbol(_) | Value::VmFunction(..) | Value::VmClosure(..) => {
+            value_to_string(val)
+        }
         Value::String(s) => {
             let rust_str = utf16_to_utf8(s);
             format!("\"{}\"", rust_str.replace('\\', "\\\\").replace('"', "\\\""))

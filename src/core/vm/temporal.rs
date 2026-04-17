@@ -63,6 +63,21 @@ impl<'gc> VM<'gc> {
                 };
                 Self::temporal_compare_result(one.as_i128().cmp(&two.as_i128()))
             }
+            "temporal.instant.round" => {
+                let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let options = match self.temporal_rounding_options_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.round(options) {
+                    Ok(value) => {
+                        self.temporal_wrap_instant(ctx, self.temporal_intrinsic_ctor_value("Instant").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.instant.add" => {
                 let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
                     return Value::Undefined;
@@ -161,7 +176,8 @@ impl<'gc> VM<'gc> {
                 };
                 Value::Boolean(value == other)
             }
-            "temporal.instant.toString" | "temporal.instant.toJSON" => self.temporal_repr_result(ctx, receiver, "Instant"),
+            "temporal.instant.toString" => self.temporal_instant_to_string(ctx, receiver, args.first()),
+            "temporal.instant.toJSON" => self.temporal_instant_to_string(ctx, receiver, None),
             "temporal.instant.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.Instant to a primitive value");
                 Value::Undefined
@@ -569,6 +585,21 @@ impl<'gc> VM<'gc> {
                         )),
                 )
             }
+            "temporal.plainTime.round" => {
+                let Some(value) = self.temporal_expect_plain_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let options = match self.temporal_rounding_options_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.round(options) {
+                    Ok(value) => {
+                        self.temporal_wrap_plain_time(ctx, self.temporal_intrinsic_ctor_value("PlainTime").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainTime.add" => {
                 let Some(value) = self.temporal_expect_plain_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -695,7 +726,8 @@ impl<'gc> VM<'gc> {
                     ),
                 )
             }
-            "temporal.plainTime.toString" | "temporal.plainTime.toJSON" => self.temporal_repr_result(ctx, receiver, "PlainTime"),
+            "temporal.plainTime.toString" => self.temporal_plain_time_to_string(ctx, receiver, args.first()),
+            "temporal.plainTime.toJSON" => self.temporal_plain_time_to_string(ctx, receiver, None),
             "temporal.plainTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainTime to a primitive value");
                 Value::Undefined
@@ -811,6 +843,40 @@ impl<'gc> VM<'gc> {
                             two.nanosecond(),
                         )),
                 )
+            }
+            "temporal.plainDateTime.round" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let options = match self.temporal_rounding_options_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.round(options) {
+                    Ok(value) => self.temporal_wrap_plain_date_time(
+                        ctx,
+                        self.temporal_intrinsic_ctor_value("PlainDateTime").as_ref().or(receiver),
+                        &value,
+                    ),
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.plainDateTime.withPlainTime" => {
+                let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let time = match self.temporal_to_plain_time_like(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.with_time(time) {
+                    Ok(value) => self.temporal_wrap_plain_date_time(
+                        ctx,
+                        self.temporal_intrinsic_ctor_value("PlainDateTime").as_ref().or(receiver),
+                        &value,
+                    ),
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
             }
             "temporal.plainDateTime.toZonedDateTime" => {
                 let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
@@ -974,9 +1040,8 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.plainDateTime.toString" | "temporal.plainDateTime.toJSON" => {
-                self.temporal_repr_result(ctx, receiver, "PlainDateTime")
-            }
+            "temporal.plainDateTime.toString" => self.temporal_plain_date_time_to_string(ctx, receiver, args.first()),
+            "temporal.plainDateTime.toJSON" => self.temporal_plain_date_time_to_string(ctx, receiver, None),
             "temporal.plainDateTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainDateTime to a primitive value");
                 Value::Undefined
@@ -1073,7 +1138,8 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
-            "temporal.duration.toString" | "temporal.duration.toJSON" => self.temporal_duration_to_string(ctx, receiver),
+            "temporal.duration.toString" => self.temporal_duration_to_string(ctx, receiver, args.first()),
+            "temporal.duration.toJSON" => self.temporal_duration_to_string(ctx, receiver, None),
             "temporal.duration.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.Duration to a primitive value");
                 Value::Undefined
@@ -1113,6 +1179,25 @@ impl<'gc> VM<'gc> {
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
                 match value.add(&other) {
+                    Ok(value) => {
+                        self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.duration.subtract" => {
+                let Some(value) = self.temporal_expect_duration(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.Duration.prototype.subtract requires an argument");
+                    return Value::Undefined;
+                };
+                let other = match self.temporal_to_duration(ctx, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.subtract(&other) {
                     Ok(value) => {
                         self.temporal_wrap_duration(ctx, self.temporal_intrinsic_ctor_value("Duration").as_ref().or(receiver), &value)
                     }
@@ -1594,6 +1679,22 @@ impl<'gc> VM<'gc> {
                 };
                 Self::temporal_compare_result(one.to_instant().as_i128().cmp(&two.to_instant().as_i128()))
             }
+            "temporal.zonedDateTime.round" => {
+                let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let options = match self.temporal_rounding_options_arg(ctx, args.first()) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.round(options) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                        self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.zonedDateTime.withTimeZone" => {
                 let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -1748,6 +1849,30 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.zonedDateTime.subtract" => {
+                let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.ZonedDateTime.prototype.subtract requires a duration");
+                    return Value::Undefined;
+                };
+                let duration = match self.temporal_to_duration(ctx, arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let overflow = match self.temporal_overflow_option_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.subtract(&duration, Some(overflow)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                        self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.zonedDateTime.since" => {
                 let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -1864,6 +1989,11 @@ impl<'gc> VM<'gc> {
             }
             "temporal.zonedDateTime.get.calendarId" => self.temporal_zoned_date_time_calendar(ctx, receiver),
             "temporal.zonedDateTime.get.timeZoneId" => self.temporal_zoned_date_time_time_zone(ctx, receiver),
+            "temporal.zonedDateTime.get.daysInMonth" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "daysInMonth"),
+            "temporal.zonedDateTime.get.daysInYear" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "daysInYear"),
+            "temporal.zonedDateTime.get.monthsInYear" => self.temporal_zoned_date_time_calendar_number(ctx, receiver, "monthsInYear"),
+            "temporal.zonedDateTime.get.hoursInDay" => self.temporal_zoned_date_time_hours_in_day(ctx, receiver),
+            "temporal.zonedDateTime.get.inLeapYear" => self.temporal_zoned_date_time_in_leap_year(ctx, receiver),
             "temporal.zonedDateTime.get.weekOfYear" => self.temporal_zoned_date_time_week_of_year(ctx, receiver),
             "temporal.zonedDateTime.get.yearOfWeek" => self.temporal_zoned_date_time_year_of_week(ctx, receiver),
 
@@ -1918,6 +2048,7 @@ impl<'gc> VM<'gc> {
                 ("compare", "temporal.instant.compare", "compare", 2.0),
             ],
             &[
+                ("round", "temporal.instant.round", "round", 1.0),
                 ("add", "temporal.instant.add", "add", 1.0),
                 ("subtract", "temporal.instant.subtract", "subtract", 1.0),
                 ("until", "temporal.instant.until", "until", 1.0),
@@ -1975,6 +2106,7 @@ impl<'gc> VM<'gc> {
                 ("compare", "temporal.plainTime.compare", "compare", 2.0),
             ],
             &[
+                ("round", "temporal.plainTime.round", "round", 1.0),
                 ("add", "temporal.plainTime.add", "add", 1.0),
                 ("subtract", "temporal.plainTime.subtract", "subtract", 1.0),
                 ("until", "temporal.plainTime.until", "until", 1.0),
@@ -2005,6 +2137,8 @@ impl<'gc> VM<'gc> {
                 ("compare", "temporal.plainDateTime.compare", "compare", 2.0),
             ],
             &[
+                ("round", "temporal.plainDateTime.round", "round", 1.0),
+                ("withPlainTime", "temporal.plainDateTime.withPlainTime", "withPlainTime", 0.0),
                 ("add", "temporal.plainDateTime.add", "add", 1.0),
                 ("subtract", "temporal.plainDateTime.subtract", "subtract", 1.0),
                 ("until", "temporal.plainDateTime.until", "until", 1.0),
@@ -2045,6 +2179,7 @@ impl<'gc> VM<'gc> {
                 ("toJSON", "temporal.duration.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.duration.valueOf", "valueOf", 0.0),
                 ("add", "temporal.duration.add", "add", 1.0),
+                ("subtract", "temporal.duration.subtract", "subtract", 1.0),
                 ("round", "temporal.duration.round", "round", 1.0),
                 ("negated", "temporal.duration.negated", "negated", 0.0),
                 ("with", "temporal.duration.with", "with", 1.0),
@@ -2126,11 +2261,13 @@ impl<'gc> VM<'gc> {
                 ("compare", "temporal.zonedDateTime.compare", "compare", 2.0),
             ],
             &[
+                ("round", "temporal.zonedDateTime.round", "round", 1.0),
                 ("withTimeZone", "temporal.zonedDateTime.withTimeZone", "withTimeZone", 1.0),
                 ("withPlainTime", "temporal.zonedDateTime.withPlainTime", "withPlainTime", 0.0),
                 ("withCalendar", "temporal.zonedDateTime.withCalendar", "withCalendar", 1.0),
                 ("with", "temporal.zonedDateTime.with", "with", 1.0),
                 ("add", "temporal.zonedDateTime.add", "add", 1.0),
+                ("subtract", "temporal.zonedDateTime.subtract", "subtract", 1.0),
                 ("since", "temporal.zonedDateTime.since", "since", 1.0),
                 ("until", "temporal.zonedDateTime.until", "until", 1.0),
                 ("toPlainDateTime", "temporal.zonedDateTime.toPlainDateTime", "toPlainDateTime", 0.0),
@@ -2156,6 +2293,11 @@ impl<'gc> VM<'gc> {
                 ("epochNanoseconds", "temporal.zonedDateTime.get.epochNanoseconds"),
                 ("calendarId", "temporal.zonedDateTime.get.calendarId"),
                 ("timeZoneId", "temporal.zonedDateTime.get.timeZoneId"),
+                ("daysInMonth", "temporal.zonedDateTime.get.daysInMonth"),
+                ("daysInYear", "temporal.zonedDateTime.get.daysInYear"),
+                ("monthsInYear", "temporal.zonedDateTime.get.monthsInYear"),
+                ("hoursInDay", "temporal.zonedDateTime.get.hoursInDay"),
+                ("inLeapYear", "temporal.zonedDateTime.get.inLeapYear"),
                 ("weekOfYear", "temporal.zonedDateTime.get.weekOfYear"),
                 ("yearOfWeek", "temporal.zonedDateTime.get.yearOfWeek"),
             ],
@@ -2392,6 +2534,7 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("round", "temporal.instant.round"),
                     ("toString", "temporal.instant.toString"),
                     ("toJSON", "temporal.instant.toJSON"),
                     ("valueOf", "temporal.instant.valueOf"),
@@ -2447,6 +2590,7 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("round", "temporal.plainTime.round"),
                     ("toString", "temporal.plainTime.toString"),
                     ("toJSON", "temporal.plainTime.toJSON"),
                     ("valueOf", "temporal.plainTime.valueOf"),
@@ -2470,6 +2614,8 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("round", "temporal.plainDateTime.round"),
+                    ("withPlainTime", "temporal.plainDateTime.withPlainTime"),
                     ("toZonedDateTime", "temporal.plainDateTime.toZonedDateTime"),
                     ("toString", "temporal.plainDateTime.toString"),
                     ("toJSON", "temporal.plainDateTime.toJSON"),
@@ -2503,6 +2649,7 @@ impl<'gc> VM<'gc> {
                     ("toJSON", "temporal.duration.toJSON"),
                     ("valueOf", "temporal.duration.valueOf"),
                     ("add", "temporal.duration.add"),
+                    ("subtract", "temporal.duration.subtract"),
                     ("round", "temporal.duration.round"),
                     ("negated", "temporal.duration.negated"),
                     ("with", "temporal.duration.with"),
@@ -2590,11 +2737,13 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("round", "temporal.zonedDateTime.round"),
                     ("withTimeZone", "temporal.zonedDateTime.withTimeZone"),
                     ("withPlainTime", "temporal.zonedDateTime.withPlainTime"),
                     ("withCalendar", "temporal.zonedDateTime.withCalendar"),
                     ("with", "temporal.zonedDateTime.with"),
                     ("add", "temporal.zonedDateTime.add"),
+                    ("subtract", "temporal.zonedDateTime.subtract"),
                     ("since", "temporal.zonedDateTime.since"),
                     ("until", "temporal.zonedDateTime.until"),
                     ("toPlainDateTime", "temporal.zonedDateTime.toPlainDateTime"),
@@ -2968,6 +3117,48 @@ impl<'gc> VM<'gc> {
             _ => None,
         };
         Ok((options, relative_to))
+    }
+
+    fn temporal_rounding_options_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+    ) -> Result<RoundingOptions, TemporalError> {
+        let Some(value) = value else {
+            return Err(TemporalError::r#type().with_message("Options must be an object or string"));
+        };
+        if matches!(value, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("Options must be an object or string"));
+        }
+        if let Value::String(text) = value {
+            let unit = Unit::from_str(&crate::unicode::utf16_to_utf8(text))
+                .map_err(|_| TemporalError::range().with_message("Invalid smallestUnit"))?;
+            let mut options = RoundingOptions::default();
+            options.smallest_unit = Some(unit);
+            return Ok(options);
+        }
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Options must be an object or string"));
+        }
+
+        let increment = match self.temporal_get_option_number(ctx, value, "roundingIncrement")? {
+            Some(value) => Some(RoundingIncrement::try_from(value)?),
+            None => None,
+        };
+        let rounding_mode = match self.temporal_get_option_string(ctx, value, "roundingMode")? {
+            Some(value) => Some(RoundingMode::from_str(&value)?),
+            None => None,
+        };
+        let smallest_unit = match self.temporal_get_option_string(ctx, value, "smallestUnit")? {
+            Some(value) => Some(Unit::from_str(&value).map_err(|_| TemporalError::range().with_message("Invalid smallestUnit"))?),
+            None => None,
+        };
+
+        let mut options = RoundingOptions::default();
+        options.smallest_unit = smallest_unit;
+        options.rounding_mode = rounding_mode;
+        options.increment = increment;
+        Ok(options)
     }
 
     fn temporal_zoned_date_time_with_options_arg(
@@ -4491,11 +4682,164 @@ impl<'gc> VM<'gc> {
         Value::Boolean(value.is_zero())
     }
 
-    fn temporal_duration_to_string(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+    fn temporal_to_string_options(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: Option<&Value<'gc>>,
+        calendar_name_first: bool,
+    ) -> Result<(Option<DisplayCalendar>, ToStringRoundingOptions), TemporalError> {
+        let Some(options) = options else {
+            return Ok((None, ToStringRoundingOptions::default()));
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok((None, ToStringRoundingOptions::default()));
+        }
+        if !self.temporal_is_object_like(options) {
+            return Err(TemporalError::r#type().with_message("Options must be an object"));
+        }
+
+        let calendar_name = if calendar_name_first {
+            Some(match self.temporal_get_option_string(ctx, options, "calendarName")? {
+                Some(text) => DisplayCalendar::from_str(&text)?,
+                None => DisplayCalendar::Auto,
+            })
+        } else {
+            None
+        };
+
+        let fractional_second_digits_value = self.read_named_property(ctx, options, "fractionalSecondDigits");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal options"));
+        }
+        let precision = match fractional_second_digits_value {
+            Value::Undefined => Precision::Auto,
+            Value::Number(number) => {
+                let floored = number.floor();
+                if !number.is_finite() || !(0.0..=9.0).contains(&floored) {
+                    return Err(TemporalError::range().with_message("Invalid fractionalSecondDigits"));
+                }
+                Precision::Digit(floored as u8)
+            }
+            value => {
+                let text = self
+                    .temporal_value_string(ctx, &value)
+                    .ok_or_else(|| TemporalError::r#type().with_message("Invalid fractionalSecondDigits"))?;
+                if text == "auto" {
+                    Precision::Auto
+                } else {
+                    return Err(TemporalError::range().with_message("Invalid fractionalSecondDigits"));
+                }
+            }
+        };
+        let rounding_mode = match self.temporal_get_option_string(ctx, options, "roundingMode")? {
+            Some(text) => Some(RoundingMode::from_str(&text)?),
+            None => None,
+        };
+        let smallest_unit = match self.temporal_get_option_string(ctx, options, "smallestUnit")? {
+            Some(text) => Some(Unit::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid smallestUnit"))?),
+            None => None,
+        };
+
+        Ok((
+            calendar_name,
+            ToStringRoundingOptions {
+                precision,
+                smallest_unit,
+                rounding_mode,
+            },
+        ))
+    }
+
+    fn temporal_instant_to_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        options_arg: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        let (_, options) = match self.temporal_to_string_options(ctx, options_arg, false) {
+            Ok(value) => value,
+            Err(err) => return self.temporal_throw(ctx, err),
+        };
+        let time_zone = match options_arg {
+            None | Some(Value::Undefined) => None,
+            Some(opts) => {
+                let tz_value = self.read_named_property(ctx, opts, "timeZone");
+                if self.pending_throw.is_some() {
+                    return self.temporal_throw(ctx, TemporalError::r#type().with_message("Invalid Temporal options"));
+                }
+                match tz_value {
+                    Value::Undefined => None,
+                    value => match self.temporal_time_zone_with_iso_string_arg(ctx, Some(&value)) {
+                        Ok(value) => value,
+                        Err(err) => return self.temporal_throw(ctx, err),
+                    },
+                }
+            }
+        };
+        match value.to_ixdtf_string(time_zone, options) {
+            Ok(text) => Value::from(text),
+            Err(err) => self.temporal_throw(ctx, err),
+        }
+    }
+
+    fn temporal_plain_time_to_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        let (_, options) = match self.temporal_to_string_options(ctx, options, false) {
+            Ok(value) => value,
+            Err(err) => return self.temporal_throw(ctx, err),
+        };
+        match value.to_ixdtf_string(options) {
+            Ok(text) => Value::from(text),
+            Err(err) => self.temporal_throw(ctx, err),
+        }
+    }
+
+    fn temporal_plain_date_time_to_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        let (calendar_name, options) = match self.temporal_to_string_options(ctx, options, true) {
+            Ok(value) => value,
+            Err(err) => return self.temporal_throw(ctx, err),
+        };
+        match value.to_ixdtf_string(options, calendar_name.unwrap_or(DisplayCalendar::Auto)) {
+            Ok(text) => Value::from(text),
+            Err(err) => self.temporal_throw(ctx, err),
+        }
+    }
+
+    fn temporal_duration_to_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
         let Some(value) = self.temporal_expect_duration(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::from(value.to_string())
+        let (_, options) = match self.temporal_to_string_options(ctx, options, false) {
+            Ok(value) => value,
+            Err(err) => return self.temporal_throw(ctx, err),
+        };
+        match value.as_temporal_string(options) {
+            Ok(text) => Value::from(text),
+            Err(err) => self.temporal_throw(ctx, err),
+        }
     }
 
     fn temporal_zoned_date_time_to_string(
@@ -4699,6 +5043,35 @@ impl<'gc> VM<'gc> {
             Ok(id) => Value::from(id.as_str()),
             Err(err) => self.temporal_throw(ctx, err),
         }
+    }
+
+    fn temporal_zoned_date_time_calendar_number(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, field: &str) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match field {
+            "daysInMonth" => Value::Number(value.days_in_month() as f64),
+            "daysInYear" => Value::Number(value.days_in_year() as f64),
+            "monthsInYear" => Value::Number(value.months_in_year() as f64),
+            _ => Value::Undefined,
+        }
+    }
+
+    fn temporal_zoned_date_time_hours_in_day(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match value.hours_in_day() {
+            Ok(value) => Value::Number(value),
+            Err(err) => self.temporal_throw(ctx, err),
+        }
+    }
+
+    fn temporal_zoned_date_time_in_leap_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Boolean(value.in_leap_year())
     }
 
     fn temporal_zoned_date_time_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {

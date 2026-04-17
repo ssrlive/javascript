@@ -3,7 +3,6 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 use std::str::FromStr;
-use temporal_rs::provider::TransitionDirection;
 use temporal_rs::fields::{CalendarFields, DateTimeFields, YearMonthCalendarFields, ZonedDateTimeFields};
 use temporal_rs::options::{
     DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation, Overflow, RelativeTo,
@@ -11,6 +10,7 @@ use temporal_rs::options::{
 };
 use temporal_rs::parsers::Precision;
 use temporal_rs::partial::PartialTime;
+use temporal_rs::provider::TransitionDirection;
 use temporal_rs::{
     Calendar, Duration as TemporalDuration, Instant, MonthCode, PlainDate, PlainDateTime, PlainMonthDay, PlainTime, PlainYearMonth,
     Temporal, TemporalError, TimeZone, UtcOffset, ZonedDateTime,
@@ -1337,6 +1337,13 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.duration.abs" => {
+                let Some(value) = self.temporal_expect_duration(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let ctor_value = self.temporal_intrinsic_ctor_value("Duration");
+                self.temporal_wrap_duration(ctx, ctor_value.as_ref().or(receiver), &value.abs())
+            }
             "temporal.duration.add" => {
                 let Some(value) = self.temporal_expect_duration(ctx, receiver) else {
                     return Value::Undefined;
@@ -2073,6 +2080,18 @@ impl<'gc> VM<'gc> {
                 let ctor_value = self.temporal_intrinsic_ctor_value("Instant");
                 self.temporal_wrap_instant(ctx, ctor_value.as_ref(), &value.to_instant())
             }
+            "temporal.zonedDateTime.startOfDay" => {
+                let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                match value.start_of_day() {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
+                        self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.zonedDateTime.getTimeZoneTransition" => {
                 let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
                     return Value::Undefined;
@@ -2481,6 +2500,7 @@ impl<'gc> VM<'gc> {
                 ("toString", "temporal.duration.toString", "toString", 0.0),
                 ("toJSON", "temporal.duration.toJSON", "toJSON", 0.0),
                 ("valueOf", "temporal.duration.valueOf", "valueOf", 0.0),
+                ("abs", "temporal.duration.abs", "abs", 0.0),
                 ("add", "temporal.duration.add", "add", 1.0),
                 ("subtract", "temporal.duration.subtract", "subtract", 1.0),
                 ("round", "temporal.duration.round", "round", 1.0),
@@ -2582,7 +2602,13 @@ impl<'gc> VM<'gc> {
                 ("toPlainDate", "temporal.zonedDateTime.toPlainDate", "toPlainDate", 0.0),
                 ("toPlainTime", "temporal.zonedDateTime.toPlainTime", "toPlainTime", 0.0),
                 ("toInstant", "temporal.zonedDateTime.toInstant", "toInstant", 0.0),
-                ("getTimeZoneTransition", "temporal.zonedDateTime.getTimeZoneTransition", "getTimeZoneTransition", 1.0),
+                ("startOfDay", "temporal.zonedDateTime.startOfDay", "startOfDay", 0.0),
+                (
+                    "getTimeZoneTransition",
+                    "temporal.zonedDateTime.getTimeZoneTransition",
+                    "getTimeZoneTransition",
+                    1.0,
+                ),
                 ("equals", "temporal.zonedDateTime.equals", "equals", 1.0),
                 ("toString", "temporal.zonedDateTime.toString", "toString", 0.0),
                 ("toJSON", "temporal.zonedDateTime.toJSON", "toJSON", 0.0),
@@ -2967,6 +2993,7 @@ impl<'gc> VM<'gc> {
                     ("toString", "temporal.duration.toString"),
                     ("toJSON", "temporal.duration.toJSON"),
                     ("valueOf", "temporal.duration.valueOf"),
+                    ("abs", "temporal.duration.abs"),
                     ("add", "temporal.duration.add"),
                     ("subtract", "temporal.duration.subtract"),
                     ("round", "temporal.duration.round"),
@@ -3074,6 +3101,7 @@ impl<'gc> VM<'gc> {
                     ("toPlainDate", "temporal.zonedDateTime.toPlainDate"),
                     ("toPlainTime", "temporal.zonedDateTime.toPlainTime"),
                     ("toInstant", "temporal.zonedDateTime.toInstant"),
+                    ("startOfDay", "temporal.zonedDateTime.startOfDay"),
                     ("getTimeZoneTransition", "temporal.zonedDateTime.getTimeZoneTransition"),
                     ("equals", "temporal.zonedDateTime.equals"),
                     ("toString", "temporal.zonedDateTime.toString"),

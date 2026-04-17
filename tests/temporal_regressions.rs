@@ -346,3 +346,24 @@ fn test_temporal_zoned_date_time_get_time_zone_transition_utc_returns_null() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "null");
 }
+
+#[test]
+fn test_temporal_duration_abs_basic() {
+    let script = r#"
+        new Temporal.Duration(-1, -2, -3, -4, -5, -6, -7, -8, -9, -10)
+            .abs()
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"P1Y2M3W4DT5H6M7.00800901S\"");
+}
+
+#[test]
+fn test_temporal_zoned_date_time_start_of_day_basic() {
+    let script = r#"
+        const ns = 10000n * 86400_000_000_000n + 7272_123_456_789n;
+        new Temporal.ZonedDateTime(ns, "UTC").startOfDay().epochNanoseconds
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "864000000000000000");
+}

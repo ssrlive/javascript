@@ -34012,6 +34012,51 @@ impl<'gc> VM<'gc> {
                                 std::cmp::Ordering::Equal
                             }
                         });
+                    } else if let Some(cmp) = cmp_fn.as_ref()
+                        && !matches!(cmp, Value::Undefined)
+                    {
+                        if let Value::Object(map) = cmp {
+                            let borrow = map.borrow();
+                            if let Some(Value::String(host_name_u16)) = borrow.get("__host_fn__") {
+                                let host_name = crate::unicode::utf16_to_utf8(host_name_u16);
+                                let host_this = borrow.get("__host_this__").cloned();
+                                drop(borrow);
+                                elems.sort_by(|a, b| {
+                                    let undefined_this = Value::Undefined;
+                                    let receiver = host_this.as_ref().unwrap_or(&undefined_this);
+                                    let result =
+                                        self.call_named_host_function_with_this(ctx, &host_name, Some(receiver), &[a.clone(), b.clone()]);
+                                    if let Value::Number(n) = result {
+                                        n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                });
+                            } else {
+                                drop(borrow);
+                                elems.sort_by(|a, b| {
+                                    let result = self
+                                        .vm_call_function_value(ctx, cmp, &Value::Undefined, &[a.clone(), b.clone()])
+                                        .unwrap_or(Value::Undefined);
+                                    if let Value::Number(n) = result {
+                                        n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                });
+                            }
+                        } else {
+                            elems.sort_by(|a, b| {
+                                let result = self
+                                    .vm_call_function_value(ctx, cmp, &Value::Undefined, &[a.clone(), b.clone()])
+                                    .unwrap_or(Value::Undefined);
+                                if let Value::Number(n) = result {
+                                    n.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
+                                } else {
+                                    std::cmp::Ordering::Equal
+                                }
+                            });
+                        }
                     } else {
                         elems.sort_by(|a, b| {
                             let sa = value_to_string(a);

@@ -1,6 +1,9 @@
 use super::*;
+use crate::core::GcPtr;
+use unicode_normalization::UnicodeNormalization;
 
 const INTL_DEFAULT_LOCALE: &str = "en-US";
+const INTL_COLLATOR_BOUND_COMPARE_SLOT: &str = "@@sym:900001";
 
 const INTL_SERVICE_CTORS: &[(&str, &str)] = &[
     ("Collator", "intl.collator.ctor"),
@@ -105,6 +108,8 @@ impl<'gc> VM<'gc> {
         }
         match name {
             "intl.getCanonicalLocales" => self.intl_get_canonical_locales(ctx, args.first()),
+            "intl.collator.get.compare" => self.intl_collator_compare_getter(ctx, receiver),
+            "intl.collator.compare" => self.intl_collator_compare(ctx, receiver, args),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
                 let mut obj = IndexMap::new();
@@ -164,6 +169,11 @@ impl<'gc> VM<'gc> {
                 Self::make_host_fn_with_name_len(ctx, "intl.service.resolvedOptions", "resolvedOptions", 0.0, false),
             );
             mark_nonenumerable(&mut proto, "resolvedOptions");
+            if display_name == "Collator" {
+                let getter = Self::make_host_fn_with_name_len(ctx, "intl.collator.get.compare", "get compare", 0.0, false);
+                Self::insert_getter_property_with_attributes(&mut proto, "compare", &getter, false, true);
+                Self::insert_property_with_attributes(&mut proto, "@@sym:4", &Value::from("Intl.Collator"), false, false, true);
+            }
             if display_name == "Segmenter" {
                 proto.insert(
                     "segment".to_string(),
@@ -216,7 +226,12 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Value<'gc>> {
         let requested_locales = self.intl_canonicalize_locale_list(ctx, args.first())?;
-        self.intl_read_constructor_options(ctx, kind, args.get(1))?;
+        let collator_opts = if kind == "Collator" {
+            Some(self.intl_read_collator_options(ctx, &requested_locales, args.get(1))?)
+        } else {
+            self.intl_read_constructor_options(ctx, kind, args.get(1))?;
+            None
+        };
 
         let ctor_value = ctor_value
             .cloned()
@@ -234,11 +249,13 @@ impl<'gc> VM<'gc> {
         }
         obj.insert("__intl_kind__".to_string(), Value::from(kind));
         let locale = requested_locales
-            .iter()
-            .find(|locale| locale.eq_ignore_ascii_case(INTL_DEFAULT_LOCALE))
+            .first()
             .cloned()
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
         obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
+        if let Some(opts) = collator_opts {
+            self.intl_store_collator_options(&mut obj, &opts);
+        }
 
         if kind == "Segmenter" {
             if let Value::Object(ctor_obj) = &ctor_value {
@@ -252,7 +269,23 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        Ok(Value::Object(new_gc_cell_ptr(ctx, obj)))
+        let value = Value::Object(new_gc_cell_ptr(ctx, obj));
+        if kind == "Collator"
+            && let Value::Object(collator_obj) = &value
+        {
+            let compare = Self::make_bound_host_fn(ctx, "intl.collator.compare", &value);
+            if let Value::Object(compare_obj) = &compare {
+                let mut borrow = compare_obj.borrow_mut(ctx);
+                Self::insert_property_with_attributes(&mut borrow, "length", &Value::Number(2.0), false, false, true);
+                Self::insert_property_with_attributes(&mut borrow, "name", &Value::from(""), false, false, true);
+                borrow.insert("__non_constructor__".to_string(), Value::Boolean(true));
+            }
+            let mut borrow = collator_obj.borrow_mut(ctx);
+            borrow.insert(INTL_COLLATOR_BOUND_COMPARE_SLOT.to_string(), compare.clone());
+            Self::insert_property_with_attributes(&mut borrow, "compare", &compare, false, true, true);
+        }
+
+        Ok(value)
     }
 
     fn intl_supported_locales_of(
@@ -276,19 +309,43 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_resolved_options(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(obj) = self.intl_require_initialized_service(ctx, receiver, None) else {
+            return Value::Undefined;
+        };
+
         let mut result = IndexMap::new();
-        if let Some(Value::Object(obj)) = receiver {
-            let borrow = obj.borrow();
-            if let Some(locale) = borrow.get("__intl_locale__").cloned() {
-                result.insert("locale".to_string(), locale);
-            } else {
-                result.insert("locale".to_string(), Value::from(INTL_DEFAULT_LOCALE));
-            }
-            if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "Collator") {
-                result.insert("sensitivity".to_string(), Value::from("variant"));
-            }
+        let borrow = obj.borrow();
+        if let Some(locale) = borrow.get("__intl_locale__").cloned() {
+            result.insert("locale".to_string(), locale);
         } else {
             result.insert("locale".to_string(), Value::from(INTL_DEFAULT_LOCALE));
+        }
+        if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(&kind) == "Collator") {
+            result.insert(
+                "usage".to_string(),
+                borrow.get("__intl_usage__").cloned().unwrap_or_else(|| Value::from("sort")),
+            );
+            result.insert(
+                "sensitivity".to_string(),
+                borrow
+                    .get("__intl_sensitivity__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("variant")),
+            );
+            result.insert(
+                "ignorePunctuation".to_string(),
+                borrow.get("__intl_ignore_punctuation__").cloned().unwrap_or(Value::Boolean(false)),
+            );
+            result.insert(
+                "collation".to_string(),
+                borrow.get("__intl_collation__").cloned().unwrap_or_else(|| Value::from("default")),
+            );
+            if let Some(numeric) = borrow.get("__intl_numeric__").cloned() {
+                result.insert("numeric".to_string(), numeric);
+            }
+            if let Some(case_first) = borrow.get("__intl_case_first__").cloned() {
+                result.insert("caseFirst".to_string(), case_first);
+            }
         }
         Value::Object(new_gc_cell_ptr(ctx, result))
     }
@@ -467,10 +524,291 @@ impl<'gc> VM<'gc> {
 
     fn intl_supported_locales_result(&self, ctx: &GcContext<'gc>, requested: &[String]) -> Value<'gc> {
         let mut supported = Vec::new();
-        if requested.iter().any(|locale| locale.eq_ignore_ascii_case(INTL_DEFAULT_LOCALE)) {
-            supported.push(Value::from(INTL_DEFAULT_LOCALE));
+        for locale in requested {
+            let base = Self::intl_locale_without_unicode_extension(locale);
+            if base.eq_ignore_ascii_case("zxx") {
+                continue;
+            }
+            supported.push(Value::from(locale.as_str()));
         }
         Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(supported)))
+    }
+
+    fn intl_collator_compare_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let this_val = receiver.unwrap_or(&Value::Undefined);
+        let Value::Object(collator) = this_val else {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
+            return Value::Undefined;
+        };
+        {
+            let borrow = collator.borrow();
+            if !matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "Collator") {
+                drop(borrow);
+                self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
+                return Value::Undefined;
+            }
+        }
+
+        if let Some(existing) = collator.borrow().get(INTL_COLLATOR_BOUND_COMPARE_SLOT).cloned() {
+            return existing;
+        }
+
+        let compare = Self::make_bound_host_fn(ctx, "intl.collator.compare", this_val);
+        if let Value::Object(compare_obj) = &compare {
+            let mut borrow = compare_obj.borrow_mut(ctx);
+            Self::insert_property_with_attributes(&mut borrow, "length", &Value::Number(2.0), false, false, true);
+            Self::insert_property_with_attributes(&mut borrow, "name", &Value::from(""), false, false, true);
+            borrow.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        }
+        collator
+            .borrow_mut(ctx)
+            .insert(INTL_COLLATOR_BOUND_COMPARE_SLOT.to_string(), compare.clone());
+        compare
+    }
+
+    fn intl_collator_compare(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let Some(collator_obj) = self.intl_require_initialized_service(ctx, receiver, Some("Collator")) else {
+            return Value::Undefined;
+        };
+        let left = match self.vm_to_string_like_spec(ctx, args.first().unwrap_or(&Value::Undefined)) {
+            Ok(v) => v,
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                return Value::Undefined;
+            }
+        };
+        let right = match self.vm_to_string_like_spec(ctx, args.get(1).unwrap_or(&Value::Undefined)) {
+            Ok(v) => v,
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                return Value::Undefined;
+            }
+        };
+        let borrow = collator_obj.borrow();
+        let options = IntlCollatorOptions::from_object(&borrow);
+        Value::Number(Self::intl_compare_strings(&left, &right, &options) as f64)
+    }
+
+    fn intl_require_initialized_service(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        expected_kind: Option<&str>,
+    ) -> Option<GcPtr<'gc, IndexMap<String, Value<'gc>>>> {
+        let Some(Value::Object(obj)) = receiver else {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
+            return None;
+        };
+        let borrow = obj.borrow();
+        let Some(Value::String(kind)) = borrow.get("__intl_kind__") else {
+            drop(borrow);
+            self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
+            return None;
+        };
+        let kind = crate::unicode::utf16_to_utf8(kind);
+        if expected_kind.is_some_and(|expected| expected != kind) {
+            drop(borrow);
+            self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
+            return None;
+        }
+        drop(borrow);
+        Some(obj.clone())
+    }
+
+    fn intl_read_collator_options(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        requested_locales: &[String],
+        options: Option<&Value<'gc>>,
+    ) -> Result<IntlCollatorOptions, Value<'gc>> {
+        self.intl_read_constructor_options(ctx, "Collator", options)?;
+        let locale = requested_locales
+            .first()
+            .cloned()
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_base = Self::intl_locale_without_unicode_extension(&locale);
+        let locale_unicode = Self::intl_locale_unicode_keywords(&locale);
+        let mut out = IntlCollatorOptions {
+            usage: "sort".to_string(),
+            sensitivity: "variant".to_string(),
+            ignore_punctuation: locale_base.eq_ignore_ascii_case("th"),
+            collation: "default".to_string(),
+            numeric: None,
+            case_first: None,
+        };
+
+        if let Some(value) = locale_unicode.get("co")
+            && !value.is_empty()
+        {
+            out.collation = value.clone();
+        }
+        if let Some(value) = locale_unicode.get("kn") {
+            out.numeric = match value.as_str() {
+                "" | "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+        }
+        if let Some(value) = locale_unicode.get("kf")
+            && matches!(value.as_str(), "upper" | "lower" | "false")
+        {
+            out.case_first = Some(value.clone());
+        }
+
+        let Some(options) = options else {
+            return Ok(out);
+        };
+        if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+            return Ok(out);
+        }
+
+        if let Some(usage) = self.intl_string_option(ctx, options, "usage", &["sort", "search"], Some("sort"))? {
+            out.usage = usage;
+        }
+        let _ = self.intl_locale_matcher_option(ctx, Some(options))?;
+        if let Some(collation) = self.intl_string_option(ctx, options, "collation", &[], None)? {
+            out.collation = if collation.is_empty() { "default".to_string() } else { collation };
+        }
+        out.numeric = self.intl_boolean_option(ctx, options, "numeric")?.or(out.numeric);
+        if let Some(case_first) = self.intl_string_option(ctx, options, "caseFirst", &["upper", "lower", "false"], None)? {
+            out.case_first = Some(case_first);
+        }
+        if let Some(sensitivity) =
+            self.intl_string_option(ctx, options, "sensitivity", &["base", "accent", "case", "variant"], Some("variant"))?
+        {
+            out.sensitivity = sensitivity;
+        }
+        if let Some(ignore_punctuation) = self.intl_boolean_option(ctx, options, "ignorePunctuation")? {
+            out.ignore_punctuation = ignore_punctuation;
+        }
+        Ok(out)
+    }
+
+    fn intl_store_collator_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlCollatorOptions) {
+        obj.insert("__intl_usage__".to_string(), Value::from(options.usage.as_str()));
+        obj.insert("__intl_sensitivity__".to_string(), Value::from(options.sensitivity.as_str()));
+        obj.insert(
+            "__intl_ignore_punctuation__".to_string(),
+            Value::Boolean(options.ignore_punctuation),
+        );
+        obj.insert("__intl_collation__".to_string(), Value::from(options.collation.as_str()));
+        if let Some(numeric) = options.numeric {
+            obj.insert("__intl_numeric__".to_string(), Value::Boolean(numeric));
+        }
+        if let Some(case_first) = &options.case_first {
+            obj.insert("__intl_case_first__".to_string(), Value::from(case_first.as_str()));
+        }
+    }
+
+    fn intl_string_option(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: &Value<'gc>,
+        key: &str,
+        allowed: &[&str],
+        fallback: Option<&str>,
+    ) -> Result<Option<String>, Value<'gc>> {
+        let value = self.read_named_property(ctx, options, key);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if matches!(value, Value::Undefined) {
+            return Ok(fallback.map(str::to_string));
+        }
+        let value = match self.vm_to_string_like_spec(ctx, &value) {
+            Ok(value) => value,
+            Err(err) => return Err(self.vm_value_from_error(ctx, &err)),
+        };
+        if !allowed.is_empty() && !allowed.iter().any(|candidate| *candidate == value) {
+            return Err(self.make_range_error_object(ctx, &format!("Invalid {}", key)));
+        }
+        Ok(Some(value))
+    }
+
+    fn intl_boolean_option(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>, key: &str) -> Result<Option<bool>, Value<'gc>> {
+        let value = self.read_named_property(ctx, options, key);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if matches!(value, Value::Undefined) {
+            return Ok(None);
+        }
+        Ok(Some(value.to_truthy()))
+    }
+
+    fn intl_locale_without_unicode_extension(locale: &str) -> String {
+        let parts: Vec<&str> = locale.split('-').collect();
+        let mut out = Vec::new();
+        for part in parts {
+            if part.eq_ignore_ascii_case("u") {
+                break;
+            }
+            out.push(part);
+        }
+        out.join("-")
+    }
+
+    fn intl_locale_unicode_keywords(locale: &str) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let parts: Vec<&str> = locale.split('-').collect();
+        let Some(unicode_start) = parts.iter().position(|part| part.eq_ignore_ascii_case("u")) else {
+            return out;
+        };
+        let mut idx = unicode_start + 1;
+        while idx < parts.len() {
+            let key = parts[idx];
+            if key.len() == 1 {
+                break;
+            }
+            if key.len() != 2 {
+                idx += 1;
+                continue;
+            }
+            idx += 1;
+            let mut value_parts = Vec::new();
+            while idx < parts.len() && parts[idx].len() > 2 {
+                value_parts.push(parts[idx]);
+                idx += 1;
+            }
+            out.insert(key.to_ascii_lowercase(), value_parts.join("-"));
+        }
+        out
+    }
+
+    fn intl_compare_strings(left: &str, right: &str, options: &IntlCollatorOptions) -> i32 {
+        let left_key = Self::intl_collator_sort_key(&left.nfc().collect::<String>(), options);
+        let right_key = Self::intl_collator_sort_key(&right.nfc().collect::<String>(), options);
+        match left_key.cmp(&right_key) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    }
+
+    fn intl_collator_sort_key(value: &str, options: &IntlCollatorOptions) -> String {
+        let mut normalized = value.nfd().collect::<String>();
+        if options.ignore_punctuation {
+            normalized.retain(|ch| !ch.is_ascii_punctuation() && !ch.is_whitespace());
+        }
+        if options.collation == "phonebk" {
+            normalized = normalized
+                .replace("ä", "ae")
+                .replace("Ä", "Ae")
+                .replace("ö", "oe")
+                .replace("Ö", "Oe")
+                .replace("ü", "ue")
+                .replace("Ü", "Ue");
+        }
+        match options.sensitivity.as_str() {
+            "base" => Self::intl_collator_strip_accents(&normalized).to_ascii_lowercase(),
+            "accent" => normalized.to_ascii_lowercase(),
+            "case" => Self::intl_collator_strip_accents(&normalized),
+            _ => normalized.to_ascii_lowercase(),
+        }
+    }
+
+    fn intl_collator_strip_accents(value: &str) -> String {
+        value.chars().filter(|ch| !matches!(ch, '\u{0300}'..='\u{036f}')).collect()
     }
 
     fn intl_service_constructor_from_global(&self, kind: &str) -> Option<Value<'gc>> {
@@ -625,5 +963,43 @@ impl<'gc> VM<'gc> {
             idx += 1;
         }
         true
+    }
+}
+
+#[derive(Clone)]
+struct IntlCollatorOptions {
+    usage: String,
+    sensitivity: String,
+    ignore_punctuation: bool,
+    collation: String,
+    numeric: Option<bool>,
+    case_first: Option<String>,
+}
+
+impl IntlCollatorOptions {
+    fn from_object<'gc>(obj: &IndexMap<String, Value<'gc>>) -> Self {
+        Self {
+            usage: match obj.get("__intl_usage__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "sort".to_string(),
+            },
+            sensitivity: match obj.get("__intl_sensitivity__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "variant".to_string(),
+            },
+            ignore_punctuation: matches!(obj.get("__intl_ignore_punctuation__"), Some(Value::Boolean(true))),
+            collation: match obj.get("__intl_collation__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "default".to_string(),
+            },
+            numeric: match obj.get("__intl_numeric__") {
+                Some(Value::Boolean(value)) => Some(*value),
+                _ => None,
+            },
+            case_first: match obj.get("__intl_case_first__") {
+                Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            },
+        }
     }
 }

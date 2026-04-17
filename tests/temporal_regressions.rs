@@ -367,3 +367,54 @@ fn test_temporal_zoned_date_time_start_of_day_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "864000000000000000");
 }
+
+#[test]
+fn test_temporal_plain_date_to_plain_month_day_basic() {
+    let script = r#"
+        new Temporal.PlainDate(1976, 11, 18)
+            .toPlainMonthDay()
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"11-18\"");
+}
+
+#[test]
+fn test_temporal_plain_date_calendar_getters_basic() {
+    let script = r#"
+        const date = new Temporal.PlainDate(1976, 11, 18);
+        [
+          date.dayOfWeek,
+          date.dayOfYear,
+          date.daysInMonth,
+          date.daysInWeek,
+          date.daysInYear,
+          date.monthsInYear,
+          date.inLeapYear,
+          date.weekOfYear,
+          date.yearOfWeek,
+        ].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"4,323,30,7,366,12,true,47,1976\"");
+}
+
+#[test]
+fn test_temporal_plain_date_time_calendar_getters_basic() {
+    let script = r#"
+        const dateTime = new Temporal.PlainDateTime(1976, 11, 18, 15, 23, 30, 123, 456, 789);
+        [
+          dateTime.dayOfWeek,
+          dateTime.dayOfYear,
+          dateTime.daysInMonth,
+          dateTime.daysInWeek,
+          dateTime.daysInYear,
+          dateTime.monthsInYear,
+          dateTime.inLeapYear,
+          dateTime.weekOfYear,
+          dateTime.yearOfWeek,
+        ].join(",")
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"4,323,30,7,366,12,true,47,1976\"");
+}

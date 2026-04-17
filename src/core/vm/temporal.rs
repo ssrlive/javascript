@@ -555,6 +555,18 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainDate.toPlainMonthDay" => {
+                let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                match value.to_plain_month_day() {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainMonthDay");
+                        self.temporal_wrap_plain_month_day(ctx, ctor_value.as_ref(), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainDate.toPlainYearMonth" => {
                 let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
                     return Value::Undefined;
@@ -594,6 +606,15 @@ impl<'gc> VM<'gc> {
             "temporal.plainDate.get.monthCode" => self.temporal_plain_date_month_code(ctx, receiver),
             "temporal.plainDate.get.day" => self.temporal_plain_date_number(ctx, receiver, "day"),
             "temporal.plainDate.get.calendarId" => self.temporal_plain_date_calendar(ctx, receiver),
+            "temporal.plainDate.get.dayOfWeek" => self.temporal_plain_date_derived_number(ctx, receiver, "dayOfWeek"),
+            "temporal.plainDate.get.dayOfYear" => self.temporal_plain_date_derived_number(ctx, receiver, "dayOfYear"),
+            "temporal.plainDate.get.weekOfYear" => self.temporal_plain_date_week_of_year(ctx, receiver),
+            "temporal.plainDate.get.yearOfWeek" => self.temporal_plain_date_year_of_week(ctx, receiver),
+            "temporal.plainDate.get.daysInWeek" => self.temporal_plain_date_derived_number(ctx, receiver, "daysInWeek"),
+            "temporal.plainDate.get.daysInMonth" => self.temporal_plain_date_derived_number(ctx, receiver, "daysInMonth"),
+            "temporal.plainDate.get.daysInYear" => self.temporal_plain_date_derived_number(ctx, receiver, "daysInYear"),
+            "temporal.plainDate.get.monthsInYear" => self.temporal_plain_date_derived_number(ctx, receiver, "monthsInYear"),
+            "temporal.plainDate.get.inLeapYear" => self.temporal_plain_date_in_leap_year(ctx, receiver),
 
             "temporal.plainTime.constructor" => {
                 let hour = args.first().and_then(|v| self.temporal_number_u8(ctx, v, "hour")).unwrap_or(0);
@@ -1228,6 +1249,15 @@ impl<'gc> VM<'gc> {
             "temporal.plainDateTime.get.nanosecond" => self.temporal_plain_date_time_number(ctx, receiver, "nanosecond"),
             "temporal.plainDateTime.get.monthCode" => self.temporal_plain_date_time_month_code(ctx, receiver),
             "temporal.plainDateTime.get.calendarId" => self.temporal_plain_date_time_calendar(ctx, receiver),
+            "temporal.plainDateTime.get.dayOfWeek" => self.temporal_plain_date_time_derived_number(ctx, receiver, "dayOfWeek"),
+            "temporal.plainDateTime.get.dayOfYear" => self.temporal_plain_date_time_derived_number(ctx, receiver, "dayOfYear"),
+            "temporal.plainDateTime.get.weekOfYear" => self.temporal_plain_date_time_week_of_year(ctx, receiver),
+            "temporal.plainDateTime.get.yearOfWeek" => self.temporal_plain_date_time_year_of_week(ctx, receiver),
+            "temporal.plainDateTime.get.daysInWeek" => self.temporal_plain_date_time_derived_number(ctx, receiver, "daysInWeek"),
+            "temporal.plainDateTime.get.daysInMonth" => self.temporal_plain_date_time_derived_number(ctx, receiver, "daysInMonth"),
+            "temporal.plainDateTime.get.daysInYear" => self.temporal_plain_date_time_derived_number(ctx, receiver, "daysInYear"),
+            "temporal.plainDateTime.get.monthsInYear" => self.temporal_plain_date_time_derived_number(ctx, receiver, "monthsInYear"),
+            "temporal.plainDateTime.get.inLeapYear" => self.temporal_plain_date_time_in_leap_year(ctx, receiver),
 
             "temporal.duration.constructor" => {
                 let years = args.first().and_then(|v| self.temporal_number_i64(ctx, v, "years")).unwrap_or(0);
@@ -2396,6 +2426,7 @@ impl<'gc> VM<'gc> {
                 ("with", "temporal.plainDate.with", "with", 1.0),
                 ("withCalendar", "temporal.plainDate.withCalendar", "withCalendar", 1.0),
                 ("toPlainDateTime", "temporal.plainDate.toPlainDateTime", "toPlainDateTime", 0.0),
+                ("toPlainMonthDay", "temporal.plainDate.toPlainMonthDay", "toPlainMonthDay", 0.0),
                 ("toPlainYearMonth", "temporal.plainDate.toPlainYearMonth", "toPlainYearMonth", 0.0),
                 ("toZonedDateTime", "temporal.plainDate.toZonedDateTime", "toZonedDateTime", 1.0),
                 ("equals", "temporal.plainDate.equals", "equals", 1.0),
@@ -2409,6 +2440,15 @@ impl<'gc> VM<'gc> {
                 ("monthCode", "temporal.plainDate.get.monthCode"),
                 ("day", "temporal.plainDate.get.day"),
                 ("calendarId", "temporal.plainDate.get.calendarId"),
+                ("dayOfWeek", "temporal.plainDate.get.dayOfWeek"),
+                ("dayOfYear", "temporal.plainDate.get.dayOfYear"),
+                ("weekOfYear", "temporal.plainDate.get.weekOfYear"),
+                ("yearOfWeek", "temporal.plainDate.get.yearOfWeek"),
+                ("daysInWeek", "temporal.plainDate.get.daysInWeek"),
+                ("daysInMonth", "temporal.plainDate.get.daysInMonth"),
+                ("daysInYear", "temporal.plainDate.get.daysInYear"),
+                ("monthsInYear", "temporal.plainDate.get.monthsInYear"),
+                ("inLeapYear", "temporal.plainDate.get.inLeapYear"),
             ],
             &object_proto,
         );
@@ -2483,6 +2523,15 @@ impl<'gc> VM<'gc> {
                 ("nanosecond", "temporal.plainDateTime.get.nanosecond"),
                 ("monthCode", "temporal.plainDateTime.get.monthCode"),
                 ("calendarId", "temporal.plainDateTime.get.calendarId"),
+                ("dayOfWeek", "temporal.plainDateTime.get.dayOfWeek"),
+                ("dayOfYear", "temporal.plainDateTime.get.dayOfYear"),
+                ("weekOfYear", "temporal.plainDateTime.get.weekOfYear"),
+                ("yearOfWeek", "temporal.plainDateTime.get.yearOfWeek"),
+                ("daysInWeek", "temporal.plainDateTime.get.daysInWeek"),
+                ("daysInMonth", "temporal.plainDateTime.get.daysInMonth"),
+                ("daysInYear", "temporal.plainDateTime.get.daysInYear"),
+                ("monthsInYear", "temporal.plainDateTime.get.monthsInYear"),
+                ("inLeapYear", "temporal.plainDateTime.get.inLeapYear"),
             ],
             &object_proto,
         );
@@ -2898,6 +2947,7 @@ impl<'gc> VM<'gc> {
                     ("with", "temporal.plainDate.with"),
                     ("withCalendar", "temporal.plainDate.withCalendar"),
                     ("toPlainDateTime", "temporal.plainDate.toPlainDateTime"),
+                    ("toPlainMonthDay", "temporal.plainDate.toPlainMonthDay"),
                     ("toPlainYearMonth", "temporal.plainDate.toPlainYearMonth"),
                     ("toZonedDateTime", "temporal.plainDate.toZonedDateTime"),
                     ("toString", "temporal.plainDate.toString"),
@@ -2911,6 +2961,19 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "day", Value::Number(value.day() as f64));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
+            Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
+            if let Some(week_of_year) = value.week_of_year() {
+                Self::temporal_store_readonly(&mut borrow, "weekOfYear", Value::Number(week_of_year as f64));
+            }
+            if let Some(year_of_week) = value.year_of_week() {
+                Self::temporal_store_readonly(&mut borrow, "yearOfWeek", Value::Number(year_of_week as f64));
+            }
+            Self::temporal_store_readonly(&mut borrow, "daysInWeek", Value::Number(value.days_in_week() as f64));
+            Self::temporal_store_readonly(&mut borrow, "daysInMonth", Value::Number(value.days_in_month() as f64));
+            Self::temporal_store_readonly(&mut borrow, "daysInYear", Value::Number(value.days_in_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "monthsInYear", Value::Number(value.months_in_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "inLeapYear", Value::Boolean(value.in_leap_year()));
         }
         wrapped
     }
@@ -2979,6 +3042,19 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "nanosecond", Value::Number(value.nanosecond() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
+            Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
+            Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
+            if let Some(week_of_year) = value.week_of_year() {
+                Self::temporal_store_readonly(&mut borrow, "weekOfYear", Value::Number(week_of_year as f64));
+            }
+            if let Some(year_of_week) = value.year_of_week() {
+                Self::temporal_store_readonly(&mut borrow, "yearOfWeek", Value::Number(year_of_week as f64));
+            }
+            Self::temporal_store_readonly(&mut borrow, "daysInWeek", Value::Number(value.days_in_week() as f64));
+            Self::temporal_store_readonly(&mut borrow, "daysInMonth", Value::Number(value.days_in_month() as f64));
+            Self::temporal_store_readonly(&mut borrow, "daysInYear", Value::Number(value.days_in_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "monthsInYear", Value::Number(value.months_in_year() as f64));
+            Self::temporal_store_readonly(&mut borrow, "inLeapYear", Value::Boolean(value.in_leap_year()));
         }
         wrapped
     }
@@ -5691,6 +5767,48 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn temporal_plain_date_derived_number(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, field: &str) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match field {
+            "dayOfWeek" => Value::Number(value.day_of_week() as f64),
+            "dayOfYear" => Value::Number(value.day_of_year() as f64),
+            "daysInWeek" => Value::Number(value.days_in_week() as f64),
+            "daysInMonth" => Value::Number(value.days_in_month() as f64),
+            "daysInYear" => Value::Number(value.days_in_year() as f64),
+            "monthsInYear" => Value::Number(value.months_in_year() as f64),
+            _ => Value::Undefined,
+        }
+    }
+
+    fn temporal_plain_date_in_leap_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Boolean(value.in_leap_year())
+    }
+
+    fn temporal_plain_date_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match value.year_of_week() {
+            Some(value) => Value::Number(value as f64),
+            None => Value::Undefined,
+        }
+    }
+
+    fn temporal_plain_date_week_of_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match value.week_of_year() {
+            Some(value) => Value::Number(value as f64),
+            None => Value::Undefined,
+        }
+    }
+
     fn temporal_plain_date_calendar(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
         let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
             return Value::Undefined;
@@ -5735,6 +5853,48 @@ impl<'gc> VM<'gc> {
             "microsecond" => Value::Number(value.microsecond() as f64),
             "nanosecond" => Value::Number(value.nanosecond() as f64),
             _ => Value::Undefined,
+        }
+    }
+
+    fn temporal_plain_date_time_derived_number(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, field: &str) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match field {
+            "dayOfWeek" => Value::Number(value.day_of_week() as f64),
+            "dayOfYear" => Value::Number(value.day_of_year() as f64),
+            "daysInWeek" => Value::Number(value.days_in_week() as f64),
+            "daysInMonth" => Value::Number(value.days_in_month() as f64),
+            "daysInYear" => Value::Number(value.days_in_year() as f64),
+            "monthsInYear" => Value::Number(value.months_in_year() as f64),
+            _ => Value::Undefined,
+        }
+    }
+
+    fn temporal_plain_date_time_in_leap_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        Value::Boolean(value.in_leap_year())
+    }
+
+    fn temporal_plain_date_time_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match value.year_of_week() {
+            Some(value) => Value::Number(value as f64),
+            None => Value::Undefined,
+        }
+    }
+
+    fn temporal_plain_date_time_week_of_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        match value.week_of_year() {
+            Some(value) => Value::Number(value as f64),
+            None => Value::Undefined,
         }
     }
 

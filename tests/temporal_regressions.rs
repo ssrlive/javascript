@@ -180,3 +180,25 @@ fn test_temporal_plain_month_day_from_invalid_month_code_still_throws_with_numer
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "true");
 }
+
+#[test]
+fn test_temporal_plain_date_with_constrains_month() {
+    let script = r#"
+        new Temporal.PlainDate(1976, 11, 18)
+            .with({ month: 13 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"1976-12-18\"");
+}
+
+#[test]
+fn test_temporal_plain_date_time_with_updates_date_fields() {
+    let script = r#"
+        new Temporal.PlainDateTime(2000, 5, 2, 12, 34, 56, 987, 654, 321)
+            .with({ year: 2001, month: 6, day: 3 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2001-06-03T12:34:56.987654321\"");
+}

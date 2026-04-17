@@ -3,7 +3,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 use std::str::FromStr;
-use temporal_rs::fields::{CalendarFields, DateTimeFields, ZonedDateTimeFields};
+use temporal_rs::fields::{CalendarFields, DateTimeFields, YearMonthCalendarFields, ZonedDateTimeFields};
 use temporal_rs::options::{
     DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation, Overflow, RelativeTo,
     RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
@@ -632,6 +632,30 @@ impl<'gc> VM<'gc> {
                 match value.round(options) {
                     Ok(value) => {
                         self.temporal_wrap_plain_time(ctx, self.temporal_intrinsic_ctor_value("PlainTime").as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
+            "temporal.plainTime.with" => {
+                let Some(value) = self.temporal_expect_plain_time(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(fields_arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainTime.prototype.with requires an object");
+                    return Value::Undefined;
+                };
+                let fields = match self.temporal_plain_time_with_fields_arg(ctx, fields_arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let overflow = match self.temporal_overflow_option_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                match value.with(fields, Some(overflow)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainTime");
+                        self.temporal_wrap_plain_time(ctx, ctor_value.as_ref().or(receiver), &value)
                     }
                     Err(err) => self.temporal_throw(ctx, err),
                 }
@@ -1581,6 +1605,33 @@ impl<'gc> VM<'gc> {
                     Err(err) => self.temporal_throw(ctx, err),
                 }
             }
+            "temporal.plainYearMonth.with" => {
+                let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(fields_arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainYearMonth.prototype.with requires an object");
+                    return Value::Undefined;
+                };
+                let fields = match self.temporal_plain_year_month_with_fields_arg(ctx, fields_arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let overflow = match self.temporal_overflow_option_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                if fields.month == Some(0) {
+                    return self.temporal_throw(ctx, TemporalError::range().with_message("Invalid Temporal field"));
+                }
+                match value.with(fields, Some(overflow)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainYearMonth");
+                        self.temporal_wrap_plain_year_month(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
+            }
             "temporal.plainYearMonth.equals" => {
                 let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
                     return Value::Undefined;
@@ -1663,6 +1714,33 @@ impl<'gc> VM<'gc> {
                 let one_month = Self::temporal_month_from_code(Some(one.month_code().as_str())).unwrap_or(0);
                 let two_month = Self::temporal_month_from_code(Some(two.month_code().as_str())).unwrap_or(0);
                 Self::temporal_compare_result((one_month, one.day()).cmp(&(two_month, two.day())))
+            }
+            "temporal.plainMonthDay.with" => {
+                let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
+                    return Value::Undefined;
+                };
+                let Some(fields_arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.PlainMonthDay.prototype.with requires an object");
+                    return Value::Undefined;
+                };
+                let fields = match self.temporal_plain_month_day_with_fields_arg(ctx, fields_arg) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let overflow = match self.temporal_overflow_option_arg(ctx, args.get(1)) {
+                    Ok(value) => value,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                if fields.month == Some(0) || fields.day == Some(0) {
+                    return self.temporal_throw(ctx, TemporalError::range().with_message("Invalid Temporal field"));
+                }
+                match value.with(fields, Some(overflow)) {
+                    Ok(value) => {
+                        let ctor_value = self.temporal_intrinsic_ctor_value("PlainMonthDay");
+                        self.temporal_wrap_plain_month_day(ctx, ctor_value.as_ref().or(receiver), &value)
+                    }
+                    Err(err) => self.temporal_throw(ctx, err),
+                }
             }
             "temporal.plainMonthDay.equals" => {
                 let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
@@ -2186,6 +2264,7 @@ impl<'gc> VM<'gc> {
             ],
             &[
                 ("round", "temporal.plainTime.round", "round", 1.0),
+                ("with", "temporal.plainTime.with", "with", 1.0),
                 ("add", "temporal.plainTime.add", "add", 1.0),
                 ("subtract", "temporal.plainTime.subtract", "subtract", 1.0),
                 ("until", "temporal.plainTime.until", "until", 1.0),
@@ -2295,6 +2374,7 @@ impl<'gc> VM<'gc> {
                 ("subtract", "temporal.plainYearMonth.subtract", "subtract", 1.0),
                 ("until", "temporal.plainYearMonth.until", "until", 1.0),
                 ("since", "temporal.plainYearMonth.since", "since", 1.0),
+                ("with", "temporal.plainYearMonth.with", "with", 1.0),
                 ("equals", "temporal.plainYearMonth.equals", "equals", 1.0),
                 ("toString", "temporal.plainYearMonth.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainYearMonth.toJSON", "toJSON", 0.0),
@@ -2319,6 +2399,7 @@ impl<'gc> VM<'gc> {
                 ("compare", "temporal.plainMonthDay.compare", "compare", 2.0),
             ],
             &[
+                ("with", "temporal.plainMonthDay.with", "with", 1.0),
                 ("equals", "temporal.plainMonthDay.equals", "equals", 1.0),
                 ("toString", "temporal.plainMonthDay.toString", "toString", 0.0),
                 ("toJSON", "temporal.plainMonthDay.toJSON", "toJSON", 0.0),
@@ -2673,6 +2754,7 @@ impl<'gc> VM<'gc> {
                 obj,
                 &[
                     ("round", "temporal.plainTime.round"),
+                    ("with", "temporal.plainTime.with"),
                     ("toString", "temporal.plainTime.toString"),
                     ("toJSON", "temporal.plainTime.toJSON"),
                     ("valueOf", "temporal.plainTime.valueOf"),
@@ -2768,6 +2850,7 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("with", "temporal.plainYearMonth.with"),
                     ("toString", "temporal.plainYearMonth.toString"),
                     ("toJSON", "temporal.plainYearMonth.toJSON"),
                     ("valueOf", "temporal.plainYearMonth.valueOf"),
@@ -2795,6 +2878,7 @@ impl<'gc> VM<'gc> {
                 ctx,
                 obj,
                 &[
+                    ("with", "temporal.plainMonthDay.with"),
                     ("toString", "temporal.plainMonthDay.toString"),
                     ("toJSON", "temporal.plainMonthDay.toJSON"),
                     ("valueOf", "temporal.plainMonthDay.valueOf"),
@@ -3413,6 +3497,174 @@ impl<'gc> VM<'gc> {
                 .with_microsecond(microsecond)
                 .with_nanosecond(nanosecond),
         })
+    }
+
+    fn temporal_plain_time_with_fields_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+    ) -> Result<PartialTime, TemporalError> {
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainTime.prototype.with requires an object"));
+        }
+        if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainYearMonth", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainMonthDay", SLOT_KIND).is_some()
+        {
+            return Err(TemporalError::r#type().with_message("Temporal object is not a valid property bag"));
+        }
+
+        let calendar = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        if !matches!(calendar, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("calendar is not allowed"));
+        }
+        let time_zone = self.read_named_property(ctx, value, "timeZone");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        if !matches!(time_zone, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("timeZone is not allowed"));
+        }
+
+        let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
+        let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
+        let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
+        let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
+        let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
+        let second = self.temporal_optional_trunc_u8_property(ctx, value, "second")?;
+        let partial = PartialTime::new()
+            .with_hour(hour)
+            .with_minute(minute)
+            .with_second(second)
+            .with_millisecond(millisecond)
+            .with_microsecond(microsecond)
+            .with_nanosecond(nanosecond);
+        if partial.is_empty() {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+        Ok(partial)
+    }
+
+    fn temporal_plain_year_month_with_fields_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+    ) -> Result<YearMonthCalendarFields, TemporalError> {
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth.prototype.with requires an object"));
+        }
+        if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainYearMonth", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainMonthDay", SLOT_KIND).is_some()
+        {
+            return Err(TemporalError::r#type().with_message("Temporal object is not a valid property bag"));
+        }
+
+        let calendar = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        if !matches!(calendar, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("calendar is not allowed"));
+        }
+        let time_zone = self.read_named_property(ctx, value, "timeZone");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        if !matches!(time_zone, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("timeZone is not allowed"));
+        }
+
+        let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
+        let month_code = {
+            let month_code_value = self.read_named_property(ctx, value, "monthCode");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+            }
+            if matches!(month_code_value, Value::Undefined) {
+                None
+            } else {
+                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
+                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
+            }
+        };
+        let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        let fields = YearMonthCalendarFields::new()
+            .with_optional_year(year)
+            .with_optional_month(month)
+            .with_optional_month_code(month_code);
+        if fields.is_empty() {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+        Ok(fields)
+    }
+
+    fn temporal_plain_month_day_with_fields_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+    ) -> Result<CalendarFields, TemporalError> {
+        if !self.temporal_is_object_like(value) {
+            return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay.prototype.with requires an object"));
+        }
+        if self.temporal_slot_string_if_kind(value, "ZonedDateTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainDateTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainDate", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainTime", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainYearMonth", SLOT_KIND).is_some()
+            || self.temporal_slot_string_if_kind(value, "PlainMonthDay", SLOT_KIND).is_some()
+        {
+            return Err(TemporalError::r#type().with_message("Temporal object is not a valid property bag"));
+        }
+
+        let calendar = self.read_named_property(ctx, value, "calendar");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        if !matches!(calendar, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("calendar is not allowed"));
+        }
+        let time_zone = self.read_named_property(ctx, value, "timeZone");
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+        }
+        if !matches!(time_zone, Value::Undefined) {
+            return Err(TemporalError::r#type().with_message("timeZone is not allowed"));
+        }
+
+        let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
+        let month_code = {
+            let month_code_value = self.read_named_property(ctx, value, "monthCode");
+            if self.pending_throw.is_some() {
+                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
+            }
+            if matches!(month_code_value, Value::Undefined) {
+                None
+            } else {
+                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
+                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
+            }
+        };
+        let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        let fields = CalendarFields::new()
+            .with_optional_year(year)
+            .with_optional_month(month)
+            .with_optional_month_code(month_code)
+            .with_optional_day(day);
+        if fields.is_empty() {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+        Ok(fields)
     }
 
     fn temporal_zoned_date_time_with_fields_arg(

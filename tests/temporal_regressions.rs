@@ -202,3 +202,36 @@ fn test_temporal_plain_date_time_with_updates_date_fields() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"2001-06-03T12:34:56.987654321\"");
 }
+
+#[test]
+fn test_temporal_plain_time_with_updates_fields() {
+    let script = r#"
+        new Temporal.PlainTime(12, 34, 56, 987, 654, 321)
+            .with({ hour: 1, minute: 2, second: 3 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"01:02:03.987654321\"");
+}
+
+#[test]
+fn test_temporal_plain_year_month_with_updates_fields() {
+    let script = r#"
+        new Temporal.PlainYearMonth(2000, 5)
+            .with({ year: 2001, month: 6 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"2001-06\"");
+}
+
+#[test]
+fn test_temporal_plain_month_day_with_updates_fields() {
+    let script = r#"
+        new Temporal.PlainMonthDay(5, 2)
+            .with({ monthCode: "M06", day: 3 })
+            .toString()
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"06-03\"");
+}

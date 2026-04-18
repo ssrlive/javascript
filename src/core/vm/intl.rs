@@ -226,7 +226,7 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Value<'gc> {
         if let Some(kind) = Self::intl_service_kind_from_ctor_host(name) {
-            return match self.intl_construct_service_instance(ctx, kind, receiver, args) {
+            return match self.intl_construct_service_instance(ctx, kind, None, args) {
                 Ok(value) => value,
                 Err(err) => {
                     self.pending_throw = Some(err);
@@ -2836,7 +2836,7 @@ impl<'gc> VM<'gc> {
         let Value::Object(intl) = self.globals.get("Intl")?.clone() else {
             return None;
         };
-        intl.borrow().get(kind).cloned()
+        own_data_from_legacy_map(&intl.borrow(), kind)
     }
 
     fn intl_service_kind_from_ctor_host(name: &str) -> Option<&'static str> {

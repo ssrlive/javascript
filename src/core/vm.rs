@@ -44105,7 +44105,7 @@ impl<'gc> VM<'gc> {
                 Ok(None) => self.has_property_in_chain(ctx, target, key),
                 Err(err) => {
                     self.set_pending_throw_from_error(&err);
-                    return Err(Value::Undefined);
+                    return Err(self.pending_throw.take().unwrap_or(Value::Undefined));
                 }
             },
             _ => self.has_property_in_chain(ctx, target, key),
@@ -44125,7 +44125,7 @@ impl<'gc> VM<'gc> {
                 Ok(None) => self.has_property_in_chain(ctx, target, &key),
                 Err(err) => {
                     self.set_pending_throw_from_error(&err);
-                    return Err(Value::Undefined);
+                    return Err(self.pending_throw.take().unwrap_or(Value::Undefined));
                 }
             },
             _ => self.has_property_in_chain(ctx, target, &key),

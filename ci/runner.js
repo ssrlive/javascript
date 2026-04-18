@@ -212,18 +212,10 @@ if (FOCUS_LIST.length) {
   for (const tokRaw of toks) {
     const { text: tok, filesOnly } = stripFilesOnlyMarker(tokRaw);
     if (!tok) continue;
-    if (tok === 'language') {
-      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', 'language'), filesOnly });
-    } else if (tok === 'built-ins' || tok === 'builtins') {
-      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', 'built-ins'), filesOnly });
-    } else if (tok === 'intl') {
-      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', 'intl402'), filesOnly });
-    } else if (tok === 'all') {
-      SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test'), filesOnly });
-    } else if (fs.existsSync(path.join(TEST262_ROOT_DIR, 'test', tok))) {
+    if (fs.existsSync(path.join(TEST262_ROOT_DIR, 'test', tok))) {
       SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test', tok), filesOnly });
-    } else if (fs.existsSync(tok)) {
-      SEARCH_DIRS.push({ path: tok, filesOnly });
+    } else {
+      console.error(`WARNING: Focus token "${tokRaw}" (stripped to "${tok}") does not exist as a file or directory under test262/test/. Skipping.`);
     }
   }
 } else {
@@ -303,6 +295,12 @@ function findProbeFile(feat) {
 function detectFeature(feat) {
   // Allow environment override to force running unsupported features
   if (process.env.FORCE_RUN_UNSUPPORTED_FEATURES && process.env.FORCE_RUN_UNSUPPORTED_FEATURES !== 'false') {
+    FEATURE_SUPPORTED[feat] = true;
+    return true;
+  }
+
+  // Intl.* features and related Intl flags are assumed supported
+  if (/^Intl\./i.test(feat) || feat === 'Intl-enumeration' || feat === 'canonical-tz' || feat === 'intl-normative-optional') {
     FEATURE_SUPPORTED[feat] = true;
     return true;
   }

@@ -534,15 +534,21 @@ impl<'gc> VM<'gc> {
             Value::String(text) => {
                 let tag = crate::unicode::utf16_to_utf8(text);
                 self.intl_validate_locale_tag(ctx, &tag)?;
-                Ok(vec![tag])
+                Ok(vec![Self::intl_canonicalize_locale_tag(&tag)])
             }
-            v if Self::intl_is_object_like(v) => self.intl_canonicalize_locale_list_from_object(ctx, v),
-            _ => Ok(vec![]),
+            _ => self.intl_canonicalize_locale_list_from_object(ctx, value),
         }
     }
 
     fn intl_canonicalize_locale_list_from_object(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Vec<String>, Value<'gc>> {
-        let Some(len) = self.array_like_length_u64(ctx, value) else {
+        let boxed_value;
+        let target = if Self::intl_is_object_like(value) {
+            value
+        } else {
+            boxed_value = self.intl_box_locale_list_value(ctx, value);
+            &boxed_value
+        };
+        let Some(len) = self.array_like_length_u64(ctx, target) else {
             let thrown = self
                 .pending_throw
                 .take()
@@ -551,12 +557,12 @@ impl<'gc> VM<'gc> {
         };
         let mut out = Vec::new();
         for index in 0..len {
-            let present = self.array_like_has_index_u64(ctx, value, index)?;
+            let present = self.array_like_has_index_u64(ctx, target, index)?;
             if !present {
                 continue;
             }
             let key = index.to_string();
-            let entry = self.read_named_property(ctx, value, &key);
+            let entry = self.read_named_property(ctx, target, &key);
             if let Some(thrown) = self.pending_throw.take() {
                 return Err(thrown);
             }
@@ -571,11 +577,48 @@ impl<'gc> VM<'gc> {
                 },
             };
             self.intl_validate_locale_tag(ctx, &tag)?;
-            if !out.iter().any(|existing| existing == &tag) {
-                out.push(tag);
+            let canonicalized = Self::intl_canonicalize_locale_tag(&tag);
+            if !out.iter().any(|existing| existing == &canonicalized) {
+                out.push(canonicalized);
             }
         }
         Ok(out)
+    }
+
+    fn intl_box_locale_list_value(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Value<'gc> {
+        let mut wrapper = IndexMap::new();
+        match value {
+            Value::Boolean(boolean) => {
+                wrapper.insert("__type__".to_string(), Value::from("Boolean"));
+                wrapper.insert("__value__".to_string(), Value::Boolean(*boolean));
+                if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Boolean") {
+                    wrapper.insert("__proto__".to_string(), proto);
+                }
+            }
+            Value::Number(number) => {
+                wrapper.insert("__type__".to_string(), Value::from("Number"));
+                wrapper.insert("__value__".to_string(), Value::Number(*number));
+                if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Number") {
+                    wrapper.insert("__proto__".to_string(), proto);
+                }
+            }
+            Value::BigInt(bigint) => {
+                wrapper.insert("__type__".to_string(), Value::from("BigInt"));
+                wrapper.insert("__value__".to_string(), Value::BigInt(bigint.clone()));
+                if let Some(proto) = self.ctor_prototype_from_globals(ctx, "BigInt") {
+                    wrapper.insert("__proto__".to_string(), proto);
+                }
+            }
+            Value::Symbol(symbol) => {
+                wrapper.insert("__type__".to_string(), Value::from("Symbol"));
+                wrapper.insert("__value__".to_string(), Value::Symbol(*symbol));
+                if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Symbol") {
+                    wrapper.insert("__proto__".to_string(), proto);
+                }
+            }
+            _ => return value.clone(),
+        }
+        Value::Object(new_gc_cell_ptr(ctx, wrapper))
     }
 
     fn intl_validate_locale_tag(&self, ctx: &GcContext<'gc>, tag: &str) -> Result<(), Value<'gc>> {
@@ -1222,6 +1265,313 @@ impl<'gc> VM<'gc> {
         Self::intl_locale_info(locale).base
     }
 
+    fn intl_canonicalize_locale_tag(tag: &str) -> String {
+        let lower = tag.to_ascii_lowercase();
+        if let Some(alias) = Self::intl_whole_locale_alias(&lower) {
+            return alias.to_string();
+        }
+
+        let parts: Vec<&str> = tag.split('-').collect();
+        let mut end = parts.len();
+        for (index, part) in parts.iter().enumerate().skip(1) {
+            if part.len() == 1 {
+                end = index;
+                break;
+            }
+        }
+
+        let mut language = parts.first().map_or(String::new(), |part| part.to_ascii_lowercase());
+        let mut script = None;
+        let mut region = None;
+        let mut variants = Vec::new();
+        let mut idx = 1;
+        while idx < end {
+            let part = parts[idx];
+            if script.is_none() && part.len() == 4 && part.chars().all(|c| c.is_ascii_alphabetic()) {
+                script = Some(Self::intl_titlecase_subtag(part));
+            } else if region.is_none()
+                && ((part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
+                    || (part.len() == 3 && part.chars().all(|c| c.is_ascii_digit())))
+            {
+                region = Some(part.to_ascii_uppercase());
+            } else {
+                variants.push(part.to_ascii_lowercase());
+            }
+            idx += 1;
+        }
+
+        Self::intl_apply_language_aliases(&mut language, &mut script, &mut region);
+        Self::intl_apply_region_aliases(&language, script.as_deref(), &mut region);
+        Self::intl_apply_variant_aliases(&mut language, &mut script, &mut region, &mut variants);
+
+        variants.sort();
+
+        let mut out = vec![language];
+        if let Some(script) = script {
+            out.push(script);
+        }
+        if let Some(region) = region {
+            out.push(region);
+        }
+        out.extend(variants);
+
+        if end == parts.len() {
+            return out.join("-");
+        }
+
+        let mut extensions = Vec::new();
+        let mut private_use = None;
+        let mut index = end;
+        while index < parts.len() {
+            let singleton = parts[index].to_ascii_lowercase();
+            index += 1;
+            let start = index;
+            if singleton == "x" {
+                private_use = Some(parts[start..].iter().map(|part| part.to_ascii_lowercase()).collect::<Vec<_>>());
+                break;
+            }
+            while index < parts.len() && parts[index].len() != 1 {
+                index += 1;
+            }
+            let subtags = &parts[start..index];
+            extensions.push((singleton, subtags));
+        }
+
+        extensions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (singleton, subtags) in extensions {
+            out.push(singleton);
+            match out.last().map(String::as_str) {
+                Some("u") => out.extend(Self::intl_canonicalize_unicode_extension(subtags)),
+                Some("t") => out.extend(Self::intl_canonicalize_transformed_extension(subtags)),
+                _ => out.extend(subtags.iter().map(|part| part.to_ascii_lowercase())),
+            }
+        }
+        if let Some(private_use) = private_use {
+            out.push("x".to_string());
+            out.extend(private_use);
+        }
+        out.join("-")
+    }
+
+    fn intl_whole_locale_alias(tag: &str) -> Option<&'static str> {
+        match tag {
+            "art-lojban" => Some("jbo"),
+            "cel-gaulish" => Some("xtg"),
+            "zh-guoyu" => Some("zh"),
+            "zh-hakka" => Some("hak"),
+            "zh-xiang" => Some("hsn"),
+            "sgn-gr" => Some("gss"),
+            _ => None,
+        }
+    }
+
+    fn intl_apply_language_aliases(language: &mut String, script: &mut Option<String>, region: &mut Option<String>) {
+        match language.as_str() {
+            "cmn" => *language = "zh".to_string(),
+            "ji" => *language = "yi".to_string(),
+            "in" => *language = "id".to_string(),
+            "iw" => *language = "he".to_string(),
+            "mo" => *language = "ro".to_string(),
+            "aar" => *language = "aa".to_string(),
+            "heb" => *language = "he".to_string(),
+            "ces" => *language = "cs".to_string(),
+            "sh" => {
+                *language = "sr".to_string();
+                if script.is_none() {
+                    *script = Some("Latn".to_string());
+                }
+            }
+            "cnr" => {
+                *language = "sr".to_string();
+                if region.is_none() {
+                    *region = Some("ME".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn intl_apply_region_aliases(language: &str, script: Option<&str>, region: &mut Option<String>) {
+        let Some(current) = region.clone() else {
+            return;
+        };
+        let replacement = match current.as_str() {
+            "DD" => Some("DE"),
+            "SU" | "810" => {
+                if language == "hy" || script == Some("Armn") {
+                    Some("AM")
+                } else {
+                    Some("RU")
+                }
+            }
+            "CS" => Some("RS"),
+            "NT" => Some("SA"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *region = Some(replacement.to_string());
+        }
+    }
+
+    fn intl_apply_variant_aliases(
+        language: &mut String,
+        script: &mut Option<String>,
+        _region: &mut Option<String>,
+        variants: &mut Vec<String>,
+    ) {
+        if language == "ja" && script.as_deref() == Some("Latn") {
+            let has_hepburn = variants.iter().any(|variant| variant == "hepburn");
+            let has_heploc = variants.iter().any(|variant| variant == "heploc");
+            if has_hepburn && has_heploc {
+                variants.retain(|variant| variant != "hepburn" && variant != "heploc");
+                variants.push("alalc97".to_string());
+            }
+        }
+        if language == "hy" {
+            if variants.iter().any(|variant| variant == "arevela") {
+                variants.retain(|variant| variant != "arevela");
+            }
+            if variants.iter().any(|variant| variant == "arevmda") {
+                variants.retain(|variant| variant != "arevmda");
+                *language = "hyw".to_string();
+            }
+        }
+    }
+
+    fn intl_titlecase_subtag(part: &str) -> String {
+        let mut chars = part.chars();
+        let Some(first) = chars.next() else {
+            return String::new();
+        };
+        first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
+    }
+
+    fn intl_canonicalize_unicode_extension(subtags: &[&str]) -> Vec<String> {
+        let mut index = 0;
+        let mut attributes = Vec::new();
+        while index < subtags.len() && subtags[index].len() != 2 {
+            attributes.push(subtags[index].to_ascii_lowercase());
+            index += 1;
+        }
+        attributes.sort();
+
+        let mut keywords: Vec<(String, Vec<String>)> = Vec::new();
+        while index < subtags.len() {
+            let key = subtags[index].to_ascii_lowercase();
+            index += 1;
+            let start = index;
+            while index < subtags.len() && subtags[index].len() != 2 {
+                index += 1;
+            }
+            let raw_value = subtags[start..index]
+                .iter()
+                .map(|part| part.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            let canonical_value = Self::intl_canonicalize_unicode_keyword_value(&key, raw_value);
+            keywords.push((key, canonical_value));
+        }
+        keywords.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut out = attributes;
+        for (key, value) in keywords {
+            out.push(key);
+            out.extend(value);
+        }
+        out
+    }
+
+    fn intl_canonicalize_unicode_keyword_value(key: &str, value: Vec<String>) -> Vec<String> {
+        let joined = value.join("-");
+        let canonical = match (key, joined.as_str()) {
+            ("ca", "ethiopic-amete-alem") => Some("ethioaa"),
+            ("ca", "islamicc") => Some("islamic-civil"),
+            ("ks", "primary") => Some("level1"),
+            ("ks", "tertiary") => Some("level3"),
+            ("ms", "imperial") => Some("uksystem"),
+            ("tz", "cnckg") => Some("cnsha"),
+            ("tz", "eire") => Some("iedub"),
+            ("tz", "est") => Some("papty"),
+            ("tz", "gmt0") => Some("gmt"),
+            ("tz", "uct") => Some("utc"),
+            ("tz", "zulu") => Some("utc"),
+            ("rg", "no23") | ("sd", "no23") => Some("no50"),
+            ("rg", "cn11") | ("sd", "cn11") => Some("cnbj"),
+            ("rg", "cz10a") | ("sd", "cz10a") => Some("cz110"),
+            ("rg", "fra") | ("sd", "fra") => Some("frges"),
+            ("rg", "frg") | ("sd", "frg") => Some("frges"),
+            ("rg", "lud") | ("sd", "lud") => Some("lucl"),
+            ("kb", "yes") | ("kc", "yes") | ("kh", "yes") | ("kk", "yes") | ("kn", "yes") => Some("true"),
+            _ => None,
+        };
+        let canonical = canonical.unwrap_or(joined.as_str());
+        if canonical.is_empty() || canonical == "true" {
+            Vec::new()
+        } else {
+            canonical.split('-').map(str::to_string).collect()
+        }
+    }
+
+    fn intl_canonicalize_transformed_extension(subtags: &[&str]) -> Vec<String> {
+        let mut index = 0;
+        let mut out = Vec::new();
+        if let Some(first) = subtags.first()
+            && first.chars().all(|c| c.is_ascii_alphabetic())
+            && ((2..=3).contains(&first.len()) || (5..=8).contains(&first.len()))
+        {
+            let mut tlang_end = 1;
+            if tlang_end < subtags.len() && subtags[tlang_end].len() == 4 && subtags[tlang_end].chars().all(|c| c.is_ascii_alphabetic()) {
+                tlang_end += 1;
+            }
+            if tlang_end < subtags.len()
+                && ((subtags[tlang_end].len() == 2 && subtags[tlang_end].chars().all(|c| c.is_ascii_alphabetic()))
+                    || (subtags[tlang_end].len() == 3 && subtags[tlang_end].chars().all(|c| c.is_ascii_digit())))
+            {
+                tlang_end += 1;
+            }
+            while tlang_end < subtags.len() {
+                let part = subtags[tlang_end];
+                let is_variant =
+                    (5..=8).contains(&part.len()) || (part.len() == 4 && part.chars().next().is_some_and(|c| c.is_ascii_digit()));
+                if !is_variant {
+                    break;
+                }
+                tlang_end += 1;
+            }
+            out.extend(
+                Self::intl_canonicalize_locale_tag(&subtags[..tlang_end].join("-"))
+                    .split('-')
+                    .map(|part| part.to_ascii_lowercase()),
+            );
+            index = tlang_end;
+        }
+
+        let mut fields = Vec::new();
+        while index < subtags.len() {
+            let key = subtags[index].to_ascii_lowercase();
+            index += 1;
+            let start = index;
+            while index < subtags.len() && subtags[index].len() != 2 {
+                index += 1;
+            }
+            let joined = subtags[start..index]
+                .iter()
+                .map(|part| part.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("-");
+            let canonical = match (key.as_str(), joined.as_str()) {
+                ("m0", "names") => "prprname".to_string(),
+                _ => joined,
+            };
+            fields.push((key, canonical));
+        }
+        fields.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (key, value) in fields {
+            out.push(key);
+            out.extend(value.split('-').map(str::to_string));
+        }
+        out
+    }
+
     fn intl_locale_info(locale: &str) -> IntlLocaleInfo {
         let parts: Vec<&str> = locale.split('-').collect();
         let mut base = Vec::new();
@@ -1567,6 +1917,25 @@ impl<'gc> VM<'gc> {
             lower.as_str(),
             "no-nyn"
                 | "i-klingon"
+                | "en-gb-oed"
+                | "i-ami"
+                | "i-bnn"
+                | "i-default"
+                | "i-enochian"
+                | "i-hak"
+                | "i-lux"
+                | "i-mingo"
+                | "i-navajo"
+                | "i-pwn"
+                | "i-tao"
+                | "i-tay"
+                | "i-tsu"
+                | "sgn-be-fr"
+                | "sgn-be-nl"
+                | "sgn-ch-de"
+                | "no-bok"
+                | "zh-min"
+                | "zh-min-nan"
                 | "zh-hak-cn"
                 | "sgn-ils"
                 | "x-foo"
@@ -1620,16 +1989,33 @@ impl<'gc> VM<'gc> {
                     return false;
                 }
                 idx += 1;
-                while idx < parts.len() {
-                    let next = parts[idx];
-                    if next.len() == 1 {
-                        break;
+                idx = match part.to_ascii_lowercase().as_str() {
+                    "u" => match Self::intl_validate_unicode_extension(&parts, idx) {
+                        Some(next) => next,
+                        None => return false,
+                    },
+                    "t" => match Self::intl_validate_transformed_extension(&parts, idx) {
+                        Some(next) => next,
+                        None => return false,
+                    },
+                    _ => {
+                        let start = idx;
+                        while idx < parts.len() {
+                            let next = parts[idx];
+                            if next.len() == 1 {
+                                break;
+                            }
+                            if next.len() < 2 || next.len() > 8 || !next.chars().all(|c| c.is_ascii_alphanumeric()) {
+                                return false;
+                            }
+                            idx += 1;
+                        }
+                        if idx == start {
+                            return false;
+                        }
+                        idx
                     }
-                    if next.len() < 2 || next.len() > 8 || !next.chars().all(|c| c.is_ascii_alphanumeric()) {
-                        return false;
-                    }
-                    idx += 1;
-                }
+                };
                 continue;
             }
             if !seen_script && !seen_region && part.len() == 4 && part.chars().all(|c| c.is_ascii_alphabetic()) {
@@ -1655,6 +2041,88 @@ impl<'gc> VM<'gc> {
             idx += 1;
         }
         true
+    }
+
+    fn intl_validate_unicode_extension(parts: &[&str], mut idx: usize) -> Option<usize> {
+        let start = idx;
+        while idx < parts.len() && parts[idx].len() != 1 && parts[idx].len() >= 3 {
+            let part = parts[idx];
+            if part.len() > 8 || !part.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            idx += 1;
+        }
+        while idx < parts.len() && parts[idx].len() != 1 {
+            let key = parts[idx];
+            if key.len() != 2
+                || !key.chars().all(|c| c.is_ascii_alphanumeric())
+                || !key.chars().nth(1).is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                return None;
+            }
+            idx += 1;
+            while idx < parts.len() && parts[idx].len() != 1 && parts[idx].len() != 2 {
+                let part = parts[idx];
+                if part.len() > 8 || !part.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    return None;
+                }
+                idx += 1;
+            }
+        }
+        (idx > start).then_some(idx)
+    }
+
+    fn intl_validate_transformed_extension(parts: &[&str], mut idx: usize) -> Option<usize> {
+        if idx >= parts.len() || parts[idx].len() == 1 {
+            return None;
+        }
+        let start = idx;
+        let first = parts[idx];
+        if first.chars().all(|c| c.is_ascii_alphabetic()) && ((2..=3).contains(&first.len()) || (5..=8).contains(&first.len())) {
+            idx += 1;
+            if idx < parts.len() && parts[idx].len() == 4 && parts[idx].chars().all(|c| c.is_ascii_alphabetic()) {
+                idx += 1;
+            }
+            if idx < parts.len()
+                && ((parts[idx].len() == 2 && parts[idx].chars().all(|c| c.is_ascii_alphabetic()))
+                    || (parts[idx].len() == 3 && parts[idx].chars().all(|c| c.is_ascii_digit())))
+            {
+                idx += 1;
+            }
+            while idx < parts.len() && parts[idx].len() != 1 {
+                let part = parts[idx];
+                let is_variant = ((5..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric()))
+                    || (part.len() == 4
+                        && part.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        && part.chars().skip(1).all(|c| c.is_ascii_alphanumeric()));
+                if !is_variant {
+                    break;
+                }
+                idx += 1;
+            }
+        }
+        while idx < parts.len() && parts[idx].len() != 1 {
+            let key = parts[idx];
+            if key.len() != 2 || !key.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            idx += 1;
+            let value_start = idx;
+            while idx < parts.len() && parts[idx].len() != 1 {
+                let part = parts[idx];
+                if part.len() == 2 {
+                    break;
+                }
+                if part.len() < 3 || part.len() > 8 || !part.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    return None;
+                }
+                idx += 1;
+            }
+            if idx == value_start {
+                return None;
+            }
+        }
+        (idx > start).then_some(idx)
     }
 }
 

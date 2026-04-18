@@ -1,5 +1,7 @@
 use super::*;
 use crate::core::GcPtr;
+use std::str::FromStr;
+use temporal_rs::{Calendar, PlainDate};
 use unicode_normalization::UnicodeNormalization;
 
 const INTL_DEFAULT_LOCALE: &str = "en-US";
@@ -40,6 +42,16 @@ const INTL_SUPPORTED_NUMBERING_SYSTEMS: &[&str] = &[
     "rohg", "roman", "romanlow", "saur", "segment", "shrd", "sind", "sinh", "sora", "sund", "sunu", "takr", "talu", "taml", "tamldec",
     "telu", "thai", "tibt", "tirh", "tnsa", "tols", "vaii", "wara", "wcho",
 ];
+
+struct IntlCalendarDateFields {
+    year: i32,
+    month: u8,
+    day: u8,
+    month_code: String,
+    era: Option<String>,
+    related_year: Option<i32>,
+    year_name: Option<String>,
+}
 const INTL_SUPPORTED_TIME_ZONES: &[&str] = &[
     "Africa/Abidjan",
     "America/New_York",
@@ -2974,7 +2986,7 @@ impl<'gc> VM<'gc> {
         let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
             return Value::Undefined;
         };
-        let Some(x) = self.intl_date_time_format_clip_value(ctx, args.first(), false) else {
+        let Some(x) = self.intl_date_time_format_single_value(ctx, args.first()) else {
             return Value::Undefined;
         };
         match Self::intl_date_time_format_render(&formatter.borrow(), x) {
@@ -2995,7 +3007,7 @@ impl<'gc> VM<'gc> {
         let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
             return Value::Undefined;
         };
-        let Some(x) = self.intl_date_time_format_clip_value(ctx, date, false) else {
+        let Some(x) = self.intl_date_time_format_single_value(ctx, date) else {
             return Value::Undefined;
         };
         match Self::intl_date_time_format_parts_array(ctx, &formatter.borrow(), x, None) {
@@ -3017,10 +3029,18 @@ impl<'gc> VM<'gc> {
         let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
             return Value::Undefined;
         };
-        let Some(start) = self.intl_date_time_format_clip_value(ctx, start, true) else {
+        let (Some(start_value), Some(end_value)) = (start, end) else {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "startDate/endDate is required"));
             return Value::Undefined;
         };
-        let Some(end) = self.intl_date_time_format_clip_value(ctx, end, true) else {
+        if matches!(start_value, Value::Undefined) || matches!(end_value, Value::Undefined) {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "startDate/endDate is required"));
+            return Value::Undefined;
+        }
+        let Some(start) = self.intl_date_time_format_range_value(ctx, start_value) else {
+            return Value::Undefined;
+        };
+        let Some(end) = self.intl_date_time_format_range_value(ctx, end_value) else {
             return Value::Undefined;
         };
         let borrow = formatter.borrow();
@@ -3044,10 +3064,18 @@ impl<'gc> VM<'gc> {
         let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
             return Value::Undefined;
         };
-        let Some(start) = self.intl_date_time_format_clip_value(ctx, start, true) else {
+        let (Some(start_value), Some(end_value)) = (start, end) else {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "startDate/endDate is required"));
             return Value::Undefined;
         };
-        let Some(end) = self.intl_date_time_format_clip_value(ctx, end, true) else {
+        if matches!(start_value, Value::Undefined) || matches!(end_value, Value::Undefined) {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "startDate/endDate is required"));
+            return Value::Undefined;
+        }
+        let Some(start) = self.intl_date_time_format_range_value(ctx, start_value) else {
+            return Value::Undefined;
+        };
+        let Some(end) = self.intl_date_time_format_range_value(ctx, end_value) else {
             return Value::Undefined;
         };
         let borrow = formatter.borrow();
@@ -4462,19 +4490,19 @@ impl<'gc> VM<'gc> {
         Some(*obj)
     }
 
-    fn intl_date_time_format_clip_value(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>, required: bool) -> Option<i64> {
+    fn intl_date_time_format_range_value(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<i64> {
+        let x = self.extract_number_with_coercion(ctx, value)?;
+        Self::intl_time_clip(x).or_else(|| {
+            self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
+            None
+        })
+    }
+
+    fn intl_date_time_format_single_value(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<i64> {
         let x = if value.is_none() || matches!(value, Some(Value::Undefined)) {
-            if required {
-                self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
-                return None;
-            }
             chrono::Utc::now().timestamp_millis() as f64
         } else {
-            let prim = self.try_to_primitive(ctx, value.unwrap_or(&Value::Undefined), "number");
-            if self.pending_throw.is_some() {
-                return None;
-            }
-            to_number(&prim)
+            self.extract_number_with_coercion(ctx, value.unwrap_or(&Value::Undefined))?
         };
         Self::intl_time_clip(x).or_else(|| {
             self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
@@ -4613,22 +4641,108 @@ impl<'gc> VM<'gc> {
             .map(value_to_string)
             .unwrap_or_else(|| "UTC".to_string());
         let time_zone_explicit = matches!(formatter.get("__intl_timeZoneExplicit__"), Some(Value::Boolean(true)));
+        let fallback_date_only_parts = || {
+            let calendar = formatter
+                .get("__intl_calendar__")
+                .map(value_to_string)
+                .unwrap_or_else(|| "gregory".to_string());
+            let numbering_system = formatter
+                .get("__intl_numbering_system__")
+                .map(value_to_string)
+                .unwrap_or_else(|| "latn".to_string());
+            let (year, month, day) = Self::intl_utc_date_components_from_millis(millis);
+            let fields = Self::intl_calendar_date_fields(year, month, day, &calendar);
+            let month_style = formatter.get("__intl_month__").map(value_to_string);
+            let day_style = formatter.get("__intl_day__").map(value_to_string);
+            let year_style = formatter.get("__intl_year__").map(value_to_string);
+            let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, &numbering_system);
+            let month_value = fields.as_ref().map(|value| value.month).unwrap_or(month as u8);
+            let day_value = fields.as_ref().map(|value| value.day).unwrap_or(day as u8);
+            let year_value = fields.as_ref().map(|value| value.year).unwrap_or(year);
+            let mut parts = Vec::new();
+            if let Some(month_style) = month_style {
+                let width = usize::from(month_style == "2-digit") + 1;
+                parts.push(("month".to_string(), numeric(month_value as i64, width)));
+                if day_style.is_some() {
+                    parts.push(("literal".to_string(), "/".to_string()));
+                }
+            }
+            if let Some(day_style) = day_style {
+                let width = usize::from(day_style == "2-digit") + 1;
+                parts.push(("day".to_string(), numeric(day_value as i64, width)));
+                if year_style.is_some() {
+                    parts.push(("literal".to_string(), "/".to_string()));
+                }
+            }
+            if let Some(year_style) = year_style {
+                let year_text = if year_style == "2-digit" {
+                    numeric((year_value.rem_euclid(100)) as i64, 2)
+                } else {
+                    numeric(year_value as i64, 1)
+                };
+                parts.push(("year".to_string(), year_text));
+            }
+            if parts.is_empty() {
+                parts.push(("year".to_string(), numeric(year_value as i64, 1)));
+            }
+            if formatter.get("__intl_era__").is_some() {
+                let is_bce = fields
+                    .as_ref()
+                    .and_then(|value| value.era.as_deref())
+                    .is_some_and(|era| matches!(era, "bce" | "gregory-inverse" | "bc"))
+                    || year <= 0;
+                let era_style = formatter
+                    .get("__intl_era__")
+                    .map(value_to_string)
+                    .unwrap_or_else(|| "short".to_string());
+                let era_text = if is_bce {
+                    match era_style.as_str() {
+                        "narrow" => "B",
+                        "short" => "BC",
+                        _ => "Before Christ",
+                    }
+                } else {
+                    match era_style.as_str() {
+                        "narrow" => "A",
+                        "short" => "AD",
+                        _ => "Anno Domini",
+                    }
+                };
+                parts.push(("literal".to_string(), " ".to_string()));
+                parts.push(("era".to_string(), era_text.to_string()));
+            }
+            parts
+        };
+        let is_date_only_fallback = || {
+            formatter.get("__intl_weekday__").is_none()
+                && formatter.get("__intl_hour__").is_none()
+                && formatter.get("__intl_minute__").is_none()
+                && formatter.get("__intl_second__").is_none()
+                && formatter.get("__intl_fractionalSecondDigits__").is_none()
+                && formatter.get("__intl_timeZoneName__").is_none()
+                && formatter.get("__intl_dateStyle__").is_none()
+                && formatter.get("__intl_timeStyle__").is_none()
+        };
         let offset = if !time_zone_explicit && time_zone == "UTC" {
-            let date_time = chrono::Local
-                .timestamp_millis_opt(millis)
-                .single()
-                .ok_or_else(|| Value::from("Invalid time value"))?;
-            return Self::intl_date_time_format_parts_for_datetime(formatter, &date_time);
+            if let Some(date_time) = chrono::Local.timestamp_millis_opt(millis).single() {
+                return Self::intl_date_time_format_parts_for_datetime(formatter, &date_time);
+            }
+            if is_date_only_fallback() {
+                return Ok(fallback_date_only_parts());
+            }
+            return Err(Value::from("Invalid time value"));
         } else if time_zone == "UTC" {
             FixedOffset::east_opt(0)
         } else {
             Self::intl_fixed_offset_from_zone(&time_zone)
         }
         .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero UTC offset"));
-        let date_time = offset
-            .timestamp_millis_opt(millis)
-            .single()
-            .ok_or_else(|| Value::from("Invalid time value"))?;
+        let Some(date_time) = offset.timestamp_millis_opt(millis).single() else {
+            if time_zone == "UTC" && is_date_only_fallback() {
+                return Ok(fallback_date_only_parts());
+            }
+            return Err(Value::from("Invalid time value"));
+        };
 
         Self::intl_date_time_format_parts_for_datetime(formatter, &date_time)
     }
@@ -4672,7 +4786,13 @@ impl<'gc> VM<'gc> {
             .get("__intl_calendar__")
             .map(value_to_string)
             .unwrap_or_else(|| "gregory".to_string());
+        let locale = formatter
+            .get("__intl_locale__")
+            .map(value_to_string)
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let calendar_fields = Self::intl_calendar_date_fields(date_time.year(), date_time.month(), date_time.day(), &calendar);
         let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, &numbering_system);
+        let fractional_separator = if numbering_system == "arab" { "٫" } else { "." };
 
         if date_style.is_some() || time_style.is_some() {
             return Ok(Self::intl_date_time_style_parts(
@@ -4700,10 +4820,49 @@ impl<'gc> VM<'gc> {
         }
 
         if let Some(month_style) = month {
-            let month_index = date_time.month0() as usize;
+            let leap_month = calendar_fields.as_ref().is_some_and(|fields| fields.month_code.ends_with('L'));
+            let month_value = calendar_fields
+                .as_ref()
+                .map(|fields| {
+                    if matches!(calendar.as_str(), "chinese" | "dangi" | "hebrew") {
+                        fields
+                            .month_code
+                            .trim_start_matches('M')
+                            .trim_end_matches('L')
+                            .parse::<u8>()
+                            .ok()
+                            .unwrap_or(fields.month)
+                    } else {
+                        fields.month
+                    }
+                })
+                .unwrap_or(date_time.month() as u8);
+            let month_index = month_value.saturating_sub(1) as usize;
             let month_text = match month_style.as_str() {
-                "2-digit" => numeric((month_index + 1) as i64, 2),
-                "numeric" => numeric((month_index + 1) as i64, 1),
+                "2-digit" | "numeric"
+                    if calendar == "hebrew"
+                        && let Some(name) = calendar_fields
+                            .as_ref()
+                            .and_then(|fields| Self::intl_hebrew_month_name(&fields.month_code)) =>
+                {
+                    name.to_string()
+                }
+                "2-digit" if matches!(calendar.as_str(), "chinese" | "dangi") && leap_month => {
+                    format!("{}bis", numeric(month_value as i64, 2))
+                }
+                "numeric" if matches!(calendar.as_str(), "chinese" | "dangi") && leap_month => {
+                    format!("{}bis", numeric(month_value as i64, 1))
+                }
+                "2-digit" => numeric(month_value as i64, 2),
+                "numeric" => numeric(month_value as i64, 1),
+                "narrow" | "short" | "long"
+                    if calendar == "hebrew"
+                        && let Some(name) = calendar_fields
+                            .as_ref()
+                            .and_then(|fields| Self::intl_hebrew_month_name(&fields.month_code)) =>
+                {
+                    name.to_string()
+                }
                 "narrow" => ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"][month_index].to_string(),
                 "short" => ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month_index].to_string(),
                 _ => [
@@ -4737,7 +4896,8 @@ impl<'gc> VM<'gc> {
 
         if let Some(day_style) = day {
             let width = usize::from(day_style == "2-digit") + 1;
-            parts.push(("day".to_string(), numeric(date_time.day() as i64, width)));
+            let day_value = calendar_fields.as_ref().map(|fields| fields.day).unwrap_or(date_time.day() as u8);
+            parts.push(("day".to_string(), numeric(day_value as i64, width)));
             if year.is_some() {
                 parts.push((
                     "literal".to_string(),
@@ -4747,31 +4907,49 @@ impl<'gc> VM<'gc> {
         }
 
         if let Some(year_style) = year {
-            let mut year_value = date_time.year();
-            if calendar == "buddhist" {
-                year_value += 543;
-            }
+            let year_value = calendar_fields.as_ref().map(|fields| fields.year).unwrap_or(date_time.year());
             let year_text = if year_style == "2-digit" {
                 numeric((year_value.rem_euclid(100)) as i64, 2)
             } else {
                 numeric(year_value as i64, 1)
             };
-            parts.push(("year".to_string(), year_text));
+            if let Some(related_year) = calendar_fields.as_ref().and_then(|fields| fields.related_year) {
+                parts.push(("relatedYear".to_string(), numeric(related_year as i64, 1)));
+                if let Some(year_name) = calendar_fields.as_ref().and_then(|fields| fields.year_name.clone()) {
+                    parts.push(("yearName".to_string(), year_name));
+                    if locale.starts_with("zh") {
+                        parts.push(("literal".to_string(), "年".to_string()));
+                    }
+                }
+            } else {
+                parts.push(("year".to_string(), year_text));
+            }
         }
 
         if let Some(era_style) = era {
-            let text = if date_time.year() <= 0 {
-                match era_style.as_str() {
-                    "narrow" => "B",
-                    "short" => "BC",
-                    _ => "Before Christ",
-                }
-            } else {
-                match era_style.as_str() {
-                    "narrow" => "A",
-                    "short" => "AD",
-                    _ => "Anno Domini",
-                }
+            let Some(text) = Self::intl_era_display_name(
+                &calendar,
+                calendar_fields.as_ref().and_then(|fields| fields.era.as_deref()),
+                &era_style,
+            )
+            .or_else(|| {
+                (matches!(calendar.as_str(), "gregory" | "iso8601" | "japanese") || calendar_fields.is_none()).then(|| {
+                    if date_time.year() <= 0 {
+                        match era_style.as_str() {
+                            "narrow" => "B",
+                            "short" => "BC",
+                            _ => "Before Christ",
+                        }
+                    } else {
+                        match era_style.as_str() {
+                            "narrow" => "A",
+                            "short" => "AD",
+                            _ => "Anno Domini",
+                        }
+                    }
+                })
+            }) else {
+                return Ok(parts);
             };
             if !parts.is_empty() {
                 parts.push(("literal".to_string(), " ".to_string()));
@@ -4817,9 +4995,12 @@ impl<'gc> VM<'gc> {
                 let width = if minute.is_some() || second_style == "2-digit" { 2 } else { 1 };
                 parts.push(("second".to_string(), numeric(date_time.second() as i64, width)));
                 if let Some(fractional_second_digits) = fractional_second_digits {
-                    parts.push(("literal".to_string(), ".".to_string()));
+                    parts.push(("literal".to_string(), fractional_separator.to_string()));
                     let millis = format!("{:03}", date_time.timestamp_subsec_millis());
-                    parts.push(("fractionalSecond".to_string(), millis[..fractional_second_digits].to_string()));
+                    parts.push((
+                        "fractionalSecond".to_string(),
+                        Self::intl_remap_numbering_system_digits(&millis[..fractional_second_digits], &numbering_system),
+                    ));
                 }
             }
             if let Some(day_period_style) = day_period {
@@ -4989,6 +5170,15 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_fixed_offset_from_zone(value: &str) -> Option<chrono::FixedOffset> {
+        if let Some(rest) = value.strip_prefix("Etc/GMT") {
+            let sign = match rest.as_bytes().first().copied()? {
+                b'+' => -1,
+                b'-' => 1,
+                _ => return None,
+            };
+            let hour: i32 = rest[1..].parse().ok()?;
+            return chrono::FixedOffset::east_opt(sign * hour * 3600);
+        }
         if value.len() != 6 || !matches!(value.as_bytes()[0], b'+' | b'-') || value.as_bytes()[3] != b':' {
             return None;
         }
@@ -4996,6 +5186,119 @@ impl<'gc> VM<'gc> {
         let hour: i32 = value[1..3].parse().ok()?;
         let minute: i32 = value[4..6].parse().ok()?;
         chrono::FixedOffset::east_opt(sign * (hour * 3600 + minute * 60))
+    }
+
+    fn intl_temporal_calendar_identifier(calendar: &str) -> &str {
+        match calendar {
+            "ethioaa" => "ethiopic-amete-alem",
+            _ => calendar,
+        }
+    }
+
+    fn intl_calendar_date_fields(year: i32, month: u32, day: u32, calendar: &str) -> Option<IntlCalendarDateFields> {
+        let iso = PlainDate::try_new_iso(year, month as u8, day as u8).ok()?;
+        let date = if calendar == "iso8601" {
+            iso
+        } else {
+            let calendar_id = Self::intl_temporal_calendar_identifier(calendar);
+            let calendar = Calendar::from_str(calendar_id).ok()?;
+            iso.with_calendar(calendar)
+        };
+        let related_year = matches!(calendar, "chinese" | "dangi").then_some(date.year());
+        Some(IntlCalendarDateFields {
+            year: date.era_year().unwrap_or_else(|| date.year()),
+            month: date.month(),
+            day: date.day(),
+            month_code: date.month_code().as_str().to_string(),
+            era: date.era().map(|value| value.to_string()),
+            related_year,
+            year_name: related_year.map(Self::intl_sexagenary_year_name),
+        })
+    }
+
+    fn intl_sexagenary_year_name(year: i32) -> String {
+        const STEMS: [&str; 10] = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
+        const BRANCHES: [&str; 12] = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"];
+        let index = (year - 1984).rem_euclid(60) as usize;
+        format!("{}{}", STEMS[index % 10], BRANCHES[index % 12])
+    }
+
+    fn intl_hebrew_month_name(month_code: &str) -> Option<&'static str> {
+        match month_code {
+            "M01" => Some("Tishri"),
+            "M02" => Some("Heshvan"),
+            "M03" => Some("Kislev"),
+            "M04" => Some("Tevet"),
+            "M05" => Some("Shevat"),
+            "M05L" => Some("Adar I"),
+            "M06" => Some("Adar"),
+            "M06L" => Some("Adar II"),
+            "M07" => Some("Nisan"),
+            "M08" => Some("Iyar"),
+            "M09" => Some("Sivan"),
+            "M10" => Some("Tamuz"),
+            "M11" => Some("Av"),
+            "M12" => Some("Elul"),
+            _ => None,
+        }
+    }
+
+    fn intl_era_display_name(calendar: &str, era: Option<&str>, style: &str) -> Option<&'static str> {
+        let era = era?;
+        Some(match (calendar, era, style) {
+            (_, "bce", "narrow") => "B",
+            (_, "bce", "short") => "BC",
+            (_, "bce", _) => "Before Christ",
+            (_, "ce", "narrow") => "A",
+            (_, "ce", "short") => "AD",
+            (_, "ce", _) => "Anno Domini",
+            ("islamic-civil" | "islamic-tbla" | "islamic-umalqura", "bh", "narrow") => "BH",
+            ("islamic-civil" | "islamic-tbla" | "islamic-umalqura", "bh", "short") => "BH",
+            ("islamic-civil" | "islamic-tbla" | "islamic-umalqura", "bh", _) => "Before Hijrah",
+            ("islamic-civil" | "islamic-tbla" | "islamic-umalqura", "ah", "narrow") => "AH",
+            ("islamic-civil" | "islamic-tbla" | "islamic-umalqura", "ah", "short") => "AH",
+            ("islamic-civil" | "islamic-tbla" | "islamic-umalqura", "ah", _) => "Anno Hegirae",
+            ("japanese", "meiji", _) => "Meiji",
+            ("japanese", "taisho", _) => "Taisho",
+            ("japanese", "showa", _) => "Showa",
+            ("japanese", "heisei", _) => "Heisei",
+            ("japanese", "reiwa", _) => "Reiwa",
+            ("roc", "broc", "narrow") => "B",
+            ("roc", "broc", "short") => "Before ROC",
+            ("roc", "broc", _) => "Before R.O.C.",
+            ("roc", "roc", "narrow") => "M",
+            ("roc", "roc", "short") => "Minguo",
+            ("roc", "roc", _) => "Minguo",
+            ("ethiopic" | "ethiopic-amete-alem" | "ethioaa", "aa", "narrow") => "AA",
+            ("ethiopic" | "ethiopic-amete-alem" | "ethioaa", "aa", "short") => "Amete Alem",
+            ("ethiopic" | "ethiopic-amete-alem" | "ethioaa", "aa", _) => "Amete Alem",
+            ("ethiopic", "am", "narrow") => "AM",
+            ("ethiopic", "am", "short") => "Amete Mihret",
+            ("ethiopic", "am", _) => "Amete Mihret",
+            ("buddhist", "be", _) => "Buddhist Era",
+            ("coptic", "am", _) => "Anno Martyrum",
+            ("hebrew", "am", _) => "Anno Mundi",
+            ("indian", "shaka", _) => "Shaka",
+            ("persian", "ap", _) => "Anno Persico",
+            _ => return None,
+        })
+    }
+
+    fn intl_utc_date_components_from_millis(millis: i64) -> (i32, u32, u32) {
+        let days = millis.div_euclid(86_400_000);
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+        let mut year = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2).div_euclid(153);
+        let day = doy - (153 * mp + 2).div_euclid(5) + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        if month <= 2 {
+            year += 1;
+        }
+        (year as i32, month as u32, day as u32)
     }
 
     fn intl_format_numbering_digits(value: i64, min_width: usize, numbering_system: &str) -> String {
@@ -5302,8 +5605,6 @@ impl<'gc> VM<'gc> {
             return Ok(out);
         }
         let _ = self.intl_string_option(ctx, options, "localeMatcher", &["lookup", "best fit"], Some("best fit"))?;
-        let option_hour12 = self.intl_boolean_option(ctx, options, "hour12")?;
-        let option_hour_cycle = self.intl_string_option(ctx, options, "hourCycle", &["h11", "h12", "h23", "h24"], None)?;
         if let Some(calendar) = self.intl_string_option(ctx, options, "calendar", &[], None)? {
             if !Self::intl_is_valid_unicode_type_identifier(&calendar) {
                 return Err(self.make_range_error_object(ctx, "Invalid calendar"));
@@ -5320,6 +5621,8 @@ impl<'gc> VM<'gc> {
                 out.numbering_system = numbering_system;
             }
         }
+        let option_hour12 = self.intl_boolean_option(ctx, options, "hour12")?;
+        let option_hour_cycle = self.intl_string_option(ctx, options, "hourCycle", &["h11", "h12", "h23", "h24"], None)?;
         if let Some(time_zone) = self.intl_string_option(ctx, options, "timeZone", &[], None)? {
             let Some(normalized_time_zone) = Self::intl_normalize_time_zone_name(&time_zone) else {
                 return Err(self.make_range_error_object(ctx, "Invalid timeZone"));
@@ -5825,10 +6128,10 @@ impl<'gc> VM<'gc> {
         if !number.is_finite() {
             return Err(self.make_range_error_object(ctx, &format!("{} must be finite", key)));
         }
-        let integer = number.trunc();
-        if integer < min as f64 || integer > max as f64 {
+        if number < min as f64 || number > max as f64 {
             return Err(self.make_range_error_object(ctx, &format!("{} out of range", key)));
         }
+        let integer = number.floor();
         Ok(Some(integer as u8))
     }
 
@@ -7305,6 +7608,7 @@ impl<'gc> VM<'gc> {
     fn intl_supported_calendar(value: &str) -> Option<String> {
         let value = value.to_ascii_lowercase();
         let canonical = match value.as_str() {
+            "ethiopic-amete-alem" => "ethioaa",
             "islamicc" => "islamic-civil",
             _ => value.as_str(),
         };

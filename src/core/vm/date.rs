@@ -264,26 +264,25 @@ impl<'gc> VM<'gc> {
         } else {
             self.intl_box_primitive_if_needed(ctx, &options)
         };
-        let has_date_or_time_fields = [
-            "weekday",
-            "year",
-            "month",
-            "day",
-            "dayPeriod",
-            "hour",
-            "minute",
-            "second",
-            "fractionalSecondDigits",
-        ]
-        .into_iter()
-        .any(|key| {
+        let has_date_fields = ["weekday", "year", "month", "day"].into_iter().any(|key| {
             let value = self.read_named_property(ctx, &boxed_options, key);
             self.pending_throw.is_none() && !matches!(value, Value::Undefined)
         });
+        let has_time_fields = ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName"]
+            .into_iter()
+            .any(|key| {
+                let value = self.read_named_property(ctx, &boxed_options, key);
+                self.pending_throw.is_none() && !matches!(value, Value::Undefined)
+            });
         if let Some(thrown) = self.pending_throw.take() {
             return Err(thrown);
         }
-        if has_date_or_time_fields {
+        let needs_defaults = match mode {
+            "date" => !has_date_fields,
+            "time" => !has_time_fields,
+            _ => !has_date_fields && !has_time_fields,
+        };
+        if !needs_defaults {
             return Ok(vec![locales, boxed_options]);
         }
 
@@ -674,31 +673,71 @@ impl<'gc> VM<'gc> {
                         ));
                     }
                     BUILTIN_DATE_GETUTCFULLYEAR => {
-                        return Some(Value::Number(to_utc().map(|dt| dt.year() as f64).unwrap_or(f64::NAN)));
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).0 as f64
+                        };
+                        return Some(Value::Number(to_utc().map(|dt| dt.year() as f64).unwrap_or(fallback)));
                     }
                     BUILTIN_DATE_GETUTCMONTH => {
-                        return Some(Value::Number(to_utc().map(|dt| dt.month0() as f64).unwrap_or(f64::NAN)));
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).1 as f64
+                        };
+                        return Some(Value::Number(to_utc().map(|dt| dt.month0() as f64).unwrap_or(fallback)));
                     }
                     BUILTIN_DATE_GETUTCDATE => {
-                        return Some(Value::Number(to_utc().map(|dt| dt.day() as f64).unwrap_or(f64::NAN)));
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).2 as f64
+                        };
+                        return Some(Value::Number(to_utc().map(|dt| dt.day() as f64).unwrap_or(fallback)));
                     }
                     BUILTIN_DATE_GETUTCHOURS => {
-                        return Some(Value::Number(to_utc().map(|dt| dt.hour() as f64).unwrap_or(f64::NAN)));
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).3 as f64
+                        };
+                        return Some(Value::Number(to_utc().map(|dt| dt.hour() as f64).unwrap_or(fallback)));
                     }
                     BUILTIN_DATE_GETUTCMINUTES => {
-                        return Some(Value::Number(to_utc().map(|dt| dt.minute() as f64).unwrap_or(f64::NAN)));
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).4 as f64
+                        };
+                        return Some(Value::Number(to_utc().map(|dt| dt.minute() as f64).unwrap_or(fallback)));
                     }
                     BUILTIN_DATE_GETUTCSECONDS => {
-                        return Some(Value::Number(to_utc().map(|dt| dt.second() as f64).unwrap_or(f64::NAN)));
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).5 as f64
+                        };
+                        return Some(Value::Number(to_utc().map(|dt| dt.second() as f64).unwrap_or(fallback)));
                     }
                     BUILTIN_DATE_GETUTCDAY => {
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).7 as f64
+                        };
                         return Some(Value::Number(
-                            to_utc().map(|dt| dt.weekday().num_days_from_sunday() as f64).unwrap_or(f64::NAN),
+                            to_utc().map(|dt| dt.weekday().num_days_from_sunday() as f64).unwrap_or(fallback),
                         ));
                     }
                     BUILTIN_DATE_GETUTCMILLISECONDS => {
+                        let fallback = if ms.is_nan() {
+                            f64::NAN
+                        } else {
+                            Self::utc_components_arithmetic(ms).6 as f64
+                        };
                         return Some(Value::Number(
-                            to_utc().map(|dt| dt.timestamp_subsec_millis() as f64).unwrap_or(f64::NAN),
+                            to_utc().map(|dt| dt.timestamp_subsec_millis() as f64).unwrap_or(fallback),
                         ));
                     }
                     BUILTIN_DATE_GETTIMEZONEOFFSET => {
@@ -1277,7 +1316,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Format a UTC date as ISO string using pure arithmetic (for dates outside chrono's range)
-    pub(super) fn format_iso_string_arithmetic(ms: f64) -> String {
+    pub(super) fn utc_components_arithmetic(ms: f64) -> (i64, u32, i64, i64, i64, i64, i64, i64) {
         const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         fn is_leap(y: i64) -> bool {
             y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
@@ -1288,6 +1327,7 @@ impl<'gc> VM<'gc> {
 
         let total_ms = ms as i64;
         let mut remaining_days = total_ms.div_euclid(86_400_000);
+        let epoch_days = remaining_days;
         let time_ms = total_ms.rem_euclid(86_400_000);
         let hours = time_ms / 3_600_000;
         let minutes = (time_ms % 3_600_000) / 60_000;
@@ -1324,6 +1364,14 @@ impl<'gc> VM<'gc> {
             month += 1;
         }
         let day = remaining_days + 1;
+        let weekday = (epoch_days + 4).rem_euclid(7);
+
+        (year, month, day, hours, minutes, seconds, millis, weekday)
+    }
+
+    /// Format a UTC date as ISO string using pure arithmetic (for dates outside chrono's range)
+    pub(super) fn format_iso_string_arithmetic(ms: f64) -> String {
+        let (year, month, day, hours, minutes, seconds, millis, _) = Self::utc_components_arithmetic(ms);
 
         if (0..=9999).contains(&year) {
             format!(

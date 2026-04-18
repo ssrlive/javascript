@@ -214,6 +214,9 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "this is not a Date object");
             return Value::Undefined;
         };
+        if ms.is_nan() || ms.is_infinite() {
+            return Value::from("Invalid Date");
+        }
 
         let formatter = match self.intl_construct_service_instance(ctx, "DateTimeFormat", None, args) {
             Ok(value) => value,

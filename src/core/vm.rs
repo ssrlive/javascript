@@ -12817,7 +12817,7 @@ impl<'gc> VM<'gc> {
                         self.throw_type_error(ctx, "Array.prototype.toLocaleString element method is not callable");
                         return Value::Undefined;
                     }
-                    let localized = match self.vm_call_function_value(ctx, &method, &element, &[]) {
+                    let localized = match self.vm_call_function_value(ctx, &method, &element, args) {
                         Ok(v) => v,
                         Err(err) => {
                             self.set_pending_throw_from_error(&err);

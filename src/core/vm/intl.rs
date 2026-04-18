@@ -282,7 +282,6 @@ impl<'gc> VM<'gc> {
             }
             let mut borrow = collator_obj.borrow_mut(ctx);
             borrow.insert(INTL_COLLATOR_BOUND_COMPARE_SLOT.to_string(), compare.clone());
-            Self::insert_property_with_attributes(&mut borrow, "compare", &compare, false, true, true);
         }
 
         Ok(value)

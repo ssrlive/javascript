@@ -14177,6 +14177,7 @@ impl<'gc> VM<'gc> {
             || name.starts_with("number.")
             || name.starts_with("bigint.")
             || name.starts_with("date.")
+            || name.starts_with("intl.")
             || name.starts_with("temporal.")
             || name.starts_with("global.")
             || name.starts_with("typedarray.")

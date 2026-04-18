@@ -228,7 +228,11 @@ impl<'gc> VM<'gc> {
         if let Some(kind) = Self::intl_service_kind_from_ctor_host(name) {
             if matches!(
                 name,
-                "intl.locale.ctor" | "intl.durationFormat.ctor" | "intl.listFormat.ctor" | "intl.relativeTimeFormat.ctor"
+                "intl.locale.ctor"
+                    | "intl.durationFormat.ctor"
+                    | "intl.listFormat.ctor"
+                    | "intl.relativeTimeFormat.ctor"
+                    | "intl.pluralRules.ctor"
             ) && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined))
             {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Constructor Intl.Locale requires 'new'"));
@@ -293,6 +297,8 @@ impl<'gc> VM<'gc> {
             "intl.numberFormat.formatRangeToParts" => {
                 self.intl_number_format_format_range_to_parts(ctx, receiver, args.first(), args.get(1))
             }
+            "intl.pluralRules.select" => self.intl_plural_rules_select(ctx, receiver, args.first()),
+            "intl.pluralRules.selectRange" => self.intl_plural_rules_select_range(ctx, receiver, args.first(), args.get(1)),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
                 let mut obj = IndexMap::new();
@@ -454,6 +460,18 @@ impl<'gc> VM<'gc> {
                 );
                 mark_nonenumerable(&mut proto, "formatToParts");
             }
+            if display_name == "PluralRules" {
+                proto.insert(
+                    "select".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.pluralRules.select", "select", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "select");
+                proto.insert(
+                    "selectRange".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.pluralRules.selectRange", "selectRange", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "selectRange");
+            }
             if display_name == "Locale" {
                 for (prop, host) in [
                     ("baseName", "intl.locale.get.baseName"),
@@ -584,6 +602,11 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
+        let plural_rules_options = if kind == "PluralRules" {
+            Some(self.intl_read_plural_rules_options(ctx, &requested_locales, args.get(1))?)
+        } else {
+            None
+        };
 
         let ctor_value = ctor_value
             .cloned()
@@ -605,6 +628,7 @@ impl<'gc> VM<'gc> {
             .or_else(|| duration_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| list_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| relative_time_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
+            .or_else(|| plural_rules_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
         obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
@@ -625,6 +649,9 @@ impl<'gc> VM<'gc> {
         }
         if let Some(options) = relative_time_format_options {
             self.intl_store_relative_time_format_options(&mut obj, &options);
+        }
+        if let Some(options) = plural_rules_options {
+            self.intl_store_plural_rules_options(&mut obj, &options);
         }
         if let Some((display_type, fallback)) = display_names_options {
             obj.insert("__intl_type__".to_string(), Value::from(display_type.as_str()));
@@ -866,6 +893,68 @@ impl<'gc> VM<'gc> {
                     .get("__intl_numbering_system__")
                     .cloned()
                     .unwrap_or_else(|| Value::from("latn")),
+            );
+        } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "PluralRules") {
+            result.insert(
+                "type".to_string(),
+                borrow.get("__intl_type__").cloned().unwrap_or_else(|| Value::from("cardinal")),
+            );
+            result.insert(
+                "notation".to_string(),
+                borrow.get("__intl_notation__").cloned().unwrap_or_else(|| Value::from("standard")),
+            );
+            result.insert(
+                "minimumIntegerDigits".to_string(),
+                borrow.get("__intl_minimum_integer_digits__").cloned().unwrap_or(Value::Number(1.0)),
+            );
+            result.insert(
+                "minimumFractionDigits".to_string(),
+                borrow
+                    .get("__intl_minimum_fraction_digits__")
+                    .cloned()
+                    .unwrap_or(Value::Number(0.0)),
+            );
+            result.insert(
+                "maximumFractionDigits".to_string(),
+                borrow
+                    .get("__intl_maximum_fraction_digits__")
+                    .cloned()
+                    .unwrap_or(Value::Number(3.0)),
+            );
+            if let Some(minimum_significant_digits) = borrow.get("__intl_minimum_significant_digits__").cloned() {
+                result.insert("minimumSignificantDigits".to_string(), minimum_significant_digits);
+            }
+            if let Some(maximum_significant_digits) = borrow.get("__intl_maximum_significant_digits__").cloned() {
+                result.insert("maximumSignificantDigits".to_string(), maximum_significant_digits);
+            }
+            result.insert(
+                "pluralCategories".to_string(),
+                Value::Array(new_gc_cell_ptr(
+                    ctx,
+                    VmArrayData::new(
+                        Self::intl_plural_rule_categories(
+                            borrow
+                                .get("__intl_locale__")
+                                .and_then(|value| match value {
+                                    Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string())
+                                .as_str(),
+                            borrow
+                                .get("__intl_type__")
+                                .and_then(|value| match value {
+                                    Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| "cardinal".to_string())
+                                .as_str(),
+                        )
+                        .into_iter()
+                        .map(Value::from)
+                        .collect(),
+                    ),
+                )),
             );
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "DurationFormat")
         {
@@ -1352,6 +1441,89 @@ impl<'gc> VM<'gc> {
                 None
             }
         }
+    }
+
+    fn intl_plural_rules_select(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(plural_rules) = self.intl_require_initialized_service(ctx, receiver, Some("PluralRules")) else {
+            return Value::Undefined;
+        };
+        let borrow = plural_rules.borrow();
+        let locale = borrow
+            .get("__intl_locale__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let plural_type = borrow
+            .get("__intl_type__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "cardinal".to_string());
+        let notation = borrow
+            .get("__intl_notation__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "standard".to_string());
+        let undefined = Value::Undefined;
+        let Some(number) = self.extract_number_with_coercion(ctx, value.unwrap_or(&undefined)) else {
+            return Value::Undefined;
+        };
+        Value::from(Self::intl_plural_rule_select(&locale, &plural_type, &notation, number))
+    }
+
+    fn intl_plural_rules_select_range(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(plural_rules) = self.intl_require_initialized_service(ctx, receiver, Some("PluralRules")) else {
+            return Value::Undefined;
+        };
+        let borrow = plural_rules.borrow();
+        let locale = borrow
+            .get("__intl_locale__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let plural_type = borrow
+            .get("__intl_type__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "cardinal".to_string());
+        let notation = borrow
+            .get("__intl_notation__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "standard".to_string());
+        if start.is_none_or(|value| matches!(value, Value::Undefined)) || end.is_none_or(|value| matches!(value, Value::Undefined)) {
+            self.pending_throw = Some(self.make_type_error_object(ctx, "selectRange arguments are required"));
+            return Value::Undefined;
+        }
+        let undefined = Value::Undefined;
+        let Some(start) = self.extract_number_with_coercion(ctx, start.unwrap_or(&undefined)) else {
+            return Value::Undefined;
+        };
+        let Some(end) = self.extract_number_with_coercion(ctx, end.unwrap_or(&undefined)) else {
+            return Value::Undefined;
+        };
+        if start.is_nan() || end.is_nan() {
+            self.pending_throw = Some(self.make_range_error_object(ctx, "selectRange arguments must not be NaN"));
+            return Value::Undefined;
+        }
+        Value::from(Self::intl_plural_rule_select(&locale, &plural_type, &notation, end))
     }
 
     fn intl_duration_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
@@ -5581,6 +5753,116 @@ impl<'gc> VM<'gc> {
         Ok(out)
     }
 
+    fn intl_read_plural_rules_options(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        requested_locales: &[String],
+        options: Option<&Value<'gc>>,
+    ) -> Result<IntlPluralRulesOptions, Value<'gc>> {
+        let requested_locale = requested_locales
+            .first()
+            .cloned()
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_info = Self::intl_locale_info(&requested_locale);
+        let locale_base = if locale_info.base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_info.base.clone()
+        };
+        let mut out = IntlPluralRulesOptions::new(locale_base);
+        let Some(options) = options else {
+            return Ok(out);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(out);
+        }
+        if matches!(options, Value::Null) {
+            return Err(self.make_type_error_object(ctx, "options must not be null"));
+        }
+        let boxed_options = if Self::intl_is_object_like(options) {
+            options.clone()
+        } else {
+            self.intl_box_primitive_if_needed(ctx, options)
+        };
+        let mut raw = IndexMap::new();
+        for key in [
+            "localeMatcher",
+            "type",
+            "notation",
+            "minimumIntegerDigits",
+            "minimumFractionDigits",
+            "maximumFractionDigits",
+            "minimumSignificantDigits",
+            "maximumSignificantDigits",
+            "roundingIncrement",
+            "roundingMode",
+            "roundingPriority",
+            "trailingZeroDisplay",
+        ] {
+            let value = self.read_named_property(ctx, &boxed_options, key);
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(thrown);
+            }
+            raw.insert(key.to_string(), value);
+        }
+        let _ = self.intl_string_option_from_value(ctx, raw.get("localeMatcher"), &["lookup", "best fit"], Some("best fit"))?;
+        out.plural_type = self
+            .intl_string_option_from_value(ctx, raw.get("type"), &["cardinal", "ordinal"], Some("cardinal"))?
+            .unwrap_or_else(|| "cardinal".to_string());
+        out.notation = self
+            .intl_string_option_from_value(
+                ctx,
+                raw.get("notation"),
+                &["standard", "compact", "scientific", "engineering"],
+                Some("standard"),
+            )?
+            .unwrap_or_else(|| "standard".to_string());
+        if let Some(value) = self.intl_default_u8_option_value(ctx, raw.get("minimumIntegerDigits"), "minimumIntegerDigits", 1, 21)? {
+            out.minimum_integer_digits = value;
+        }
+        out.minimum_fraction_digits = self
+            .intl_default_u8_option_value(ctx, raw.get("minimumFractionDigits"), "minimumFractionDigits", 0, 20)?
+            .unwrap_or(0);
+        out.maximum_fraction_digits = self
+            .intl_default_u8_option_value(ctx, raw.get("maximumFractionDigits"), "maximumFractionDigits", 0, 20)?
+            .unwrap_or(3)
+            .max(out.minimum_fraction_digits);
+        out.minimum_significant_digits =
+            self.intl_default_u8_option_value(ctx, raw.get("minimumSignificantDigits"), "minimumSignificantDigits", 1, 21)?;
+        out.maximum_significant_digits =
+            self.intl_default_u8_option_value(ctx, raw.get("maximumSignificantDigits"), "maximumSignificantDigits", 1, 21)?;
+        if let (Some(min), Some(max)) = (out.minimum_significant_digits, out.maximum_significant_digits)
+            && max < min
+        {
+            return Err(self.make_range_error_object(ctx, "maximumSignificantDigits must be >= minimumSignificantDigits"));
+        }
+        let _ = self.intl_rounding_increment_option(ctx, raw.get("roundingIncrement"))?;
+        let _ = self.intl_string_option_from_value(
+            ctx,
+            raw.get("roundingMode"),
+            &[
+                "ceil",
+                "floor",
+                "expand",
+                "trunc",
+                "halfCeil",
+                "halfFloor",
+                "halfExpand",
+                "halfTrunc",
+                "halfEven",
+            ],
+            Some("halfExpand"),
+        )?;
+        let _ = self.intl_string_option_from_value(
+            ctx,
+            raw.get("roundingPriority"),
+            &["auto", "morePrecision", "lessPrecision"],
+            Some("auto"),
+        )?;
+        let _ = self.intl_string_option_from_value(ctx, raw.get("trailingZeroDisplay"), &["auto", "stripIfInteger"], Some("auto"))?;
+        Ok(out)
+    }
+
     fn intl_read_duration_format_options(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -5813,6 +6095,35 @@ impl<'gc> VM<'gc> {
         );
         obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
         obj.insert("__intl_numeric__".to_string(), Value::from(options.numeric.as_str()));
+    }
+
+    fn intl_store_plural_rules_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlPluralRulesOptions) {
+        obj.insert("__intl_type__".to_string(), Value::from(options.plural_type.as_str()));
+        obj.insert("__intl_notation__".to_string(), Value::from(options.notation.as_str()));
+        obj.insert(
+            "__intl_minimum_integer_digits__".to_string(),
+            Value::Number(options.minimum_integer_digits as f64),
+        );
+        obj.insert(
+            "__intl_minimum_fraction_digits__".to_string(),
+            Value::Number(options.minimum_fraction_digits as f64),
+        );
+        obj.insert(
+            "__intl_maximum_fraction_digits__".to_string(),
+            Value::Number(options.maximum_fraction_digits as f64),
+        );
+        if let Some(minimum_significant_digits) = options.minimum_significant_digits {
+            obj.insert(
+                "__intl_minimum_significant_digits__".to_string(),
+                Value::Number(minimum_significant_digits as f64),
+            );
+        }
+        if let Some(maximum_significant_digits) = options.maximum_significant_digits {
+            obj.insert(
+                "__intl_maximum_significant_digits__".to_string(),
+                Value::Number(maximum_significant_digits as f64),
+            );
+        }
     }
 
     fn intl_boolean_option(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>, key: &str) -> Result<Option<bool>, Value<'gc>> {
@@ -7548,6 +7859,17 @@ struct IntlRelativeTimeFormatOptions {
     numeric: String,
 }
 
+struct IntlPluralRulesOptions {
+    resolved_locale: String,
+    plural_type: String,
+    notation: String,
+    minimum_integer_digits: u8,
+    minimum_fraction_digits: u8,
+    maximum_fraction_digits: u8,
+    minimum_significant_digits: Option<u8>,
+    maximum_significant_digits: Option<u8>,
+}
+
 struct IntlNumberFormatOptions {
     resolved_locale: String,
     numbering_system: String,
@@ -7666,6 +7988,21 @@ impl IntlRelativeTimeFormatOptions {
             _ => "always".to_string(),
         };
         out
+    }
+}
+
+impl IntlPluralRulesOptions {
+    fn new(resolved_locale: String) -> Self {
+        Self {
+            resolved_locale,
+            plural_type: "cardinal".to_string(),
+            notation: "standard".to_string(),
+            minimum_integer_digits: 1,
+            minimum_fraction_digits: 0,
+            maximum_fraction_digits: 3,
+            minimum_significant_digits: None,
+            maximum_significant_digits: None,
+        }
     }
 }
 
@@ -8168,6 +8505,67 @@ impl<'gc> VM<'gc> {
             format!("{:.0}", value)
         } else {
             value.to_string()
+        }
+    }
+
+    fn intl_plural_rule_categories(locale: &str, plural_type: &str) -> Vec<&'static str> {
+        if plural_type == "ordinal" {
+            if locale.starts_with("en") {
+                vec!["one", "two", "few", "other"]
+            } else {
+                vec!["other"]
+            }
+        } else if locale.starts_with("ar") {
+            vec!["zero", "one", "two", "few", "many", "other"]
+        } else if locale.starts_with("en") || locale.starts_with("fa") {
+            vec!["one", "other"]
+        } else if locale.starts_with("fr") {
+            vec!["one", "many", "other"]
+        } else if locale.starts_with("gv") {
+            vec!["one", "two", "few", "many", "other"]
+        } else if locale.starts_with("ko") {
+            vec!["other"]
+        } else if locale.starts_with("sl") {
+            vec!["one", "two", "few", "other"]
+        } else {
+            vec!["other"]
+        }
+    }
+
+    fn intl_plural_rule_select(locale: &str, plural_type: &str, notation: &str, value: f64) -> &'static str {
+        if !value.is_finite() {
+            return "other";
+        }
+        if plural_type == "ordinal" {
+            if locale.starts_with("en") {
+                let n = value.abs().trunc() as i64;
+                let mod10 = n % 10;
+                let mod100 = n % 100;
+                if mod10 == 1 && mod100 != 11 {
+                    "one"
+                } else if mod10 == 2 && mod100 != 12 {
+                    "two"
+                } else if mod10 == 3 && mod100 != 13 {
+                    "few"
+                } else {
+                    "other"
+                }
+            } else {
+                "other"
+            }
+        } else if locale.starts_with("fr") {
+            let abs = value.abs();
+            if (notation == "compact" && abs >= 1_000_000.0) || (notation == "standard" && abs == 1_000_000.0) {
+                "many"
+            } else if abs < 2.0 {
+                "one"
+            } else {
+                "other"
+            }
+        } else if locale.starts_with("en") {
+            if value.abs() == 1.0 { "one" } else { "other" }
+        } else {
+            "other"
         }
     }
 }

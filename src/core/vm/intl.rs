@@ -178,6 +178,11 @@ impl<'gc> VM<'gc> {
                 Self::make_host_fn_with_name_len(ctx, "intl.segments.iterator", "[Symbol.iterator]", 0.0, false),
             );
             mark_nonenumerable(&mut borrow, "@@sym:1");
+            borrow.insert(
+                "containing".to_string(),
+                Self::make_host_fn_with_name_len(ctx, "intl.segments.containing", "containing", 1.0, false),
+            );
+            mark_nonenumerable(&mut borrow, "containing");
         }
 
         let mut intl = IndexMap::new();
@@ -233,6 +238,7 @@ impl<'gc> VM<'gc> {
                     | "intl.listFormat.ctor"
                     | "intl.relativeTimeFormat.ctor"
                     | "intl.pluralRules.ctor"
+                    | "intl.segmenter.ctor"
             ) && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined))
             {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Constructor Intl.Locale requires 'new'"));
@@ -301,8 +307,19 @@ impl<'gc> VM<'gc> {
             "intl.pluralRules.selectRange" => self.intl_plural_rules_select_range(ctx, receiver, args.first(), args.get(1)),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
+                let Some(segmenter) = self.intl_require_initialized_service(ctx, receiver, Some("Segmenter")) else {
+                    return Value::Undefined;
+                };
+                let undefined = Value::Undefined;
+                let input = match self.intl_to_string_value(ctx, args.first().unwrap_or(&undefined)) {
+                    Ok(input) => input,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Value::Undefined;
+                    }
+                };
                 let mut obj = IndexMap::new();
-                if let Some(Value::Object(segmenter)) = receiver {
+                {
                     let borrow = segmenter.borrow();
                     if let Some(proto) = borrow.get("__segments_proto__").cloned() {
                         obj.insert("__proto__".to_string(), proto);
@@ -310,18 +327,33 @@ impl<'gc> VM<'gc> {
                     if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
                         obj.insert("__segment_iter_proto__".to_string(), proto);
                     }
+                    if let Some(locale) = borrow.get("__intl_locale__").cloned() {
+                        obj.insert("__intl_locale__".to_string(), locale);
+                    }
+                    if let Some(granularity) = borrow.get("__intl_granularity__").cloned() {
+                        obj.insert("__intl_granularity__".to_string(), granularity);
+                    }
                 }
+                let items = self.intl_segment_items_array(ctx, &input, &obj);
+                obj.insert("__segments_input__".to_string(), input);
+                obj.insert("__items__".to_string(), items);
                 Value::Object(new_gc_cell_ptr(ctx, obj))
             }
             "intl.segments.iterator" => {
                 let mut obj = IndexMap::new();
-                if let Some(Value::Object(segments)) = receiver
-                    && let Some(proto) = segments.borrow().get("__segment_iter_proto__").cloned()
-                {
-                    obj.insert("__proto__".to_string(), proto);
+                if let Some(Value::Object(segments)) = receiver {
+                    let borrow = segments.borrow();
+                    if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
+                        obj.insert("__proto__".to_string(), proto);
+                    }
+                    if let Some(items) = borrow.get("__items__").cloned() {
+                        obj.insert("__items__".to_string(), items);
+                    }
                 }
+                obj.insert("__index__".to_string(), Value::Number(0.0));
                 Value::Object(new_gc_cell_ptr(ctx, obj))
             }
+            "intl.segments.containing" => self.intl_segments_containing(ctx, receiver, args.first()),
             _ => {
                 self.throw_type_error(ctx, "Intl operation not implemented");
                 Value::Undefined
@@ -602,6 +634,11 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
+        let segmenter_options = if kind == "Segmenter" {
+            Some(self.intl_read_segmenter_options(ctx, &requested_locales, args.get(1))?)
+        } else {
+            None
+        };
         let plural_rules_options = if kind == "PluralRules" {
             Some(self.intl_read_plural_rules_options(ctx, &requested_locales, args.get(1))?)
         } else {
@@ -628,6 +665,7 @@ impl<'gc> VM<'gc> {
             .or_else(|| duration_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| list_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| relative_time_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
+            .or_else(|| segmenter_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| plural_rules_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
@@ -649,6 +687,9 @@ impl<'gc> VM<'gc> {
         }
         if let Some(options) = relative_time_format_options {
             self.intl_store_relative_time_format_options(&mut obj, &options);
+        }
+        if let Some(options) = segmenter_options {
+            self.intl_store_segmenter_options(&mut obj, &options);
         }
         if let Some(options) = plural_rules_options {
             self.intl_store_plural_rules_options(&mut obj, &options);
@@ -955,6 +996,14 @@ impl<'gc> VM<'gc> {
                         .collect(),
                     ),
                 )),
+            );
+        } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "Segmenter") {
+            result.insert(
+                "granularity".to_string(),
+                borrow
+                    .get("__intl_granularity__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("grapheme")),
             );
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "DurationFormat")
         {
@@ -1524,6 +1573,128 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         }
         Value::from(Self::intl_plural_rule_select(&locale, &plural_type, &notation, end))
+    }
+
+    fn intl_to_string_value(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
+        let prim = self.try_to_primitive(ctx, value, "string");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        if prim.is_symbol_value() {
+            return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+        }
+        if !matches!(prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
+            return Ok(match prim {
+                Value::String(_) => prim,
+                _ => Value::from(crate::core::value::value_to_string(&prim)),
+            });
+        }
+
+        let to_string_fn = self.read_named_property(ctx, &prim, "toString");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        if matches!(
+            to_string_fn,
+            Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
+        ) {
+            let out = self.vm_call_function_value(ctx, &to_string_fn, &prim, &[])?;
+            if out.is_symbol_value() {
+                return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+            }
+            if !matches!(out, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
+                return Ok(match out {
+                    Value::String(_) => out,
+                    _ => Value::from(crate::core::value::value_to_string(&out)),
+                });
+            }
+        }
+
+        let value_of_fn = self.read_named_property(ctx, &prim, "valueOf");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        if matches!(
+            value_of_fn,
+            Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
+        ) {
+            let out = self.vm_call_function_value(ctx, &value_of_fn, &prim, &[])?;
+            if out.is_symbol_value() {
+                return Err(crate::raise_type_error!("Cannot convert a Symbol value to a string"));
+            }
+            if !matches!(out, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
+                return Ok(match out {
+                    Value::String(_) => out,
+                    _ => Value::from(crate::core::value::value_to_string(&out)),
+                });
+            }
+        }
+
+        Err(crate::raise_type_error!("Cannot convert object to primitive value"))
+    }
+
+    fn intl_segments_containing(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, index: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(Value::Object(segments)) = receiver else {
+            self.throw_type_error(ctx, "%Segments.prototype%.containing called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let borrow = segments.borrow();
+        if !borrow.contains_key("__segments_input__") {
+            drop(borrow);
+            self.throw_type_error(ctx, "%Segments.prototype%.containing called on incompatible receiver");
+            return Value::Undefined;
+        }
+        let input = borrow.get("__segments_input__").cloned().unwrap_or(Value::Undefined);
+        let items = borrow.get("__items__").cloned().unwrap_or(Value::Undefined);
+        drop(borrow);
+
+        let number = match index.unwrap_or(&Value::Undefined) {
+            Value::Symbol(_) | Value::BigInt(_) => {
+                self.throw_type_error(ctx, "Cannot convert value to integer");
+                return Value::Undefined;
+            }
+            value => {
+                let Some(number) = self.extract_number_with_coercion(ctx, value) else {
+                    return Value::Undefined;
+                };
+                number
+            }
+        };
+        let n = if number.is_nan() || number == 0.0 {
+            0isize
+        } else if number.is_infinite() {
+            if number.is_sign_negative() { isize::MIN } else { isize::MAX }
+        } else {
+            number.trunc() as isize
+        };
+
+        let input_len = match &input {
+            Value::String(text) => text.len(),
+            _ => 0,
+        };
+        if n < 0 || n as usize >= input_len {
+            return Value::Undefined;
+        }
+        let target_index = n as usize;
+        if let Value::Array(items) = items {
+            for item in &items.borrow().elements {
+                if let Value::Object(item_obj) = item {
+                    let item_borrow = item_obj.borrow();
+                    let start = match item_borrow.get("index") {
+                        Some(Value::Number(value)) => *value as usize,
+                        _ => 0,
+                    };
+                    let segment_len = match item_borrow.get("segment") {
+                        Some(Value::String(text)) => text.len(),
+                        _ => 0,
+                    };
+                    if target_index >= start && target_index < start + segment_len {
+                        return item.clone();
+                    }
+                }
+            }
+        }
+        Value::Undefined
     }
 
     fn intl_duration_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
@@ -5863,6 +6034,52 @@ impl<'gc> VM<'gc> {
         Ok(out)
     }
 
+    fn intl_read_segmenter_options(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        requested_locales: &[String],
+        options: Option<&Value<'gc>>,
+    ) -> Result<IntlSegmenterOptions, Value<'gc>> {
+        let requested_locale = requested_locales
+            .iter()
+            .find(|locale| Self::intl_segmenter_supports_locale(locale))
+            .cloned()
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_base = Self::intl_locale_without_unicode_extension(&requested_locale);
+        let mut out = IntlSegmenterOptions::new(if locale_base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_base
+        });
+        let Some(options) = options else {
+            return Ok(out);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(out);
+        }
+        if matches!(options, Value::Null) {
+            return Err(self.make_type_error_object(ctx, "options must not be null"));
+        }
+        let boxed_options = if Self::intl_is_object_like(options) {
+            options.clone()
+        } else {
+            self.intl_box_primitive_if_needed(ctx, options)
+        };
+        let locale_matcher = self.read_named_property(ctx, &boxed_options, "localeMatcher");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        let _ = self.intl_string_option_from_value(ctx, Some(&locale_matcher), &["lookup", "best fit"], Some("best fit"))?;
+        let granularity = self.read_named_property(ctx, &boxed_options, "granularity");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        out.granularity = self
+            .intl_string_option_from_value(ctx, Some(&granularity), &["grapheme", "word", "sentence"], Some("grapheme"))?
+            .unwrap_or_else(|| "grapheme".to_string());
+        Ok(out)
+    }
+
     fn intl_read_duration_format_options(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -6095,6 +6312,10 @@ impl<'gc> VM<'gc> {
         );
         obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
         obj.insert("__intl_numeric__".to_string(), Value::from(options.numeric.as_str()));
+    }
+
+    fn intl_store_segmenter_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlSegmenterOptions) {
+        obj.insert("__intl_granularity__".to_string(), Value::from(options.granularity.as_str()));
     }
 
     fn intl_store_plural_rules_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlPluralRulesOptions) {
@@ -6940,6 +7161,15 @@ impl<'gc> VM<'gc> {
     fn intl_supported_numbering_system(value: &str) -> Option<String> {
         let value = value.to_ascii_lowercase();
         INTL_SUPPORTED_NUMBERING_SYSTEMS.contains(&value.as_str()).then_some(value)
+    }
+
+    fn intl_segmenter_supports_locale(locale: &str) -> bool {
+        let base = Self::intl_locale_without_unicode_extension(locale);
+        if base.is_empty() || base.eq_ignore_ascii_case("zxx") {
+            return false;
+        }
+        let language = base.split('-').next().unwrap_or(base.as_str());
+        language.len() == 2
     }
 
     fn intl_supported_hour_cycle(value: &str) -> Option<String> {
@@ -7870,6 +8100,11 @@ struct IntlPluralRulesOptions {
     maximum_significant_digits: Option<u8>,
 }
 
+struct IntlSegmenterOptions {
+    resolved_locale: String,
+    granularity: String,
+}
+
 struct IntlNumberFormatOptions {
     resolved_locale: String,
     numbering_system: String,
@@ -8002,6 +8237,15 @@ impl IntlPluralRulesOptions {
             maximum_fraction_digits: 3,
             minimum_significant_digits: None,
             maximum_significant_digits: None,
+        }
+    }
+}
+
+impl IntlSegmenterOptions {
+    fn new(resolved_locale: String) -> Self {
+        Self {
+            resolved_locale,
+            granularity: "grapheme".to_string(),
         }
     }
 }
@@ -8567,6 +8811,530 @@ impl<'gc> VM<'gc> {
         } else {
             "other"
         }
+    }
+
+    fn intl_segment_items_array(
+        &self,
+        ctx: &GcContext<'gc>,
+        input: &Value<'gc>,
+        segment_slots: &IndexMap<String, Value<'gc>>,
+    ) -> Value<'gc> {
+        let granularity = segment_slots
+            .get("__intl_granularity__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "grapheme".to_string());
+        let utf16 = match input {
+            Value::String(text) => text.clone(),
+            _ => crate::unicode::utf8_to_utf16(""),
+        };
+        let segments = Self::intl_segment_utf16(&utf16, &granularity);
+        Value::Array(new_gc_cell_ptr(
+            ctx,
+            VmArrayData::new(
+                segments
+                    .into_iter()
+                    .map(|segment| Self::intl_segment_data_object(ctx, input, segment))
+                    .collect(),
+            ),
+        ))
+    }
+
+    fn intl_segment_data_object(ctx: &GcContext<'gc>, input: &Value<'gc>, segment: IntlSegmentRecord) -> Value<'gc> {
+        let mut obj = IndexMap::new();
+        let empty = Vec::new();
+        let input_utf16 = match input {
+            Value::String(text) => text,
+            _ => &empty,
+        };
+        obj.insert(
+            "segment".to_string(),
+            Value::String(crate::unicode::utf16_slice(input_utf16, segment.start, segment.end)),
+        );
+        obj.insert("index".to_string(), Value::Number(segment.start as f64));
+        obj.insert("input".to_string(), input.clone());
+        if let Some(is_word_like) = segment.is_word_like {
+            obj.insert("isWordLike".to_string(), Value::Boolean(is_word_like));
+        }
+        Value::Object(new_gc_cell_ptr(ctx, obj))
+    }
+
+    fn intl_segment_utf16(input: &[u16], granularity: &str) -> Vec<IntlSegmentRecord> {
+        match granularity {
+            "word" => Self::intl_segment_word_utf16(input),
+            "sentence" => Self::intl_segment_sentence_utf16(input),
+            _ => Self::intl_segment_grapheme_utf16(input),
+        }
+    }
+
+    fn intl_segment_grapheme_utf16(input: &[u16]) -> Vec<IntlSegmentRecord> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i < input.len() {
+            let start = i;
+            let (mut cp, mut len) = Self::intl_utf16_code_point_at(input, i);
+            i += len;
+            loop {
+                if i >= input.len() {
+                    break;
+                }
+                let (next_cp, next_len) = Self::intl_utf16_code_point_at(input, i);
+                if Self::intl_is_grapheme_extend(next_cp)
+                    || Self::intl_is_variation_selector(next_cp)
+                    || Self::intl_is_emoji_modifier(next_cp)
+                    || Self::intl_hangul_grapheme_continue(cp, next_cp)
+                {
+                    cp = next_cp;
+                    len = next_len;
+                    i += next_len;
+                    continue;
+                }
+                if next_cp == 0x200D {
+                    i += next_len;
+                    if i < input.len() {
+                        let (joined_cp, joined_len) = Self::intl_utf16_code_point_at(input, i);
+                        cp = joined_cp;
+                        len = joined_len;
+                        i += joined_len;
+                        while i < input.len() {
+                            let (tail_cp, tail_len) = Self::intl_utf16_code_point_at(input, i);
+                            if Self::intl_is_grapheme_extend(tail_cp)
+                                || Self::intl_is_variation_selector(tail_cp)
+                                || Self::intl_is_emoji_modifier(tail_cp)
+                            {
+                                cp = tail_cp;
+                                len = tail_len;
+                                i += tail_len;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                break;
+            }
+            let _ = (cp, len);
+            out.push(IntlSegmentRecord::new(start, i, None));
+        }
+        out
+    }
+
+    fn intl_segment_word_utf16(input: &[u16]) -> Vec<IntlSegmentRecord> {
+        let graphemes = Self::intl_segment_grapheme_utf16(input);
+        let classified: Vec<(IntlSegmentRecord, String, bool, bool)> = graphemes
+            .into_iter()
+            .map(|grapheme| {
+                let text = crate::unicode::utf16_to_utf8(&input[grapheme.start..grapheme.end]);
+                let is_space = text.chars().all(char::is_whitespace);
+                let is_word_like = !is_space && Self::intl_segment_slice_is_word_like_utf16(input, grapheme.start, grapheme.end);
+                (grapheme, text, is_space, is_word_like)
+            })
+            .collect();
+        let mut out = Vec::new();
+        let mut index = 0usize;
+        while index < classified.len() {
+            let (segment, _, is_space, is_word_like) = &classified[index];
+            if *is_space {
+                out.push(IntlSegmentRecord::new(segment.start, segment.end, Some(false)));
+                index += 1;
+                continue;
+            }
+            if *is_word_like {
+                let start = segment.start;
+                let mut end = segment.end;
+                index += 1;
+                while index < classified.len() {
+                    let (next_segment, next_text, next_is_space, next_is_word_like) = &classified[index];
+                    if *next_is_space {
+                        break;
+                    }
+                    if *next_is_word_like {
+                        end = next_segment.end;
+                        index += 1;
+                        continue;
+                    }
+                    if next_text == "."
+                        && index + 1 < classified.len()
+                        && !classified[index + 1].2
+                        && classified[index + 1].3
+                        && Self::intl_segment_slice_is_ascii_digits_utf16(input, start, end)
+                        && Self::intl_segment_slice_is_ascii_digits_utf16(input, classified[index + 1].0.start, classified[index + 1].0.end)
+                    {
+                        end = classified[index + 1].0.end;
+                        index += 2;
+                        continue;
+                    }
+                    break;
+                }
+                out.push(IntlSegmentRecord::new(start, end, Some(true)));
+                continue;
+            }
+            out.push(IntlSegmentRecord::new(segment.start, segment.end, Some(false)));
+            index += 1;
+        }
+        out
+    }
+
+    fn intl_segment_sentence_utf16(input: &[u16]) -> Vec<IntlSegmentRecord> {
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let mut i = 0usize;
+        while i < input.len() {
+            let (cp, len) = Self::intl_utf16_code_point_at(input, i);
+            i += len;
+            if matches!(cp, 0x002E | 0x0021 | 0x003F | 0x3002 | 0xFF01 | 0xFF1F) {
+                while i < input.len() {
+                    let (next_cp, next_len) = Self::intl_utf16_code_point_at(input, i);
+                    if matches!(next_cp, 0x0022 | 0x0027 | 0x2019 | 0x201D | 0x3001 | 0x300D | 0x300F)
+                        || char::from_u32(next_cp).is_some_and(char::is_whitespace)
+                    {
+                        i += next_len;
+                    } else {
+                        break;
+                    }
+                }
+                out.push(IntlSegmentRecord::new(start, i, None));
+                start = i;
+            }
+        }
+        if start < input.len() || out.is_empty() {
+            out.push(IntlSegmentRecord::new(start, input.len(), None));
+        }
+        out.retain(|segment| segment.start < segment.end);
+        out
+    }
+
+    fn intl_segment_text_is_word_like(text: &str) -> bool {
+        text.chars().any(|ch| ch.is_alphanumeric()) || text.chars().all(|ch| !ch.is_whitespace() && !Self::intl_is_punctuation_char(ch))
+    }
+
+    fn intl_segment_slice_is_word_like_utf16(input: &[u16], start: usize, end: usize) -> bool {
+        if input[start..end].iter().any(|code_unit| (0xD800..=0xDFFF).contains(code_unit)) {
+            return false;
+        }
+        let text = crate::unicode::utf16_to_utf8(&input[start..end]);
+        Self::intl_segment_text_is_word_like(&text)
+    }
+
+    fn intl_segment_slice_is_ascii_digits_utf16(input: &[u16], start: usize, end: usize) -> bool {
+        !input[start..end].is_empty() && input[start..end].iter().all(|code_unit| matches!(code_unit, 0x30..=0x39))
+    }
+
+    fn intl_is_punctuation_char(ch: char) -> bool {
+        ch.is_ascii_punctuation()
+            || matches!(
+                ch,
+                '«' | '»' | '“' | '”' | '„' | '’' | '‘' | '—' | '–' | '…' | '、' | '。' | '，' | '！' | '？' | '：' | '；'
+            )
+    }
+
+    fn intl_utf16_code_point_at(input: &[u16], index: usize) -> (u32, usize) {
+        let first = input[index];
+        if (0xD800..=0xDBFF).contains(&first) && index + 1 < input.len() {
+            let second = input[index + 1];
+            if (0xDC00..=0xDFFF).contains(&second) {
+                let high = (first as u32) - 0xD800;
+                let low = (second as u32) - 0xDC00;
+                return (0x10000 + ((high << 10) | low), 2);
+            }
+        }
+        (first as u32, 1)
+    }
+
+    fn intl_is_grapheme_extend(cp: u32) -> bool {
+        matches!(
+            cp,
+            0x0300..=0x036F
+                | 0x0483..=0x0489
+                | 0x0591..=0x05BD
+                | 0x05BF
+                | 0x05C1..=0x05C2
+                | 0x05C4..=0x05C5
+                | 0x0610..=0x061A
+                | 0x064B..=0x065F
+                | 0x0670
+                | 0x06D6..=0x06DC
+                | 0x06DF..=0x06E4
+                | 0x06E7..=0x06E8
+                | 0x06EA..=0x06ED
+                | 0x0711
+                | 0x0730..=0x074A
+                | 0x07A6..=0x07B0
+                | 0x0816..=0x0819
+                | 0x081B..=0x0823
+                | 0x0825..=0x0827
+                | 0x0829..=0x082D
+                | 0x0859..=0x085B
+                | 0x08D3..=0x08E1
+                | 0x08E3..=0x0902
+                | 0x093A
+                | 0x093C
+                | 0x0941..=0x0948
+                | 0x094D
+                | 0x0951..=0x0957
+                | 0x0962..=0x0963
+                | 0x09BC
+                | 0x09CD
+                | 0x0A3C
+                | 0x0A4D
+                | 0x0ABC
+                | 0x0ACD
+                | 0x0B3C
+                | 0x0BCD
+                | 0x0C3E..=0x0C40
+                | 0x0C46..=0x0C48
+                | 0x0C4A..=0x0C4D
+                | 0x0D3B..=0x0D3C
+                | 0x0D4D
+                | 0x0E31
+                | 0x0E34..=0x0E3A
+                | 0x0E47..=0x0E4E
+                | 0x0EB1
+                | 0x0EB4..=0x0EBC
+                | 0x0EC8..=0x0ECD
+                | 0x0F71..=0x0F7E
+                | 0x0F80..=0x0F84
+                | 0x0F86..=0x0F87
+                | 0x102D..=0x1030
+                | 0x1032..=0x1037
+                | 0x1039..=0x103A
+                | 0x1058..=0x1059
+                | 0x1712..=0x1714
+                | 0x1732..=0x1734
+                | 0x1752..=0x1753
+                | 0x1772..=0x1773
+                | 0x17B4..=0x17B5
+                | 0x17B7..=0x17BD
+                | 0x17C6
+                | 0x17C9..=0x17D3
+                | 0x180B..=0x180D
+                | 0x1885..=0x1886
+                | 0x18A9
+                | 0x1920..=0x1922
+                | 0x1927..=0x1928
+                | 0x1932
+                | 0x1939..=0x193B
+                | 0x1A17..=0x1A18
+                | 0x1A56
+                | 0x1A58..=0x1A5E
+                | 0x1A60
+                | 0x1A62
+                | 0x1A65..=0x1A6C
+                | 0x1A73..=0x1A7C
+                | 0x1AB0..=0x1AFF
+                | 0x1B00..=0x1B03
+                | 0x1B34
+                | 0x1B36..=0x1B3A
+                | 0x1B3C
+                | 0x1B42
+                | 0x1B6B..=0x1B73
+                | 0x1BA2..=0x1BA5
+                | 0x1BA8..=0x1BA9
+                | 0x1BAB..=0x1BAD
+                | 0x1BE6
+                | 0x1BE8..=0x1BE9
+                | 0x1BED
+                | 0x1BEF..=0x1BF1
+                | 0x1C2C..=0x1C33
+                | 0x1C36..=0x1C37
+                | 0x1CD0..=0x1CD2
+                | 0x1CD4..=0x1CE0
+                | 0x1CE2..=0x1CE8
+                | 0x1CED
+                | 0x1CF4
+                | 0x1CF8..=0x1CF9
+                | 0x1DC0..=0x1DFF
+                | 0x20D0..=0x20FF
+                | 0x2CEF..=0x2CF1
+                | 0x2D7F
+                | 0x2DE0..=0x2DFF
+                | 0x302A..=0x302F
+                | 0x3099..=0x309A
+                | 0xA66F
+                | 0xA67C..=0xA67D
+                | 0xA6F0..=0xA6F1
+                | 0xA802
+                | 0xA806
+                | 0xA80B
+                | 0xA825..=0xA826
+                | 0xA82C
+                | 0xA8C4..=0xA8C5
+                | 0xA8E0..=0xA8F1
+                | 0xA926..=0xA92D
+                | 0xA947..=0xA951
+                | 0xA980..=0xA982
+                | 0xA9B3
+                | 0xA9B6..=0xA9B9
+                | 0xA9BC
+                | 0xA9E5
+                | 0xAA29..=0xAA2E
+                | 0xAA31..=0xAA32
+                | 0xAA35..=0xAA36
+                | 0xAA43
+                | 0xAA4C
+                | 0xAA7C
+                | 0xAAB0
+                | 0xAAB2..=0xAAB4
+                | 0xAAB7..=0xAAB8
+                | 0xAABE..=0xAABF
+                | 0xAAC1
+                | 0xAAEC..=0xAAED
+                | 0xAAF6
+                | 0xABE5
+                | 0xABE8
+                | 0xABED
+                | 0xFB1E
+                | 0xFE00..=0xFE0F
+                | 0xFE20..=0xFE2F
+                | 0x101FD
+                | 0x102E0
+                | 0x10376..=0x1037A
+                | 0x10A01..=0x10A03
+                | 0x10A05..=0x10A06
+                | 0x10A0C..=0x10A0F
+                | 0x10A38..=0x10A3A
+                | 0x10A3F
+                | 0x10AE5..=0x10AE6
+                | 0x11001
+                | 0x11038..=0x11046
+                | 0x1107F..=0x11081
+                | 0x110B3..=0x110B6
+                | 0x110B9..=0x110BA
+                | 0x11100..=0x11102
+                | 0x11127..=0x1112B
+                | 0x1112D..=0x11134
+                | 0x11173
+                | 0x11180..=0x11181
+                | 0x111B6..=0x111BE
+                | 0x111CA..=0x111CC
+                | 0x1122F..=0x11231
+                | 0x11234
+                | 0x11236..=0x11237
+                | 0x1123E
+                | 0x112DF
+                | 0x112E3..=0x112EA
+                | 0x11300..=0x11301
+                | 0x1133C
+                | 0x11340
+                | 0x11366..=0x1136C
+                | 0x11370..=0x11374
+                | 0x11438..=0x1143F
+                | 0x11442..=0x11444
+                | 0x11446
+                | 0x1145E
+                | 0x114B3..=0x114B8
+                | 0x114BA
+                | 0x114BF..=0x114C0
+                | 0x114C2..=0x114C3
+                | 0x115B2..=0x115B5
+                | 0x115BC..=0x115BD
+                | 0x115BF..=0x115C0
+                | 0x115DC..=0x115DD
+                | 0x11633..=0x1163A
+                | 0x1163D
+                | 0x1163F..=0x11640
+                | 0x116AB
+                | 0x116AD
+                | 0x116B0..=0x116B5
+                | 0x116B7
+                | 0x1171D..=0x1171F
+                | 0x11722..=0x11725
+                | 0x11727..=0x1172B
+                | 0x1182F..=0x11837
+                | 0x11839..=0x1183A
+                | 0x1193B..=0x1193C
+                | 0x1193E
+                | 0x11943
+                | 0x119D4..=0x119D7
+                | 0x119DA..=0x119DB
+                | 0x119E0
+                | 0x11A01..=0x11A0A
+                | 0x11A33..=0x11A38
+                | 0x11A3B..=0x11A3E
+                | 0x11A47
+                | 0x11A51..=0x11A56
+                | 0x11A59..=0x11A5B
+                | 0x11A8A..=0x11A96
+                | 0x11A98..=0x11A99
+                | 0x11C30..=0x11C36
+                | 0x11C38..=0x11C3D
+                | 0x11C3F
+                | 0x11C92..=0x11CA7
+                | 0x11CAA..=0x11CB0
+                | 0x11CB2..=0x11CB3
+                | 0x11CB5..=0x11CB6
+                | 0x11D31..=0x11D36
+                | 0x11D3A
+                | 0x11D3C..=0x11D3D
+                | 0x11D3F..=0x11D45
+                | 0x11D47
+                | 0x11D90..=0x11D91
+                | 0x11D95
+                | 0x11D97
+                | 0x11EF3..=0x11EF4
+                | 0x16AF0..=0x16AF4
+                | 0x16B30..=0x16B36
+                | 0x16F4F
+                | 0x16F8F..=0x16F92
+                | 0x16FE4
+                | 0x1BC9D..=0x1BC9E
+                | 0x1D167..=0x1D169
+                | 0x1D17B..=0x1D182
+                | 0x1D185..=0x1D18B
+                | 0x1D1AA..=0x1D1AD
+                | 0x1D242..=0x1D244
+                | 0x1DA00..=0x1DA36
+                | 0x1DA3B..=0x1DA6C
+                | 0x1DA75
+                | 0x1DA84
+                | 0x1DA9B..=0x1DA9F
+                | 0x1DAA1..=0x1DAAF
+                | 0x1E000..=0x1E006
+                | 0x1E008..=0x1E018
+                | 0x1E01B..=0x1E021
+                | 0x1E023..=0x1E024
+                | 0x1E026..=0x1E02A
+                | 0x1E130..=0x1E136
+                | 0x1E2EC..=0x1E2EF
+                | 0x1E8D0..=0x1E8D6
+                | 0x1E944..=0x1E94A
+        )
+    }
+
+    fn intl_is_variation_selector(cp: u32) -> bool {
+        matches!(cp, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+    }
+
+    fn intl_is_emoji_modifier(cp: u32) -> bool {
+        matches!(cp, 0x1F3FB..=0x1F3FF)
+    }
+
+    fn intl_hangul_grapheme_continue(current: u32, next: u32) -> bool {
+        let current_l = matches!(current, 0x1100..=0x115F | 0xA960..=0xA97C);
+        let current_v = matches!(current, 0x1160..=0x11A7 | 0xD7B0..=0xD7C6);
+        let current_t = matches!(current, 0x11A8..=0x11FF | 0xD7CB..=0xD7FB);
+        let current_lv = (0xAC00..=0xD7A3).contains(&current) && (current - 0xAC00).is_multiple_of(28);
+        let current_lvt = (0xAC00..=0xD7A3).contains(&current) && !(current - 0xAC00).is_multiple_of(28);
+        let next_l = matches!(next, 0x1100..=0x115F | 0xA960..=0xA97C);
+        let next_v = matches!(next, 0x1160..=0x11A7 | 0xD7B0..=0xD7C6);
+        let next_t = matches!(next, 0x11A8..=0x11FF | 0xD7CB..=0xD7FB);
+        (current_l && (next_l || next_v)) || ((current_v || current_lv) && (next_v || next_t)) || ((current_t || current_lvt) && next_t)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IntlSegmentRecord {
+    start: usize,
+    end: usize,
+    is_word_like: Option<bool>,
+}
+
+impl IntlSegmentRecord {
+    fn new(start: usize, end: usize, is_word_like: Option<bool>) -> Self {
+        Self { start, end, is_word_like }
     }
 }
 

@@ -9,11 +9,11 @@ use temporal_rs::options::{
     RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
 };
 use temporal_rs::parsers::Precision;
-use temporal_rs::partial::PartialTime;
+use temporal_rs::partial::{PartialDate, PartialDateTime, PartialTime, PartialYearMonth, PartialZonedDateTime};
 use temporal_rs::provider::TransitionDirection;
 use temporal_rs::{
     Calendar, Duration as TemporalDuration, Instant, MonthCode, PlainDate, PlainDateTime, PlainMonthDay, PlainTime, PlainYearMonth,
-    Temporal, TemporalError, TimeZone, UtcOffset, ZonedDateTime,
+    Temporal, TemporalError, TimeZone, TinyAsciiStr, UtcOffset, ZonedDateTime,
 };
 
 const SLOT_KIND: &str = "__temporal_kind__";
@@ -3193,8 +3193,8 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "day", Value::Number(value.day() as f64));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
-            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
-            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "era", Self::temporal_era_to_value(value.era()));
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Self::temporal_era_year_to_value(value.era_year()));
             Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
             Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
             if let Some(week_of_year) = value.week_of_year() {
@@ -3283,8 +3283,8 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "nanosecond", Value::Number(value.nanosecond() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
-            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
-            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "era", Self::temporal_era_to_value(value.era()));
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Self::temporal_era_year_to_value(value.era_year()));
             Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
             Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
             if let Some(week_of_year) = value.week_of_year() {
@@ -3370,8 +3370,8 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "month", Value::Number(value.month() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthCode", Value::from(value.month_code().as_str()));
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
-            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
-            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "era", Self::temporal_era_to_value(value.era()));
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Self::temporal_era_year_to_value(value.era_year()));
             Self::temporal_store_readonly(&mut borrow, "daysInMonth", Value::Number(value.days_in_month() as f64));
             Self::temporal_store_readonly(&mut borrow, "daysInYear", Value::Number(value.days_in_year() as f64));
             Self::temporal_store_readonly(&mut borrow, "monthsInYear", Value::Number(value.months_in_year() as f64));
@@ -3471,8 +3471,8 @@ impl<'gc> VM<'gc> {
                 Value::BigInt(Box::new(BigInt::from(value.to_instant().as_i128()))),
             );
             Self::temporal_store_readonly(&mut borrow, "calendarId", Value::from(value.calendar().identifier()));
-            Self::temporal_store_readonly(&mut borrow, "era", Value::Undefined);
-            Self::temporal_store_readonly(&mut borrow, "eraYear", Value::Undefined);
+            Self::temporal_store_readonly(&mut borrow, "era", Self::temporal_era_to_value(value.era()));
+            Self::temporal_store_readonly(&mut borrow, "eraYear", Self::temporal_era_year_to_value(value.era_year()));
             if let Ok(time_zone_id) = value.time_zone().identifier() {
                 Self::temporal_store_readonly(&mut borrow, "timeZoneId", Value::from(time_zone_id.as_str()));
             }
@@ -3935,24 +3935,17 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
-                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
-        if day.is_none() && month.is_none() && month_code.is_none() && year.is_none() {
+        if day.is_none() && era.is_none() && era_year.is_none() && month.is_none() && month_code.is_none() && year.is_none() {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
         Ok(CalendarFields::new()
+            .with_era(era)
+            .with_era_year(era_year)
             .with_optional_year(year)
             .with_optional_month(month)
             .with_optional_month_code(month_code)
@@ -3993,27 +3986,20 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
         let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
-                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
         let second = self.temporal_optional_trunc_u8_property(ctx, value, "second")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
         if day.is_none()
+            && era.is_none()
+            && era_year.is_none()
             && hour.is_none()
             && microsecond.is_none()
             && millisecond.is_none()
@@ -4028,6 +4014,8 @@ impl<'gc> VM<'gc> {
         }
         Ok(DateTimeFields {
             calendar_fields: CalendarFields::new()
+                .with_era(era)
+                .with_era_year(era_year)
                 .with_optional_year(year)
                 .with_optional_month(month)
                 .with_optional_month_code(month_code)
@@ -4123,21 +4111,14 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("timeZone is not allowed"));
         }
 
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
-                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
         let fields = YearMonthCalendarFields::new()
+            .with_era(era)
+            .with_era_year(era_year)
             .with_optional_year(year)
             .with_optional_month(month)
             .with_optional_month_code(month_code);
@@ -4181,21 +4162,14 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
-                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
         let fields = CalendarFields::new()
+            .with_era(era)
+            .with_era_year(era_year)
             .with_optional_year(year)
             .with_optional_month(month)
             .with_optional_month_code(month_code)
@@ -4308,23 +4282,14 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
         let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                let text = self.temporal_textual_property(ctx, &month_code_value, "monthCode")?;
-                Some(MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
         let offset = {
             let offset_value = self.read_named_property(ctx, value, "offset");
@@ -4350,12 +4315,16 @@ impl<'gc> VM<'gc> {
             || nanosecond.is_some()
             || offset.is_some()
             || second.is_some()
+            || era.is_some()
+            || era_year.is_some()
             || year.is_some();
 
         let month = month.or_else(|| if month_code.is_none() { Some(current.month()) } else { None });
         let month_code = month_code.or_else(|| if month.is_none() { Some(current.month_code()) } else { None });
 
         let calendar_fields = CalendarFields::new()
+            .with_era(era)
+            .with_era_year(era_year)
             .with_optional_year(year)
             .with_optional_month(month)
             .with_optional_month_code(month_code)
@@ -4651,52 +4620,35 @@ impl<'gc> VM<'gc> {
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
         let day = self.temporal_optional_trunc_i32_property(ctx, value, "day")?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let month = self.temporal_optional_trunc_i32_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                Some(self.temporal_month_code_property(ctx, &month_code_value)?)
-            }
-        };
-        let month_code_syntax = match month_code.as_deref() {
-            Some(month_code) => {
-                Some(Self::temporal_month_code_syntax(month_code).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-            None => None,
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
         let overflow = self.temporal_overflow_option_arg(ctx, options)?;
 
-        let had_any_property = day.is_some() || month.is_some() || month_code.is_some() || year.is_some();
+        let had_any_property =
+            day.is_some() || era.is_some() || era_year.is_some() || month.is_some() || month_code.is_some() || year.is_some();
         if !had_any_property {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
 
-        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
-        let month_from_code = match month_code_syntax {
-            Some((_, true)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-            Some((month, false)) if !(1..=12).contains(&month) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-            Some((month, false)) => Some(month),
-            None => None,
-        };
-        if let (Some(month), Some(month_from_code)) = (month, month_from_code)
-            && month != month_from_code as i32
-        {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        let month = match (month, month_from_code) {
-            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
-            (None, Some(month)) => month,
-            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
-        };
-        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
-        PlainDate::new_with_overflow(year, month, day, calendar, overflow)
+        let partial = PartialDate::new()
+            .with_calendar(calendar)
+            .with_era(era)
+            .with_era_year(era_year)
+            .with_year(year)
+            .with_month(
+                month
+                    .map(|month| Self::temporal_positive_overflow_u8(month, overflow, 12, "month"))
+                    .transpose()?,
+            )
+            .with_month_code(month_code)
+            .with_day(
+                day.map(|day| Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day"))
+                    .transpose()?,
+            );
+        PlainDate::from_partial(partial, Some(overflow))
     }
 
     fn temporal_plain_time_from_arg(
@@ -4814,34 +4766,22 @@ impl<'gc> VM<'gc> {
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
         let day = self.temporal_optional_trunc_i32_property(ctx, value, "day")?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
         let minute = self.temporal_optional_trunc_u8_property(ctx, value, "minute")?;
         let month = self.temporal_optional_trunc_i32_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                Some(self.temporal_month_code_property(ctx, &month_code_value)?)
-            }
-        };
-        let month_code_syntax = match month_code.as_deref() {
-            Some(month_code) => {
-                Some(Self::temporal_month_code_syntax(month_code).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?)
-            }
-            None => None,
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let nanosecond = self.temporal_optional_trunc_u16_property(ctx, value, "nanosecond")?;
         let second = self.temporal_optional_trunc_u8_property(ctx, value, "second")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
         let overflow = self.temporal_overflow_option_arg(ctx, options)?;
 
         let had_any_property = day.is_some()
+            || era.is_some()
+            || era_year.is_some()
             || hour.is_some()
             || microsecond.is_some()
             || millisecond.is_some()
@@ -4855,68 +4795,33 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
 
-        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
-        let month_from_code = match month_code_syntax {
-            Some((_, true)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-            Some((month, false)) if !(1..=12).contains(&month) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-            Some((month, false)) => Some(month),
-            None => None,
-        };
-        if let (Some(month), Some(month_from_code)) = (month, month_from_code)
-            && month != month_from_code as i32
-        {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        let month = match (month, month_from_code) {
-            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
-            (None, Some(month)) => month,
-            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
-        };
-        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
-        let date = PlainDate::new_with_overflow(year, month, day, calendar.clone(), overflow)?;
-
-        let hour = match overflow {
-            Overflow::Constrain => hour.unwrap_or(0).min(23),
-            Overflow::Reject => hour.unwrap_or(0),
-        };
-        let minute = match overflow {
-            Overflow::Constrain => minute.unwrap_or(0).min(59),
-            Overflow::Reject => minute.unwrap_or(0),
-        };
-        let second = match overflow {
-            Overflow::Constrain => match second {
-                Some(60) => 59,
-                Some(value) => value.min(59),
-                None => 0,
+        let partial = PartialDateTime {
+            fields: DateTimeFields {
+                calendar_fields: CalendarFields::new()
+                    .with_era(era)
+                    .with_era_year(era_year)
+                    .with_optional_year(year)
+                    .with_optional_month(
+                        month
+                            .map(|month| Self::temporal_positive_overflow_u8(month, overflow, 12, "month"))
+                            .transpose()?,
+                    )
+                    .with_optional_month_code(month_code)
+                    .with_optional_day(
+                        day.map(|day| Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day"))
+                            .transpose()?,
+                    ),
+                time: PartialTime::new()
+                    .with_hour(hour)
+                    .with_minute(minute)
+                    .with_second(second)
+                    .with_millisecond(millisecond)
+                    .with_microsecond(microsecond)
+                    .with_nanosecond(nanosecond),
             },
-            Overflow::Reject => second.unwrap_or(0),
-        };
-        let millisecond = match overflow {
-            Overflow::Constrain => millisecond.unwrap_or(0).min(999),
-            Overflow::Reject => millisecond.unwrap_or(0),
-        };
-        let microsecond = match overflow {
-            Overflow::Constrain => microsecond.unwrap_or(0).min(999),
-            Overflow::Reject => microsecond.unwrap_or(0),
-        };
-        let nanosecond = match overflow {
-            Overflow::Constrain => nanosecond.unwrap_or(0).min(999),
-            Overflow::Reject => nanosecond.unwrap_or(0),
-        };
-
-        PlainDateTime::try_new(
-            date.year(),
-            date.month(),
-            date.day(),
-            hour,
-            minute,
-            second,
-            millisecond,
-            microsecond,
-            nanosecond,
             calendar,
-        )
+        };
+        PlainDateTime::from_partial(partial, Some(overflow))
     }
 
     fn temporal_parse_plain_date_time_string(text: &str) -> Result<PlainDateTime, TemporalError> {
@@ -5261,20 +5166,57 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn temporal_month_code_property(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<String, TemporalError> {
-        match value {
-            Value::String(text) => Ok(crate::unicode::utf16_to_utf8(text)),
-            v if self.temporal_is_object_like(v) => {
-                let prim = self.try_to_primitive(ctx, v, "string");
-                if self.pending_throw.is_some() {
-                    return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-                }
-                match prim {
-                    Value::String(text) => Ok(crate::unicode::utf16_to_utf8(&text)),
-                    _ => Err(TemporalError::r#type().with_message("Value must be a string")),
-                }
-            }
-            _ => Err(TemporalError::r#type().with_message("Value must be a string")),
+    fn temporal_optional_month_code_value(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        key: &str,
+        invalid_input_message: &'static str,
+    ) -> Result<Option<MonthCode>, TemporalError> {
+        let raw = self.read_named_property(ctx, value, key);
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message(invalid_input_message));
+        }
+        if matches!(raw, Value::Undefined) {
+            return Ok(None);
+        }
+        let text = self.temporal_textual_property(ctx, &raw, key)?;
+        Ok(Some(
+            MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?,
+        ))
+    }
+
+    fn temporal_optional_era_value(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        key: &str,
+        invalid_input_message: &'static str,
+    ) -> Result<Option<TinyAsciiStr<19>>, TemporalError> {
+        let raw = self.read_named_property(ctx, value, key);
+        if self.pending_throw.is_some() {
+            return Err(TemporalError::r#type().with_message(invalid_input_message));
+        }
+        if matches!(raw, Value::Undefined) {
+            return Ok(None);
+        }
+        let text = self.temporal_textual_property(ctx, &raw, key)?;
+        Ok(Some(
+            TinyAsciiStr::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid era"))?,
+        ))
+    }
+
+    fn temporal_era_to_value<'a, const N: usize>(era: Option<TinyAsciiStr<N>>) -> Value<'a> {
+        match era {
+            Some(era) => Value::from(era.as_str()),
+            None => Value::Undefined,
+        }
+    }
+
+    fn temporal_era_year_to_value<'a>(era_year: Option<i32>) -> Value<'a> {
+        match era_year {
+            Some(era_year) => Value::Number(era_year as f64),
+            None => Value::Undefined,
         }
     }
 
@@ -5286,19 +5228,6 @@ impl<'gc> VM<'gc> {
         }
         let month = digits.parse::<u8>().ok()?;
         (1..=12).contains(&month).then_some(month)
-    }
-
-    fn temporal_month_code_syntax(month_code: &str) -> Option<(u8, bool)> {
-        let body = month_code.strip_prefix('M')?;
-        let (digits, leap) = if let Some(digits) = body.strip_suffix('L') {
-            (digits, true)
-        } else {
-            (body, false)
-        };
-        if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        Some((digits.parse::<u8>().ok()?, leap))
     }
 
     fn temporal_positive_overflow_u8(value: i32, overflow: Overflow, clamp_max: i32, name: &str) -> Result<u8, TemporalError> {
@@ -5499,63 +5428,6 @@ impl<'gc> VM<'gc> {
             })
     }
 
-    fn temporal_validate_month_code_syntax(text: &str) -> Result<(), TemporalError> {
-        let bytes = text.as_bytes();
-        let valid = matches!(bytes, [b'M', a, b] if a.is_ascii_digit() && b.is_ascii_digit())
-            || matches!(bytes, [b'M', a, b, b'L'] if a.is_ascii_digit() && b.is_ascii_digit());
-        if valid {
-            Ok(())
-        } else {
-            Err(TemporalError::range().with_message("Invalid monthCode"))
-        }
-    }
-
-    fn temporal_month_code_string_property(
-        &mut self,
-        ctx: &GcContext<'gc>,
-        value: &Value<'gc>,
-        name: &str,
-    ) -> Result<Option<String>, TemporalError> {
-        let raw = self.read_named_property(ctx, value, name);
-        if self.pending_throw.is_some() {
-            return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-        }
-        match raw {
-            Value::Undefined => Ok(None),
-            Value::String(text) => {
-                let text = crate::unicode::utf16_to_utf8(&text);
-                Self::temporal_validate_month_code_syntax(&text)?;
-                Ok(Some(text))
-            }
-            _ => {
-                let prim = self.try_to_primitive(ctx, &raw, "string");
-                if self.pending_throw.is_some() {
-                    return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-                }
-                let Value::String(text) = prim else {
-                    return Err(TemporalError::r#type().with_message("monthCode must be a string"));
-                };
-                let text = crate::unicode::utf16_to_utf8(&text);
-                Self::temporal_validate_month_code_syntax(&text)?;
-                Ok(Some(text))
-            }
-        }
-    }
-
-    fn temporal_iso_in_leap_year(year: i32) -> bool {
-        (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0)
-    }
-
-    fn temporal_iso_days_in_month(year: i32, month: u8) -> u8 {
-        match month {
-            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-            4 | 6 | 9 | 11 => 30,
-            2 if Self::temporal_iso_in_leap_year(year) => 29,
-            2 => 28,
-            _ => 31,
-        }
-    }
-
     fn temporal_plain_year_month_from_arg(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -5586,6 +5458,8 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let month = {
             let raw = self.read_named_property(ctx, value, "month");
             if self.pending_throw.is_some() {
@@ -5596,7 +5470,7 @@ impl<'gc> VM<'gc> {
                 _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "month")?),
             }
         };
-        let month_code = self.temporal_month_code_string_property(ctx, value, "monthCode")?;
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = {
             let raw = self.read_named_property(ctx, value, "year");
             if self.pending_throw.is_some() {
@@ -5608,30 +5482,25 @@ impl<'gc> VM<'gc> {
             }
         };
 
-        if month.is_none() && month_code.is_none() && year.is_none() {
+        if era.is_none() && era_year.is_none() && month.is_none() && month_code.is_none() && year.is_none() {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
 
         let overflow = self.temporal_overflow_option_arg(ctx, options)?;
-        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let month_from_code = month_code
-            .as_deref()
-            .map(|month_code| Self::temporal_month_from_code(Some(month_code)));
-        if month_code.is_some() && month_from_code == Some(None) {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        if let (Some(month), Some(Some(month_from_code))) = (month, month_from_code)
-            && month != month_from_code as i32
-        {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        let month = match (month, month_from_code) {
-            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
-            (None, Some(Some(month_code))) => month_code,
-            (None, Some(None)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
+        let partial = PartialYearMonth {
+            calendar_fields: YearMonthCalendarFields::new()
+                .with_era(era)
+                .with_era_year(era_year)
+                .with_optional_year(year)
+                .with_optional_month(
+                    month
+                        .map(|month| Self::temporal_positive_overflow_u8(month, overflow, 12, "month"))
+                        .transpose()?,
+                )
+                .with_optional_month_code(month_code),
+            calendar,
         };
-        PlainYearMonth::new_with_overflow(year, month, Some(1), calendar, overflow)
+        PlainYearMonth::from_partial(partial, Some(overflow))
     }
 
     fn temporal_plain_month_day_from_arg(
@@ -5664,6 +5533,8 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal.PlainMonthDay input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let day = {
             let raw = self.read_named_property(ctx, value, "day");
             if self.pending_throw.is_some() {
@@ -5684,7 +5555,7 @@ impl<'gc> VM<'gc> {
                 _ => Some(self.temporal_trunc_i32_field(ctx, &raw, "month")?),
             }
         };
-        let month_code = self.temporal_month_code_string_property(ctx, value, "monthCode")?;
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal.PlainMonthDay input")?;
         let year = {
             let raw = self.read_named_property(ctx, value, "year");
             if self.pending_throw.is_some() {
@@ -5696,52 +5567,27 @@ impl<'gc> VM<'gc> {
             }
         };
 
-        if day.is_none() && month.is_none() && month_code.is_none() && year.is_none() {
+        if day.is_none() && era.is_none() && era_year.is_none() && month.is_none() && month_code.is_none() && year.is_none() {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
 
         let overflow = self.temporal_overflow_option_arg(ctx, options)?;
-        let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
-        let month_from_code = month_code
-            .as_deref()
-            .map(|month_code| Self::temporal_month_from_code(Some(month_code)));
-        if month_code.is_some() && month_from_code == Some(None) {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        if let (Some(month), Some(Some(month_from_code))) = (month, month_from_code)
-            && month != month_from_code as i32
-        {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        let month = match (month, month_from_code) {
-            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
-            (None, Some(Some(value))) => value,
-            (None, Some(None)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
-        };
-        let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
-        let overflow_year = year.unwrap_or(1972);
-        if calendar.identifier() == "iso8601" {
-            let max_day = Self::temporal_iso_days_in_month(overflow_year, month);
-            let day = match overflow {
-                Overflow::Constrain => day.min(max_day),
-                Overflow::Reject => {
-                    if day > max_day {
-                        return Err(TemporalError::range().with_message("Date is not within ISO date time limits."));
-                    }
-                    day
-                }
-            };
-            return PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Reject, Some(1972));
-        }
-        let overflow_applied = PlainMonthDay::new_with_overflow(month, day, calendar.clone(), overflow, Some(overflow_year))?;
-        PlainMonthDay::new_with_overflow(
-            overflow_applied.month_code().to_month_integer(),
-            overflow_applied.day(),
-            calendar,
-            Overflow::Reject,
-            Some(1972),
-        )
+        let partial = PartialDate::new()
+            .with_calendar(calendar)
+            .with_era(era)
+            .with_era_year(era_year)
+            .with_year(year.or(Some(1972)))
+            .with_month(
+                month
+                    .map(|month| Self::temporal_positive_overflow_u8(month, overflow, 12, "month"))
+                    .transpose()?,
+            )
+            .with_month_code(month_code)
+            .with_day(
+                day.map(|day| Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day"))
+                    .transpose()?,
+            );
+        PlainMonthDay::from_partial(partial, Some(overflow))
     }
 
     fn temporal_relative_to_time_zone_arg(&mut self, _ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TimeZone, TemporalError> {
@@ -5820,44 +5666,31 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
         let month = self.temporal_optional_i32_property(ctx, value, "month")?;
-        let month_code = {
-            let month_code_value = self.read_named_property(ctx, value, "monthCode");
-            if self.pending_throw.is_some() {
-                return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
-            }
-            if matches!(month_code_value, Value::Undefined) {
-                None
-            } else {
-                Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?)
-            }
-        };
+        let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
 
-        let had_any_property = month.is_some() || month_code.is_some() || year.is_some();
+        let had_any_property = era.is_some() || era_year.is_some() || month.is_some() || month_code.is_some() || year.is_some();
         if !had_any_property {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
 
-        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-        let month_from_code = match month_code.as_deref() {
-            Some(month_code) => Some(
-                Self::temporal_month_from_code(Some(month_code)).ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?,
-            ),
-            None => None,
+        let partial = PartialYearMonth {
+            calendar_fields: YearMonthCalendarFields::new()
+                .with_era(era)
+                .with_era_year(era_year)
+                .with_optional_year(year)
+                .with_optional_month(
+                    month
+                        .map(|month| Self::temporal_positive_overflow_u8(month, overflow, 12, "month"))
+                        .transpose()?,
+                )
+                .with_optional_month_code(month_code),
+            calendar,
         };
-        if let (Some(month), Some(month_from_code)) = (month, month_from_code)
-            && month != month_from_code as i32
-        {
-            return Err(TemporalError::range().with_message("Invalid monthCode"));
-        }
-        let month = match (month, month_from_code) {
-            (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
-            (None, Some(month_code)) => month_code,
-            (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
-        };
-        let date = PlainDate::new_with_overflow(year, month, 1, calendar, overflow)?;
-        date.to_plain_year_month()
+        PlainYearMonth::from_partial(partial, Some(overflow))
     }
 
     fn temporal_from_plain_month_day(
@@ -5955,26 +5788,15 @@ impl<'gc> VM<'gc> {
                         return Err(TemporalError::r#type().with_message("Invalid Temporal.ZonedDateTime input"));
                     }
                     let day = self.temporal_optional_trunc_i32_property(ctx, v, "day")?;
+                    let era = self.temporal_optional_era_value(ctx, v, "era", "Invalid Temporal.ZonedDateTime input")?;
+                    let era_year = self.temporal_optional_trunc_i32_property(ctx, v, "eraYear")?;
                     let hour = self.temporal_optional_trunc_i32_property(ctx, v, "hour")?;
                     let microsecond = self.temporal_optional_trunc_i32_property(ctx, v, "microsecond")?;
                     let millisecond = self.temporal_optional_trunc_i32_property(ctx, v, "millisecond")?;
                     let minute = self.temporal_optional_trunc_i32_property(ctx, v, "minute")?;
                     let month_value = self.temporal_optional_trunc_i32_property(ctx, v, "month")?;
-                    let month_code_value = self.read_named_property(ctx, v, "monthCode");
-                    if self.pending_throw.is_some() {
-                        return Err(TemporalError::r#type().with_message("Invalid Temporal.ZonedDateTime input"));
-                    }
-                    let month_code = match month_code_value {
-                        Value::Undefined => None,
-                        _ => Some(self.temporal_month_code_property(ctx, &month_code_value)?),
-                    };
-                    let month_code_syntax = match month_code.as_deref() {
-                        Some(month_code) => Some(
-                            Self::temporal_month_code_syntax(month_code)
-                                .ok_or_else(|| TemporalError::range().with_message("Invalid monthCode"))?,
-                        ),
-                        None => None,
-                    };
+                    let month_code =
+                        self.temporal_optional_month_code_value(ctx, v, "monthCode", "Invalid Temporal.ZonedDateTime input")?;
                     let nanosecond = self.temporal_optional_trunc_i32_property(ctx, v, "nanosecond")?;
                     let offset_value = self.read_named_property(ctx, v, "offset");
                     if self.pending_throw.is_some() {
@@ -5998,6 +5820,8 @@ impl<'gc> VM<'gc> {
                         self.temporal_zoned_date_time_with_options_arg(ctx, options, OffsetDisambiguation::Reject)?;
 
                     let had_any_property = day.is_some()
+                        || era.is_some()
+                        || era_year.is_some()
                         || hour.is_some()
                         || microsecond.is_some()
                         || millisecond.is_some()
@@ -6014,69 +5838,71 @@ impl<'gc> VM<'gc> {
                     }
 
                     let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
-                    let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
-                    let day = day.ok_or_else(|| TemporalError::r#type().with_message("day is required"))?;
-                    let month_from_code = match month_code_syntax {
-                        Some((_, true)) => return Err(TemporalError::range().with_message("Invalid monthCode")),
-                        Some((month, false)) if !(1..=12).contains(&month) => {
-                            return Err(TemporalError::range().with_message("Invalid monthCode"));
-                        }
-                        Some((month, false)) => Some(month as i32),
-                        None => None,
-                    };
-                    if let (Some(month), Some(month_from_code)) = (month_value, month_from_code)
-                        && month != month_from_code
-                    {
-                        return Err(TemporalError::range().with_message("Invalid monthCode"));
-                    }
-                    let month = match (month_value, month_from_code) {
-                        (Some(month), _) => Self::temporal_positive_overflow_u8(month, overflow, 12, "month")?,
-                        (None, Some(month)) => month as u8,
-                        (None, None) => return Err(TemporalError::r#type().with_message("month or monthCode is required")),
-                    };
-                    let day = Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day")?;
                     let time_zone = self
                         .temporal_time_zone_from_like_arg(ctx, &time_zone_value)?
                         .ok_or_else(|| TemporalError::r#type().with_message("Missing timeZone"))?;
-                    let date = PlainDate::new_with_overflow(year, month, day, calendar.clone(), overflow)?;
-                    let hour = Self::temporal_nonnegative_overflow_u8(hour.unwrap_or(0), overflow, 23, "hour")?;
-                    let minute = Self::temporal_nonnegative_overflow_u8(minute.unwrap_or(0), overflow, 59, "minute")?;
-                    let second = Self::temporal_nonnegative_overflow_u8(second.unwrap_or(0), overflow, 59, "second")?;
-                    let millisecond = Self::temporal_nonnegative_overflow_u16(millisecond.unwrap_or(0), overflow, 999, "millisecond")?;
-                    let microsecond = Self::temporal_nonnegative_overflow_u16(microsecond.unwrap_or(0), overflow, 999, "microsecond")?;
-                    let nanosecond = Self::temporal_nonnegative_overflow_u16(nanosecond.unwrap_or(0), overflow, 999, "nanosecond")?;
-                    let pdt = PlainDateTime::try_new(
-                        date.year(),
-                        date.month(),
-                        date.day(),
-                        hour,
-                        minute,
-                        second,
-                        millisecond,
-                        microsecond,
-                        nanosecond,
-                        calendar.clone(),
-                    )?;
-                    if let Some(offset) = offset {
-                        let time_zone_id = time_zone
-                            .identifier()
-                            .map_err(|_| TemporalError::range().with_message("Invalid time zone"))?;
-                        let year_text = Self::temporal_format_iso_year(date.year());
-                        let mut text = format!(
-                            "{year_text}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}{microsecond:03}{nanosecond:03}{offset}[{}]",
-                            time_zone_id.as_str(),
-                            month = date.month(),
-                            day = date.day()
-                        );
-                        if calendar != Calendar::ISO {
-                            text.push_str("[u-ca=");
-                            text.push_str(calendar.identifier());
-                            text.push(']');
-                        }
-                        ZonedDateTime::from_utf8(text.as_bytes(), disambiguation, offset_option)
-                    } else {
-                        pdt.to_zoned_date_time(time_zone, disambiguation)
-                    }
+                    let partial = PartialZonedDateTime {
+                        fields: ZonedDateTimeFields {
+                            calendar_fields: CalendarFields::new()
+                                .with_era(era)
+                                .with_era_year(era_year)
+                                .with_optional_year(year)
+                                .with_optional_month(
+                                    month_value
+                                        .map(|month| Self::temporal_positive_overflow_u8(month, overflow, 12, "month"))
+                                        .transpose()?,
+                                )
+                                .with_optional_month_code(month_code)
+                                .with_optional_day(
+                                    day.map(|day| Self::temporal_positive_overflow_u8(day, overflow, u8::MAX as i32, "day"))
+                                        .transpose()?,
+                                ),
+                            time: PartialTime::new()
+                                .with_hour(
+                                    hour.map(|hour| Self::temporal_nonnegative_overflow_u8(hour, overflow, 23, "hour"))
+                                        .transpose()?,
+                                )
+                                .with_minute(
+                                    minute
+                                        .map(|minute| Self::temporal_nonnegative_overflow_u8(minute, overflow, 59, "minute"))
+                                        .transpose()?,
+                                )
+                                .with_second(
+                                    second
+                                        .map(|second| Self::temporal_nonnegative_overflow_u8(second, overflow, 59, "second"))
+                                        .transpose()?,
+                                )
+                                .with_millisecond(
+                                    millisecond
+                                        .map(|millisecond| {
+                                            Self::temporal_nonnegative_overflow_u16(millisecond, overflow, 999, "millisecond")
+                                        })
+                                        .transpose()?,
+                                )
+                                .with_microsecond(
+                                    microsecond
+                                        .map(|microsecond| {
+                                            Self::temporal_nonnegative_overflow_u16(microsecond, overflow, 999, "microsecond")
+                                        })
+                                        .transpose()?,
+                                )
+                                .with_nanosecond(
+                                    nanosecond
+                                        .map(|nanosecond| Self::temporal_nonnegative_overflow_u16(nanosecond, overflow, 999, "nanosecond"))
+                                        .transpose()?,
+                                ),
+                            offset: match offset {
+                                Some(offset) => Some(
+                                    UtcOffset::from_utf8(offset.as_bytes())
+                                        .map_err(|_| TemporalError::range().with_message("Invalid offset"))?,
+                                ),
+                                None => None,
+                            },
+                        },
+                        timezone: Some(time_zone),
+                        calendar,
+                    };
+                    ZonedDateTime::from_partial(partial, Some(overflow), Some(disambiguation), Some(offset_option))
                 } else {
                     let text = match v {
                         Value::String(text) => crate::unicode::utf16_to_utf8(text),
@@ -6342,17 +6168,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_plain_date_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_plain_date(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_to_value(value.era())
     }
 
     fn temporal_plain_date_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_plain_date(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_year_to_value(value.era_year())
     }
 
     fn temporal_plain_date_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -6445,17 +6271,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_plain_date_time_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_to_value(value.era())
     }
 
     fn temporal_plain_date_time_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_plain_date_time(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_plain_date_time(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_year_to_value(value.era_year())
     }
 
     fn temporal_plain_date_time_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -6917,17 +6743,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_plain_year_month_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_to_value(value.era())
     }
 
     fn temporal_plain_year_month_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_plain_year_month(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_year_to_value(value.era_year())
     }
 
     fn temporal_plain_year_month_month_code(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -7047,17 +6873,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn temporal_zoned_date_time_era(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_to_value(value.era())
     }
 
     fn temporal_zoned_date_time_era_year(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(_) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
+        let Some(value) = self.temporal_expect_zoned_date_time(ctx, receiver) else {
             return Value::Undefined;
         };
-        Value::Undefined
+        Self::temporal_era_year_to_value(value.era_year())
     }
 
     fn temporal_zoned_date_time_year_of_week(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {

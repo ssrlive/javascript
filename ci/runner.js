@@ -300,7 +300,7 @@ function detectFeature(feat) {
   }
 
   // Intl.* features and related Intl flags are assumed supported
-  if (/^Intl\./i.test(feat) || feat === 'Intl-enumeration' || feat === 'canonical-tz' || feat === 'intl-normative-optional') {
+  if (/^Intl\./i.test(feat) || feat === 'Intl-enumeration' || feat === 'intl-normative-optional') {
     FEATURE_SUPPORTED[feat] = true;
     return true;
   }

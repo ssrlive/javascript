@@ -1516,10 +1516,10 @@ impl<'gc> VM<'gc> {
         while digits.len() < options.minimum_integer_digits as usize {
             digits.insert(0, '0');
         }
-        if options.notation == "compact" {
-            if let Some(formatted) = Self::intl_format_compact_integer(options, &digits) {
-                return Self::intl_apply_sign_and_affixes(options, negative, false, false, &formatted);
-            }
+        if options.notation == "compact"
+            && let Some(formatted) = Self::intl_format_compact_integer(options, &digits)
+        {
+            return Self::intl_apply_sign_and_affixes(options, negative, false, false, &formatted);
         }
         let mut formatted = Self::intl_apply_grouping(&digits, options);
         if options.maximum_fraction_digits > 0 || options.minimum_fraction_digits > 0 {
@@ -1547,14 +1547,18 @@ impl<'gc> VM<'gc> {
         }
         let negative = value.is_sign_negative();
         value = value.abs();
-        if options.notation == "compact" {
-            if let Some(formatted) = Self::intl_format_compact_decimal(options, value) {
-                let is_zeroish = formatted
-                    .trim_start_matches('0')
-                    .trim_matches(Self::intl_decimal_separator(options))
-                    .is_empty();
-                return Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted);
-            }
+        if matches!(options.notation.as_str(), "scientific" | "engineering") {
+            let formatted = Self::intl_format_exponential(options, value);
+            return Self::intl_apply_sign_and_affixes(options, negative, value == 0.0, false, &formatted);
+        }
+        if options.notation == "compact"
+            && let Some(formatted) = Self::intl_format_compact_decimal(options, value)
+        {
+            let is_zeroish = formatted
+                .trim_start_matches('0')
+                .trim_matches(Self::intl_decimal_separator(options))
+                .is_empty();
+            return Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted);
         }
         let (mut integer_digits, fraction_digits) = if let Some(maximum_significant_digits) = options.maximum_significant_digits {
             let rounded = Self::intl_round_to_significant_digits(value, maximum_significant_digits);
@@ -1705,18 +1709,18 @@ impl<'gc> VM<'gc> {
         let mut out = String::new();
         let (prefix, suffix) = Self::intl_sign_parts(options, negative, is_zeroish, is_nan);
         out.push_str(&prefix);
-        if options.style == "currency" {
-            if let Some(currency) = &options.currency {
-                let symbol = Self::intl_currency_symbol(options, currency);
-                if options.resolved_locale.starts_with("de") {
-                    out.push_str(core);
-                    out.push('\u{a0}');
-                    out.push_str(symbol);
-                    out.push_str(&suffix);
-                    return out;
-                }
+        if options.style == "currency"
+            && let Some(currency) = &options.currency
+        {
+            let symbol = Self::intl_currency_symbol(options, currency);
+            if options.resolved_locale.starts_with("de") {
+                out.push_str(core);
+                out.push('\u{a0}');
                 out.push_str(symbol);
+                out.push_str(&suffix);
+                return out;
             }
+            out.push_str(symbol);
         }
         out.push_str(core);
         if options.style == "percent" {
@@ -1791,6 +1795,7 @@ impl<'gc> VM<'gc> {
         let locale = options.resolved_locale.as_str();
         let compact_display = options.compact_display.as_deref().unwrap_or("short");
         let (divisor, suffix) = if locale.starts_with("en") {
+            #[allow(clippy::if_same_then_else)]
             if value >= 1_000_000_000.0 {
                 (1_000_000.0, if compact_display == "long" { " million" } else { "M" })
             } else if value >= 1_000_000.0 {
@@ -1873,6 +1878,34 @@ impl<'gc> VM<'gc> {
             formatted.push(Self::intl_decimal_separator(options));
             formatted.push_str(&fraction_digits);
         }
+        formatted
+    }
+
+    fn intl_format_exponential(options: &IntlNumberFormatOptions, value: f64) -> String {
+        if value == 0.0 {
+            return "0E0".to_string();
+        }
+        let scientific_exponent = value.log10().floor() as i32;
+        let mut exponent = if options.notation == "engineering" {
+            scientific_exponent.div_euclid(3) * 3
+        } else {
+            scientific_exponent
+        };
+        let mut mantissa = value / 10f64.powi(exponent);
+        mantissa = Self::intl_round_to_fraction_digits(mantissa, 3);
+        let rollover = if options.notation == "engineering" { 1000.0 } else { 10.0 };
+        if mantissa >= rollover {
+            mantissa /= if options.notation == "engineering" { 1000.0 } else { 10.0 };
+            exponent += if options.notation == "engineering" { 3 } else { 1 };
+        }
+        let (integer_digits, fraction_digits) = Self::intl_split_fixed_decimal(mantissa, 3, 0, false);
+        let mut formatted = integer_digits;
+        if !fraction_digits.is_empty() {
+            formatted.push(Self::intl_decimal_separator(options));
+            formatted.push_str(&fraction_digits);
+        }
+        formatted.push('E');
+        formatted.push_str(&exponent.to_string());
         formatted
     }
 
@@ -2599,12 +2632,11 @@ impl<'gc> VM<'gc> {
         if out.style == "currency" && out.currency.is_none() {
             return Err(self.make_type_error_object(ctx, "currency style requires currency"));
         }
-        if out.style == "unit" {
-            if let Some(unit) = self.intl_string_option_from_value(ctx, raw_options.get("unit"), &[], None)?
-                && INTL_SUPPORTED_UNITS.contains(&unit.as_str())
-            {
-                out.unit = Some(unit);
-            }
+        if out.style == "unit"
+            && let Some(unit) = self.intl_string_option_from_value(ctx, raw_options.get("unit"), &[], None)?
+            && INTL_SUPPORTED_UNITS.contains(&unit.as_str())
+        {
+            out.unit = Some(unit);
         }
         let notation = self.intl_string_option_from_value(
             ctx,
@@ -2613,12 +2645,11 @@ impl<'gc> VM<'gc> {
             Some("standard"),
         )?;
         out.notation = notation.clone().unwrap_or_else(|| "standard".to_string());
-        if out.style == "currency" {
-            if let Some(currency_sign) =
+        if out.style == "currency"
+            && let Some(currency_sign) =
                 self.intl_string_option_from_value(ctx, raw_options.get("currencySign"), &["standard", "accounting"], Some("standard"))?
-            {
-                out.currency_sign = currency_sign;
-            }
+        {
+            out.currency_sign = currency_sign;
         }
         if let Some(sign_display) = self.intl_string_option_from_value(
             ctx,

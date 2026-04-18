@@ -245,6 +245,11 @@ impl<'gc> VM<'gc> {
             "intl.collator.compare" => self.intl_collator_compare(ctx, receiver, args),
             "intl.dateTimeFormat.get.format" => self.intl_date_time_format_getter(ctx, receiver),
             "intl.dateTimeFormat.format" => self.intl_date_time_format_format(ctx, receiver, args),
+            "intl.dateTimeFormat.formatToParts" => self.intl_date_time_format_format_to_parts(ctx, receiver, args.first()),
+            "intl.dateTimeFormat.formatRange" => self.intl_date_time_format_format_range(ctx, receiver, args.first(), args.get(1)),
+            "intl.dateTimeFormat.formatRangeToParts" => {
+                self.intl_date_time_format_format_range_to_parts(ctx, receiver, args.first(), args.get(1))
+            }
             "intl.locale.toString" => self.intl_locale_to_string(ctx, receiver),
             "intl.numberFormat.get.format" => self.intl_number_format_getter(ctx, receiver),
             "intl.numberFormat.format" => self.intl_number_format_format(ctx, receiver, args),
@@ -322,6 +327,21 @@ impl<'gc> VM<'gc> {
             if display_name == "DateTimeFormat" {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.get.format", "get format", 0.0, false);
                 Self::insert_getter_property_with_attributes(&mut proto, "format", &getter, false, true);
+                proto.insert(
+                    "formatToParts".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.formatToParts", "formatToParts", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatToParts");
+                proto.insert(
+                    "formatRange".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.formatRange", "formatRange", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatRange");
+                proto.insert(
+                    "formatRangeToParts".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.formatRangeToParts", "formatRangeToParts", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatRangeToParts");
             }
             if display_name == "NumberFormat" {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.numberFormat.get.format", "get format", 0.0, false);
@@ -385,7 +405,7 @@ impl<'gc> VM<'gc> {
         Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
-    fn intl_construct_service_instance(
+    pub(super) fn intl_construct_service_instance(
         &mut self,
         ctx: &GcContext<'gc>,
         kind: &str,
@@ -1129,24 +1149,148 @@ impl<'gc> VM<'gc> {
         format
     }
 
-    fn intl_date_time_format_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
-        let Some(_formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
+    pub(super) fn intl_date_time_format_format(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
             return Value::Undefined;
         };
-        let x = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-            chrono::Utc::now().timestamp_millis() as f64
-        } else {
-            let prim = self.try_to_primitive(ctx, args.first().unwrap_or(&Value::Undefined), "number");
-            if self.pending_throw.is_some() {
+        let Some(x) = self.intl_date_time_format_clip_value(ctx, args.first(), false) else {
+            return Value::Undefined;
+        };
+        match Self::intl_date_time_format_render(&formatter.borrow(), x) {
+            Ok(text) => Value::from(text.as_str()),
+            Err(err) => {
+                self.pending_throw = Some(err);
+                Value::Undefined
+            }
+        }
+    }
+
+    fn intl_date_time_format_format_to_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        date: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
+            return Value::Undefined;
+        };
+        let Some(x) = self.intl_date_time_format_clip_value(ctx, date, false) else {
+            return Value::Undefined;
+        };
+        match Self::intl_date_time_format_parts_array(ctx, &formatter.borrow(), x, None) {
+            Ok(value) => value,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                Value::Undefined
+            }
+        }
+    }
+
+    fn intl_date_time_format_format_range(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
+            return Value::Undefined;
+        };
+        let Some(start) = self.intl_date_time_format_clip_value(ctx, start, true) else {
+            return Value::Undefined;
+        };
+        let Some(end) = self.intl_date_time_format_clip_value(ctx, end, true) else {
+            return Value::Undefined;
+        };
+        let borrow = formatter.borrow();
+        let start_text = match Self::intl_date_time_format_render(&borrow, start) {
+            Ok(text) => text,
+            Err(err) => {
+                self.pending_throw = Some(err);
                 return Value::Undefined;
             }
-            to_number(&prim)
         };
-        if !x.is_finite() || x.is_nan() {
-            self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
-            return Value::Undefined;
+        let end_text = match Self::intl_date_time_format_render(&borrow, end) {
+            Ok(text) => text,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        if start_text == end_text {
+            return Value::from(start_text.as_str());
         }
-        Value::from(x.trunc().to_string().as_str())
+        Value::from(format!("{start_text} – {end_text}").as_str())
+    }
+
+    fn intl_date_time_format_format_range_to_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
+            return Value::Undefined;
+        };
+        let Some(start) = self.intl_date_time_format_clip_value(ctx, start, true) else {
+            return Value::Undefined;
+        };
+        let Some(end) = self.intl_date_time_format_clip_value(ctx, end, true) else {
+            return Value::Undefined;
+        };
+        let borrow = formatter.borrow();
+        let start_text = match Self::intl_date_time_format_render(&borrow, start) {
+            Ok(text) => text,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        let end_text = match Self::intl_date_time_format_render(&borrow, end) {
+            Ok(text) => text,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        if start_text == end_text {
+            return match Self::intl_date_time_format_parts_array(ctx, &borrow, start, Some("shared")) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.pending_throw = Some(err);
+                    Value::Undefined
+                }
+            };
+        }
+        let mut values = match Self::intl_date_time_format_parts(&borrow, start) {
+            Ok(parts) => parts
+                .into_iter()
+                .map(|(part_type, value)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, Some("startRange")))
+                .collect::<Vec<_>>(),
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        values.push(Self::intl_date_time_format_part_object(ctx, "literal", " – ", Some("shared")));
+        match Self::intl_date_time_format_parts(&borrow, end) {
+            Ok(parts) => values.extend(
+                parts
+                    .into_iter()
+                    .map(|(part_type, value)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, Some("endRange"))),
+            ),
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        }
+        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
     }
 
     fn intl_number_format_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -1222,6 +1366,301 @@ impl<'gc> VM<'gc> {
         }
         drop(borrow);
         Some(*obj)
+    }
+
+    fn intl_date_time_format_clip_value(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>, required: bool) -> Option<i64> {
+        let x = if value.is_none() || matches!(value, Some(Value::Undefined)) {
+            if required {
+                self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
+                return None;
+            }
+            chrono::Utc::now().timestamp_millis() as f64
+        } else {
+            let prim = self.try_to_primitive(ctx, value.unwrap_or(&Value::Undefined), "number");
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            to_number(&prim)
+        };
+        Self::intl_time_clip(x).or_else(|| {
+            self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
+            None
+        })
+    }
+
+    fn intl_time_clip(value: f64) -> Option<i64> {
+        if !value.is_finite() || value.abs() > 8.64e15 {
+            return None;
+        }
+        let clipped = value.trunc();
+        let clipped = if clipped == 0.0 { 0.0 } else { clipped };
+        Some(clipped as i64)
+    }
+
+    fn intl_date_time_format_parts_array(
+        ctx: &GcContext<'gc>,
+        formatter: &IndexMap<String, Value<'gc>>,
+        millis: i64,
+        source: Option<&str>,
+    ) -> Result<Value<'gc>, Value<'gc>> {
+        let values = Self::intl_date_time_format_parts(formatter, millis)?
+            .into_iter()
+            .map(|(part_type, value)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, source))
+            .collect();
+        Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values))))
+    }
+
+    fn intl_date_time_format_part_object(ctx: &GcContext<'gc>, part_type: &str, value: &str, source: Option<&str>) -> Value<'gc> {
+        let mut map = IndexMap::new();
+        map.insert("type".to_string(), Value::from(part_type));
+        map.insert("value".to_string(), Value::from(value));
+        if let Some(source) = source {
+            map.insert("source".to_string(), Value::from(source));
+        }
+        Value::Object(new_gc_cell_ptr(ctx, map))
+    }
+
+    fn intl_date_time_format_render(formatter: &IndexMap<String, Value<'gc>>, millis: i64) -> Result<String, Value<'gc>> {
+        Ok(Self::intl_date_time_format_parts(formatter, millis)?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+
+    fn intl_date_time_format_parts(formatter: &IndexMap<String, Value<'gc>>, millis: i64) -> Result<Vec<(String, String)>, Value<'gc>> {
+        use chrono::{Datelike, FixedOffset, TimeZone, Timelike};
+
+        let numbering_system = formatter
+            .get("__intl_numbering_system__")
+            .map(value_to_string)
+            .unwrap_or_else(|| "latn".to_string());
+        let time_zone = formatter
+            .get("__intl_time_zone__")
+            .map(value_to_string)
+            .unwrap_or_else(|| "UTC".to_string());
+        let calendar = formatter
+            .get("__intl_calendar__")
+            .map(value_to_string)
+            .unwrap_or_else(|| "gregory".to_string());
+
+        let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, &numbering_system);
+        let offset = if time_zone == "UTC" {
+            FixedOffset::east_opt(0)
+        } else {
+            Self::intl_fixed_offset_from_zone(&time_zone)
+        }
+        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero UTC offset"));
+        let date_time = offset
+            .timestamp_millis_opt(millis)
+            .single()
+            .ok_or_else(|| Value::from("Invalid time value"))?;
+
+        let mut parts = Vec::new();
+        let weekday = formatter.get("__intl_weekday__").map(value_to_string);
+        let era = formatter.get("__intl_era__").map(value_to_string);
+        let year = formatter.get("__intl_year__").map(value_to_string);
+        let month = formatter.get("__intl_month__").map(value_to_string);
+        let day = formatter.get("__intl_day__").map(value_to_string);
+        let hour = formatter.get("__intl_hour__").map(value_to_string);
+        let minute = formatter.get("__intl_minute__").map(value_to_string);
+        let second = formatter.get("__intl_second__").map(value_to_string);
+        let time_zone_name = formatter.get("__intl_timeZoneName__").map(value_to_string);
+        let numeric_month_style = matches!(month.as_deref(), Some("2-digit" | "numeric"));
+
+        if let Some(style) = weekday {
+            let names = match style.as_str() {
+                "narrow" => ["S", "M", "T", "W", "T", "F", "S"],
+                "short" => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+                _ => ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+            };
+            parts.push((
+                "weekday".to_string(),
+                names[date_time.weekday().num_days_from_sunday() as usize].to_string(),
+            ));
+            if month.is_some() || day.is_some() || year.is_some() {
+                parts.push(("literal".to_string(), ", ".to_string()));
+            }
+        }
+
+        if let Some(month_style) = month {
+            let month_index = date_time.month0() as usize;
+            let month_text = match month_style.as_str() {
+                "2-digit" => numeric((month_index + 1) as i64, 2),
+                "numeric" => numeric((month_index + 1) as i64, 1),
+                "narrow" => ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"][month_index].to_string(),
+                "short" => ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month_index].to_string(),
+                _ => [
+                    "January",
+                    "February",
+                    "March",
+                    "April",
+                    "May",
+                    "June",
+                    "July",
+                    "August",
+                    "September",
+                    "October",
+                    "November",
+                    "December",
+                ][month_index]
+                    .to_string(),
+            };
+            parts.push(("month".to_string(), month_text));
+            if day.is_some() {
+                parts.push((
+                    "literal".to_string(),
+                    if month_style == "2-digit" || month_style == "numeric" {
+                        "/".to_string()
+                    } else {
+                        " ".to_string()
+                    },
+                ));
+            }
+        }
+
+        if let Some(day_style) = day {
+            let width = usize::from(day_style == "2-digit") + 1;
+            parts.push(("day".to_string(), numeric(date_time.day() as i64, width)));
+            if year.is_some() {
+                parts.push((
+                    "literal".to_string(),
+                    if numeric_month_style { "/".to_string() } else { ", ".to_string() },
+                ));
+            }
+        }
+
+        if let Some(year_style) = year {
+            let mut year_value = date_time.year();
+            if calendar == "buddhist" {
+                year_value += 543;
+            }
+            let year_text = if year_style == "2-digit" {
+                numeric((year_value.rem_euclid(100)) as i64, 2)
+            } else {
+                numeric(year_value as i64, 1)
+            };
+            parts.push(("year".to_string(), year_text));
+        }
+
+        if let Some(era_style) = era {
+            let text = if date_time.year() <= 0 {
+                match era_style.as_str() {
+                    "narrow" => "B",
+                    "short" => "BC",
+                    _ => "Before Christ",
+                }
+            } else {
+                match era_style.as_str() {
+                    "narrow" => "A",
+                    "short" => "AD",
+                    _ => "Anno Domini",
+                }
+            };
+            if !parts.is_empty() {
+                parts.push(("literal".to_string(), " ".to_string()));
+            }
+            parts.push(("era".to_string(), text.to_string()));
+        }
+
+        if hour.is_some() || minute.is_some() || second.is_some() {
+            if !parts.is_empty() {
+                parts.push(("literal".to_string(), " ".to_string()));
+            }
+            let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
+            let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)));
+            let mut hour_value = date_time.hour() as i64;
+            if hour12 || matches!(hour_cycle.as_deref(), Some("h11" | "h12")) {
+                hour_value %= 12;
+                if matches!(hour_cycle.as_deref(), Some("h12")) && hour_value == 0 {
+                    hour_value = 12;
+                }
+            }
+            if let Some(hour_style) = hour {
+                let width = usize::from(hour_style == "2-digit") + 1;
+                parts.push(("hour".to_string(), numeric(hour_value, width)));
+            }
+            if let Some(minute_style) = minute {
+                if formatter.get("__intl_hour__").is_some() {
+                    parts.push(("literal".to_string(), ":".to_string()));
+                }
+                let width = usize::from(minute_style == "2-digit") + 1;
+                parts.push(("minute".to_string(), numeric(date_time.minute() as i64, width)));
+            }
+            if let Some(second_style) = second {
+                if formatter.get("__intl_minute__").is_some() {
+                    parts.push(("literal".to_string(), ":".to_string()));
+                }
+                let width = usize::from(second_style == "2-digit") + 1;
+                parts.push(("second".to_string(), numeric(date_time.second() as i64, width)));
+            }
+            if hour12 {
+                parts.push(("literal".to_string(), " ".to_string()));
+                parts.push((
+                    "dayPeriod".to_string(),
+                    if date_time.hour() < 12 {
+                        "AM".to_string()
+                    } else {
+                        "PM".to_string()
+                    },
+                ));
+            }
+        }
+
+        if let Some(style) = time_zone_name {
+            if !parts.is_empty() {
+                parts.push(("literal".to_string(), " ".to_string()));
+            }
+            let text = match style.as_str() {
+                "long" | "short" if time_zone == "UTC" => "UTC".to_string(),
+                "shortOffset" | "longOffset" => time_zone.clone(),
+                _ => time_zone.clone(),
+            };
+            parts.push(("timeZoneName".to_string(), text));
+        }
+
+        if parts.is_empty() {
+            parts.push(("literal".to_string(), numeric(date_time.month() as i64, 1)));
+            parts.push(("literal".to_string(), "/".to_string()));
+            parts.push(("literal".to_string(), numeric(date_time.day() as i64, 1)));
+            parts.push(("literal".to_string(), "/".to_string()));
+            parts.push(("literal".to_string(), numeric(date_time.year() as i64, 1)));
+        }
+
+        Ok(parts)
+    }
+
+    fn intl_fixed_offset_from_zone(value: &str) -> Option<chrono::FixedOffset> {
+        if value.len() != 6 || !matches!(value.as_bytes()[0], b'+' | b'-') || value.as_bytes()[3] != b':' {
+            return None;
+        }
+        let sign = if value.as_bytes()[0] == b'-' { -1 } else { 1 };
+        let hour: i32 = value[1..3].parse().ok()?;
+        let minute: i32 = value[4..6].parse().ok()?;
+        chrono::FixedOffset::east_opt(sign * (hour * 3600 + minute * 60))
+    }
+
+    fn intl_format_numbering_digits(value: i64, min_width: usize, numbering_system: &str) -> String {
+        let mut text = if min_width > 1 {
+            format!("{:0width$}", value, width = min_width)
+        } else {
+            value.to_string()
+        };
+        let digits = match numbering_system {
+            "arab" => Some(['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩']),
+            "arabext" => Some(['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹']),
+            _ => None,
+        };
+        if let Some(digits) = digits {
+            text = text
+                .chars()
+                .map(|ch| match ch {
+                    '0'..='9' => digits[ch as usize - '0' as usize],
+                    _ => ch,
+                })
+                .collect();
+        }
+        text
     }
 
     fn intl_read_collator_options(

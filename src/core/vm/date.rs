@@ -194,12 +194,35 @@ impl<'gc> VM<'gc> {
                 self.throw_type_error(ctx, "this is not a Date object");
                 Value::Undefined
             }
+            "date.toLocaleDateString" => self.date_to_locale_string(ctx, receiver, args),
+            "date.toLocaleTimeString" => self.date_to_locale_string(ctx, receiver, args),
+            "date.toLocaleString" => self.date_to_locale_string(ctx, receiver, args),
             n if n.starts_with("date.set") => self.date_setter_host_fn(ctx, n, receiver, args),
             _ => {
                 log::warn!("Unhandled date host fn: {}", name);
                 Value::Undefined
             }
         }
+    }
+
+    fn date_to_locale_string(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let Some(Value::Object(obj)) = receiver else {
+            self.throw_type_error(ctx, "this is not a Date object");
+            return Value::Undefined;
+        };
+        let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned() else {
+            self.throw_type_error(ctx, "this is not a Date object");
+            return Value::Undefined;
+        };
+
+        let formatter = match self.intl_construct_service_instance(ctx, "DateTimeFormat", None, args) {
+            Ok(value) => value,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        self.intl_date_time_format_format(ctx, Some(&formatter), &[Value::Number(ms)])
     }
 
     /// Initialize Date constructor and Date.prototype.
@@ -234,9 +257,18 @@ impl<'gc> VM<'gc> {
             ("toDateString", Value::NativeFunction(BUILTIN_DATE_TODATESTRING)),
             ("setTime", Value::NativeFunction(BUILTIN_DATE_SETTIME)),
             ("toJSON", Self::make_host_fn_with_name_len(ctx, "date.toJSON", "toJSON", 1.0, false)),
-            ("toLocaleDateString", Value::NativeFunction(BUILTIN_DATE_TOLOCALEDATESTRING)),
-            ("toLocaleTimeString", Value::NativeFunction(BUILTIN_DATE_TOLOCALETIMESTRING)),
-            ("toLocaleString", Value::NativeFunction(BUILTIN_DATE_TOLOCALESTRING)),
+            (
+                "toLocaleDateString",
+                Self::make_host_fn_with_name_len(ctx, "date.toLocaleDateString", "toLocaleDateString", 0.0, false),
+            ),
+            (
+                "toLocaleTimeString",
+                Self::make_host_fn_with_name_len(ctx, "date.toLocaleTimeString", "toLocaleTimeString", 0.0, false),
+            ),
+            (
+                "toLocaleString",
+                Self::make_host_fn_with_name_len(ctx, "date.toLocaleString", "toLocaleString", 0.0, false),
+            ),
             ("toISOString", Value::NativeFunction(BUILTIN_DATE_TOISOSTRING)),
             ("getFullYear", Value::NativeFunction(BUILTIN_DATE_GETFULLYEAR)),
             ("getMonth", Value::NativeFunction(BUILTIN_DATE_GETMONTH)),

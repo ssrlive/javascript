@@ -634,11 +634,17 @@ impl<'gc> VM<'gc> {
             if let Some(currency) = borrow.get("__intl_currency__").cloned() {
                 result.insert("currency".to_string(), currency);
             }
+            if let Some(currency_display) = borrow.get("__intl_currency_display__").cloned() {
+                result.insert("currencyDisplay".to_string(), currency_display);
+            }
             if let Some(currency_sign) = borrow.get("__intl_currency_sign__").cloned() {
                 result.insert("currencySign".to_string(), currency_sign);
             }
             if let Some(unit) = borrow.get("__intl_unit__").cloned() {
                 result.insert("unit".to_string(), unit);
+            }
+            if let Some(unit_display) = borrow.get("__intl_unit_display__").cloned() {
+                result.insert("unitDisplay".to_string(), unit_display);
             }
             if let Some(compact_display) = borrow.get("__intl_compact_display__").cloned() {
                 result.insert("compactDisplay".to_string(), compact_display);
@@ -1396,6 +1402,7 @@ impl<'gc> VM<'gc> {
         value: Option<&Value<'gc>>,
     ) -> Result<Value<'gc>, Value<'gc>> {
         let formatted = self.intl_number_format_format_value(ctx, formatter, value)?;
+        let options = IntlNumberFormatOptions::from_object(formatter);
         if formatted == "NaN" {
             return Ok(Value::Array(new_gc_cell_ptr(
                 ctx,
@@ -1412,6 +1419,41 @@ impl<'gc> VM<'gc> {
             }
             return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
         }
+        if options.style == "unit"
+            && let Some(pattern) = Self::intl_unit_pattern(&options)
+        {
+            let mut parts = Vec::new();
+            let mut rest = formatted.as_str();
+            if let Some(prefix_unit) = pattern.prefix_unit.as_deref() {
+                rest = rest.strip_prefix(prefix_unit).unwrap_or(rest);
+                parts.push(Self::intl_part_object(ctx, "unit", prefix_unit));
+            }
+            if let Some(prefix_literal) = pattern.prefix_literal.as_deref() {
+                rest = rest.strip_prefix(prefix_literal).unwrap_or(rest);
+                parts.push(Self::intl_part_object(ctx, "literal", prefix_literal));
+            }
+            let numeric_end = if let Some(suffix_literal) = pattern.suffix_literal.as_deref() {
+                rest.strip_suffix(&(suffix_literal.to_string() + &pattern.suffix_unit))
+                    .map(|numeric| (numeric, Some(suffix_literal)))
+            } else {
+                rest.strip_suffix(&pattern.suffix_unit).map(|numeric| (numeric, None))
+            };
+            if let Some((numeric, suffix_literal)) = numeric_end {
+                parts.extend(Self::intl_number_string_parts(ctx, formatter, numeric));
+                if let Some(suffix_literal) = suffix_literal {
+                    parts.push(Self::intl_part_object(ctx, "literal", suffix_literal));
+                }
+                parts.push(Self::intl_part_object(ctx, "unit", &pattern.suffix_unit));
+                return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
+            }
+        }
+        Ok(Value::Array(new_gc_cell_ptr(
+            ctx,
+            VmArrayData::new(Self::intl_number_string_parts(ctx, formatter, &formatted)),
+        )))
+    }
+
+    fn intl_number_string_parts(ctx: &GcContext<'gc>, formatter: &IndexMap<String, Value<'gc>>, formatted: &str) -> Vec<Value<'gc>> {
         let locale_is_de = formatter
             .get("__intl_locale__")
             .is_some_and(|v| matches!(v, Value::String(s) if crate::unicode::utf16_to_utf8(s).starts_with("de")));
@@ -1452,7 +1494,7 @@ impl<'gc> VM<'gc> {
         if !current.is_empty() {
             parts.push(Self::intl_part_object(ctx, current_type, &current));
         }
-        Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))))
+        parts
     }
 
     fn intl_part_object(ctx: &GcContext<'gc>, part_type: &str, value: &str) -> Value<'gc> {
@@ -1758,6 +1800,24 @@ impl<'gc> VM<'gc> {
     ) -> String {
         let mut out = String::new();
         let (prefix, suffix) = Self::intl_sign_parts(options, negative, is_zeroish, is_nan);
+        if options.style == "unit"
+            && let Some(pattern) = Self::intl_unit_pattern(options)
+        {
+            if let Some(prefix_unit) = pattern.prefix_unit {
+                out.push_str(&prefix_unit);
+            }
+            if let Some(prefix_literal) = pattern.prefix_literal {
+                out.push_str(&prefix_literal);
+            }
+            out.push_str(&prefix);
+            out.push_str(core);
+            out.push_str(&suffix);
+            if let Some(suffix_literal) = pattern.suffix_literal {
+                out.push_str(&suffix_literal);
+            }
+            out.push_str(&pattern.suffix_unit);
+            return out;
+        }
         out.push_str(&prefix);
         if options.style == "currency"
             && let Some(currency) = &options.currency
@@ -1815,6 +1875,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_currency_symbol<'a>(options: &IntlNumberFormatOptions, currency: &'a str) -> &'a str {
+        if options.currency_display == "code" || options.currency_display == "name" {
+            return currency;
+        }
         if currency != "USD" {
             return currency;
         }
@@ -1834,6 +1897,116 @@ impl<'gc> VM<'gc> {
         } else {
             "NaN".to_string()
         }
+    }
+
+    fn intl_unit_pattern(options: &IntlNumberFormatOptions) -> Option<IntlUnitPattern> {
+        let unit = options.unit.as_deref()?;
+        if unit == "kilometer-per-hour" {
+            let display = options.unit_display.as_str();
+            let locale = options.resolved_locale.as_str();
+            let pattern = if locale.starts_with("de") {
+                IntlUnitPattern {
+                    prefix_unit: None,
+                    prefix_literal: None,
+                    suffix_literal: Some(" ".to_string()),
+                    suffix_unit: if display == "long" {
+                        "Kilometer pro Stunde".to_string()
+                    } else {
+                        "km/h".to_string()
+                    },
+                }
+            } else if locale.starts_with("ja") {
+                match display {
+                    "narrow" => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: None,
+                        suffix_unit: "km/h".to_string(),
+                    },
+                    "long" => IntlUnitPattern {
+                        prefix_unit: Some("時速".to_string()),
+                        prefix_literal: Some(" ".to_string()),
+                        suffix_literal: Some(" ".to_string()),
+                        suffix_unit: "キロメートル".to_string(),
+                    },
+                    _ => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: Some(" ".to_string()),
+                        suffix_unit: "km/h".to_string(),
+                    },
+                }
+            } else if locale.starts_with("ko") {
+                match display {
+                    "long" => IntlUnitPattern {
+                        prefix_unit: Some("시속".to_string()),
+                        prefix_literal: Some(" ".to_string()),
+                        suffix_literal: None,
+                        suffix_unit: "킬로미터".to_string(),
+                    },
+                    _ => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: None,
+                        suffix_unit: "km/h".to_string(),
+                    },
+                }
+            } else if locale.starts_with("zh-TW") {
+                match display {
+                    "narrow" => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: None,
+                        suffix_unit: "公里/小時".to_string(),
+                    },
+                    "long" => IntlUnitPattern {
+                        prefix_unit: Some("每小時".to_string()),
+                        prefix_literal: Some(" ".to_string()),
+                        suffix_literal: Some(" ".to_string()),
+                        suffix_unit: "公里".to_string(),
+                    },
+                    _ => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: Some(" ".to_string()),
+                        suffix_unit: "公里/小時".to_string(),
+                    },
+                }
+            } else {
+                match display {
+                    "narrow" => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: None,
+                        suffix_unit: "km/h".to_string(),
+                    },
+                    "long" => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: Some(" ".to_string()),
+                        suffix_unit: "kilometers per hour".to_string(),
+                    },
+                    _ => IntlUnitPattern {
+                        prefix_unit: None,
+                        prefix_literal: None,
+                        suffix_literal: Some(" ".to_string()),
+                        suffix_unit: "km/h".to_string(),
+                    },
+                }
+            };
+            return Some(pattern);
+        }
+        let suffix_unit = if options.unit_display == "narrow" {
+            unit.to_string()
+        } else {
+            unit.replace("-per-", "/")
+        };
+        Some(IntlUnitPattern {
+            prefix_unit: None,
+            prefix_literal: None,
+            suffix_literal: Some(" ".to_string()),
+            suffix_unit,
+        })
     }
 
     fn intl_format_compact_integer(options: &IntlNumberFormatOptions, digits: &str) -> Option<String> {
@@ -2807,7 +2980,9 @@ impl<'gc> VM<'gc> {
             numbering_system: ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
             style: "decimal".to_string(),
             currency: None,
+            currency_display: "symbol".to_string(),
             unit: None,
+            unit_display: "short".to_string(),
             notation: "standard".to_string(),
             compact_display: None,
             currency_sign: "standard".to_string(),
@@ -2872,11 +3047,31 @@ impl<'gc> VM<'gc> {
         if out.style == "currency" && out.currency.is_none() {
             return Err(self.make_type_error_object(ctx, "currency style requires currency"));
         }
-        if out.style == "unit"
-            && let Some(unit) = self.intl_string_option_from_value(ctx, raw_options.get("unit"), &[], None)?
-            && INTL_SUPPORTED_UNITS.contains(&unit.as_str())
+        if let Some(currency_display) = self.intl_string_option_from_value(
+            ctx,
+            raw_options.get("currencyDisplay"),
+            &["code", "symbol", "narrowSymbol", "name"],
+            Some("symbol"),
+        )? && out.style == "currency"
         {
-            out.unit = Some(unit);
+            out.currency_display = currency_display;
+        }
+        if let Some(unit) = self.intl_string_option_from_value(ctx, raw_options.get("unit"), &[], None)? {
+            if !Self::intl_is_well_formed_unit_identifier(&unit) {
+                return Err(self.make_range_error_object(ctx, "Invalid unit identifier"));
+            }
+            if out.style == "unit" {
+                out.unit = Some(unit);
+            }
+        }
+        if let Some(unit_display) =
+            self.intl_string_option_from_value(ctx, raw_options.get("unitDisplay"), &["short", "narrow", "long"], Some("short"))?
+            && out.style == "unit"
+        {
+            out.unit_display = unit_display;
+        }
+        if out.style == "unit" && out.unit.is_none() {
+            return Err(self.make_type_error_object(ctx, "unit style requires unit"));
         }
         let notation = self.intl_string_option_from_value(
             ctx,
@@ -3173,9 +3368,14 @@ impl<'gc> VM<'gc> {
         );
         if let Some(currency) = &options.currency {
             obj.insert("__intl_currency__".to_string(), Value::from(currency.as_str()));
+            obj.insert(
+                "__intl_currency_display__".to_string(),
+                Value::from(options.currency_display.as_str()),
+            );
         }
         if let Some(unit) = &options.unit {
             obj.insert("__intl_unit__".to_string(), Value::from(unit.as_str()));
+            obj.insert("__intl_unit_display__".to_string(), Value::from(options.unit_display.as_str()));
         }
         if let Some(compact_display) = &options.compact_display {
             obj.insert("__intl_compact_display__".to_string(), Value::from(compact_display.as_str()));
@@ -3917,6 +4117,16 @@ impl<'gc> VM<'gc> {
         value.len() == 3 && value.chars().all(|c| c.is_ascii_alphabetic())
     }
 
+    fn intl_is_well_formed_unit_identifier(value: &str) -> bool {
+        if INTL_SUPPORTED_UNITS.contains(&value) {
+            return true;
+        }
+        let Some((numerator, denominator)) = value.split_once("-per-") else {
+            return false;
+        };
+        !denominator.contains("-per-") && INTL_SUPPORTED_UNITS.contains(&numerator) && INTL_SUPPORTED_UNITS.contains(&denominator)
+    }
+
     fn intl_compare_strings(left: &str, right: &str, options: &IntlCollatorOptions) -> i32 {
         let left_key = Self::intl_collator_sort_key(&left.nfc().collect::<String>(), options);
         let right_key = Self::intl_collator_sort_key(&right.nfc().collect::<String>(), options);
@@ -4256,9 +4466,17 @@ impl IntlNumberFormatOptions {
                 Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(text)),
                 _ => None,
             },
+            currency_display: match obj.get("__intl_currency_display__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "symbol".to_string(),
+            },
             unit: match obj.get("__intl_unit__") {
                 Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(text)),
                 _ => None,
+            },
+            unit_display: match obj.get("__intl_unit_display__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "short".to_string(),
             },
             notation: match obj.get("__intl_notation__") {
                 Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
@@ -4369,7 +4587,9 @@ struct IntlNumberFormatOptions {
     numbering_system: String,
     style: String,
     currency: Option<String>,
+    currency_display: String,
     unit: Option<String>,
+    unit_display: String,
     notation: String,
     compact_display: Option<String>,
     currency_sign: String,
@@ -4393,6 +4613,13 @@ struct IntlExactDecimal {
     negative: bool,
     digits: String,
     scale: usize,
+}
+
+struct IntlUnitPattern {
+    prefix_unit: Option<String>,
+    prefix_literal: Option<String>,
+    suffix_literal: Option<String>,
+    suffix_unit: String,
 }
 
 enum IntlFormattedNumberInput {

@@ -620,7 +620,21 @@ impl<'gc> VM<'gc> {
             if let Some(hour12) = borrow.get("__intl_hour12__").cloned() {
                 result.insert("hour12".to_string(), hour12);
             }
-            for key in ["weekday", "era", "year", "month", "day", "hour", "minute", "second", "timeZoneName"] {
+            for key in [
+                "weekday",
+                "era",
+                "year",
+                "month",
+                "day",
+                "dayPeriod",
+                "hour",
+                "minute",
+                "second",
+                "fractionalSecondDigits",
+                "timeZoneName",
+                "dateStyle",
+                "timeStyle",
+            ] {
                 if let Some(value) = borrow.get(&format!("__intl_{}__", key)).cloned() {
                     result.insert(key.to_string(), value);
                 }
@@ -1273,24 +1287,14 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = formatter.borrow();
-        let start_text = match Self::intl_date_time_format_render(&borrow, start) {
-            Ok(text) => text,
+        let parts = match Self::intl_date_time_range_parts(&borrow, start, end) {
+            Ok(parts) => parts,
             Err(err) => {
                 self.pending_throw = Some(err);
                 return Value::Undefined;
             }
         };
-        let end_text = match Self::intl_date_time_format_render(&borrow, end) {
-            Ok(text) => text,
-            Err(err) => {
-                self.pending_throw = Some(err);
-                return Value::Undefined;
-            }
-        };
-        if start_text == end_text {
-            return Value::from(start_text.as_str());
-        }
-        Value::from(format!("{start_text} – {end_text}").as_str())
+        Value::from(parts.into_iter().map(|(_, value, _)| value).collect::<Vec<_>>().join("").as_str())
     }
 
     fn intl_date_time_format_format_range_to_parts(
@@ -1310,51 +1314,16 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = formatter.borrow();
-        let start_text = match Self::intl_date_time_format_render(&borrow, start) {
-            Ok(text) => text,
-            Err(err) => {
-                self.pending_throw = Some(err);
-                return Value::Undefined;
-            }
-        };
-        let end_text = match Self::intl_date_time_format_render(&borrow, end) {
-            Ok(text) => text,
-            Err(err) => {
-                self.pending_throw = Some(err);
-                return Value::Undefined;
-            }
-        };
-        if start_text == end_text {
-            return match Self::intl_date_time_format_parts_array(ctx, &borrow, start, Some("shared")) {
-                Ok(value) => value,
-                Err(err) => {
-                    self.pending_throw = Some(err);
-                    Value::Undefined
-                }
-            };
-        }
-        let mut values = match Self::intl_date_time_format_parts(&borrow, start) {
+        let values = match Self::intl_date_time_range_parts(&borrow, start, end) {
             Ok(parts) => parts
                 .into_iter()
-                .map(|(part_type, value)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, Some("startRange")))
+                .map(|(part_type, value, source)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, Some(source)))
                 .collect::<Vec<_>>(),
             Err(err) => {
                 self.pending_throw = Some(err);
                 return Value::Undefined;
             }
         };
-        values.push(Self::intl_date_time_format_part_object(ctx, "literal", " – ", Some("shared")));
-        match Self::intl_date_time_format_parts(&borrow, end) {
-            Ok(parts) => values.extend(
-                parts
-                    .into_iter()
-                    .map(|(part_type, value)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, Some("endRange"))),
-            ),
-            Err(err) => {
-                self.pending_throw = Some(err);
-                return Value::Undefined;
-            }
-        }
         Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
     }
 
@@ -2781,9 +2750,144 @@ impl<'gc> VM<'gc> {
             .join(""))
     }
 
-    fn intl_date_time_format_parts(formatter: &IndexMap<String, Value<'gc>>, millis: i64) -> Result<Vec<(String, String)>, Value<'gc>> {
-        use chrono::{Datelike, FixedOffset, TimeZone, Timelike};
+    fn intl_date_time_range_parts(
+        formatter: &IndexMap<String, Value<'gc>>,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(String, String, &'static str)>, Value<'gc>> {
+        let start_parts = Self::intl_date_time_format_parts(formatter, start)?;
+        let end_parts = Self::intl_date_time_format_parts(formatter, end)?;
+        if start_parts == end_parts {
+            return Ok(start_parts
+                .into_iter()
+                .map(|(part_type, value)| (part_type, value, "shared"))
+                .collect());
+        }
 
+        let mut parts = Vec::new();
+        if Self::intl_can_collapse_date_time_range(formatter) {
+            let mut prefix_len = 0;
+            while prefix_len < start_parts.len() && prefix_len < end_parts.len() && start_parts[prefix_len] == end_parts[prefix_len] {
+                prefix_len += 1;
+            }
+
+            let mut suffix_len = 0;
+            while suffix_len < start_parts.len().saturating_sub(prefix_len)
+                && suffix_len < end_parts.len().saturating_sub(prefix_len)
+                && start_parts[start_parts.len() - 1 - suffix_len] == end_parts[end_parts.len() - 1 - suffix_len]
+            {
+                suffix_len += 1;
+            }
+
+            if suffix_len > 0 {
+                parts.extend(
+                    start_parts[..prefix_len]
+                        .iter()
+                        .cloned()
+                        .map(|(part_type, value)| (part_type, value, "shared")),
+                );
+                parts.extend(
+                    start_parts[prefix_len..start_parts.len() - suffix_len]
+                        .iter()
+                        .cloned()
+                        .map(|(part_type, value)| (part_type, value, "startRange")),
+                );
+                parts.push(("literal".to_string(), " – ".to_string(), "shared"));
+                parts.extend(
+                    end_parts[prefix_len..end_parts.len() - suffix_len]
+                        .iter()
+                        .cloned()
+                        .map(|(part_type, value)| (part_type, value, "endRange")),
+                );
+                parts.extend(
+                    start_parts[start_parts.len() - suffix_len..]
+                        .iter()
+                        .cloned()
+                        .map(|(part_type, value)| (part_type, value, "shared")),
+                );
+                return Ok(parts);
+            }
+        }
+
+        parts.extend(start_parts.into_iter().map(|(part_type, value)| (part_type, value, "startRange")));
+        parts.push(("literal".to_string(), " – ".to_string(), "shared"));
+        parts.extend(end_parts.into_iter().map(|(part_type, value)| (part_type, value, "endRange")));
+        Ok(parts)
+    }
+
+    fn intl_can_collapse_date_time_range(formatter: &IndexMap<String, Value<'gc>>) -> bool {
+        matches!(
+            formatter.get("__intl_month__"),
+            Some(Value::String(month)) if crate::unicode::utf16_to_utf8(month) == "short"
+        ) && formatter.get("__intl_day__").is_some()
+            && formatter.get("__intl_year__").is_some()
+            && formatter.get("__intl_weekday__").is_none()
+            && formatter.get("__intl_era__").is_none()
+            && formatter.get("__intl_dayPeriod__").is_none()
+            && formatter.get("__intl_hour__").is_none()
+            && formatter.get("__intl_minute__").is_none()
+            && formatter.get("__intl_second__").is_none()
+            && formatter.get("__intl_fractionalSecondDigits__").is_none()
+            && formatter.get("__intl_timeZoneName__").is_none()
+            && formatter.get("__intl_dateStyle__").is_none()
+            && formatter.get("__intl_timeStyle__").is_none()
+    }
+
+    fn intl_date_time_format_parts(formatter: &IndexMap<String, Value<'gc>>, millis: i64) -> Result<Vec<(String, String)>, Value<'gc>> {
+        use chrono::{FixedOffset, TimeZone};
+
+        let time_zone = formatter
+            .get("__intl_time_zone__")
+            .map(value_to_string)
+            .unwrap_or_else(|| "UTC".to_string());
+        let time_zone_explicit = matches!(formatter.get("__intl_timeZoneExplicit__"), Some(Value::Boolean(true)));
+        let offset = if !time_zone_explicit && time_zone == "UTC" {
+            let date_time = chrono::Local
+                .timestamp_millis_opt(millis)
+                .single()
+                .ok_or_else(|| Value::from("Invalid time value"))?;
+            return Self::intl_date_time_format_parts_for_datetime(formatter, &date_time);
+        } else if time_zone == "UTC" {
+            FixedOffset::east_opt(0)
+        } else {
+            Self::intl_fixed_offset_from_zone(&time_zone)
+        }
+        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero UTC offset"));
+        let date_time = offset
+            .timestamp_millis_opt(millis)
+            .single()
+            .ok_or_else(|| Value::from("Invalid time value"))?;
+
+        Self::intl_date_time_format_parts_for_datetime(formatter, &date_time)
+    }
+
+    fn intl_date_time_format_parts_for_datetime<Tz: chrono::TimeZone>(
+        formatter: &IndexMap<String, Value<'gc>>,
+        date_time: &chrono::DateTime<Tz>,
+    ) -> Result<Vec<(String, String)>, Value<'gc>>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        use chrono::{Datelike, Timelike};
+
+        let mut parts = Vec::new();
+        let weekday = formatter.get("__intl_weekday__").map(value_to_string);
+        let era = formatter.get("__intl_era__").map(value_to_string);
+        let year = formatter.get("__intl_year__").map(value_to_string);
+        let month = formatter.get("__intl_month__").map(value_to_string);
+        let day = formatter.get("__intl_day__").map(value_to_string);
+        let day_period = formatter.get("__intl_dayPeriod__").map(value_to_string);
+        let hour = formatter.get("__intl_hour__").map(value_to_string);
+        let minute = formatter.get("__intl_minute__").map(value_to_string);
+        let second = formatter.get("__intl_second__").map(value_to_string);
+        let fractional_second_digits = match formatter.get("__intl_fractionalSecondDigits__") {
+            Some(Value::Number(value)) => Some(*value as usize),
+            _ => None,
+        };
+        let time_zone_name = formatter.get("__intl_timeZoneName__").map(value_to_string);
+        let date_style = formatter.get("__intl_dateStyle__").map(value_to_string);
+        let time_style = formatter.get("__intl_timeStyle__").map(value_to_string);
+        let numeric_month_style = matches!(month.as_deref(), Some("2-digit" | "numeric"));
         let numbering_system = formatter
             .get("__intl_numbering_system__")
             .map(value_to_string)
@@ -2796,30 +2900,17 @@ impl<'gc> VM<'gc> {
             .get("__intl_calendar__")
             .map(value_to_string)
             .unwrap_or_else(|| "gregory".to_string());
-
         let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, &numbering_system);
-        let offset = if time_zone == "UTC" {
-            FixedOffset::east_opt(0)
-        } else {
-            Self::intl_fixed_offset_from_zone(&time_zone)
-        }
-        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero UTC offset"));
-        let date_time = offset
-            .timestamp_millis_opt(millis)
-            .single()
-            .ok_or_else(|| Value::from("Invalid time value"))?;
 
-        let mut parts = Vec::new();
-        let weekday = formatter.get("__intl_weekday__").map(value_to_string);
-        let era = formatter.get("__intl_era__").map(value_to_string);
-        let year = formatter.get("__intl_year__").map(value_to_string);
-        let month = formatter.get("__intl_month__").map(value_to_string);
-        let day = formatter.get("__intl_day__").map(value_to_string);
-        let hour = formatter.get("__intl_hour__").map(value_to_string);
-        let minute = formatter.get("__intl_minute__").map(value_to_string);
-        let second = formatter.get("__intl_second__").map(value_to_string);
-        let time_zone_name = formatter.get("__intl_timeZoneName__").map(value_to_string);
-        let numeric_month_style = matches!(month.as_deref(), Some("2-digit" | "numeric"));
+        if date_style.is_some() || time_style.is_some() {
+            return Ok(Self::intl_date_time_style_parts(
+                formatter,
+                date_time,
+                date_style.as_deref(),
+                time_style.as_deref(),
+                &numbering_system,
+            ));
+        }
 
         if let Some(style) = weekday {
             let names = match style.as_str() {
@@ -2916,38 +3007,58 @@ impl<'gc> VM<'gc> {
             parts.push(("era".to_string(), text.to_string()));
         }
 
-        if hour.is_some() || minute.is_some() || second.is_some() {
+        if hour.is_some() || minute.is_some() || second.is_some() || day_period.is_some() {
             if !parts.is_empty() {
                 parts.push(("literal".to_string(), " ".to_string()));
             }
             let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
             let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)));
             let mut hour_value = date_time.hour() as i64;
-            if hour12 || matches!(hour_cycle.as_deref(), Some("h11" | "h12")) {
+            if day_period.is_some() || hour12 || matches!(hour_cycle.as_deref(), Some("h11" | "h12")) {
                 hour_value %= 12;
                 if matches!(hour_cycle.as_deref(), Some("h12")) && hour_value == 0 {
                     hour_value = 12;
                 }
+                if day_period.is_some() && hour_value == 0 {
+                    hour_value = 12;
+                }
             }
-            if let Some(hour_style) = hour {
+            if let Some(ref hour_style) = hour {
                 let width = usize::from(hour_style == "2-digit") + 1;
                 parts.push(("hour".to_string(), numeric(hour_value, width)));
             }
-            if let Some(minute_style) = minute {
+            if let Some(ref minute_style) = minute {
                 if formatter.get("__intl_hour__").is_some() {
                     parts.push(("literal".to_string(), ":".to_string()));
                 }
-                let width = usize::from(minute_style == "2-digit") + 1;
+                let width = if second.is_some() || hour.is_some() || minute_style == "2-digit" {
+                    2
+                } else {
+                    1
+                };
                 parts.push(("minute".to_string(), numeric(date_time.minute() as i64, width)));
             }
             if let Some(second_style) = second {
                 if formatter.get("__intl_minute__").is_some() {
                     parts.push(("literal".to_string(), ":".to_string()));
                 }
-                let width = usize::from(second_style == "2-digit") + 1;
+                let width = if minute.is_some() || second_style == "2-digit" { 2 } else { 1 };
                 parts.push(("second".to_string(), numeric(date_time.second() as i64, width)));
+                if let Some(fractional_second_digits) = fractional_second_digits {
+                    parts.push(("literal".to_string(), ".".to_string()));
+                    let millis = format!("{:03}", date_time.timestamp_subsec_millis());
+                    parts.push(("fractionalSecond".to_string(), millis[..fractional_second_digits].to_string()));
+                }
             }
-            if hour12 {
+            if let Some(day_period_style) = day_period {
+                if hour.is_some() {
+                    parts.push(("literal".to_string(), " ".to_string()));
+                }
+                parts.push((
+                    "dayPeriod".to_string(),
+                    Self::intl_day_period_text(date_time.hour(), &day_period_style),
+                ));
+            } else if hour12 {
                 parts.push(("literal".to_string(), " ".to_string()));
                 parts.push((
                     "dayPeriod".to_string(),
@@ -2973,14 +3084,136 @@ impl<'gc> VM<'gc> {
         }
 
         if parts.is_empty() {
-            parts.push(("literal".to_string(), numeric(date_time.month() as i64, 1)));
+            parts.push(("month".to_string(), numeric(date_time.month() as i64, 1)));
             parts.push(("literal".to_string(), "/".to_string()));
-            parts.push(("literal".to_string(), numeric(date_time.day() as i64, 1)));
+            parts.push(("day".to_string(), numeric(date_time.day() as i64, 1)));
             parts.push(("literal".to_string(), "/".to_string()));
-            parts.push(("literal".to_string(), numeric(date_time.year() as i64, 1)));
+            parts.push(("year".to_string(), numeric(date_time.year() as i64, 1)));
         }
 
         Ok(parts)
+    }
+
+    fn intl_day_period_text(hour: u32, style: &str) -> String {
+        match hour {
+            12 => {
+                if style == "narrow" {
+                    "n".to_string()
+                } else {
+                    "noon".to_string()
+                }
+            }
+            6..=11 => "in the morning".to_string(),
+            13..=17 => "in the afternoon".to_string(),
+            18..=20 => "in the evening".to_string(),
+            _ => "at night".to_string(),
+        }
+    }
+
+    fn intl_date_time_style_parts<Tz: chrono::TimeZone>(
+        formatter: &IndexMap<String, Value<'gc>>,
+        date_time: &chrono::DateTime<Tz>,
+        date_style: Option<&str>,
+        time_style: Option<&str>,
+        numbering_system: &str,
+    ) -> Vec<(String, String)>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        use chrono::{Datelike, Timelike};
+        let locale = formatter
+            .get("__intl_locale__")
+            .map(value_to_string)
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
+        let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)))
+            || matches!(hour_cycle.as_deref(), Some("h11" | "h12"))
+            || (!matches!(hour_cycle.as_deref(), Some("h23" | "h24")) && locale.starts_with("en-US"));
+        let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, numbering_system);
+        let mut parts = Vec::new();
+        if let Some(date_style) = date_style {
+            let month_name = [
+                "January",
+                "February",
+                "March",
+                "April",
+                "May",
+                "June",
+                "July",
+                "August",
+                "September",
+                "October",
+                "November",
+                "December",
+            ][date_time.month0() as usize];
+            if date_style == "full" {
+                parts.push((
+                    "weekday".to_string(),
+                    ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+                        [date_time.weekday().num_days_from_sunday() as usize]
+                        .to_string(),
+                ));
+                parts.push(("literal".to_string(), ", ".to_string()));
+            }
+            match date_style {
+                "short" => {
+                    parts.push(("month".to_string(), numeric(date_time.month() as i64, 1)));
+                    parts.push(("literal".to_string(), "/".to_string()));
+                    parts.push(("day".to_string(), numeric(date_time.day() as i64, 1)));
+                    parts.push(("literal".to_string(), "/".to_string()));
+                    parts.push(("year".to_string(), numeric((date_time.year().rem_euclid(100)) as i64, 2)));
+                }
+                _ => {
+                    parts.push(("month".to_string(), month_name.to_string()));
+                    parts.push(("literal".to_string(), " ".to_string()));
+                    parts.push(("day".to_string(), numeric(date_time.day() as i64, 1)));
+                    parts.push(("literal".to_string(), ", ".to_string()));
+                    parts.push(("year".to_string(), numeric(date_time.year() as i64, 1)));
+                }
+            }
+        }
+        if let Some(time_style) = time_style {
+            if !parts.is_empty() {
+                parts.push(("literal".to_string(), ", ".to_string()));
+            }
+            let mut hour = date_time.hour() as i64;
+            let day_period = if hour12 {
+                let dp = if hour < 12 { "AM" } else { "PM" };
+                hour %= 12;
+                if hour == 0 {
+                    hour = 12;
+                }
+                Some(dp)
+            } else {
+                None
+            };
+            parts.push((
+                "hour".to_string(),
+                if day_period.is_some() { numeric(hour, 1) } else { numeric(hour, 2) },
+            ));
+            parts.push(("literal".to_string(), ":".to_string()));
+            parts.push(("minute".to_string(), numeric(date_time.minute() as i64, 2)));
+            if matches!(time_style, "full" | "long" | "medium") {
+                parts.push(("literal".to_string(), ":".to_string()));
+                parts.push(("second".to_string(), numeric(date_time.second() as i64, 2)));
+            }
+            if let Some(dp) = day_period {
+                parts.push(("literal".to_string(), " ".to_string()));
+                parts.push(("dayPeriod".to_string(), dp.to_string()));
+            }
+            if matches!(time_style, "full" | "long") {
+                parts.push(("literal".to_string(), " ".to_string()));
+                parts.push((
+                    "timeZoneName".to_string(),
+                    if time_style == "full" {
+                        "Coordinated Universal Time".to_string()
+                    } else {
+                        "UTC".to_string()
+                    },
+                ));
+            };
+        }
+        parts
     }
 
     fn intl_fixed_offset_from_zone(value: &str) -> Option<chrono::FixedOffset> {
@@ -3255,19 +3488,27 @@ impl<'gc> VM<'gc> {
             calendar: ext_calendar.clone().unwrap_or_else(|| "gregory".to_string()),
             numbering_system: ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
             time_zone: "UTC".to_string(),
-            year: Some("numeric".to_string()),
-            month: Some("numeric".to_string()),
-            day: Some("numeric".to_string()),
+            time_zone_explicit: false,
+            year: None,
+            month: None,
+            day: None,
             weekday: None,
             era: None,
+            day_period: None,
             hour: None,
             minute: None,
             second: None,
+            fractional_second_digits: None,
             time_zone_name: None,
             hour_cycle: None,
             hour12: None,
+            date_style: None,
+            time_style: None,
         };
         let Some(options) = options else {
+            out.year = Some("numeric".to_string());
+            out.month = Some("numeric".to_string());
+            out.day = Some("numeric".to_string());
             out.resolved_locale = Self::intl_date_time_format_resolved_locale(
                 &locale_base,
                 ext_calendar.as_deref(),
@@ -3277,6 +3518,9 @@ impl<'gc> VM<'gc> {
             return Ok(out);
         };
         if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+            out.year = Some("numeric".to_string());
+            out.month = Some("numeric".to_string());
+            out.day = Some("numeric".to_string());
             out.resolved_locale = Self::intl_date_time_format_resolved_locale(
                 &locale_base,
                 ext_calendar.as_deref(),
@@ -3309,21 +3553,23 @@ impl<'gc> VM<'gc> {
                 return Err(self.make_range_error_object(ctx, "Invalid timeZone"));
             };
             out.time_zone = normalized_time_zone;
+            out.time_zone_explicit = true;
         }
         out.weekday = self.intl_string_option(ctx, options, "weekday", &["narrow", "short", "long"], None)?;
         out.era = self.intl_string_option(ctx, options, "era", &["narrow", "short", "long"], None)?;
-        out.year = self.intl_string_option(ctx, options, "year", &["2-digit", "numeric"], out.year.as_deref())?;
-        out.month = self.intl_string_option(
-            ctx,
-            options,
-            "month",
-            &["2-digit", "numeric", "narrow", "short", "long"],
-            out.month.as_deref(),
-        )?;
-        out.day = self.intl_string_option(ctx, options, "day", &["2-digit", "numeric"], out.day.as_deref())?;
+        out.year = self.intl_string_option(ctx, options, "year", &["2-digit", "numeric"], None)?;
+        out.month = self.intl_string_option(ctx, options, "month", &["2-digit", "numeric", "narrow", "short", "long"], None)?;
+        out.day = self.intl_string_option(ctx, options, "day", &["2-digit", "numeric"], None)?;
+        out.day_period = self.intl_string_option(ctx, options, "dayPeriod", &["narrow", "short", "long"], None)?;
         out.hour = self.intl_string_option(ctx, options, "hour", &["2-digit", "numeric"], None)?;
         out.minute = self.intl_string_option(ctx, options, "minute", &["2-digit", "numeric"], None)?;
         out.second = self.intl_string_option(ctx, options, "second", &["2-digit", "numeric"], None)?;
+        let fractional_second_digits_value = self.read_named_property(ctx, options, "fractionalSecondDigits");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        out.fractional_second_digits =
+            self.intl_default_u8_option_value(ctx, Some(&fractional_second_digits_value), "fractionalSecondDigits", 1, 3)?;
         out.time_zone_name = self.intl_string_option(
             ctx,
             options,
@@ -3331,7 +3577,7 @@ impl<'gc> VM<'gc> {
             &["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"],
             None,
         )?;
-        if out.hour.is_some() {
+        if out.hour.is_some() || out.time_style.is_some() {
             let resolved_hour_cycle = if let Some(hour12) = option_hour12 {
                 Some(if hour12 {
                     Self::intl_default_true_hour_cycle(&locale_base)
@@ -3349,10 +3595,57 @@ impl<'gc> VM<'gc> {
             out.hour12 = out.hour_cycle.as_deref().map(Self::intl_hour_cycle_is_twelve_hour);
         }
         let _ = self.intl_string_option(ctx, options, "formatMatcher", &["basic", "best fit"], Some("best fit"))?;
-        let date_style = self.intl_string_option(ctx, options, "dateStyle", &["full", "long", "medium", "short"], None)?;
-        let time_style = self.intl_string_option(ctx, options, "timeStyle", &["full", "long", "medium", "short"], None)?;
-        if (date_style.is_some() || time_style.is_some()) && Self::intl_has_explicit_date_time_components(ctx, self, options)? {
+        out.date_style = self.intl_string_option(ctx, options, "dateStyle", &["full", "long", "medium", "short"], None)?;
+        out.time_style = self.intl_string_option(ctx, options, "timeStyle", &["full", "long", "medium", "short"], None)?;
+        if out.time_style.is_some() && out.hour_cycle.is_none() {
+            out.hour_cycle = if let Some(hour12) = option_hour12 {
+                Some(if hour12 {
+                    Self::intl_default_true_hour_cycle(&locale_base)
+                } else {
+                    "h23".to_string()
+                })
+            } else if let Some(hour_cycle) = option_hour_cycle.clone() {
+                Some(hour_cycle)
+            } else if let Some(hour_cycle) = ext_hour_cycle.clone() {
+                Some(hour_cycle)
+            } else {
+                Some(Self::intl_default_true_hour_cycle(&locale_base))
+            };
+            out.hour12 = out.hour_cycle.as_deref().map(Self::intl_hour_cycle_is_twelve_hour);
+        }
+        if (out.date_style.is_some() || out.time_style.is_some()) && Self::intl_has_explicit_date_time_components(ctx, self, options)? {
             return Err(self.make_type_error_object(ctx, "dateStyle/timeStyle conflicts with explicit components"));
+        }
+        if out.date_style.is_some() || out.time_style.is_some() {
+            out.weekday = None;
+            out.era = None;
+            out.year = None;
+            out.month = None;
+            out.day = None;
+            out.day_period = None;
+            out.hour = None;
+            out.minute = None;
+            out.second = None;
+            out.fractional_second_digits = None;
+            out.time_zone_name = None;
+        } else if out.day_period.is_some() && out.hour.is_none() && out.minute.is_none() && out.second.is_none() {
+            out.year = None;
+            out.month = None;
+            out.day = None;
+        } else if out.weekday.is_none()
+            && out.era.is_none()
+            && out.year.is_none()
+            && out.month.is_none()
+            && out.day.is_none()
+            && out.day_period.is_none()
+            && out.hour.is_none()
+            && out.minute.is_none()
+            && out.second.is_none()
+            && out.time_zone_name.is_none()
+        {
+            out.year = Some("numeric".to_string());
+            out.month = Some("numeric".to_string());
+            out.day = Some("numeric".to_string());
         }
         let reflect_calendar = ext_calendar.as_deref() == Some(out.calendar.as_str());
         let reflect_numbering_system = ext_numbering_system.as_deref() == Some(out.numbering_system.as_str());
@@ -3391,6 +3684,7 @@ impl<'gc> VM<'gc> {
         if let Some(hour12) = options.hour12 {
             obj.insert("__intl_hour12__".to_string(), Value::Boolean(hour12));
         }
+        obj.insert("__intl_timeZoneExplicit__".to_string(), Value::Boolean(options.time_zone_explicit));
         if let Some(weekday) = &options.weekday {
             obj.insert("__intl_weekday__".to_string(), Value::from(weekday.as_str()));
         }
@@ -3406,6 +3700,9 @@ impl<'gc> VM<'gc> {
         if let Some(day) = &options.day {
             obj.insert("__intl_day__".to_string(), Value::from(day.as_str()));
         }
+        if let Some(day_period) = &options.day_period {
+            obj.insert("__intl_dayPeriod__".to_string(), Value::from(day_period.as_str()));
+        }
         if let Some(hour) = &options.hour {
             obj.insert("__intl_hour__".to_string(), Value::from(hour.as_str()));
         }
@@ -3415,8 +3712,20 @@ impl<'gc> VM<'gc> {
         if let Some(second) = &options.second {
             obj.insert("__intl_second__".to_string(), Value::from(second.as_str()));
         }
+        if let Some(fractional_second_digits) = options.fractional_second_digits {
+            obj.insert(
+                "__intl_fractionalSecondDigits__".to_string(),
+                Value::Number(fractional_second_digits as f64),
+            );
+        }
         if let Some(time_zone_name) = &options.time_zone_name {
             obj.insert("__intl_timeZoneName__".to_string(), Value::from(time_zone_name.as_str()));
+        }
+        if let Some(date_style) = &options.date_style {
+            obj.insert("__intl_dateStyle__".to_string(), Value::from(date_style.as_str()));
+        }
+        if let Some(time_style) = &options.time_style {
+            obj.insert("__intl_timeStyle__".to_string(), Value::from(time_style.as_str()));
         }
     }
 
@@ -5147,17 +5456,22 @@ struct IntlDateTimeFormatOptions {
     calendar: String,
     numbering_system: String,
     time_zone: String,
+    time_zone_explicit: bool,
     weekday: Option<String>,
     era: Option<String>,
     year: Option<String>,
     month: Option<String>,
     day: Option<String>,
+    day_period: Option<String>,
     hour: Option<String>,
     minute: Option<String>,
     second: Option<String>,
+    fractional_second_digits: Option<u8>,
     time_zone_name: Option<String>,
     hour_cycle: Option<String>,
     hour12: Option<bool>,
+    date_style: Option<String>,
+    time_style: Option<String>,
 }
 
 struct IntlNumberFormatOptions {

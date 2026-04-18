@@ -4,6 +4,7 @@ use unicode_normalization::UnicodeNormalization;
 
 const INTL_DEFAULT_LOCALE: &str = "en-US";
 const INTL_COLLATOR_BOUND_COMPARE_SLOT: &str = "@@sym:900001";
+const INTL_DATE_TIME_FORMAT_BOUND_FORMAT_SLOT: &str = "@@sym:900003";
 
 const INTL_SERVICE_CTORS: &[(&str, &str)] = &[
     ("Collator", "intl.collator.ctor"),
@@ -110,6 +111,8 @@ impl<'gc> VM<'gc> {
             "intl.getCanonicalLocales" => self.intl_get_canonical_locales(ctx, args.first()),
             "intl.collator.get.compare" => self.intl_collator_compare_getter(ctx, receiver),
             "intl.collator.compare" => self.intl_collator_compare(ctx, receiver, args),
+            "intl.dateTimeFormat.get.format" => self.intl_date_time_format_getter(ctx, receiver),
+            "intl.dateTimeFormat.format" => self.intl_date_time_format_format(ctx, receiver, args),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
                 let mut obj = IndexMap::new();
@@ -173,6 +176,10 @@ impl<'gc> VM<'gc> {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.collator.get.compare", "get compare", 0.0, false);
                 Self::insert_getter_property_with_attributes(&mut proto, "compare", &getter, false, true);
                 Self::insert_property_with_attributes(&mut proto, "@@sym:4", &Value::from("Intl.Collator"), false, false, true);
+            }
+            if display_name == "DateTimeFormat" {
+                let getter = Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.get.format", "get format", 0.0, false);
+                Self::insert_getter_property_with_attributes(&mut proto, "format", &getter, false, true);
             }
             if display_name == "Segmenter" {
                 proto.insert(
@@ -587,6 +594,49 @@ impl<'gc> VM<'gc> {
         let borrow = collator_obj.borrow();
         let options = IntlCollatorOptions::from_object(&borrow);
         Value::Number(Self::intl_compare_strings(&left, &right, &options) as f64)
+    }
+
+    fn intl_date_time_format_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
+            return Value::Undefined;
+        };
+
+        if let Some(existing) = formatter.borrow().get(INTL_DATE_TIME_FORMAT_BOUND_FORMAT_SLOT).cloned() {
+            return existing;
+        }
+
+        let this_val = receiver.unwrap_or(&Value::Undefined);
+        let format = Self::make_bound_host_fn(ctx, "intl.dateTimeFormat.format", this_val);
+        if let Value::Object(format_obj) = &format {
+            let mut borrow = format_obj.borrow_mut(ctx);
+            Self::insert_property_with_attributes(&mut borrow, "length", &Value::Number(1.0), false, false, true);
+            Self::insert_property_with_attributes(&mut borrow, "name", &Value::from(""), false, false, true);
+            borrow.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        }
+        formatter
+            .borrow_mut(ctx)
+            .insert(INTL_DATE_TIME_FORMAT_BOUND_FORMAT_SLOT.to_string(), format.clone());
+        format
+    }
+
+    fn intl_date_time_format_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let Some(_formatter) = self.intl_require_initialized_service(ctx, receiver, Some("DateTimeFormat")) else {
+            return Value::Undefined;
+        };
+        let x = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
+            chrono::Utc::now().timestamp_millis() as f64
+        } else {
+            let prim = self.try_to_primitive(ctx, args.first().unwrap_or(&Value::Undefined), "number");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            to_number(&prim)
+        };
+        if !x.is_finite() || x.is_nan() {
+            self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid time value"));
+            return Value::Undefined;
+        }
+        Value::from(x.trunc().to_string().as_str())
     }
 
     fn intl_require_initialized_service(

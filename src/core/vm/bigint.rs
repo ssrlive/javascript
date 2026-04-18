@@ -172,8 +172,8 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     Value::Number(n) => {
-                        if n.is_finite() && *n == n.trunc() {
-                            Value::BigInt(Box::new(num_bigint::BigInt::from(*n as i64)))
+                        if let Some(bigint) = bigint_from_integral_number(*n) {
+                            Value::BigInt(Box::new(bigint))
                         } else {
                             self.throw_range_error_object(
                                 ctx,

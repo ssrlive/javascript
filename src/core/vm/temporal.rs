@@ -4863,7 +4863,7 @@ impl<'gc> VM<'gc> {
         None
     }
 
-    fn temporal_to_duration(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TemporalDuration, TemporalError> {
+    pub(super) fn temporal_to_duration(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<TemporalDuration, TemporalError> {
         if matches!(
             value,
             Value::Object(_) | Value::Array(_) | Value::Function(_, _) | Value::Closure(_, _, _) | Value::NativeFunction(_)

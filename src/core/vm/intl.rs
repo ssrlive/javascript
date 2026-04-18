@@ -256,6 +256,8 @@ impl<'gc> VM<'gc> {
             "intl.dateTimeFormat.formatRangeToParts" => {
                 self.intl_date_time_format_format_range_to_parts(ctx, receiver, args.first(), args.get(1))
             }
+            "intl.durationFormat.format" => self.intl_duration_format(ctx, receiver, args.first()),
+            "intl.durationFormat.formatToParts" => self.intl_duration_format_to_parts(ctx, receiver, args.first()),
             "intl.listFormat.format" => self.intl_list_format(ctx, receiver, args.first()),
             "intl.listFormat.formatToParts" => self.intl_list_format_to_parts(ctx, receiver, args.first()),
             "intl.locale.get.baseName" => self.intl_locale_slot_getter(ctx, receiver, "__intl_base_name__"),
@@ -411,6 +413,18 @@ impl<'gc> VM<'gc> {
                     Self::make_host_fn_with_name_len(ctx, "intl.displayNames.of", "of", 1.0, false),
                 );
                 mark_nonenumerable(&mut proto, "of");
+            }
+            if display_name == "DurationFormat" {
+                proto.insert(
+                    "format".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.durationFormat.format", "format", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "format");
+                proto.insert(
+                    "formatToParts".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.durationFormat.formatToParts", "formatToParts", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatToParts");
             }
             if display_name == "ListFormat" {
                 proto.insert(
@@ -1228,6 +1242,604 @@ impl<'gc> VM<'gc> {
             })
             .unwrap_or_else(|| "conjunction".to_string());
         Some(Self::intl_format_list_parts(&locale, &list_type, &style, &items))
+    }
+
+    fn intl_duration_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(parts) = self.intl_duration_format_parts(ctx, receiver, value) else {
+            return Value::Undefined;
+        };
+        Value::from(parts.into_iter().map(|part| part.value).collect::<Vec<_>>().join("").as_str())
+    }
+
+    fn intl_duration_format_to_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        value: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(parts) = self.intl_duration_format_parts(ctx, receiver, value) else {
+            return Value::Undefined;
+        };
+        Value::Array(new_gc_cell_ptr(
+            ctx,
+            VmArrayData::new(
+                parts
+                    .into_iter()
+                    .map(|part| {
+                        let mut obj = IndexMap::new();
+                        obj.insert("type".to_string(), Value::from(part.part_type.as_str()));
+                        obj.insert("value".to_string(), Value::from(part.value.as_str()));
+                        if let Some(unit) = part.unit {
+                            obj.insert("unit".to_string(), Value::from(unit.as_str()));
+                        }
+                        Value::Object(new_gc_cell_ptr(ctx, obj))
+                    })
+                    .collect(),
+            ),
+        ))
+    }
+
+    fn intl_duration_format_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        value: Option<&Value<'gc>>,
+    ) -> Option<Vec<IntlDurationPart>> {
+        let formatter = self.intl_require_initialized_service(ctx, receiver, Some("DurationFormat"))?;
+        let options = {
+            let borrow = formatter.borrow();
+            IntlDurationFormatOptions::from_object(&borrow)
+        };
+        let undefined = Value::Undefined;
+        let duration = match self.intl_duration_record_from_value(ctx, value.unwrap_or(&undefined)) {
+            Ok(duration) => duration,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return None;
+            }
+        };
+        match self.intl_partition_duration_format_pattern(ctx, &options, &duration) {
+            Ok(parts) => Some(parts),
+            Err(err) => {
+                self.pending_throw = Some(err);
+                None
+            }
+        }
+    }
+
+    fn intl_duration_record_from_value(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<IntlDurationRecord, Value<'gc>> {
+        if let Value::Object(obj) = value
+            && !obj.borrow().contains_key("__temporal_kind__")
+        {
+            let record = self.intl_duration_record_from_object_like(ctx, value)?;
+            self.intl_validate_duration_record(ctx, &record)?;
+            return Ok(record);
+        }
+        self.intl_validate_duration_input(ctx, value)?;
+        let duration = self.temporal_to_duration(ctx, value).map_err(|err| {
+            let js_err: JSError = err.into();
+            self.vm_value_from_error(ctx, &js_err)
+        })?;
+        let record = IntlDurationRecord {
+            years: duration.years(),
+            months: duration.months(),
+            weeks: duration.weeks(),
+            days: duration.days(),
+            hours: duration.hours(),
+            minutes: duration.minutes(),
+            seconds: duration.seconds(),
+            milliseconds: duration.milliseconds(),
+            microseconds: duration.microseconds(),
+            nanoseconds: duration.nanoseconds(),
+            years_present: duration.years() != 0,
+            months_present: duration.months() != 0,
+            weeks_present: duration.weeks() != 0,
+            days_present: duration.days() != 0,
+            hours_present: duration.hours() != 0,
+            minutes_present: duration.minutes() != 0,
+            seconds_present: duration.seconds() != 0,
+            milliseconds_present: duration.milliseconds() != 0,
+            microseconds_present: duration.microseconds() != 0,
+            nanoseconds_present: duration.nanoseconds() != 0,
+        };
+        self.intl_validate_duration_record(ctx, &record)?;
+        Ok(record)
+    }
+
+    fn intl_duration_record_from_object_like(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+    ) -> Result<IntlDurationRecord, Value<'gc>> {
+        let Value::Object(obj) = value else {
+            return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+        };
+        let supported = [
+            "years",
+            "months",
+            "weeks",
+            "days",
+            "hours",
+            "minutes",
+            "seconds",
+            "milliseconds",
+            "microseconds",
+            "nanoseconds",
+        ];
+        {
+            let borrow = obj.borrow();
+            for key in borrow.keys() {
+                if key.starts_with("__") {
+                    continue;
+                }
+                if !supported.contains(&key.as_str()) {
+                    return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+                }
+            }
+        }
+        let mut record = IntlDurationRecord {
+            years: 0,
+            months: 0,
+            weeks: 0,
+            days: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+            milliseconds: 0,
+            microseconds: 0,
+            nanoseconds: 0,
+            years_present: false,
+            months_present: false,
+            weeks_present: false,
+            days_present: false,
+            hours_present: false,
+            minutes_present: false,
+            seconds_present: false,
+            milliseconds_present: false,
+            microseconds_present: false,
+            nanoseconds_present: false,
+        };
+        let mut seen_supported = false;
+        for unit in supported {
+            let raw = self.read_named_property(ctx, value, unit);
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(thrown);
+            }
+            if matches!(raw, Value::Undefined) {
+                if obj.borrow().contains_key(unit) {
+                    return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+                }
+                continue;
+            }
+            seen_supported = true;
+            let Some(number) = self.extract_number_with_coercion(ctx, &raw) else {
+                return Err(self
+                    .pending_throw
+                    .clone()
+                    .unwrap_or_else(|| self.make_type_error_object(ctx, "Invalid duration input")));
+            };
+            if !number.is_finite() || number.fract() != 0.0 {
+                return Err(self.make_range_error_object(ctx, "Duration field out of range"));
+            }
+            let Some(integer) = Self::intl_exact_integral_number(number) else {
+                return Err(self.make_range_error_object(ctx, "Duration field out of range"));
+            };
+            if !matches!(unit, "microseconds" | "nanoseconds") && integer.unsigned_abs() > i64::MAX as u128 {
+                return Err(self.make_range_error_object(ctx, "Duration field out of range"));
+            }
+            record.set_unit(unit, integer);
+        }
+        if !seen_supported {
+            return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+        }
+        Ok(record)
+    }
+
+    fn intl_exact_integral_number(value: f64) -> Option<i128> {
+        if value == 0.0 {
+            return Some(0);
+        }
+        let bits = value.to_bits();
+        let negative = (bits >> 63) != 0;
+        let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+        if exponent_bits == 0x7ff {
+            return None;
+        }
+        let fraction = bits & ((1_u64 << 52) - 1);
+        if exponent_bits == 0 {
+            return None;
+        }
+        let exponent = exponent_bits - 1023;
+        let significand = (1_u128 << 52) | fraction as u128;
+        let magnitude = if exponent >= 52 {
+            significand.checked_shl((exponent - 52) as u32)?
+        } else {
+            let shift = (52 - exponent) as u32;
+            if shift >= 128 || (significand & ((1_u128 << shift) - 1)) != 0 {
+                return None;
+            }
+            significand >> shift
+        };
+        if negative {
+            let signed = i128::try_from(magnitude).ok()?;
+            Some(-signed)
+        } else {
+            i128::try_from(magnitude).ok()
+        }
+    }
+
+    fn intl_validate_duration_input(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<(), Value<'gc>> {
+        let Value::Object(obj) = value else {
+            return Ok(());
+        };
+        if obj.borrow().contains_key("__temporal_kind__") {
+            return Ok(());
+        }
+        let supported = [
+            "years",
+            "months",
+            "weeks",
+            "days",
+            "hours",
+            "minutes",
+            "seconds",
+            "milliseconds",
+            "microseconds",
+            "nanoseconds",
+        ];
+        let borrow = obj.borrow();
+        let mut seen_supported = false;
+        for (key, raw) in borrow.iter() {
+            if key.starts_with("__") {
+                continue;
+            }
+            if !supported.contains(&key.as_str()) {
+                return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+            }
+            if matches!(raw, Value::Undefined) {
+                return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+            }
+            seen_supported = true;
+            if let Value::Number(number) = raw
+                && (!number.is_finite() || number.fract() != 0.0)
+            {
+                return Err(self.make_range_error_object(ctx, "Duration field out of range"));
+            }
+        }
+        if !seen_supported {
+            return Err(self.make_type_error_object(ctx, "Invalid duration input"));
+        }
+        Ok(())
+    }
+
+    fn intl_validate_duration_record(&mut self, ctx: &GcContext<'gc>, record: &IntlDurationRecord) -> Result<(), Value<'gc>> {
+        let signs = [
+            record.years.signum(),
+            record.months.signum(),
+            record.weeks.signum(),
+            record.days.signum(),
+            record.hours.signum(),
+            record.minutes.signum(),
+            record.seconds.signum(),
+            record.milliseconds.signum(),
+            record.microseconds.signum() as i64,
+            record.nanoseconds.signum() as i64,
+        ];
+        let has_positive = signs.iter().any(|sign| *sign > 0);
+        let has_negative = signs.iter().any(|sign| *sign < 0);
+        if has_positive && has_negative {
+            return Err(self.make_range_error_object(ctx, "Duration fields must have the same sign"));
+        }
+        let year_month_week_limit = 1_i128 << 32;
+        if (record.years as i128).abs() >= year_month_week_limit
+            || (record.months as i128).abs() >= year_month_week_limit
+            || (record.weeks as i128).abs() >= year_month_week_limit
+        {
+            return Err(self.make_range_error_object(ctx, "Duration field out of range"));
+        }
+        let total_nanoseconds = (record.days as i128) * 86_400_000_000_000
+            + (record.hours as i128) * 3_600_000_000_000
+            + (record.minutes as i128) * 60_000_000_000
+            + (record.seconds as i128) * 1_000_000_000
+            + (record.milliseconds as i128) * 1_000_000
+            + record.microseconds * 1_000
+            + record.nanoseconds;
+        if total_nanoseconds.abs() >= ((1_i128 << 53) * 1_000_000_000) {
+            return Err(self.make_range_error_object(ctx, "Duration field out of range"));
+        }
+        Ok(())
+    }
+
+    fn intl_partition_duration_format_pattern(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: &IntlDurationFormatOptions,
+        duration: &IntlDurationRecord,
+    ) -> Result<Vec<IntlDurationPart>, Value<'gc>> {
+        let units = [
+            "years",
+            "months",
+            "weeks",
+            "days",
+            "hours",
+            "minutes",
+            "seconds",
+            "milliseconds",
+            "microseconds",
+            "nanoseconds",
+        ];
+        let mut result: Vec<Vec<IntlDurationPart>> = Vec::new();
+        let mut need_separator = false;
+        let mut display_negative_sign = true;
+        for (index, unit) in units.iter().enumerate() {
+            let unit_options = options.unit_options(unit);
+            let mut value = duration.unit_i128(unit).to_string();
+            let display = unit_options.display.as_str();
+            let style = unit_options.style.as_str();
+            let mut display_required = value != "0" || display != "auto";
+            if (*unit == "seconds" || *unit == "milliseconds" || *unit == "microseconds")
+                && units.get(index + 1).map(|next| options.unit_options(next).style.as_str()) == Some("numeric")
+            {
+                display_required = display_required
+                    || match *unit {
+                        "seconds" => duration.milliseconds != 0 || duration.microseconds != 0 || duration.nanoseconds != 0,
+                        "milliseconds" => duration.microseconds != 0 || duration.nanoseconds != 0,
+                        "microseconds" => duration.nanoseconds != 0,
+                        _ => false,
+                    };
+            }
+            if *unit == "minutes" && (need_separator || (options.style == "digital" && duration.is_present("minutes"))) {
+                display_required = display_required
+                    || options.seconds.display == "always"
+                    || duration.seconds != 0
+                    || duration.milliseconds != 0
+                    || duration.microseconds != 0
+                    || duration.nanoseconds != 0;
+            }
+            if !display_required {
+                continue;
+            }
+            let mut sign_never = false;
+            let next_style = units.get(index + 1).map(|next| options.unit_options(next).style.as_str());
+            let minimum_integer_digits = if style == "2-digit" || (need_separator && matches!(*unit, "minutes" | "seconds")) {
+                Some(2)
+            } else {
+                None
+            };
+            let mut minimum_fraction_digits = None;
+            let mut maximum_fraction_digits = None;
+            let mut trunc_rounding = false;
+            let mut done = false;
+            if (*unit == "seconds" || *unit == "milliseconds" || *unit == "microseconds") && next_style == Some("numeric") {
+                let extra_digits = match *unit {
+                    "seconds" => 9,
+                    "milliseconds" => 6,
+                    "microseconds" => 3,
+                    _ => 0,
+                };
+                value = Self::intl_duration_fractional_string(duration, unit, extra_digits);
+                maximum_fraction_digits = Some(options.fractional_digits.unwrap_or(9));
+                minimum_fraction_digits = Some(options.fractional_digits.unwrap_or(0));
+                trunc_rounding = true;
+                done = true;
+            }
+            if display_negative_sign {
+                display_negative_sign = false;
+                if value == "0" && duration.any_negative() {
+                    value = "-0".to_string();
+                }
+            } else {
+                sign_never = true;
+            }
+            let decimal_style = style == "numeric" || style == "2-digit";
+            let parts = self.intl_duration_number_parts(
+                ctx,
+                IntlDurationNumberFormatConfig {
+                    locale: &options.resolved_locale,
+                    numbering_system: &options.numbering_system,
+                    unit,
+                    unit_options,
+                    input: &value,
+                    decimal_style,
+                    trunc_rounding,
+                    sign_never,
+                    minimum_integer_digits,
+                    minimum_fraction_digits,
+                    maximum_fraction_digits,
+                },
+            )?;
+            if !need_separator {
+                if decimal_style {
+                    need_separator = true;
+                }
+                result.push(parts);
+            } else {
+                let list = result.last_mut().expect("separator requires previous part");
+                list.push(IntlDurationPart::literal(":"));
+                list.extend(parts);
+            }
+            if done {
+                break;
+            }
+        }
+        let list_style = if options.style == "digital" {
+            "short"
+        } else {
+            options.style.as_str()
+        };
+        let strings = result
+            .iter()
+            .map(|parts| parts.iter().map(|part| part.value.as_str()).collect::<String>())
+            .collect::<Vec<_>>();
+        if strings.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut groups = result.into_iter();
+        let mut flattened = Vec::new();
+        for part in Self::intl_format_list_parts(&options.resolved_locale, "unit", list_style, &strings) {
+            if part.part_type == "element" {
+                if let Some(group) = groups.next() {
+                    flattened.extend(group);
+                }
+            } else {
+                flattened.push(IntlDurationPart::literal(&part.value));
+            }
+        }
+        Ok(flattened)
+    }
+
+    fn intl_duration_fractional_string(duration: &IntlDurationRecord, unit: &str, extra_digits: usize) -> String {
+        if extra_digits == 0 {
+            return "0".to_string();
+        }
+        let mut ns = duration.nanoseconds;
+        match unit {
+            "seconds" => {
+                ns += (duration.seconds as i128) * 1_000_000_000;
+                ns += (duration.milliseconds as i128) * 1_000_000;
+                ns += duration.microseconds * 1_000;
+            }
+            "milliseconds" => {
+                ns += (duration.milliseconds as i128) * 1_000_000;
+                ns += duration.microseconds * 1_000;
+            }
+            "microseconds" => {
+                ns += duration.microseconds * 1_000;
+            }
+            _ => return "0".to_string(),
+        }
+        let divisor = 10_i128.pow(extra_digits as u32);
+        let q = ns / divisor;
+        let mut r = ns % divisor;
+        if r == 0 {
+            return q.to_string();
+        }
+        if r < 0 {
+            r = -r;
+        }
+        format!("{q}.{:0width$}", r, width = extra_digits)
+    }
+
+    fn intl_duration_number_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        config: IntlDurationNumberFormatConfig<'_>,
+    ) -> Result<Vec<IntlDurationPart>, Value<'gc>> {
+        let mut formatter = IndexMap::new();
+        formatter.insert("__intl_service__".to_string(), Value::from("NumberFormat"));
+        formatter.insert("__intl_locale__".to_string(), Value::from(config.locale));
+        formatter.insert("__intl_numbering_system__".to_string(), Value::from(config.numbering_system));
+        formatter.insert(
+            "__intl_style__".to_string(),
+            Value::from(if config.decimal_style { "decimal" } else { "unit" }),
+        );
+        formatter.insert(
+            "__intl_sign_display__".to_string(),
+            Value::from(if config.sign_never { "never" } else { "auto" }),
+        );
+        formatter.insert("__intl_use_grouping__".to_string(), Value::Boolean(!config.decimal_style));
+        formatter.insert("__intl_notation__".to_string(), Value::from("standard"));
+        formatter.insert("__intl_compact_display__".to_string(), Value::from("short"));
+        formatter.insert("__intl_currency_display__".to_string(), Value::from("symbol"));
+        formatter.insert("__intl_currency_sign__".to_string(), Value::from("standard"));
+        formatter.insert("__intl_unit_display__".to_string(), Value::from(config.unit_options.style.as_str()));
+        formatter.insert("__intl_unit__".to_string(), Value::from(config.unit.trim_end_matches('s')));
+        if let Some(digits) = config.minimum_integer_digits {
+            formatter.insert("__intl_minimum_integer_digits__".to_string(), Value::Number(digits as f64));
+        }
+        if let Some(digits) = config.minimum_fraction_digits {
+            formatter.insert("__intl_minimum_fraction_digits__".to_string(), Value::Number(digits as f64));
+        }
+        if let Some(digits) = config.maximum_fraction_digits {
+            formatter.insert("__intl_maximum_fraction_digits__".to_string(), Value::Number(digits as f64));
+        }
+        if config.trunc_rounding {
+            formatter.insert("__intl_rounding_mode__".to_string(), Value::from("trunc"));
+        }
+        if config.decimal_style && config.locale.starts_with("en") {
+            return Ok(Self::intl_duration_decimal_parts(
+                config.input,
+                config.sign_never,
+                config.minimum_integer_digits,
+                config.minimum_fraction_digits,
+                config.maximum_fraction_digits,
+                config.unit.trim_end_matches('s'),
+            ));
+        }
+        let input_value = Value::from(config.input);
+        let rendered = self.intl_number_format_parts_array(ctx, &formatter, Some(&input_value))?;
+        let Value::Array(array) = rendered else {
+            return Err(self.make_type_error_object(ctx, "NumberFormat parts must be an array"));
+        };
+        let mut out = Vec::new();
+        for value in &array.borrow().elements {
+            let Value::Object(obj) = value else {
+                continue;
+            };
+            let borrow = obj.borrow();
+            let part_type = borrow
+                .get("type")
+                .and_then(|value| match value {
+                    Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "literal".to_string());
+            let part_value = borrow
+                .get("value")
+                .and_then(|value| match value {
+                    Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            out.push(IntlDurationPart::element(
+                &part_type,
+                part_value,
+                Some(config.unit.trim_end_matches('s')),
+            ));
+        }
+        Ok(out)
+    }
+
+    fn intl_duration_decimal_parts(
+        input: &str,
+        sign_never: bool,
+        minimum_integer_digits: Option<u8>,
+        minimum_fraction_digits: Option<u8>,
+        maximum_fraction_digits: Option<u8>,
+        unit: &str,
+    ) -> Vec<IntlDurationPart> {
+        let mut text = input;
+        let negative = text.starts_with('-');
+        if negative {
+            text = &text[1..];
+        }
+        let (integer_raw, fraction_raw) = text.split_once('.').unwrap_or((text, ""));
+        let mut integer = integer_raw.to_string();
+        let mut fraction = fraction_raw.to_string();
+        if let Some(max_digits) = maximum_fraction_digits {
+            fraction.truncate(max_digits as usize);
+        }
+        let min_fraction = minimum_fraction_digits.unwrap_or(0) as usize;
+        while fraction.ends_with('0') && fraction.len() > min_fraction {
+            fraction.pop();
+        }
+        while fraction.len() < min_fraction {
+            fraction.push('0');
+        }
+        let min_integer = minimum_integer_digits.unwrap_or(1) as usize;
+        if integer.len() < min_integer {
+            integer = format!("{integer:0>width$}", width = min_integer);
+        }
+        let mut parts = Vec::new();
+        if negative && !sign_never {
+            parts.push(IntlDurationPart::element("minusSign", "-".to_string(), Some(unit)));
+        }
+        parts.push(IntlDurationPart::element("integer", integer, Some(unit)));
+        if !fraction.is_empty() {
+            parts.push(IntlDurationPart::element("decimal", ".".to_string(), Some(unit)));
+            parts.push(IntlDurationPart::element("fraction", fraction, Some(unit)));
+        }
+        parts
     }
 
     fn intl_locale_to_string(&mut self, _ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -2429,7 +3041,7 @@ impl<'gc> VM<'gc> {
         if let Some(decimal) = Self::intl_parse_exact_decimal(value)
             && options.notation == "standard"
             && options.rounding_increment == 1
-            && options.rounding_mode == "halfExpand"
+            && matches!(options.rounding_mode.as_str(), "halfExpand" | "trunc")
             && options.rounding_priority == "auto"
         {
             if options.minimum_significant_digits.is_some() || options.maximum_significant_digits.is_some() {
@@ -2758,6 +3370,11 @@ impl<'gc> VM<'gc> {
         if options.style == "unit"
             && let Some(pattern) = Self::intl_unit_pattern(options)
         {
+            let suffix_unit = if options.resolved_locale.starts_with("en") {
+                Self::intl_english_plural_unit(&pattern.suffix_unit, core)
+            } else {
+                pattern.suffix_unit.clone()
+            };
             if let Some(prefix_unit) = pattern.prefix_unit {
                 out.push_str(&prefix_unit);
             }
@@ -2770,7 +3387,7 @@ impl<'gc> VM<'gc> {
             if let Some(suffix_literal) = pattern.suffix_literal {
                 out.push_str(&suffix_literal);
             }
-            out.push_str(&pattern.suffix_unit);
+            out.push_str(&suffix_unit);
             return out;
         }
         out.push_str(&prefix);
@@ -2862,6 +3479,18 @@ impl<'gc> VM<'gc> {
             "非數值".to_string()
         } else {
             "NaN".to_string()
+        }
+    }
+
+    fn intl_english_plural_unit(unit: &str, core: &str) -> String {
+        if unit.ends_with("/h") || unit.len() == 1 {
+            return unit.to_string();
+        }
+        let normalized = core.replace([',', '.'], "");
+        if normalized == "1" || normalized == "-1" || unit.ends_with('s') {
+            unit.to_string()
+        } else {
+            format!("{unit}s")
         }
     }
 
@@ -3160,7 +3789,12 @@ impl<'gc> VM<'gc> {
                 scale = 0;
             }
         }
-        Self::intl_round_exact_fraction_digits(&mut digits, &mut scale, options.maximum_fraction_digits as usize);
+        Self::intl_round_exact_fraction_digits_mode(
+            &mut digits,
+            &mut scale,
+            options.maximum_fraction_digits as usize,
+            &options.rounding_mode,
+        );
         let split = digits.len().saturating_sub(scale);
         let integer_part_raw = if split == 0 { "0".to_string() } else { digits[..split].to_string() };
         let mut integer_part = integer_part_raw.trim_start_matches('0').to_string();
@@ -3186,12 +3820,12 @@ impl<'gc> VM<'gc> {
         Self::intl_apply_sign_and_affixes(options, decimal.negative, is_zeroish, false, &formatted)
     }
 
-    fn intl_round_exact_fraction_digits(digits: &mut String, scale: &mut usize, maximum_fraction_digits: usize) {
+    fn intl_round_exact_fraction_digits_mode(digits: &mut String, scale: &mut usize, maximum_fraction_digits: usize, rounding_mode: &str) {
         if *scale <= maximum_fraction_digits {
             return;
         }
         let cut = digits.len() - *scale + maximum_fraction_digits;
-        let round_up = digits.as_bytes().get(cut).is_some_and(|digit| *digit >= b'5');
+        let round_up = rounding_mode == "halfExpand" && digits.as_bytes().get(cut).is_some_and(|digit| *digit >= b'5');
         digits.truncate(cut);
         *scale = maximum_fraction_digits;
         if round_up {
@@ -4902,9 +5536,10 @@ impl<'gc> VM<'gc> {
         ] {
             let explicit_style = self.intl_string_option(ctx, &boxed_options, slot, allowed, None)?;
             let display_key = format!("{slot}Display");
+            let display_default = if explicit_style.is_some() { "always" } else { "auto" };
             let display = self
-                .intl_string_option(ctx, &boxed_options, &display_key, &["auto", "always"], Some("auto"))?
-                .unwrap_or_else(|| "auto".to_string());
+                .intl_string_option(ctx, &boxed_options, &display_key, &["auto", "always"], Some(display_default))?
+                .unwrap_or_else(|| display_default.to_string());
             let style = if let Some(style) = explicit_style {
                 if prev_style.as_deref().is_some_and(|prev| {
                     matches!(prev, "numeric" | "2-digit") && !Self::intl_duration_is_following_numeric_style(slot, &style)
@@ -6835,6 +7470,22 @@ impl IntlDurationFormatOptions {
         target.style = style;
         target.display = display;
     }
+
+    fn unit_options(&self, slot: &str) -> &IntlDurationUnitOptions {
+        match slot {
+            "years" => &self.years,
+            "months" => &self.months,
+            "weeks" => &self.weeks,
+            "days" => &self.days,
+            "hours" => &self.hours,
+            "minutes" => &self.minutes,
+            "seconds" => &self.seconds,
+            "milliseconds" => &self.milliseconds,
+            "microseconds" => &self.microseconds,
+            "nanoseconds" => &self.nanoseconds,
+            _ => &self.seconds,
+        }
+    }
 }
 
 impl IntlDurationUnitOptions {
@@ -6843,6 +7494,52 @@ impl IntlDurationUnitOptions {
             style: style.to_string(),
             display: display.to_string(),
         }
+    }
+}
+
+impl IntlDurationFormatOptions {
+    fn from_object<'gc>(obj: &IndexMap<String, Value<'gc>>) -> Self {
+        let mut out = Self::new(
+            match obj.get("__intl_locale__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => INTL_DEFAULT_LOCALE.to_string(),
+            },
+            match obj.get("__intl_numbering_system__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "latn".to_string(),
+            },
+        );
+        out.style = match obj.get("__intl_style__") {
+            Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+            _ => "short".to_string(),
+        };
+        for slot in [
+            "years",
+            "months",
+            "weeks",
+            "days",
+            "hours",
+            "minutes",
+            "seconds",
+            "milliseconds",
+            "microseconds",
+            "nanoseconds",
+        ] {
+            let style = match obj.get(&format!("__intl_{}__", slot)) {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "short".to_string(),
+            };
+            let display = match obj.get(&format!("__intl_{}Display__", slot)) {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "auto".to_string(),
+            };
+            out.set_unit(slot, style, display);
+        }
+        out.fractional_digits = match obj.get("__intl_fractional_digits__") {
+            Some(Value::Number(value)) => Some(*value as u8),
+            _ => None,
+        };
+        out
     }
 }
 
@@ -6868,6 +7565,117 @@ impl IntlListLiterals {
     }
 }
 
+impl IntlDurationPart {
+    fn element(part_type: &str, value: String, unit: Option<&str>) -> Self {
+        Self {
+            part_type: part_type.to_string(),
+            value,
+            unit: unit.map(str::to_string),
+        }
+    }
+
+    fn literal(value: &str) -> Self {
+        Self {
+            part_type: "literal".to_string(),
+            value: value.to_string(),
+            unit: None,
+        }
+    }
+}
+
+impl IntlDurationRecord {
+    fn any_negative(&self) -> bool {
+        self.years < 0
+            || self.months < 0
+            || self.weeks < 0
+            || self.days < 0
+            || self.hours < 0
+            || self.minutes < 0
+            || self.seconds < 0
+            || self.milliseconds < 0
+            || self.microseconds < 0
+            || self.nanoseconds < 0
+    }
+
+    fn unit_i128(&self, unit: &str) -> i128 {
+        match unit {
+            "years" => self.years as i128,
+            "months" => self.months as i128,
+            "weeks" => self.weeks as i128,
+            "days" => self.days as i128,
+            "hours" => self.hours as i128,
+            "minutes" => self.minutes as i128,
+            "seconds" => self.seconds as i128,
+            "milliseconds" => self.milliseconds as i128,
+            "microseconds" => self.microseconds,
+            "nanoseconds" => self.nanoseconds,
+            _ => 0,
+        }
+    }
+
+    fn set_unit(&mut self, unit: &str, value: i128) {
+        match unit {
+            "years" => {
+                self.years = value as i64;
+                self.years_present = true;
+            }
+            "months" => {
+                self.months = value as i64;
+                self.months_present = true;
+            }
+            "weeks" => {
+                self.weeks = value as i64;
+                self.weeks_present = true;
+            }
+            "days" => {
+                self.days = value as i64;
+                self.days_present = true;
+            }
+            "hours" => {
+                self.hours = value as i64;
+                self.hours_present = true;
+            }
+            "minutes" => {
+                self.minutes = value as i64;
+                self.minutes_present = true;
+            }
+            "seconds" => {
+                self.seconds = value as i64;
+                self.seconds_present = true;
+            }
+            "milliseconds" => {
+                self.milliseconds = value as i64;
+                self.milliseconds_present = true;
+            }
+            "microseconds" => {
+                self.microseconds = value;
+                self.microseconds_present = true;
+            }
+            "nanoseconds" => {
+                self.nanoseconds = value;
+                self.nanoseconds_present = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn is_present(&self, unit: &str) -> bool {
+        match unit {
+            "years" => self.years_present,
+            "months" => self.months_present,
+            "weeks" => self.weeks_present,
+            "days" => self.days_present,
+            "hours" => self.hours_present,
+            "minutes" => self.minutes_present,
+            "seconds" => self.seconds_present,
+            "milliseconds" => self.milliseconds_present,
+            "microseconds" => self.microseconds_present,
+            "nanoseconds" => self.nanoseconds_present,
+            _ => false,
+        }
+    }
+}
+
 struct IntlExactDecimal {
     negative: bool,
     digits: String,
@@ -6884,6 +7692,49 @@ struct IntlUnitPattern {
 struct IntlListPart {
     part_type: String,
     value: String,
+}
+
+struct IntlDurationPart {
+    part_type: String,
+    value: String,
+    unit: Option<String>,
+}
+
+struct IntlDurationNumberFormatConfig<'a> {
+    locale: &'a str,
+    numbering_system: &'a str,
+    unit: &'a str,
+    unit_options: &'a IntlDurationUnitOptions,
+    input: &'a str,
+    decimal_style: bool,
+    trunc_rounding: bool,
+    sign_never: bool,
+    minimum_integer_digits: Option<u8>,
+    minimum_fraction_digits: Option<u8>,
+    maximum_fraction_digits: Option<u8>,
+}
+
+struct IntlDurationRecord {
+    years: i64,
+    months: i64,
+    weeks: i64,
+    days: i64,
+    hours: i64,
+    minutes: i64,
+    seconds: i64,
+    milliseconds: i64,
+    microseconds: i128,
+    nanoseconds: i128,
+    years_present: bool,
+    months_present: bool,
+    weeks_present: bool,
+    days_present: bool,
+    hours_present: bool,
+    minutes_present: bool,
+    seconds_present: bool,
+    milliseconds_present: bool,
+    microseconds_present: bool,
+    nanoseconds_present: bool,
 }
 
 struct IntlListLiterals {

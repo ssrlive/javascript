@@ -648,6 +648,17 @@ impl<'gc> VM<'gc> {
                 borrow.get("__intl_sign_display__").cloned().unwrap_or_else(|| Value::from("auto")),
             );
             result.insert(
+                "roundingIncrement".to_string(),
+                borrow.get("__intl_rounding_increment__").cloned().unwrap_or(Value::Number(1.0)),
+            );
+            result.insert(
+                "trailingZeroDisplay".to_string(),
+                borrow
+                    .get("__intl_trailing_zero_display__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("auto")),
+            );
+            result.insert(
                 "useGrouping".to_string(),
                 borrow.get("__intl_use_grouping__").cloned().unwrap_or(Value::Boolean(true)),
             );
@@ -2528,6 +2539,8 @@ impl<'gc> VM<'gc> {
             compact_display: None,
             currency_sign: "standard".to_string(),
             sign_display: "auto".to_string(),
+            rounding_increment: 1,
+            trailing_zero_display: "auto".to_string(),
             use_grouping: true,
             minimum_integer_digits: 1,
             minimum_fraction_digits: 0,
@@ -2619,6 +2632,9 @@ impl<'gc> VM<'gc> {
             out.compact_display =
                 self.intl_string_option_from_value(ctx, raw_options.get("compactDisplay"), &["short", "long"], Some("short"))?;
         }
+        if let Some(rounding_increment) = self.intl_rounding_increment_option(ctx, raw_options.get("roundingIncrement"))? {
+            out.rounding_increment = rounding_increment;
+        }
         let _ = self.intl_string_option_from_value(
             ctx,
             raw_options.get("roundingMode"),
@@ -2635,6 +2651,20 @@ impl<'gc> VM<'gc> {
             ],
             Some("halfExpand"),
         )?;
+        let rounding_priority = self.intl_string_option_from_value(
+            ctx,
+            raw_options.get("roundingPriority"),
+            &["auto", "morePrecision", "lessPrecision"],
+            Some("auto"),
+        )?;
+        if let Some(trailing_zero_display) = self.intl_string_option_from_value(
+            ctx,
+            raw_options.get("trailingZeroDisplay"),
+            &["auto", "stripIfInteger"],
+            Some("auto"),
+        )? {
+            out.trailing_zero_display = trailing_zero_display;
+        }
         if let Some(use_grouping) = self.intl_boolean_option_from_value(ctx, raw_options.get("useGrouping"))? {
             out.use_grouping = use_grouping;
         }
@@ -2689,6 +2719,20 @@ impl<'gc> VM<'gc> {
             out.maximum_significant_digits = Some(maximum_significant_digits.unwrap_or(21));
             if out.maximum_significant_digits < out.minimum_significant_digits {
                 return Err(self.make_range_error_object(ctx, "maximumSignificantDigits must be >= minimumSignificantDigits"));
+            }
+        }
+        if out.rounding_increment != 1 {
+            if rounding_priority.as_deref().is_some_and(|value| value != "auto")
+                || out.minimum_significant_digits.is_some()
+                || out.maximum_significant_digits.is_some()
+            {
+                return Err(self.make_type_error_object(ctx, "roundingIncrement cannot be combined with this rounding mode"));
+            }
+            if maximum_fraction_digits.is_some()
+                && minimum_fraction_digits.is_some()
+                && out.maximum_fraction_digits != out.minimum_fraction_digits
+            {
+                return Err(self.make_range_error_object(ctx, "maximumFractionDigits must equal minimumFractionDigits"));
             }
         }
         out.resolved_locale = Self::intl_numbering_system_resolved_locale(
@@ -2803,6 +2847,32 @@ impl<'gc> VM<'gc> {
         Ok(Some(value.to_truthy()))
     }
 
+    fn intl_rounding_increment_option(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<Option<u16>, Value<'gc>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if matches!(value, Value::Undefined) {
+            return Ok(None);
+        }
+        let Some(number) = self.extract_number_with_coercion(ctx, value) else {
+            return Err(self.pending_throw.clone().unwrap_or(Value::Undefined));
+        };
+        if !number.is_finite() {
+            return Err(self.make_range_error_object(ctx, "roundingIncrement must be finite"));
+        }
+        let integer = number.trunc();
+        let increment = integer as u16;
+        if integer != number
+            || !matches!(
+                increment,
+                1 | 2 | 5 | 10 | 20 | 25 | 50 | 100 | 200 | 250 | 500 | 1000 | 2000 | 2500 | 5000
+            )
+        {
+            return Err(self.make_range_error_object(ctx, "Invalid roundingIncrement"));
+        }
+        Ok(Some(increment))
+    }
+
     fn intl_currency_digits(currency: &str) -> u8 {
         match currency {
             "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
@@ -2822,6 +2892,14 @@ impl<'gc> VM<'gc> {
         obj.insert("__intl_notation__".to_string(), Value::from(options.notation.as_str()));
         obj.insert("__intl_currency_sign__".to_string(), Value::from(options.currency_sign.as_str()));
         obj.insert("__intl_sign_display__".to_string(), Value::from(options.sign_display.as_str()));
+        obj.insert(
+            "__intl_rounding_increment__".to_string(),
+            Value::Number(options.rounding_increment as f64),
+        );
+        obj.insert(
+            "__intl_trailing_zero_display__".to_string(),
+            Value::from(options.trailing_zero_display.as_str()),
+        );
         if let Some(currency) = &options.currency {
             obj.insert("__intl_currency__".to_string(), Value::from(currency.as_str()));
         }
@@ -3927,6 +4005,14 @@ impl IntlNumberFormatOptions {
                 Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
                 _ => "auto".to_string(),
             },
+            rounding_increment: match obj.get("__intl_rounding_increment__") {
+                Some(Value::Number(value)) => *value as u16,
+                _ => 1,
+            },
+            trailing_zero_display: match obj.get("__intl_trailing_zero_display__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "auto".to_string(),
+            },
             use_grouping: !matches!(obj.get("__intl_use_grouping__"), Some(Value::Boolean(false))),
             minimum_integer_digits: match obj.get("__intl_minimum_integer_digits__") {
                 Some(Value::Number(value)) => *value as u8,
@@ -4017,6 +4103,8 @@ struct IntlNumberFormatOptions {
     compact_display: Option<String>,
     currency_sign: String,
     sign_display: String,
+    rounding_increment: u16,
+    trailing_zero_display: String,
     use_grouping: bool,
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,

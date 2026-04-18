@@ -1417,11 +1417,16 @@ impl<'gc> VM<'gc> {
     ) -> Result<Value<'gc>, Value<'gc>> {
         let formatted = self.intl_number_format_format_value(ctx, formatter, value)?;
         let options = IntlNumberFormatOptions::from_object(formatter);
-        if formatted == "NaN" {
-            return Ok(Value::Array(new_gc_cell_ptr(
-                ctx,
-                VmArrayData::new(vec![Self::intl_part_object(ctx, "nan", &formatted)]),
-            )));
+        let nan_text = Self::intl_nan_string(&options);
+        if formatted.ends_with(&nan_text) {
+            let mut parts = Vec::new();
+            if let Some(prefix) = formatted.strip_suffix(&nan_text)
+                && !prefix.is_empty()
+            {
+                parts.extend(Self::intl_number_string_parts(ctx, formatter, prefix));
+            }
+            parts.push(Self::intl_part_object(ctx, "nan", &nan_text));
+            return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
         }
         if formatted == "Infinity" || formatted == "-Infinity" {
             let mut parts = Vec::new();
@@ -1468,6 +1473,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_number_string_parts(ctx: &GcContext<'gc>, formatter: &IndexMap<String, Value<'gc>>, formatted: &str) -> Vec<Value<'gc>> {
+        let options = IntlNumberFormatOptions::from_object(formatter);
         let locale_is_de = formatter
             .get("__intl_locale__")
             .is_some_and(|v| matches!(v, Value::String(s) if crate::unicode::utf16_to_utf8(s).starts_with("de")));
@@ -1477,21 +1483,55 @@ impl<'gc> VM<'gc> {
         let mut current = String::new();
         let mut current_type = "integer";
         let mut seen_decimal = false;
+        let mut in_exponent = false;
         for ch in formatted.chars() {
-            let next_type = match ch {
-                '-' => "minusSign",
-                c if c == group_separator => "group",
-                c if c == decimal_separator => "decimal",
-                '%' => "percentSign",
-                '\u{a0}' | ' ' => "literal",
-                c if c.is_ascii_digit() => {
-                    if seen_decimal {
-                        "fraction"
-                    } else {
-                        "integer"
+            if matches!(ch, '\u{200e}' | '\u{061c}') {
+                continue;
+            }
+            let next_type = if options.notation == "compact" && current_type == "compact" && ch == '.' {
+                "compact"
+            } else {
+                match ch {
+                    '-' => {
+                        if in_exponent {
+                            "exponentMinusSign"
+                        } else {
+                            "minusSign"
+                        }
                     }
+                    '+' => {
+                        if in_exponent {
+                            "exponentPlusSign"
+                        } else {
+                            "plusSign"
+                        }
+                    }
+                    'E' if matches!(options.notation.as_str(), "scientific" | "engineering") => "exponentSeparator",
+                    c if c == group_separator => "group",
+                    c if c == decimal_separator => "decimal",
+                    '%' => {
+                        if options.style == "unit" && options.unit.as_deref() == Some("percent") {
+                            "unit"
+                        } else {
+                            "percentSign"
+                        }
+                    }
+                    '∞' => "infinity",
+                    '$' if options.style == "currency" => "currency",
+                    '\u{a0}' | ' ' => "literal",
+                    c if options.style == "currency" && c.is_ascii_alphabetic() => "currency",
+                    c if c.is_ascii_digit() => {
+                        if in_exponent {
+                            "exponentInteger"
+                        } else if seen_decimal {
+                            "fraction"
+                        } else {
+                            "integer"
+                        }
+                    }
+                    c if options.notation == "compact" && !c.is_whitespace() => "compact",
+                    _ => "literal",
                 }
-                _ => "literal",
             };
             if current.is_empty() {
                 current_type = next_type;
@@ -1503,6 +1543,9 @@ impl<'gc> VM<'gc> {
             current.push(ch);
             if ch == decimal_separator {
                 seen_decimal = true;
+            }
+            if ch == 'E' && matches!(options.notation.as_str(), "scientific" | "engineering") {
+                in_exponent = true;
             }
         }
         if !current.is_empty() {
@@ -1543,6 +1586,9 @@ impl<'gc> VM<'gc> {
         let prim = self.try_to_primitive(ctx, value, "number");
         if self.pending_throw.is_some() {
             return Err(self.pending_throw.clone().unwrap_or(Value::Undefined));
+        }
+        if matches!(prim, Value::Symbol(_)) {
+            return Err(self.make_type_error_object(ctx, "Cannot convert Symbol to number"));
         }
         if let Value::BigInt(bi) = &prim {
             return Ok(IntlFormattedNumberInput::BigInt(bi.to_string()));
@@ -2193,6 +2239,14 @@ impl<'gc> VM<'gc> {
                 }
             };
             return Some(pattern);
+        }
+        if unit == "percent" {
+            return Some(IntlUnitPattern {
+                prefix_unit: None,
+                prefix_literal: None,
+                suffix_literal: None,
+                suffix_unit: "%".to_string(),
+            });
         }
         let suffix_unit = if options.unit_display == "narrow" {
             unit.to_string()

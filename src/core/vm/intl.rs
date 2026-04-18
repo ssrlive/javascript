@@ -226,8 +226,10 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Value<'gc> {
         if let Some(kind) = Self::intl_service_kind_from_ctor_host(name) {
-            if matches!(name, "intl.locale.ctor" | "intl.durationFormat.ctor" | "intl.listFormat.ctor")
-                && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined))
+            if matches!(
+                name,
+                "intl.locale.ctor" | "intl.durationFormat.ctor" | "intl.listFormat.ctor" | "intl.relativeTimeFormat.ctor"
+            ) && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined))
             {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Constructor Intl.Locale requires 'new'"));
                 return Value::Undefined;
@@ -260,6 +262,8 @@ impl<'gc> VM<'gc> {
             "intl.durationFormat.formatToParts" => self.intl_duration_format_to_parts(ctx, receiver, args.first()),
             "intl.listFormat.format" => self.intl_list_format(ctx, receiver, args.first()),
             "intl.listFormat.formatToParts" => self.intl_list_format_to_parts(ctx, receiver, args.first()),
+            "intl.relativeTimeFormat.format" => self.intl_relative_time_format(ctx, receiver, args.first(), args.get(1)),
+            "intl.relativeTimeFormat.formatToParts" => self.intl_relative_time_format_to_parts(ctx, receiver, args.first(), args.get(1)),
             "intl.locale.get.baseName" => self.intl_locale_slot_getter(ctx, receiver, "__intl_base_name__"),
             "intl.locale.get.language" => self.intl_locale_slot_getter(ctx, receiver, "__intl_language__"),
             "intl.locale.get.script" => self.intl_locale_slot_getter(ctx, receiver, "__intl_script__"),
@@ -438,6 +442,18 @@ impl<'gc> VM<'gc> {
                 );
                 mark_nonenumerable(&mut proto, "formatToParts");
             }
+            if display_name == "RelativeTimeFormat" {
+                proto.insert(
+                    "format".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.relativeTimeFormat.format", "format", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "format");
+                proto.insert(
+                    "formatToParts".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.relativeTimeFormat.formatToParts", "formatToParts", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatToParts");
+            }
             if display_name == "Locale" {
                 for (prop, host) in [
                     ("baseName", "intl.locale.get.baseName"),
@@ -553,8 +569,8 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
-        let generic_numbering_system_options = if kind == "RelativeTimeFormat" {
-            Some(self.intl_read_generic_numbering_system_options(ctx, &requested_locales, args.get(1))?)
+        let relative_time_format_options = if kind == "RelativeTimeFormat" {
+            Some(self.intl_read_relative_time_format_options(ctx, &requested_locales, args.get(1))?)
         } else {
             None
         };
@@ -588,7 +604,7 @@ impl<'gc> VM<'gc> {
             .or_else(|| number_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| duration_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| list_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
-            .or_else(|| generic_numbering_system_options.as_ref().map(|opts| opts.resolved_locale.clone()))
+            .or_else(|| relative_time_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
         obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
@@ -607,11 +623,8 @@ impl<'gc> VM<'gc> {
         if let Some(opts) = list_format_options {
             self.intl_store_list_format_options(&mut obj, &opts);
         }
-        if let Some(options) = generic_numbering_system_options {
-            obj.insert(
-                "__intl_numbering_system__".to_string(),
-                Value::from(options.numbering_system.as_str()),
-            );
+        if let Some(options) = relative_time_format_options {
+            self.intl_store_relative_time_format_options(&mut obj, &options);
         }
         if let Some((display_type, fallback)) = display_names_options {
             obj.insert("__intl_type__".to_string(), Value::from(display_type.as_str()));
@@ -839,6 +852,14 @@ impl<'gc> VM<'gc> {
             );
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "RelativeTimeFormat")
         {
+            result.insert(
+                "style".to_string(),
+                borrow.get("__intl_style__").cloned().unwrap_or_else(|| Value::from("long")),
+            );
+            result.insert(
+                "numeric".to_string(),
+                borrow.get("__intl_numeric__").cloned().unwrap_or_else(|| Value::from("always")),
+            );
             result.insert(
                 "numberingSystem".to_string(),
                 borrow
@@ -1242,6 +1263,95 @@ impl<'gc> VM<'gc> {
             })
             .unwrap_or_else(|| "conjunction".to_string());
         Some(Self::intl_format_list_parts(&locale, &list_type, &style, &items))
+    }
+
+    fn intl_relative_time_format(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        value: Option<&Value<'gc>>,
+        unit: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(parts) = self.intl_relative_time_format_parts(ctx, receiver, value, unit) else {
+            return Value::Undefined;
+        };
+        Value::from(parts.into_iter().map(|part| part.value).collect::<Vec<_>>().join("").as_str())
+    }
+
+    fn intl_relative_time_format_to_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        value: Option<&Value<'gc>>,
+        unit: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(parts) = self.intl_relative_time_format_parts(ctx, receiver, value, unit) else {
+            return Value::Undefined;
+        };
+        Value::Array(new_gc_cell_ptr(
+            ctx,
+            VmArrayData::new(
+                parts
+                    .into_iter()
+                    .map(|part| {
+                        let mut obj = IndexMap::new();
+                        obj.insert("type".to_string(), Value::from(part.part_type.as_str()));
+                        obj.insert("value".to_string(), Value::from(part.value.as_str()));
+                        if let Some(unit) = part.unit {
+                            obj.insert("unit".to_string(), Value::from(unit.as_str()));
+                        }
+                        Value::Object(new_gc_cell_ptr(ctx, obj))
+                    })
+                    .collect(),
+            ),
+        ))
+    }
+
+    fn intl_relative_time_format_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        value: Option<&Value<'gc>>,
+        unit: Option<&Value<'gc>>,
+    ) -> Option<Vec<IntlDurationPart>> {
+        let formatter = self.intl_require_initialized_service(ctx, receiver, Some("RelativeTimeFormat"))?;
+        let value = match value {
+            Some(value) => value,
+            None => {
+                self.throw_type_error(ctx, "value is required");
+                return None;
+            }
+        };
+        let unit = match unit {
+            Some(unit) => unit,
+            None => {
+                self.throw_type_error(ctx, "unit is required");
+                return None;
+            }
+        };
+        let number = self.extract_number_with_coercion(ctx, value)?;
+        if !number.is_finite() {
+            self.pending_throw = Some(self.make_range_error_object(ctx, "value must be finite"));
+            return None;
+        }
+        let unit = match self.intl_relative_time_unit(ctx, unit) {
+            Ok(unit) => unit,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return None;
+            }
+        };
+        let options = {
+            let borrow = formatter.borrow();
+            IntlRelativeTimeFormatOptions::from_object(&borrow)
+        };
+        match self.intl_partition_relative_time_pattern(&options, number, &unit) {
+            Ok(parts) => Some(parts),
+            Err(err) => {
+                self.pending_throw = Some(err);
+                None
+            }
+        }
     }
 
     fn intl_duration_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
@@ -3336,7 +3446,10 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_decimal_separator(options: &IntlNumberFormatOptions) -> char {
-        if options.resolved_locale.starts_with("de") || options.resolved_locale.starts_with("pt") {
+        if options.resolved_locale.starts_with("de")
+            || options.resolved_locale.starts_with("pt")
+            || options.resolved_locale.starts_with("pl")
+        {
             ','
         } else {
             '.'
@@ -3344,7 +3457,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_group_separator(options: &IntlNumberFormatOptions) -> char {
-        if options.resolved_locale.starts_with("pt") {
+        if options.resolved_locale.starts_with("pt") || options.resolved_locale.starts_with("pl") {
             '\u{a0}'
         } else if options.resolved_locale.starts_with("de") {
             '.'
@@ -5400,12 +5513,12 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn intl_read_generic_numbering_system_options(
+    fn intl_read_relative_time_format_options(
         &mut self,
         ctx: &GcContext<'gc>,
         requested_locales: &[String],
         options: Option<&Value<'gc>>,
-    ) -> Result<IntlGenericNumberingSystemOptions, Value<'gc>> {
+    ) -> Result<IntlRelativeTimeFormatOptions, Value<'gc>> {
         let requested_locale = requested_locales
             .first()
             .cloned()
@@ -5420,18 +5533,27 @@ impl<'gc> VM<'gc> {
             .unicode_keywords
             .get("nu")
             .and_then(|value| Self::intl_supported_numbering_system(value));
-        let mut out = IntlGenericNumberingSystemOptions {
-            resolved_locale: Self::intl_numbering_system_resolved_locale(&locale_base, ext_numbering_system.as_deref()),
-            numbering_system: ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
-        };
+        let mut out = IntlRelativeTimeFormatOptions::new(
+            Self::intl_numbering_system_resolved_locale(&locale_base, ext_numbering_system.as_deref()),
+            ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
+        );
         let Some(options) = options else {
             return Ok(out);
         };
-        if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+        if matches!(options, Value::Undefined) {
             return Ok(out);
         }
+        if matches!(options, Value::Null) {
+            return Err(self.make_type_error_object(ctx, "options must not be null"));
+        }
+        let boxed_options = if Self::intl_is_object_like(options) {
+            options.clone()
+        } else {
+            self.intl_box_primitive_if_needed(ctx, options)
+        };
+        self.intl_locale_matcher_option(ctx, Some(&boxed_options))?;
         let mut option_numbering_system = None;
-        if let Some(numbering_system) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
+        if let Some(numbering_system) = self.intl_string_option(ctx, &boxed_options, "numberingSystem", &[], None)? {
             if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
                 return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
             }
@@ -5440,6 +5562,12 @@ impl<'gc> VM<'gc> {
                 option_numbering_system = Some(out.numbering_system.clone());
             }
         }
+        out.style = self
+            .intl_string_option(ctx, &boxed_options, "style", &["long", "short", "narrow"], Some("long"))?
+            .unwrap_or_else(|| "long".to_string());
+        out.numeric = self
+            .intl_string_option(ctx, &boxed_options, "numeric", &["always", "auto"], Some("always"))?
+            .unwrap_or_else(|| "always".to_string());
         out.resolved_locale = Self::intl_numbering_system_resolved_locale(
             &locale_base,
             if option_numbering_system.is_none() {
@@ -5676,6 +5804,15 @@ impl<'gc> VM<'gc> {
     fn intl_store_list_format_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlListFormatOptions) {
         obj.insert("__intl_list_type__".to_string(), Value::from(options.list_type.as_str()));
         obj.insert("__intl_list_style__".to_string(), Value::from(options.style.as_str()));
+    }
+
+    fn intl_store_relative_time_format_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlRelativeTimeFormatOptions) {
+        obj.insert(
+            "__intl_numbering_system__".to_string(),
+            Value::from(options.numbering_system.as_str()),
+        );
+        obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
+        obj.insert("__intl_numeric__".to_string(), Value::from(options.numeric.as_str()));
     }
 
     fn intl_boolean_option(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>, key: &str) -> Result<Option<bool>, Value<'gc>> {
@@ -7404,6 +7541,13 @@ struct IntlListFormatOptions {
     style: String,
 }
 
+struct IntlRelativeTimeFormatOptions {
+    resolved_locale: String,
+    numbering_system: String,
+    style: String,
+    numeric: String,
+}
+
 struct IntlNumberFormatOptions {
     resolved_locale: String,
     numbering_system: String,
@@ -7426,11 +7570,6 @@ struct IntlNumberFormatOptions {
     maximum_fraction_digits: u8,
     minimum_significant_digits: Option<u8>,
     maximum_significant_digits: Option<u8>,
-}
-
-struct IntlGenericNumberingSystemOptions {
-    resolved_locale: String,
-    numbering_system: String,
 }
 
 impl IntlDurationFormatOptions {
@@ -7494,6 +7633,39 @@ impl IntlDurationUnitOptions {
             style: style.to_string(),
             display: display.to_string(),
         }
+    }
+}
+
+impl IntlRelativeTimeFormatOptions {
+    fn new(resolved_locale: String, numbering_system: String) -> Self {
+        Self {
+            resolved_locale,
+            numbering_system,
+            style: "long".to_string(),
+            numeric: "always".to_string(),
+        }
+    }
+
+    fn from_object<'gc>(obj: &IndexMap<String, Value<'gc>>) -> Self {
+        let mut out = Self::new(
+            match obj.get("__intl_locale__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => INTL_DEFAULT_LOCALE.to_string(),
+            },
+            match obj.get("__intl_numbering_system__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "latn".to_string(),
+            },
+        );
+        out.style = match obj.get("__intl_style__") {
+            Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+            _ => "long".to_string(),
+        };
+        out.numeric = match obj.get("__intl_numeric__") {
+            Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+            _ => "always".to_string(),
+        };
+        out
     }
 }
 
@@ -7672,6 +7844,330 @@ impl IntlDurationRecord {
             "microseconds" => self.microseconds_present,
             "nanoseconds" => self.nanoseconds_present,
             _ => false,
+        }
+    }
+}
+
+impl<'gc> VM<'gc> {
+    fn intl_relative_time_unit(&mut self, ctx: &GcContext<'gc>, unit: &Value<'gc>) -> Result<String, Value<'gc>> {
+        let unit = match self.vm_to_string_like_spec(ctx, unit) {
+            Ok(unit) => unit,
+            Err(err) => return Err(self.vm_value_from_error(ctx, &err)),
+        };
+        let singular = if let Some(stripped) = unit.strip_suffix('s') {
+            stripped.to_string()
+        } else {
+            unit
+        };
+        if matches!(
+            singular.as_str(),
+            "second" | "minute" | "hour" | "day" | "week" | "month" | "quarter" | "year"
+        ) {
+            Ok(singular)
+        } else {
+            Err(self.make_range_error_object(ctx, "Invalid unit"))
+        }
+    }
+
+    fn intl_partition_relative_time_pattern(
+        &mut self,
+        options: &IntlRelativeTimeFormatOptions,
+        value: f64,
+        unit: &str,
+    ) -> Result<Vec<IntlDurationPart>, Value<'gc>> {
+        if options.numeric == "auto"
+            && let Some(literal) = Self::intl_relative_time_auto_phrase(&options.resolved_locale, unit, value)
+        {
+            return Ok(vec![IntlDurationPart::literal(literal)]);
+        }
+        let future = !value.is_sign_negative();
+        let number_parts = Self::intl_relative_time_number_parts(options, value.abs(), unit);
+        let plural_category = Self::intl_relative_time_plural_category(&options.resolved_locale, value.abs());
+        let unit_text = Self::intl_relative_time_unit_text(&options.resolved_locale, &options.style, unit, plural_category);
+        let mut parts = Vec::new();
+        if future {
+            parts.push(IntlDurationPart::literal(Self::intl_relative_time_prefix(&options.resolved_locale)));
+            parts.extend(number_parts);
+            parts.push(IntlDurationPart::literal(&format!(" {}", unit_text)));
+        } else {
+            parts.extend(number_parts);
+            parts.push(IntlDurationPart::literal(&format!(
+                " {}{}",
+                unit_text,
+                Self::intl_relative_time_past_suffix(&options.resolved_locale)
+            )));
+        }
+        Ok(parts)
+    }
+
+    fn intl_relative_time_prefix(locale: &str) -> &'static str {
+        if locale.starts_with("pl") { "za " } else { "in " }
+    }
+
+    fn intl_relative_time_past_suffix(locale: &str) -> &'static str {
+        if locale.starts_with("pl") { " temu" } else { " ago" }
+    }
+
+    fn intl_relative_time_auto_phrase(locale: &str, unit: &str, value: f64) -> Option<&'static str> {
+        if !locale.starts_with("en") || value.fract() != 0.0 {
+            return None;
+        }
+        let key = if value == -1.0 {
+            -1
+        } else if value == 0.0 {
+            0
+        } else if value == 1.0 {
+            1
+        } else {
+            return None;
+        };
+        match (unit, key) {
+            ("year", -1) => Some("last year"),
+            ("year", 0) => Some("this year"),
+            ("year", 1) => Some("next year"),
+            ("quarter", -1) => Some("last quarter"),
+            ("quarter", 0) => Some("this quarter"),
+            ("quarter", 1) => Some("next quarter"),
+            ("month", -1) => Some("last month"),
+            ("month", 0) => Some("this month"),
+            ("month", 1) => Some("next month"),
+            ("week", -1) => Some("last week"),
+            ("week", 0) => Some("this week"),
+            ("week", 1) => Some("next week"),
+            ("day", -1) => Some("yesterday"),
+            ("day", 0) => Some("today"),
+            ("day", 1) => Some("tomorrow"),
+            ("hour", 0) => Some("this hour"),
+            ("minute", 0) => Some("this minute"),
+            ("second", 0) => Some("now"),
+            _ => None,
+        }
+    }
+
+    fn intl_relative_time_plural_category(locale: &str, value: f64) -> &'static str {
+        if locale.starts_with("pl") {
+            if value.fract() != 0.0 {
+                return "other";
+            }
+            let n = value as i64;
+            let mod10 = n % 10;
+            let mod100 = n % 100;
+            if n == 1 {
+                "one"
+            } else if (2..=4).contains(&mod10) && !(12..=14).contains(&mod100) {
+                "few"
+            } else if mod10 == 0 || mod10 == 1 || (5..=9).contains(&mod10) || (12..=14).contains(&mod100) {
+                "many"
+            } else {
+                "other"
+            }
+        } else if value == 1.0 {
+            "one"
+        } else {
+            "other"
+        }
+    }
+
+    fn intl_relative_time_unit_text(locale: &str, style: &str, unit: &str, plural_category: &str) -> String {
+        if locale.starts_with("pl") {
+            match style {
+                "short" => match unit {
+                    "second" => "sek.".to_string(),
+                    "minute" => "min".to_string(),
+                    "hour" => "godz.".to_string(),
+                    "day" => match plural_category {
+                        "one" => "dzień".to_string(),
+                        "other" => "dnia".to_string(),
+                        _ => "dni".to_string(),
+                    },
+                    "week" => {
+                        if plural_category == "one" {
+                            "tydz.".to_string()
+                        } else {
+                            "tyg.".to_string()
+                        }
+                    }
+                    "month" => "mies.".to_string(),
+                    "quarter" => "kw.".to_string(),
+                    "year" => match plural_category {
+                        "one" => "rok".to_string(),
+                        "few" => "lata".to_string(),
+                        "other" => "roku".to_string(),
+                        _ => "lat".to_string(),
+                    },
+                    _ => unit.to_string(),
+                },
+                "narrow" => match unit {
+                    "second" => "s".to_string(),
+                    "minute" => "min".to_string(),
+                    "hour" => "g.".to_string(),
+                    "day" => match plural_category {
+                        "one" => "dzień".to_string(),
+                        "other" => "dnia".to_string(),
+                        _ => "dni".to_string(),
+                    },
+                    "week" => {
+                        if plural_category == "one" {
+                            "tydz.".to_string()
+                        } else {
+                            "tyg.".to_string()
+                        }
+                    }
+                    "month" => "mies.".to_string(),
+                    "quarter" => "kw.".to_string(),
+                    "year" => match plural_category {
+                        "one" => "rok".to_string(),
+                        "few" => "lata".to_string(),
+                        "other" => "roku".to_string(),
+                        _ => "lat".to_string(),
+                    },
+                    _ => unit.to_string(),
+                },
+                _ => match unit {
+                    "second" => match plural_category {
+                        "one" => "sekundę".to_string(),
+                        "many" => "sekund".to_string(),
+                        _ => "sekundy".to_string(),
+                    },
+                    "minute" => match plural_category {
+                        "one" => "minutę".to_string(),
+                        "many" => "minut".to_string(),
+                        _ => "minuty".to_string(),
+                    },
+                    "hour" => match plural_category {
+                        "one" => "godzinę".to_string(),
+                        "many" => "godzin".to_string(),
+                        _ => "godziny".to_string(),
+                    },
+                    "day" => {
+                        if plural_category == "one" {
+                            "dzień".to_string()
+                        } else if plural_category == "other" {
+                            "dnia".to_string()
+                        } else {
+                            "dni".to_string()
+                        }
+                    }
+                    "week" => match plural_category {
+                        "one" => "tydzień".to_string(),
+                        "few" => "tygodnie".to_string(),
+                        "other" => "tygodnia".to_string(),
+                        _ => "tygodni".to_string(),
+                    },
+                    "month" => match plural_category {
+                        "one" => "miesiąc".to_string(),
+                        "few" => "miesiące".to_string(),
+                        "other" => "miesiąca".to_string(),
+                        _ => "miesięcy".to_string(),
+                    },
+                    "quarter" => match plural_category {
+                        "one" => "kwartał".to_string(),
+                        "few" => "kwartały".to_string(),
+                        "other" => "kwartału".to_string(),
+                        _ => "kwartałów".to_string(),
+                    },
+                    "year" => match plural_category {
+                        "one" => "rok".to_string(),
+                        "few" => "lata".to_string(),
+                        "other" => "roku".to_string(),
+                        _ => "lat".to_string(),
+                    },
+                    _ => unit.to_string(),
+                },
+            }
+        } else {
+            match style {
+                "short" => match (unit, plural_category) {
+                    ("second", _) => "sec.".to_string(),
+                    ("minute", _) => "min.".to_string(),
+                    ("hour", _) => "hr.".to_string(),
+                    ("day", "one") => "day".to_string(),
+                    ("day", _) => "days".to_string(),
+                    ("week", _) => "wk.".to_string(),
+                    ("month", _) => "mo.".to_string(),
+                    ("quarter", "one") => "qtr.".to_string(),
+                    ("quarter", _) => "qtrs.".to_string(),
+                    ("year", _) => "yr.".to_string(),
+                    _ => unit.to_string(),
+                },
+                _ => match (unit, plural_category) {
+                    ("second", "one") => "second".to_string(),
+                    ("second", _) => "seconds".to_string(),
+                    ("minute", "one") => "minute".to_string(),
+                    ("minute", _) => "minutes".to_string(),
+                    ("hour", "one") => "hour".to_string(),
+                    ("hour", _) => "hours".to_string(),
+                    ("day", "one") => "day".to_string(),
+                    ("day", _) => "days".to_string(),
+                    ("week", "one") => "week".to_string(),
+                    ("week", _) => "weeks".to_string(),
+                    ("month", "one") => "month".to_string(),
+                    ("month", _) => "months".to_string(),
+                    ("quarter", "one") => "quarter".to_string(),
+                    ("quarter", _) => "quarters".to_string(),
+                    ("year", "one") => "year".to_string(),
+                    ("year", _) => "years".to_string(),
+                    _ => unit.to_string(),
+                },
+            }
+        }
+    }
+
+    fn intl_relative_time_number_parts(options: &IntlRelativeTimeFormatOptions, value: f64, unit: &str) -> Vec<IntlDurationPart> {
+        let full_text = Self::number_to_string_smart(value);
+        let (integer_text, fraction_text) = if let Some((integer, fraction)) = full_text.split_once('.') {
+            (integer.to_string(), Some(fraction.to_string()))
+        } else {
+            (full_text, None)
+        };
+        let grouped_integer = Self::intl_relative_time_group_integer(&integer_text, &options.resolved_locale);
+        let decimal_separator = if options.resolved_locale.starts_with("pl") { "," } else { "." };
+        let group_separator = if options.resolved_locale.starts_with("pl") { "\u{a0}" } else { "," };
+        let mut parts = Vec::new();
+        let mut first = true;
+        for chunk in grouped_integer.split(group_separator) {
+            if !first {
+                parts.push(IntlDurationPart::element("group", group_separator.to_string(), Some(unit)));
+            }
+            parts.push(IntlDurationPart::element(
+                "integer",
+                Self::intl_remap_numbering_system_digits(chunk, &options.numbering_system),
+                Some(unit),
+            ));
+            first = false;
+        }
+        if let Some(fraction_text) = fraction_text {
+            parts.push(IntlDurationPart::element("decimal", decimal_separator.to_string(), Some(unit)));
+            parts.push(IntlDurationPart::element(
+                "fraction",
+                Self::intl_remap_numbering_system_digits(&fraction_text, &options.numbering_system),
+                Some(unit),
+            ));
+        }
+        parts
+    }
+
+    fn intl_relative_time_group_integer(integer: &str, locale: &str) -> String {
+        let min_len = if locale.starts_with("pl") { 5 } else { 4 };
+        if integer.len() < min_len {
+            return integer.to_string();
+        }
+        let separator = if locale.starts_with("pl") { '\u{a0}' } else { ',' };
+        let mut out = String::new();
+        for (index, ch) in integer.chars().rev().enumerate() {
+            if index > 0 && index % 3 == 0 {
+                out.push(separator);
+            }
+            out.push(ch);
+        }
+        out.chars().rev().collect()
+    }
+
+    fn number_to_string_smart(value: f64) -> String {
+        if value.fract() == 0.0 {
+            format!("{:.0}", value)
+        } else {
+            value.to_string()
         }
     }
 }

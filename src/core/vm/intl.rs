@@ -240,6 +240,7 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Value<'gc>> {
         let requested_locales = self.intl_canonicalize_locale_list(ctx, args.first())?;
+        #[allow(clippy::if_same_then_else)]
         let collator_opts = if kind == "Collator" {
             Some(self.intl_read_collator_options(ctx, &requested_locales, args.get(1))?)
         } else if kind == "DateTimeFormat" {
@@ -399,7 +400,13 @@ impl<'gc> VM<'gc> {
                 "timeZone".to_string(),
                 borrow.get("__intl_time_zone__").cloned().unwrap_or_else(|| Value::from("UTC")),
             );
-            for key in ["year", "month", "day"] {
+            if let Some(hour_cycle) = borrow.get("__intl_hour_cycle__").cloned() {
+                result.insert("hourCycle".to_string(), hour_cycle);
+            }
+            if let Some(hour12) = borrow.get("__intl_hour12__").cloned() {
+                result.insert("hour12".to_string(), hour12);
+            }
+            for key in ["weekday", "era", "year", "month", "day", "hour", "minute", "second", "timeZoneName"] {
                 if let Some(value) = borrow.get(&format!("__intl_{}__", key)).cloned() {
                     result.insert(key.to_string(), value);
                 }
@@ -505,28 +512,7 @@ impl<'gc> VM<'gc> {
                 "roundingMode",
                 "trailingZeroDisplay",
             ],
-            "DateTimeFormat" => &[
-                "localeMatcher",
-                "calendar",
-                "numberingSystem",
-                "hour12",
-                "hourCycle",
-                "timeZone",
-                "weekday",
-                "era",
-                "year",
-                "month",
-                "day",
-                "dayPeriod",
-                "hour",
-                "minute",
-                "second",
-                "fractionalSecondDigits",
-                "timeZoneName",
-                "formatMatcher",
-                "dateStyle",
-                "timeStyle",
-            ],
+            "DateTimeFormat" => &[],
             _ => &[],
         };
         for key in keys {
@@ -929,52 +915,153 @@ impl<'gc> VM<'gc> {
         options: Option<&Value<'gc>>,
     ) -> Result<IntlDateTimeFormatOptions, Value<'gc>> {
         self.intl_read_constructor_options(ctx, "DateTimeFormat", options)?;
-        let resolved_locale = requested_locales
+        let requested_locale = requested_locales
             .first()
             .cloned()
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_info = Self::intl_locale_info(&requested_locale);
+        let locale_base = if locale_info.base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_info.base.clone()
+        };
+        let ext_calendar = locale_info
+            .unicode_keywords
+            .get("ca")
+            .and_then(|value| Self::intl_supported_calendar(value));
+        let ext_numbering_system = locale_info
+            .unicode_keywords
+            .get("nu")
+            .and_then(|value| Self::intl_supported_numbering_system(value));
+        let ext_hour_cycle = locale_info
+            .unicode_keywords
+            .get("hc")
+            .and_then(|value| Self::intl_supported_hour_cycle(value));
         let mut out = IntlDateTimeFormatOptions {
-            resolved_locale,
-            calendar: "gregory".to_string(),
-            numbering_system: "latn".to_string(),
+            resolved_locale: locale_base.clone(),
+            calendar: ext_calendar.clone().unwrap_or_else(|| "gregory".to_string()),
+            numbering_system: ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
             time_zone: "UTC".to_string(),
             year: Some("numeric".to_string()),
             month: Some("numeric".to_string()),
             day: Some("numeric".to_string()),
+            weekday: None,
+            era: None,
+            hour: None,
+            minute: None,
+            second: None,
+            time_zone_name: None,
+            hour_cycle: None,
+            hour12: None,
         };
         let Some(options) = options else {
+            out.resolved_locale = Self::intl_date_time_format_resolved_locale(
+                &locale_base,
+                ext_calendar.as_deref(),
+                ext_numbering_system.as_deref(),
+                ext_hour_cycle.as_deref(),
+            );
             return Ok(out);
         };
         if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+            out.resolved_locale = Self::intl_date_time_format_resolved_locale(
+                &locale_base,
+                ext_calendar.as_deref(),
+                ext_numbering_system.as_deref(),
+                ext_hour_cycle.as_deref(),
+            );
             return Ok(out);
         }
+        let _ = self.intl_string_option(ctx, options, "localeMatcher", &["lookup", "best fit"], Some("best fit"))?;
+        let option_hour12 = self.intl_boolean_option(ctx, options, "hour12")?;
+        let option_hour_cycle = self.intl_string_option(ctx, options, "hourCycle", &["h11", "h12", "h23", "h24"], None)?;
         if let Some(calendar) = self.intl_string_option(ctx, options, "calendar", &[], None)? {
             if !Self::intl_is_valid_unicode_type_identifier(&calendar) {
                 return Err(self.make_range_error_object(ctx, "Invalid calendar"));
             }
-            out.calendar = calendar;
+            if let Some(calendar) = Self::intl_supported_calendar(&calendar) {
+                out.calendar = calendar;
+            }
         }
         if let Some(numbering_system) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
             if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
                 return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
             }
-            out.numbering_system = numbering_system;
+            if let Some(numbering_system) = Self::intl_supported_numbering_system(&numbering_system) {
+                out.numbering_system = numbering_system;
+            }
         }
         if let Some(time_zone) = self.intl_string_option(ctx, options, "timeZone", &[], None)? {
-            if !Self::intl_is_valid_time_zone_name(&time_zone) {
+            let Some(normalized_time_zone) = Self::intl_normalize_time_zone_name(&time_zone) else {
                 return Err(self.make_range_error_object(ctx, "Invalid timeZone"));
-            }
-            out.time_zone = if time_zone.eq_ignore_ascii_case("utc") {
-                "UTC".to_string()
-            } else {
-                time_zone
             };
+            out.time_zone = normalized_time_zone;
         }
+        out.weekday = self.intl_string_option(ctx, options, "weekday", &["narrow", "short", "long"], None)?;
+        out.era = self.intl_string_option(ctx, options, "era", &["narrow", "short", "long"], None)?;
+        out.year = self.intl_string_option(ctx, options, "year", &["2-digit", "numeric"], out.year.as_deref())?;
+        out.month = self.intl_string_option(
+            ctx,
+            options,
+            "month",
+            &["2-digit", "numeric", "narrow", "short", "long"],
+            out.month.as_deref(),
+        )?;
+        out.day = self.intl_string_option(ctx, options, "day", &["2-digit", "numeric"], out.day.as_deref())?;
+        out.hour = self.intl_string_option(ctx, options, "hour", &["2-digit", "numeric"], None)?;
+        out.minute = self.intl_string_option(ctx, options, "minute", &["2-digit", "numeric"], None)?;
+        out.second = self.intl_string_option(ctx, options, "second", &["2-digit", "numeric"], None)?;
+        out.time_zone_name = self.intl_string_option(
+            ctx,
+            options,
+            "timeZoneName",
+            &["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"],
+            None,
+        )?;
+        if out.hour.is_some() {
+            let resolved_hour_cycle = if let Some(hour12) = option_hour12 {
+                Some(if hour12 {
+                    Self::intl_default_true_hour_cycle(&locale_base)
+                } else {
+                    "h23".to_string()
+                })
+            } else if let Some(hour_cycle) = option_hour_cycle.clone() {
+                Some(hour_cycle)
+            } else if let Some(hour_cycle) = ext_hour_cycle.clone() {
+                Some(hour_cycle)
+            } else {
+                Some(Self::intl_default_true_hour_cycle(&locale_base))
+            };
+            out.hour_cycle = resolved_hour_cycle;
+            out.hour12 = out.hour_cycle.as_deref().map(Self::intl_hour_cycle_is_twelve_hour);
+        }
+        let _ = self.intl_string_option(ctx, options, "formatMatcher", &["basic", "best fit"], Some("best fit"))?;
         let date_style = self.intl_string_option(ctx, options, "dateStyle", &["full", "long", "medium", "short"], None)?;
         let time_style = self.intl_string_option(ctx, options, "timeStyle", &["full", "long", "medium", "short"], None)?;
         if (date_style.is_some() || time_style.is_some()) && Self::intl_has_explicit_date_time_components(ctx, self, options)? {
             return Err(self.make_type_error_object(ctx, "dateStyle/timeStyle conflicts with explicit components"));
         }
+        let reflect_calendar = ext_calendar.as_deref() == Some(out.calendar.as_str());
+        let reflect_numbering_system = ext_numbering_system.as_deref() == Some(out.numbering_system.as_str());
+        let reflect_hour_cycle = if option_hour12.is_some() {
+            false
+        } else if let Some(option_hour_cycle) = option_hour_cycle.as_deref() {
+            ext_hour_cycle.as_deref() == Some(option_hour_cycle)
+        } else if out.hour.is_some() {
+            ext_hour_cycle.as_deref() == out.hour_cycle.as_deref()
+        } else {
+            ext_hour_cycle.is_some()
+        };
+        out.resolved_locale = Self::intl_date_time_format_resolved_locale(
+            &locale_base,
+            reflect_calendar.then_some(out.calendar.as_str()),
+            reflect_numbering_system.then_some(out.numbering_system.as_str()),
+            if out.hour.is_some() {
+                reflect_hour_cycle.then_some(out.hour_cycle.as_deref()).flatten()
+            } else {
+                reflect_hour_cycle.then_some(ext_hour_cycle.as_deref()).flatten()
+            },
+        );
         Ok(out)
     }
 
@@ -985,6 +1072,18 @@ impl<'gc> VM<'gc> {
             Value::from(options.numbering_system.as_str()),
         );
         obj.insert("__intl_time_zone__".to_string(), Value::from(options.time_zone.as_str()));
+        if let Some(hour_cycle) = &options.hour_cycle {
+            obj.insert("__intl_hour_cycle__".to_string(), Value::from(hour_cycle.as_str()));
+        }
+        if let Some(hour12) = options.hour12 {
+            obj.insert("__intl_hour12__".to_string(), Value::Boolean(hour12));
+        }
+        if let Some(weekday) = &options.weekday {
+            obj.insert("__intl_weekday__".to_string(), Value::from(weekday.as_str()));
+        }
+        if let Some(era) = &options.era {
+            obj.insert("__intl_era__".to_string(), Value::from(era.as_str()));
+        }
         if let Some(year) = &options.year {
             obj.insert("__intl_year__".to_string(), Value::from(year.as_str()));
         }
@@ -993,6 +1092,18 @@ impl<'gc> VM<'gc> {
         }
         if let Some(day) = &options.day {
             obj.insert("__intl_day__".to_string(), Value::from(day.as_str()));
+        }
+        if let Some(hour) = &options.hour {
+            obj.insert("__intl_hour__".to_string(), Value::from(hour.as_str()));
+        }
+        if let Some(minute) = &options.minute {
+            obj.insert("__intl_minute__".to_string(), Value::from(minute.as_str()));
+        }
+        if let Some(second) = &options.second {
+            obj.insert("__intl_second__".to_string(), Value::from(second.as_str()));
+        }
+        if let Some(time_zone_name) = &options.time_zone_name {
+            obj.insert("__intl_timeZoneName__".to_string(), Value::from(time_zone_name.as_str()));
         }
     }
 
@@ -1215,6 +1326,30 @@ impl<'gc> VM<'gc> {
         out
     }
 
+    fn intl_date_time_format_resolved_locale(
+        locale_base: &str,
+        calendar: Option<&str>,
+        numbering_system: Option<&str>,
+        hour_cycle: Option<&str>,
+    ) -> String {
+        let mut out = locale_base.to_string();
+        let mut extensions = Vec::new();
+        if let Some(calendar) = calendar {
+            extensions.push(format!("ca-{}", calendar));
+        }
+        if let Some(numbering_system) = numbering_system {
+            extensions.push(format!("nu-{}", numbering_system));
+        }
+        if let Some(hour_cycle) = hour_cycle {
+            extensions.push(format!("hc-{}", hour_cycle));
+        }
+        if !extensions.is_empty() {
+            out.push_str("-u-");
+            out.push_str(&extensions.join("-"));
+        }
+        out
+    }
+
     fn intl_has_explicit_date_time_components(ctx: &GcContext<'gc>, vm: &mut VM<'gc>, options: &Value<'gc>) -> Result<bool, Value<'gc>> {
         for key in [
             "weekday",
@@ -1249,19 +1384,83 @@ impl<'gc> VM<'gc> {
             .all(|part| (3..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric()))
     }
 
-    fn intl_is_valid_time_zone_name(value: &str) -> bool {
+    fn intl_normalize_time_zone_name(value: &str) -> Option<String> {
         if value.eq_ignore_ascii_case("utc") {
-            return true;
+            return Some("UTC".to_string());
         }
-        let Some((left, right)) = value.split_once('/') else {
-            return false;
+        if let Some(offset) = Self::intl_normalize_offset_time_zone(value) {
+            return Some(offset);
+        }
+        let (left, right) = value.split_once('/')?;
+        if left.is_empty() || right.is_empty() {
+            return None;
+        }
+        if !left
+            .chars()
+            .chain(right.chars())
+            .all(|c| c.is_ascii_alphabetic() || c == '_' || c == '-' || c == '/')
+        {
+            return None;
+        }
+        Some(value.to_string())
+    }
+
+    fn intl_normalize_offset_time_zone(value: &str) -> Option<String> {
+        let sign = match value.as_bytes().first().copied()? {
+            b'+' => '+',
+            b'-' => '-',
+            _ => return None,
         };
-        !left.is_empty()
-            && !right.is_empty()
-            && left
-                .chars()
-                .chain(right.chars())
-                .all(|c| c.is_ascii_alphabetic() || c == '_' || c == '-' || c == '/')
+        let digits = &value[1..];
+        let (hours, minutes) = match digits.len() {
+            2 => (digits, "00"),
+            4 if digits.chars().all(|c| c.is_ascii_digit()) => (&digits[..2], &digits[2..]),
+            5 if digits.as_bytes()[2] == b':' => (&digits[..2], &digits[3..]),
+            _ => return None,
+        };
+        if !hours.chars().all(|c| c.is_ascii_digit()) || !minutes.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let hour: u8 = hours.parse().ok()?;
+        let minute: u8 = minutes.parse().ok()?;
+        if hour > 23 || minute > 59 {
+            return None;
+        }
+        let normalized_sign = if hour == 0 && minute == 0 { '+' } else { sign };
+        Some(format!("{}{hours}:{minutes}", normalized_sign))
+    }
+
+    fn intl_supported_calendar(value: &str) -> Option<String> {
+        match value {
+            "gregory" | "iso8601" => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_supported_numbering_system(value: &str) -> Option<String> {
+        match value {
+            "latn" | "arab" => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_supported_hour_cycle(value: &str) -> Option<String> {
+        match value {
+            "h11" | "h12" | "h23" | "h24" => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_default_true_hour_cycle(locale_base: &str) -> String {
+        if locale_base.eq("ja") || locale_base.starts_with("ja-") {
+            "h11".to_string()
+        } else {
+            "h12".to_string()
+        }
+    }
+
+    fn intl_hour_cycle_is_twelve_hour(value: &str) -> bool {
+        matches!(value, "h11" | "h12")
     }
 
     fn intl_is_well_formed_currency_code(value: &str) -> bool {
@@ -1512,9 +1711,17 @@ struct IntlDateTimeFormatOptions {
     calendar: String,
     numbering_system: String,
     time_zone: String,
+    weekday: Option<String>,
+    era: Option<String>,
     year: Option<String>,
     month: Option<String>,
     day: Option<String>,
+    hour: Option<String>,
+    minute: Option<String>,
+    second: Option<String>,
+    time_zone_name: Option<String>,
+    hour_cycle: Option<String>,
+    hour12: Option<bool>,
 }
 
 struct IntlNumberFormatOptions {

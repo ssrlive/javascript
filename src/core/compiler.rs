@@ -7669,11 +7669,17 @@ impl<'gc> Compiler<'gc> {
 
     /// Pop block-scoped locals created since `saved` count, emitting Pop opcodes.
     fn end_block_scope(&mut self, saved: usize) {
+        let removed_names: Vec<String> = self.locals[saved..].to_vec();
         let to_pop = self.locals.len() - saved;
         for _ in 0..to_pop {
             self.chunk.write_opcode(Opcode::Pop);
         }
         self.locals.truncate(saved);
+        for name in removed_names {
+            if !self.locals.iter().any(|local| local == &name) {
+                self.const_locals.remove(&name);
+            }
+        }
     }
 
     /// Record a snapshot of the current top-level locals for direct eval support.

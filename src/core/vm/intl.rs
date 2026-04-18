@@ -417,8 +417,8 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
-        let relative_time_format_numbering_system = if kind == "RelativeTimeFormat" {
-            self.intl_read_relative_time_format_numbering_system(ctx, args.get(1))?
+        let generic_numbering_system_options = if matches!(kind, "RelativeTimeFormat" | "DurationFormat") {
+            Some(self.intl_read_generic_numbering_system_options(ctx, &requested_locales, args.get(1))?)
         } else {
             None
         };
@@ -448,6 +448,7 @@ impl<'gc> VM<'gc> {
             .map(|opts| opts.resolved_locale.clone())
             .or_else(|| date_time_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| number_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
+            .or_else(|| generic_numbering_system_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
         obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
@@ -460,8 +461,11 @@ impl<'gc> VM<'gc> {
         if let Some(opts) = number_format_opts {
             self.intl_store_number_format_options(&mut obj, &opts);
         }
-        if let Some(numbering_system) = relative_time_format_numbering_system {
-            obj.insert("__intl_numbering_system__".to_string(), Value::from(numbering_system.as_str()));
+        if let Some(options) = generic_numbering_system_options {
+            obj.insert(
+                "__intl_numbering_system__".to_string(),
+                Value::from(options.numbering_system.as_str()),
+            );
         }
         if let Some((display_type, fallback)) = display_names_options {
             obj.insert("__intl_type__".to_string(), Value::from(display_type.as_str()));
@@ -626,6 +630,15 @@ impl<'gc> VM<'gc> {
                     .unwrap_or(Value::Number(3.0)),
             );
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "RelativeTimeFormat")
+        {
+            result.insert(
+                "numberingSystem".to_string(),
+                borrow
+                    .get("__intl_numbering_system__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("latn")),
+            );
+        } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "DurationFormat")
         {
             result.insert(
                 "numberingSystem".to_string(),
@@ -1530,13 +1543,23 @@ impl<'gc> VM<'gc> {
         options: Option<&Value<'gc>>,
     ) -> Result<IntlNumberFormatOptions, Value<'gc>> {
         self.intl_read_constructor_options(ctx, "NumberFormat", options)?;
-        let resolved_locale = requested_locales
+        let requested_locale = requested_locales
             .first()
             .cloned()
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_info = Self::intl_locale_info(&requested_locale);
+        let locale_base = if locale_info.base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_info.base.clone()
+        };
+        let ext_numbering_system = locale_info
+            .unicode_keywords
+            .get("nu")
+            .and_then(|value| Self::intl_supported_numbering_system(value));
         let mut out = IntlNumberFormatOptions {
-            resolved_locale,
-            numbering_system: "latn".to_string(),
+            resolved_locale: locale_base.clone(),
+            numbering_system: ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
             style: "decimal".to_string(),
             currency: None,
             unit: None,
@@ -1546,17 +1569,21 @@ impl<'gc> VM<'gc> {
             maximum_fraction_digits: 3,
         };
         let Some(options) = options else {
+            out.resolved_locale = Self::intl_numbering_system_resolved_locale(&locale_base, ext_numbering_system.as_deref());
             return Ok(out);
         };
         if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+            out.resolved_locale = Self::intl_numbering_system_resolved_locale(&locale_base, ext_numbering_system.as_deref());
             return Ok(out);
         }
+        let mut option_numbering_system = None;
         if let Some(numbering_system) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
             if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
                 return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
             }
             if let Some(numbering_system) = Self::intl_supported_numbering_system(&numbering_system) {
                 out.numbering_system = numbering_system;
+                option_numbering_system = Some(out.numbering_system.clone());
             }
         }
         if let Some(style) = self.intl_string_option(ctx, options, "style", &["decimal", "percent", "currency", "unit"], Some("decimal"))? {
@@ -1580,6 +1607,16 @@ impl<'gc> VM<'gc> {
         {
             out.unit = Some(unit);
         }
+        out.resolved_locale = Self::intl_numbering_system_resolved_locale(
+            &locale_base,
+            if option_numbering_system.is_none() {
+                ext_numbering_system.as_deref()
+            } else if ext_numbering_system.as_deref() == option_numbering_system.as_deref() {
+                option_numbering_system.as_deref()
+            } else {
+                None
+            },
+        );
         Ok(out)
     }
 
@@ -1610,24 +1647,57 @@ impl<'gc> VM<'gc> {
         );
     }
 
-    fn intl_read_relative_time_format_numbering_system(
+    fn intl_read_generic_numbering_system_options(
         &mut self,
         ctx: &GcContext<'gc>,
+        requested_locales: &[String],
         options: Option<&Value<'gc>>,
-    ) -> Result<Option<String>, Value<'gc>> {
+    ) -> Result<IntlGenericNumberingSystemOptions, Value<'gc>> {
+        let requested_locale = requested_locales
+            .first()
+            .cloned()
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_info = Self::intl_locale_info(&requested_locale);
+        let locale_base = if locale_info.base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_info.base.clone()
+        };
+        let ext_numbering_system = locale_info
+            .unicode_keywords
+            .get("nu")
+            .and_then(|value| Self::intl_supported_numbering_system(value));
+        let mut out = IntlGenericNumberingSystemOptions {
+            resolved_locale: Self::intl_numbering_system_resolved_locale(&locale_base, ext_numbering_system.as_deref()),
+            numbering_system: ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
+        };
         let Some(options) = options else {
-            return Ok(None);
+            return Ok(out);
         };
         if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
-            return Ok(None);
+            return Ok(out);
         }
+        let mut option_numbering_system = None;
         if let Some(numbering_system) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
             if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
                 return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
             }
-            return Ok(Self::intl_supported_numbering_system(&numbering_system));
+            if let Some(numbering_system) = Self::intl_supported_numbering_system(&numbering_system) {
+                out.numbering_system = numbering_system;
+                option_numbering_system = Some(out.numbering_system.clone());
+            }
         }
-        Ok(None)
+        out.resolved_locale = Self::intl_numbering_system_resolved_locale(
+            &locale_base,
+            if option_numbering_system.is_none() {
+                ext_numbering_system.as_deref()
+            } else if ext_numbering_system.as_deref() == option_numbering_system.as_deref() {
+                option_numbering_system.as_deref()
+            } else {
+                None
+            },
+        );
+        Ok(out)
     }
 
     fn intl_read_display_names_options(
@@ -2061,11 +2131,17 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn intl_collator_supported_collation(_locale_base: &str, value: &str) -> Option<String> {
-        if value.is_empty() || matches!(value, "default" | "search" | "standard" | "invalid") {
+    fn intl_collator_supported_collation(locale_base: &str, value: &str) -> Option<String> {
+        let value = value.to_ascii_lowercase();
+        if value.is_empty() || matches!(value.as_str(), "default" | "search" | "standard" | "invalid") {
             return None;
         }
-        INTL_SUPPORTED_COLLATIONS.contains(&value).then_some(value.to_string())
+        let language = locale_base.split('-').next().unwrap_or(locale_base).to_ascii_lowercase();
+        match value.as_str() {
+            "phonebk" | "eor" => (language == "de").then_some(value),
+            "pinyin" | "stroke" | "unihan" | "zhuyin" => (language == "zh").then_some(value),
+            _ => INTL_SUPPORTED_COLLATIONS.contains(&value.as_str()).then_some(value),
+        }
     }
 
     fn intl_collator_resolved_locale(locale_base: &str, collation: &str, numeric: Option<bool>, case_first: Option<&str>) -> String {
@@ -2123,6 +2199,10 @@ impl<'gc> VM<'gc> {
             out.push_str(&extensions.join("-"));
         }
         out
+    }
+
+    fn intl_numbering_system_resolved_locale(locale_base: &str, numbering_system: Option<&str>) -> String {
+        Self::intl_date_time_format_resolved_locale(locale_base, None, numbering_system, None)
     }
 
     fn intl_locale_with_extensions(
@@ -2241,11 +2321,17 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_supported_calendar(value: &str) -> Option<String> {
-        INTL_SUPPORTED_CALENDARS.contains(&value).then_some(value.to_string())
+        let value = value.to_ascii_lowercase();
+        let canonical = match value.as_str() {
+            "islamicc" => "islamic-civil",
+            _ => value.as_str(),
+        };
+        INTL_SUPPORTED_CALENDARS.contains(&canonical).then_some(canonical.to_string())
     }
 
     fn intl_supported_numbering_system(value: &str) -> Option<String> {
-        INTL_SUPPORTED_NUMBERING_SYSTEMS.contains(&value).then_some(value.to_string())
+        let value = value.to_ascii_lowercase();
+        INTL_SUPPORTED_NUMBERING_SYSTEMS.contains(&value.as_str()).then_some(value)
     }
 
     fn intl_supported_hour_cycle(value: &str) -> Option<String> {
@@ -2656,4 +2742,9 @@ struct IntlNumberFormatOptions {
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,
     maximum_fraction_digits: u8,
+}
+
+struct IntlGenericNumberingSystemOptions {
+    resolved_locale: String,
+    numbering_system: String,
 }

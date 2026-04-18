@@ -654,6 +654,20 @@ impl<'gc> VM<'gc> {
                 borrow.get("__intl_sign_display__").cloned().unwrap_or_else(|| Value::from("auto")),
             );
             result.insert(
+                "roundingMode".to_string(),
+                borrow
+                    .get("__intl_rounding_mode__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("halfExpand")),
+            );
+            result.insert(
+                "roundingPriority".to_string(),
+                borrow
+                    .get("__intl_rounding_priority__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("auto")),
+            );
+            result.insert(
                 "roundingIncrement".to_string(),
                 borrow.get("__intl_rounding_increment__").cloned().unwrap_or(Value::Number(1.0)),
             );
@@ -1593,13 +1607,13 @@ impl<'gc> VM<'gc> {
             value *= 100.0;
         }
         let negative = value.is_sign_negative();
-        value = value.abs();
+        let abs_value = value.abs();
         if matches!(options.notation.as_str(), "scientific" | "engineering") {
-            let formatted = Self::intl_format_exponential(options, value);
-            return Self::intl_apply_sign_and_affixes(options, negative, value == 0.0, false, &formatted);
+            let formatted = Self::intl_format_exponential(options, abs_value);
+            return Self::intl_apply_sign_and_affixes(options, negative, abs_value == 0.0, false, &formatted);
         }
         if options.notation == "compact"
-            && let Some(formatted) = Self::intl_format_compact_decimal(options, value)
+            && let Some(formatted) = Self::intl_format_compact_decimal(options, abs_value)
         {
             let is_zeroish = formatted
                 .trim_start_matches('0')
@@ -1607,19 +1621,7 @@ impl<'gc> VM<'gc> {
                 .is_empty();
             return Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted);
         }
-        let (mut integer_digits, fraction_digits) = if let Some(maximum_significant_digits) = options.maximum_significant_digits {
-            let rounded = Self::intl_round_to_significant_digits(value, maximum_significant_digits);
-            Self::intl_format_standard_significant_digits(
-                rounded,
-                options.minimum_significant_digits.unwrap_or(1),
-                options
-                    .maximum_significant_digits
-                    .unwrap_or(options.minimum_significant_digits.unwrap_or(1)),
-            )
-        } else {
-            let rounded = Self::intl_round_to_fraction_digits(value, options.maximum_fraction_digits);
-            Self::intl_split_fixed_decimal(rounded, options.maximum_fraction_digits, options.minimum_fraction_digits, false)
-        };
+        let (mut integer_digits, fraction_digits) = Self::intl_format_decimal_digits(options, value);
         while integer_digits.len() < options.minimum_integer_digits as usize {
             integer_digits.insert(0, '0');
         }
@@ -1632,38 +1634,155 @@ impl<'gc> VM<'gc> {
         Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted)
     }
 
+    fn intl_format_decimal_digits(options: &IntlNumberFormatOptions, value: f64) -> (String, String) {
+        let sig_digits = options
+            .maximum_significant_digits
+            .unwrap_or(options.minimum_significant_digits.unwrap_or(21));
+        let sig_quantum = Self::intl_significant_rounding_quantum(value, sig_digits);
+        let frac_quantum = if options.rounding_increment == 1 {
+            10f64.powi(-(options.maximum_fraction_digits as i32))
+        } else {
+            options.rounding_increment as f64 / 10f64.powi(options.maximum_fraction_digits as i32)
+        };
+        let use_significant = if options.minimum_significant_digits.is_some() || options.maximum_significant_digits.is_some() {
+            match options.rounding_priority.as_str() {
+                "morePrecision" if options.minimum_fraction_digits > 0 || options.maximum_fraction_digits > 0 => {
+                    sig_quantum <= frac_quantum
+                }
+                "lessPrecision" if options.minimum_fraction_digits > 0 || options.maximum_fraction_digits > 0 => sig_quantum > frac_quantum,
+                _ => true,
+            }
+        } else {
+            false
+        };
+        if use_significant {
+            let rounded = Self::intl_round_to_significant_digits_mode(value, sig_digits, &options.rounding_mode).abs();
+            Self::intl_format_standard_significant_digits(rounded, options.minimum_significant_digits.unwrap_or(1), sig_digits)
+        } else {
+            let rounded = if options.rounding_increment == 1 {
+                Self::intl_round_to_fraction_digits_mode(value, options.maximum_fraction_digits, &options.rounding_mode)
+            } else {
+                Self::intl_round_to_increment(
+                    value,
+                    options.maximum_fraction_digits,
+                    options.rounding_increment,
+                    &options.rounding_mode,
+                )
+            }
+            .abs();
+            Self::intl_split_fixed_decimal(rounded, options.maximum_fraction_digits, options.minimum_fraction_digits, false)
+        }
+    }
+
     fn intl_format_decimal_string_or_number(options: &IntlNumberFormatOptions, value: &str) -> String {
         if let Some(decimal) = Self::intl_parse_exact_decimal(value)
-            && options.minimum_significant_digits.is_none()
-            && options.maximum_significant_digits.is_none()
             && options.notation == "standard"
+            && options.rounding_increment == 1
+            && options.rounding_mode == "halfExpand"
+            && options.rounding_priority == "auto"
         {
+            if options.minimum_significant_digits.is_some() || options.maximum_significant_digits.is_some() {
+                return Self::intl_format_exact_decimal_significant(options, &decimal);
+            }
             return Self::intl_format_exact_decimal(options, &decimal);
         }
         Self::intl_format_f64_value(options, value.parse::<f64>().unwrap_or(f64::NAN))
     }
 
     fn intl_round_to_fraction_digits(value: f64, digits: u8) -> f64 {
-        let factor = 10f64.powi(digits as i32);
-        (value * factor).round() / factor
+        Self::intl_round_to_fraction_digits_mode(value, digits, "halfExpand")
     }
 
-    fn intl_round_to_significant_digits(value: f64, digits: u8) -> f64 {
+    fn intl_round_to_fraction_digits_mode(value: f64, digits: u8, rounding_mode: &str) -> f64 {
+        let factor = 10f64.powi(digits as i32);
+        Self::intl_round_scaled_value(value, factor, rounding_mode)
+    }
+
+    fn intl_round_to_significant_digits_mode(value: f64, digits: u8, rounding_mode: &str) -> f64 {
         if value == 0.0 {
             return 0.0;
         }
-        let integer_digits = value.log10().floor() as i32 + 1;
+        let integer_digits = value.abs().log10().floor() as i32 + 1;
         let factor = 10f64.powi(digits as i32 - integer_digits);
-        (value * factor).round() / factor
+        Self::intl_round_scaled_value(value, factor, rounding_mode)
+    }
+
+    fn intl_significant_rounding_quantum(value: f64, digits: u8) -> f64 {
+        if value == 0.0 {
+            return 10f64.powi(-(digits as i32));
+        }
+        let integer_digits = value.abs().log10().floor() as i32 + 1;
+        10f64.powi(integer_digits - digits as i32)
+    }
+
+    fn intl_round_to_increment(value: f64, max_fraction_digits: u8, increment: u16, rounding_mode: &str) -> f64 {
+        let factor = 10f64.powi(max_fraction_digits as i32) / increment as f64;
+        Self::intl_round_scaled_value(value, factor, rounding_mode)
+    }
+
+    fn intl_round_scaled_value(value: f64, factor: f64, rounding_mode: &str) -> f64 {
+        Self::intl_round_integer_mode(value * factor, rounding_mode) / factor
+    }
+
+    fn intl_round_integer_mode(value: f64, rounding_mode: &str) -> f64 {
+        let lower = value.floor();
+        let upper = value.ceil();
+        if (upper - lower).abs() < f64::EPSILON {
+            return value;
+        }
+        match rounding_mode {
+            "ceil" => return upper,
+            "floor" => return lower,
+            "expand" => {
+                return if value.is_sign_negative() { lower } else { upper };
+            }
+            "trunc" => {
+                return if value.is_sign_negative() { upper } else { lower };
+            }
+            _ => {}
+        }
+        let lower_dist = (value - lower).abs();
+        let upper_dist = (upper - value).abs();
+        let eps = 1e-12;
+        if lower_dist + eps < upper_dist {
+            return lower;
+        }
+        if upper_dist + eps < lower_dist {
+            return upper;
+        }
+        match rounding_mode {
+            "halfCeil" => upper,
+            "halfFloor" => lower,
+            "halfTrunc" => {
+                if value.is_sign_negative() {
+                    upper
+                } else {
+                    lower
+                }
+            }
+            "halfEven" => {
+                if (lower as i128).rem_euclid(2) == 0 {
+                    lower
+                } else {
+                    upper
+                }
+            }
+            _ => {
+                if value.is_sign_negative() {
+                    lower
+                } else {
+                    upper
+                }
+            }
+        }
     }
 
     fn intl_format_standard_significant_digits(
         value: f64,
         minimum_significant_digits: u8,
-        maximum_significant_digits: u8,
+        _maximum_significant_digits: u8,
     ) -> (String, String) {
-        let rounded = Self::intl_round_to_significant_digits(value, maximum_significant_digits);
-        let mut text = rounded.to_string();
+        let mut text = value.to_string();
         let mut significant_digits = Self::intl_count_significant_digits(&text);
         while significant_digits < minimum_significant_digits as usize {
             if !text.contains('.') {
@@ -1683,6 +1802,77 @@ impl<'gc> VM<'gc> {
         let digits: String = text.chars().filter(|ch| ch.is_ascii_digit()).collect();
         let trimmed = digits.trim_start_matches('0');
         if trimmed.is_empty() { 1 } else { trimmed.len() }
+    }
+
+    fn intl_format_exact_decimal_significant(options: &IntlNumberFormatOptions, decimal: &IntlExactDecimal) -> String {
+        let min_sig = options.minimum_significant_digits.unwrap_or(1) as usize;
+        let max_sig = options
+            .maximum_significant_digits
+            .unwrap_or(options.minimum_significant_digits.unwrap_or(21)) as usize;
+        let mut digits = decimal.digits.clone();
+        let mut scale = decimal.scale;
+        let Some(first_nonzero) = digits.chars().position(|ch| ch != '0') else {
+            let fraction = "0".repeat(min_sig.saturating_sub(1));
+            let mut formatted = "0".to_string();
+            if !fraction.is_empty() {
+                formatted.push(Self::intl_decimal_separator(options));
+                formatted.push_str(&fraction);
+            }
+            return Self::intl_apply_sign_and_affixes(options, decimal.negative, true, false, &formatted);
+        };
+        let sig_count = digits.len() - first_nonzero;
+        if sig_count > max_sig {
+            let cut = first_nonzero + max_sig;
+            let round_up = digits.as_bytes().get(cut).is_some_and(|digit| *digit >= b'5');
+            let removed = digits.len() - cut;
+            digits.truncate(cut);
+            let integer_removed = removed.saturating_sub(scale);
+            scale = scale.saturating_sub(removed);
+            if round_up {
+                let mut bytes = digits.as_bytes().to_vec();
+                let mut index = bytes.len();
+                loop {
+                    if index == 0 {
+                        bytes.insert(0, b'1');
+                        break;
+                    }
+                    index -= 1;
+                    if bytes[index] == b'9' {
+                        bytes[index] = b'0';
+                    } else {
+                        bytes[index] += 1;
+                        break;
+                    }
+                }
+                digits = String::from_utf8(bytes).unwrap_or(digits);
+            }
+            if integer_removed > 0 {
+                digits.push_str(&"0".repeat(integer_removed));
+            }
+        }
+        let split = digits.len().saturating_sub(scale);
+        let integer_raw = if split == 0 { "0".to_string() } else { digits[..split].to_string() };
+        let mut integer = integer_raw.trim_start_matches('0').to_string();
+        if integer.is_empty() {
+            integer = "0".to_string();
+        }
+        let mut fraction = if scale == 0 { String::new() } else { digits[split..].to_string() };
+        while !fraction.is_empty()
+            && fraction.ends_with('0')
+            && Self::intl_count_significant_digits(&(integer.clone() + "." + &fraction)) > min_sig
+        {
+            fraction.pop();
+        }
+        while Self::intl_count_significant_digits(&(integer.clone() + "." + &fraction)) < min_sig {
+            fraction.push('0');
+        }
+        let mut formatted = integer;
+        if !fraction.is_empty() {
+            formatted.push(Self::intl_decimal_separator(options));
+            formatted.push_str(&fraction);
+        }
+        let is_zeroish = formatted.chars().all(|ch| matches!(ch, '0' | '.'));
+        Self::intl_apply_sign_and_affixes(options, decimal.negative, is_zeroish, false, &formatted)
     }
 
     fn intl_split_fixed_decimal(
@@ -1871,7 +2061,15 @@ impl<'gc> VM<'gc> {
         } else {
             String::new()
         };
-        (prefix, String::new())
+        if prefix.is_empty() {
+            return (prefix, String::new());
+        }
+        let bidi_prefix = if options.resolved_locale.starts_with("ar") || options.numbering_system == "arab" {
+            "\u{200e}"
+        } else {
+            ""
+        };
+        (format!("{bidi_prefix}{prefix}"), String::new())
     }
 
     fn intl_currency_symbol<'a>(options: &IntlNumberFormatOptions, currency: &'a str) -> &'a str {
@@ -2987,6 +3185,8 @@ impl<'gc> VM<'gc> {
             compact_display: None,
             currency_sign: "standard".to_string(),
             sign_display: "auto".to_string(),
+            rounding_mode: "halfExpand".to_string(),
+            rounding_priority: "auto".to_string(),
             rounding_increment: 1,
             trailing_zero_display: "auto".to_string(),
             use_grouping: true,
@@ -3101,7 +3301,7 @@ impl<'gc> VM<'gc> {
         if let Some(rounding_increment) = self.intl_rounding_increment_option(ctx, raw_options.get("roundingIncrement"))? {
             out.rounding_increment = rounding_increment;
         }
-        let _ = self.intl_string_option_from_value(
+        if let Some(rounding_mode) = self.intl_string_option_from_value(
             ctx,
             raw_options.get("roundingMode"),
             &[
@@ -3116,13 +3316,17 @@ impl<'gc> VM<'gc> {
                 "halfEven",
             ],
             Some("halfExpand"),
-        )?;
-        let rounding_priority = self.intl_string_option_from_value(
+        )? {
+            out.rounding_mode = rounding_mode;
+        }
+        if let Some(rounding_priority) = self.intl_string_option_from_value(
             ctx,
             raw_options.get("roundingPriority"),
             &["auto", "morePrecision", "lessPrecision"],
             Some("auto"),
-        )?;
+        )? {
+            out.rounding_priority = rounding_priority;
+        }
         if let Some(trailing_zero_display) = self.intl_string_option_from_value(
             ctx,
             raw_options.get("trailingZeroDisplay"),
@@ -3188,10 +3392,7 @@ impl<'gc> VM<'gc> {
             }
         }
         if out.rounding_increment != 1 {
-            if rounding_priority.as_deref().is_some_and(|value| value != "auto")
-                || out.minimum_significant_digits.is_some()
-                || out.maximum_significant_digits.is_some()
-            {
+            if out.rounding_priority != "auto" || out.minimum_significant_digits.is_some() || out.maximum_significant_digits.is_some() {
                 return Err(self.make_type_error_object(ctx, "roundingIncrement cannot be combined with this rounding mode"));
             }
             if maximum_fraction_digits.is_some()
@@ -3358,6 +3559,11 @@ impl<'gc> VM<'gc> {
         obj.insert("__intl_notation__".to_string(), Value::from(options.notation.as_str()));
         obj.insert("__intl_currency_sign__".to_string(), Value::from(options.currency_sign.as_str()));
         obj.insert("__intl_sign_display__".to_string(), Value::from(options.sign_display.as_str()));
+        obj.insert("__intl_rounding_mode__".to_string(), Value::from(options.rounding_mode.as_str()));
+        obj.insert(
+            "__intl_rounding_priority__".to_string(),
+            Value::from(options.rounding_priority.as_str()),
+        );
         obj.insert(
             "__intl_rounding_increment__".to_string(),
             Value::Number(options.rounding_increment as f64),
@@ -4494,6 +4700,14 @@ impl IntlNumberFormatOptions {
                 Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
                 _ => "auto".to_string(),
             },
+            rounding_mode: match obj.get("__intl_rounding_mode__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "halfExpand".to_string(),
+            },
+            rounding_priority: match obj.get("__intl_rounding_priority__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "auto".to_string(),
+            },
             rounding_increment: match obj.get("__intl_rounding_increment__") {
                 Some(Value::Number(value)) => *value as u16,
                 _ => 1,
@@ -4594,6 +4808,8 @@ struct IntlNumberFormatOptions {
     compact_display: Option<String>,
     currency_sign: String,
     sign_display: String,
+    rounding_mode: String,
+    rounding_priority: String,
     rounding_increment: u16,
     trailing_zero_display: String,
     use_grouping: bool,

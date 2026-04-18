@@ -248,9 +248,10 @@ impl<'gc> VM<'gc> {
             obj.insert("__proto__".to_string(), prototype);
         }
         obj.insert("__intl_kind__".to_string(), Value::from(kind));
-        let locale = requested_locales
-            .first()
-            .cloned()
+        let locale = collator_opts
+            .as_ref()
+            .map(|opts| opts.resolved_locale.clone())
+            .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
         obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
         if let Some(opts) = collator_opts {
@@ -621,13 +622,18 @@ impl<'gc> VM<'gc> {
         options: Option<&Value<'gc>>,
     ) -> Result<IntlCollatorOptions, Value<'gc>> {
         self.intl_read_constructor_options(ctx, "Collator", options)?;
-        let locale = requested_locales
+        let requested_locale = requested_locales
             .first()
             .cloned()
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
-        let locale_base = Self::intl_locale_without_unicode_extension(&locale);
-        let locale_unicode = Self::intl_locale_unicode_keywords(&locale);
+        let locale_info = Self::intl_locale_info(&requested_locale);
+        let locale_base = if locale_info.base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_info.base.clone()
+        };
         let mut out = IntlCollatorOptions {
+            resolved_locale: locale_base.clone(),
             usage: "sort".to_string(),
             sensitivity: "variant".to_string(),
             ignore_punctuation: locale_base.eq_ignore_ascii_case("th"),
@@ -636,28 +642,33 @@ impl<'gc> VM<'gc> {
             case_first: None,
         };
 
-        if let Some(value) = locale_unicode.get("co")
-            && !value.is_empty()
-        {
-            out.collation = value.clone();
-        }
-        if let Some(value) = locale_unicode.get("kn") {
-            out.numeric = match value.as_str() {
-                "" | "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            };
-        }
-        if let Some(value) = locale_unicode.get("kf")
-            && matches!(value.as_str(), "upper" | "lower" | "false")
-        {
-            out.case_first = Some(value.clone());
-        }
+        let ext_collation = locale_info
+            .unicode_keywords
+            .get("co")
+            .and_then(|value| Self::intl_collator_supported_collation(&locale_base, value));
+        let ext_numeric = locale_info
+            .unicode_keywords
+            .get("kn")
+            .and_then(|value| Self::intl_collator_unicode_bool(value));
+        let ext_case_first = locale_info
+            .unicode_keywords
+            .get("kf")
+            .and_then(|value| Self::intl_collator_supported_case_first(value));
 
         let Some(options) = options else {
+            out.collation = ext_collation.clone().unwrap_or_else(|| "default".to_string());
+            out.numeric = ext_numeric;
+            out.case_first = ext_case_first.clone();
+            out.resolved_locale =
+                Self::intl_collator_resolved_locale(&locale_base, out.collation.as_str(), out.numeric, out.case_first.as_deref());
             return Ok(out);
         };
         if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+            out.collation = ext_collation.clone().unwrap_or_else(|| "default".to_string());
+            out.numeric = ext_numeric;
+            out.case_first = ext_case_first.clone();
+            out.resolved_locale =
+                Self::intl_collator_resolved_locale(&locale_base, out.collation.as_str(), out.numeric, out.case_first.as_deref());
             return Ok(out);
         }
 
@@ -665,12 +676,21 @@ impl<'gc> VM<'gc> {
             out.usage = usage;
         }
         let _ = self.intl_locale_matcher_option(ctx, Some(options))?;
-        if let Some(collation) = self.intl_string_option(ctx, options, "collation", &[], None)? {
-            out.collation = if collation.is_empty() { "default".to_string() } else { collation };
-        }
-        out.numeric = self.intl_boolean_option(ctx, options, "numeric")?.or(out.numeric);
+        let option_collation = self
+            .intl_string_option(ctx, options, "collation", &[], None)?
+            .and_then(|value| Self::intl_collator_supported_collation(&locale_base, &value));
+        out.collation = if out.usage == "search" {
+            "default".to_string()
+        } else if let Some(collation) = option_collation.clone() {
+            collation
+        } else {
+            ext_collation.clone().unwrap_or_else(|| "default".to_string())
+        };
+        out.numeric = self.intl_boolean_option(ctx, options, "numeric")?.or(ext_numeric);
         if let Some(case_first) = self.intl_string_option(ctx, options, "caseFirst", &["upper", "lower", "false"], None)? {
             out.case_first = Some(case_first);
+        } else {
+            out.case_first = ext_case_first.clone();
         }
         if let Some(sensitivity) =
             self.intl_string_option(ctx, options, "sensitivity", &["base", "accent", "case", "variant"], Some("variant"))?
@@ -680,6 +700,15 @@ impl<'gc> VM<'gc> {
         if let Some(ignore_punctuation) = self.intl_boolean_option(ctx, options, "ignorePunctuation")? {
             out.ignore_punctuation = ignore_punctuation;
         }
+        let reflect_collation = ext_collation.as_deref() == Some(out.collation.as_str()) && out.collation != "default";
+        let reflect_numeric = ext_numeric == out.numeric && out.numeric == Some(true);
+        let reflect_case_first = ext_case_first.as_deref() == out.case_first.as_deref();
+        out.resolved_locale = Self::intl_collator_resolved_locale_with_flags(
+            &locale_base,
+            reflect_collation.then_some(out.collation.as_str()),
+            reflect_numeric.then_some(true),
+            reflect_case_first.then_some(out.case_first.as_deref()).flatten(),
+        );
         Ok(out)
     }
 
@@ -736,24 +765,29 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_locale_without_unicode_extension(locale: &str) -> String {
-        let parts: Vec<&str> = locale.split('-').collect();
-        let mut out = Vec::new();
-        for part in parts {
-            if part.eq_ignore_ascii_case("u") {
-                break;
-            }
-            out.push(part);
-        }
-        out.join("-")
+        Self::intl_locale_info(locale).base
     }
 
-    fn intl_locale_unicode_keywords(locale: &str) -> std::collections::HashMap<String, String> {
-        let mut out = std::collections::HashMap::new();
+    fn intl_locale_info(locale: &str) -> IntlLocaleInfo {
         let parts: Vec<&str> = locale.split('-').collect();
-        let Some(unicode_start) = parts.iter().position(|part| part.eq_ignore_ascii_case("u")) else {
-            return out;
-        };
-        let mut idx = unicode_start + 1;
+        let mut base = Vec::new();
+        let mut unicode_keywords = std::collections::HashMap::new();
+        let mut idx = 0;
+        while idx < parts.len() {
+            let part = parts[idx];
+            if part.len() == 1 {
+                break;
+            }
+            base.push(part);
+            idx += 1;
+        }
+        if idx >= parts.len() || !parts[idx].eq_ignore_ascii_case("u") {
+            return IntlLocaleInfo {
+                base: base.join("-"),
+                unicode_keywords,
+            };
+        }
+        idx += 1;
         while idx < parts.len() {
             let key = parts[idx];
             if key.len() == 1 {
@@ -769,7 +803,71 @@ impl<'gc> VM<'gc> {
                 value_parts.push(parts[idx]);
                 idx += 1;
             }
-            out.insert(key.to_ascii_lowercase(), value_parts.join("-"));
+            unicode_keywords.insert(key.to_ascii_lowercase(), value_parts.join("-"));
+        }
+        IntlLocaleInfo {
+            base: base.join("-"),
+            unicode_keywords,
+        }
+    }
+
+    fn intl_collator_unicode_bool(value: &str) -> Option<bool> {
+        match value {
+            "" | "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn intl_collator_supported_case_first(value: &str) -> Option<String> {
+        match value {
+            "upper" | "lower" | "false" => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_collator_supported_collation(locale_base: &str, value: &str) -> Option<String> {
+        if value.is_empty() || matches!(value, "default" | "search" | "standard" | "invalid") {
+            return None;
+        }
+        match value {
+            "phonebk" if locale_base.eq_ignore_ascii_case("de") || locale_base.to_ascii_lowercase().starts_with("de-") => {
+                Some("phonebk".to_string())
+            }
+            "eor" => Some("eor".to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_collator_resolved_locale(locale_base: &str, collation: &str, numeric: Option<bool>, case_first: Option<&str>) -> String {
+        Self::intl_collator_resolved_locale_with_flags(
+            locale_base,
+            (collation != "default").then_some(collation),
+            (numeric == Some(true)).then_some(true),
+            case_first,
+        )
+    }
+
+    fn intl_collator_resolved_locale_with_flags(
+        locale_base: &str,
+        collation: Option<&str>,
+        numeric: Option<bool>,
+        case_first: Option<&str>,
+    ) -> String {
+        let mut out = locale_base.to_string();
+        let mut extensions = Vec::new();
+        if let Some(collation) = collation {
+            extensions.push(format!("co-{}", collation));
+        }
+        if numeric == Some(true) {
+            extensions.push("kn".to_string());
+        }
+        if let Some(case_first) = case_first {
+            extensions.push(format!("kf-{}", case_first));
+        }
+        if !extensions.is_empty() {
+            out.push_str("-u-");
+            out.push_str(&extensions.join("-"));
         }
         out
     }
@@ -967,6 +1065,7 @@ impl<'gc> VM<'gc> {
 
 #[derive(Clone)]
 struct IntlCollatorOptions {
+    resolved_locale: String,
     usage: String,
     sensitivity: String,
     ignore_punctuation: bool,
@@ -978,6 +1077,10 @@ struct IntlCollatorOptions {
 impl IntlCollatorOptions {
     fn from_object<'gc>(obj: &IndexMap<String, Value<'gc>>) -> Self {
         Self {
+            resolved_locale: match obj.get("__intl_locale__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => INTL_DEFAULT_LOCALE.to_string(),
+            },
             usage: match obj.get("__intl_usage__") {
                 Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
                 _ => "sort".to_string(),
@@ -1001,4 +1104,9 @@ impl IntlCollatorOptions {
             },
         }
     }
+}
+
+struct IntlLocaleInfo {
+    base: String,
+    unicode_keywords: std::collections::HashMap<String, String>,
 }

@@ -5,6 +5,7 @@ use unicode_normalization::UnicodeNormalization;
 const INTL_DEFAULT_LOCALE: &str = "en-US";
 const INTL_COLLATOR_BOUND_COMPARE_SLOT: &str = "@@sym:900001";
 const INTL_DATE_TIME_FORMAT_BOUND_FORMAT_SLOT: &str = "@@sym:900003";
+const INTL_NUMBER_FORMAT_BOUND_FORMAT_SLOT: &str = "@@sym:900004";
 
 const INTL_SERVICE_CTORS: &[(&str, &str)] = &[
     ("Collator", "intl.collator.ctor"),
@@ -68,12 +69,12 @@ impl<'gc> VM<'gc> {
 
         for (name, host_name) in INTL_SERVICE_CTORS {
             let ctor = self.intl_make_constructor(ctx, object_proto.clone(), name, host_name);
-            if *name == "Segmenter" {
-                if let Value::Object(ctor_obj) = &ctor {
-                    let mut ctor_borrow = ctor_obj.borrow_mut(ctx);
-                    ctor_borrow.insert("__segments_proto__".to_string(), segments_proto.clone());
-                    ctor_borrow.insert("__segment_iter_proto__".to_string(), segment_iterator_proto.clone());
-                }
+            if *name == "Segmenter"
+                && let Value::Object(ctor_obj) = &ctor
+            {
+                let mut ctor_borrow = ctor_obj.borrow_mut(ctx);
+                ctor_borrow.insert("__segments_proto__".to_string(), segments_proto.clone());
+                ctor_borrow.insert("__segment_iter_proto__".to_string(), segment_iterator_proto.clone());
             }
             intl.insert((*name).to_string(), ctor);
             mark_nonenumerable(&mut intl, name);
@@ -113,6 +114,8 @@ impl<'gc> VM<'gc> {
             "intl.collator.compare" => self.intl_collator_compare(ctx, receiver, args),
             "intl.dateTimeFormat.get.format" => self.intl_date_time_format_getter(ctx, receiver),
             "intl.dateTimeFormat.format" => self.intl_date_time_format_format(ctx, receiver, args),
+            "intl.numberFormat.get.format" => self.intl_number_format_getter(ctx, receiver),
+            "intl.numberFormat.format" => self.intl_number_format_format(ctx, receiver, args),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
                 let mut obj = IndexMap::new();
@@ -179,6 +182,10 @@ impl<'gc> VM<'gc> {
             }
             if display_name == "DateTimeFormat" {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.get.format", "get format", 0.0, false);
+                Self::insert_getter_property_with_attributes(&mut proto, "format", &getter, false, true);
+            }
+            if display_name == "NumberFormat" {
+                let getter = Self::make_host_fn_with_name_len(ctx, "intl.numberFormat.get.format", "get format", 0.0, false);
                 Self::insert_getter_property_with_attributes(&mut proto, "format", &getter, false, true);
             }
             if display_name == "Segmenter" {
@@ -265,15 +272,15 @@ impl<'gc> VM<'gc> {
             self.intl_store_collator_options(&mut obj, &opts);
         }
 
-        if kind == "Segmenter" {
-            if let Value::Object(ctor_obj) = &ctor_value {
-                let borrow = ctor_obj.borrow();
-                if let Some(proto) = borrow.get("__segments_proto__").cloned() {
-                    obj.insert("__segments_proto__".to_string(), proto);
-                }
-                if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
-                    obj.insert("__segment_iter_proto__".to_string(), proto);
-                }
+        if kind == "Segmenter"
+            && let Value::Object(ctor_obj) = &ctor_value
+        {
+            let borrow = ctor_obj.borrow();
+            if let Some(proto) = borrow.get("__segments_proto__").cloned() {
+                obj.insert("__segments_proto__".to_string(), proto);
+            }
+            if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
+                obj.insert("__segment_iter_proto__".to_string(), proto);
             }
         }
 
@@ -327,7 +334,7 @@ impl<'gc> VM<'gc> {
         } else {
             result.insert("locale".to_string(), Value::from(INTL_DEFAULT_LOCALE));
         }
-        if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(&kind) == "Collator") {
+        if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "Collator") {
             result.insert(
                 "usage".to_string(),
                 borrow.get("__intl_usage__").cloned().unwrap_or_else(|| Value::from("sort")),
@@ -639,6 +646,55 @@ impl<'gc> VM<'gc> {
         Value::from(x.trunc().to_string().as_str())
     }
 
+    fn intl_number_format_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("NumberFormat")) else {
+            return Value::Undefined;
+        };
+
+        if let Some(existing) = formatter.borrow().get(INTL_NUMBER_FORMAT_BOUND_FORMAT_SLOT).cloned() {
+            return existing;
+        }
+
+        let this_val = receiver.unwrap_or(&Value::Undefined);
+        let format = Self::make_bound_host_fn(ctx, "intl.numberFormat.format", this_val);
+        if let Value::Object(format_obj) = &format {
+            let mut borrow = format_obj.borrow_mut(ctx);
+            Self::insert_property_with_attributes(&mut borrow, "length", &Value::Number(1.0), false, false, true);
+            Self::insert_property_with_attributes(&mut borrow, "name", &Value::from(""), false, false, true);
+            borrow.insert("__non_constructor__".to_string(), Value::Boolean(true));
+        }
+        formatter
+            .borrow_mut(ctx)
+            .insert(INTL_NUMBER_FORMAT_BOUND_FORMAT_SLOT.to_string(), format.clone());
+        format
+    }
+
+    fn intl_number_format_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let Some(_formatter) = self.intl_require_initialized_service(ctx, receiver, Some("NumberFormat")) else {
+            return Value::Undefined;
+        };
+        let x = if args.is_empty() {
+            f64::NAN
+        } else {
+            let prim = self.try_to_primitive(ctx, args.first().unwrap_or(&Value::Undefined), "number");
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            to_number(&prim)
+        };
+        if x.is_nan() {
+            return Value::from("NaN");
+        }
+        if x.is_infinite() {
+            return if x.is_sign_negative() {
+                Value::from("-Infinity")
+            } else {
+                Value::from("Infinity")
+            };
+        }
+        Value::from(x.to_string().as_str())
+    }
+
     fn intl_require_initialized_service(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -662,7 +718,7 @@ impl<'gc> VM<'gc> {
             return None;
         }
         drop(borrow);
-        Some(obj.clone())
+        Some(*obj)
     }
 
     fn intl_read_collator_options(

@@ -52,6 +52,7 @@ jobs:
           - cluster: 39
           - cluster: 40
           - cluster: 41
+          - cluster: 42
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -290,6 +291,11 @@ jobs:
             41)
               TITLE='"annexB"'
               FOCUS='annexB'
+              RUN_TESTS='true'
+              ;;
+            42)
+              TITLE='"intl402"'
+              FOCUS='intl402'
               RUN_TESTS='true'
               ;;
             *)

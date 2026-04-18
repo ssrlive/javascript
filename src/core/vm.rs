@@ -35743,8 +35743,14 @@ impl<'gc> VM<'gc> {
                         if id == BUILTIN_NUM_VALUEOF {
                             return Value::Number(n);
                         }
-                        // toLocaleString: same as toString(10)
-                        return Value::from(&value_to_string(&Value::Number(n)));
+                        let formatter = match self.intl_construct_service_instance(ctx, "NumberFormat", None, args) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                self.pending_throw = Some(err);
+                                return Value::Undefined;
+                            }
+                        };
+                        return self.intl_number_format_format(ctx, Some(&formatter), &[Value::Number(n)]);
                     }
                     _ => {}
                 }

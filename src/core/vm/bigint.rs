@@ -306,6 +306,16 @@ impl<'gc> VM<'gc> {
             if id == BUILTIN_BIGINT_VALUEOF {
                 return Some(Value::BigInt(Box::new(bi)));
             }
+            if id == BUILTIN_BIGINT_TOLOCALESTRING {
+                let formatter = match self.intl_construct_service_instance(ctx, "NumberFormat", None, args) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.pending_throw = Some(err);
+                        return Some(Value::Undefined);
+                    }
+                };
+                return Some(self.intl_number_format_format(ctx, Some(&formatter), &[Value::BigInt(Box::new(bi))]));
+            }
             let radix = if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
                 10u32
             } else {

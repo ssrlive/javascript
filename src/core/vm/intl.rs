@@ -254,6 +254,10 @@ impl<'gc> VM<'gc> {
             "intl.numberFormat.get.format" => self.intl_number_format_getter(ctx, receiver),
             "intl.numberFormat.format" => self.intl_number_format_format(ctx, receiver, args),
             "intl.numberFormat.formatToParts" => self.intl_number_format_format_to_parts(ctx, receiver, args.first()),
+            "intl.numberFormat.formatRange" => self.intl_number_format_format_range(ctx, receiver, args.first(), args.get(1)),
+            "intl.numberFormat.formatRangeToParts" => {
+                self.intl_number_format_format_range_to_parts(ctx, receiver, args.first(), args.get(1))
+            }
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
                 let mut obj = IndexMap::new();
@@ -352,6 +356,16 @@ impl<'gc> VM<'gc> {
                     Self::make_host_fn_with_name_len(ctx, "intl.numberFormat.formatToParts", "formatToParts", 1.0, false),
                 );
                 mark_nonenumerable(&mut proto, "formatToParts");
+                proto.insert(
+                    "formatRange".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.numberFormat.formatRange", "formatRange", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatRange");
+                proto.insert(
+                    "formatRangeToParts".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.numberFormat.formatRangeToParts", "formatRangeToParts", 2.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatRangeToParts");
             }
             if display_name == "Segmenter" {
                 proto.insert(
@@ -459,10 +473,7 @@ impl<'gc> VM<'gc> {
             .or_else(|| self.intl_service_constructor_from_global(kind))
             .unwrap_or(Value::Undefined);
 
-        let prototype = self.read_named_property(ctx, &ctor_value, "prototype");
-        if let Some(thrown) = self.pending_throw.take() {
-            return Err(thrown);
-        }
+        let prototype = self.intl_service_get_prototype_from_constructor(ctx, &ctor_value, kind)?;
 
         let mut obj = IndexMap::new();
         if !matches!(prototype, Value::Undefined) {
@@ -627,10 +638,6 @@ impl<'gc> VM<'gc> {
                 "style".to_string(),
                 borrow.get("__intl_style__").cloned().unwrap_or_else(|| Value::from("decimal")),
             );
-            result.insert(
-                "notation".to_string(),
-                borrow.get("__intl_notation__").cloned().unwrap_or_else(|| Value::from("standard")),
-            );
             if let Some(currency) = borrow.get("__intl_currency__").cloned() {
                 result.insert("currency".to_string(), currency);
             }
@@ -646,42 +653,6 @@ impl<'gc> VM<'gc> {
             if let Some(unit_display) = borrow.get("__intl_unit_display__").cloned() {
                 result.insert("unitDisplay".to_string(), unit_display);
             }
-            if let Some(compact_display) = borrow.get("__intl_compact_display__").cloned() {
-                result.insert("compactDisplay".to_string(), compact_display);
-            }
-            result.insert(
-                "signDisplay".to_string(),
-                borrow.get("__intl_sign_display__").cloned().unwrap_or_else(|| Value::from("auto")),
-            );
-            result.insert(
-                "roundingMode".to_string(),
-                borrow
-                    .get("__intl_rounding_mode__")
-                    .cloned()
-                    .unwrap_or_else(|| Value::from("halfExpand")),
-            );
-            result.insert(
-                "roundingPriority".to_string(),
-                borrow
-                    .get("__intl_rounding_priority__")
-                    .cloned()
-                    .unwrap_or_else(|| Value::from("auto")),
-            );
-            result.insert(
-                "roundingIncrement".to_string(),
-                borrow.get("__intl_rounding_increment__").cloned().unwrap_or(Value::Number(1.0)),
-            );
-            result.insert(
-                "trailingZeroDisplay".to_string(),
-                borrow
-                    .get("__intl_trailing_zero_display__")
-                    .cloned()
-                    .unwrap_or_else(|| Value::from("auto")),
-            );
-            result.insert(
-                "useGrouping".to_string(),
-                borrow.get("__intl_use_grouping__").cloned().unwrap_or(Value::Boolean(true)),
-            );
             result.insert(
                 "minimumIntegerDigits".to_string(),
                 borrow.get("__intl_minimum_integer_digits__").cloned().unwrap_or(Value::Number(1.0)),
@@ -706,6 +677,43 @@ impl<'gc> VM<'gc> {
             if let Some(maximum_significant_digits) = borrow.get("__intl_maximum_significant_digits__").cloned() {
                 result.insert("maximumSignificantDigits".to_string(), maximum_significant_digits);
             }
+            result.insert("useGrouping".to_string(), Self::intl_use_grouping_value_from_object(&borrow));
+            result.insert(
+                "notation".to_string(),
+                borrow.get("__intl_notation__").cloned().unwrap_or_else(|| Value::from("standard")),
+            );
+            if let Some(compact_display) = borrow.get("__intl_compact_display__").cloned() {
+                result.insert("compactDisplay".to_string(), compact_display);
+            }
+            result.insert(
+                "signDisplay".to_string(),
+                borrow.get("__intl_sign_display__").cloned().unwrap_or_else(|| Value::from("auto")),
+            );
+            result.insert(
+                "roundingIncrement".to_string(),
+                borrow.get("__intl_rounding_increment__").cloned().unwrap_or(Value::Number(1.0)),
+            );
+            result.insert(
+                "roundingMode".to_string(),
+                borrow
+                    .get("__intl_rounding_mode__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("halfExpand")),
+            );
+            result.insert(
+                "roundingPriority".to_string(),
+                borrow
+                    .get("__intl_rounding_priority__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("auto")),
+            );
+            result.insert(
+                "trailingZeroDisplay".to_string(),
+                borrow
+                    .get("__intl_trailing_zero_display__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("auto")),
+            );
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "RelativeTimeFormat")
         {
             result.insert(
@@ -1409,6 +1417,44 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn intl_number_format_format_range(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("NumberFormat")) else {
+            return Value::Undefined;
+        };
+        match self.intl_number_format_range_string(ctx, &formatter.borrow(), start, end) {
+            Ok(text) => Value::from(text.as_str()),
+            Err(err) => {
+                self.pending_throw = Some(err);
+                Value::Undefined
+            }
+        }
+    }
+
+    fn intl_number_format_format_range_to_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(formatter) = self.intl_require_initialized_service(ctx, receiver, Some("NumberFormat")) else {
+            return Value::Undefined;
+        };
+        match self.intl_number_format_range_parts_array(ctx, &formatter.borrow(), start, end) {
+            Ok(parts) => parts,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                Value::Undefined
+            }
+        }
+    }
+
     fn intl_number_format_parts_array(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -1559,6 +1605,146 @@ impl<'gc> VM<'gc> {
         obj.insert("type".to_string(), Value::from(part_type));
         obj.insert("value".to_string(), Value::from(value));
         Value::Object(new_gc_cell_ptr(ctx, obj))
+    }
+
+    fn intl_range_part_object(ctx: &GcContext<'gc>, part_type: &str, value: &str, source: &str) -> Value<'gc> {
+        let mut obj = IndexMap::new();
+        obj.insert("type".to_string(), Value::from(part_type));
+        obj.insert("value".to_string(), Value::from(value));
+        obj.insert("source".to_string(), Value::from(source));
+        Value::Object(new_gc_cell_ptr(ctx, obj))
+    }
+
+    fn intl_number_parts_with_source(
+        ctx: &GcContext<'gc>,
+        formatter: &IndexMap<String, Value<'gc>>,
+        text: &str,
+        source: &str,
+    ) -> Vec<Value<'gc>> {
+        Self::intl_number_string_parts(ctx, formatter, text)
+            .into_iter()
+            .filter_map(|part| {
+                let Value::Object(obj) = part else {
+                    return None;
+                };
+                let borrow = obj.borrow();
+                let Some(Value::String(part_type)) = borrow.get("type") else {
+                    return None;
+                };
+                let Some(Value::String(value)) = borrow.get("value") else {
+                    return None;
+                };
+                Some(Self::intl_range_part_object(
+                    ctx,
+                    &crate::unicode::utf16_to_utf8(part_type),
+                    &crate::unicode::utf16_to_utf8(value),
+                    source,
+                ))
+            })
+            .collect()
+    }
+
+    fn intl_number_format_range_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        formatter: &IndexMap<String, Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Result<String, Value<'gc>> {
+        let (start_input, end_input) = self.intl_number_format_range_inputs(ctx, start, end)?;
+        let options = IntlNumberFormatOptions::from_object(formatter);
+        let start_text = Self::intl_format_number_value(&options, start_input);
+        let end_text = Self::intl_format_number_value(&options, end_input);
+        if start_text == end_text {
+            return Ok(format!("~{start_text}"));
+        }
+        if options.resolved_locale.starts_with("pt-PT")
+            && options.style == "currency"
+            && let Some((body_start, suffix_start)) = start_text.rsplit_once('\u{a0}')
+            && let Some((body_end, suffix_end)) = end_text.rsplit_once('\u{a0}')
+            && suffix_start == suffix_end
+        {
+            if let Some(rest_end) = body_end.strip_prefix('+')
+                && body_start.starts_with('+')
+            {
+                return Ok(format!("{body_start} - {rest_end}\u{a0}{suffix_start}"));
+            }
+            return Ok(format!("{body_start} - {body_end}\u{a0}{suffix_start}"));
+        }
+        if options.resolved_locale.starts_with("en-US")
+            && options.style == "currency"
+            && options.sign_display == "always"
+            && let Some(rest_start) = start_text.strip_prefix("+$")
+            && let Some(rest_end) = end_text.strip_prefix("+$")
+        {
+            return Ok(format!("+${rest_start}–{rest_end}"));
+        }
+        let separator = if options.resolved_locale.starts_with("pt-PT") {
+            " - "
+        } else if options.style == "currency" {
+            " – "
+        } else {
+            "–"
+        };
+        Ok(format!("{start_text}{separator}{end_text}"))
+    }
+
+    fn intl_number_format_range_parts_array(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        formatter: &IndexMap<String, Value<'gc>>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Result<Value<'gc>, Value<'gc>> {
+        let (start_input, end_input) = self.intl_number_format_range_inputs(ctx, start, end)?;
+        let options = IntlNumberFormatOptions::from_object(formatter);
+        let start_text = Self::intl_format_number_value(&options, start_input);
+        let end_text = Self::intl_format_number_value(&options, end_input);
+        if start_text == end_text {
+            let mut parts = vec![Self::intl_range_part_object(ctx, "approximatelySign", "~", "shared")];
+            parts.extend(Self::intl_number_parts_with_source(ctx, formatter, &start_text, "shared"));
+            return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
+        }
+        let separator = if options.resolved_locale.starts_with("pt-PT") {
+            " - "
+        } else {
+            " – "
+        };
+        let mut parts = Self::intl_number_parts_with_source(ctx, formatter, &start_text, "startRange");
+        parts.push(Self::intl_range_part_object(ctx, "literal", separator, "shared"));
+        parts.extend(Self::intl_number_parts_with_source(ctx, formatter, &end_text, "endRange"));
+        Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))))
+    }
+
+    fn intl_number_format_range_inputs(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        start: Option<&Value<'gc>>,
+        end: Option<&Value<'gc>>,
+    ) -> Result<(IntlFormattedNumberInput, IntlFormattedNumberInput), Value<'gc>> {
+        if matches!(start, None | Some(Value::Undefined)) || matches!(end, None | Some(Value::Undefined)) {
+            return Err(self.make_type_error_object(ctx, "start and end are required"));
+        }
+        let start_input = self.intl_number_format_input(ctx, start)?;
+        let end_input = self.intl_number_format_input(ctx, end)?;
+        if Self::intl_number_input_is_nan(&start_input) || Self::intl_number_input_is_nan(&end_input) {
+            return Err(self.make_range_error_object(ctx, "Range arguments must not be NaN"));
+        }
+        Ok((start_input, end_input))
+    }
+
+    fn intl_number_input_is_nan(input: &IntlFormattedNumberInput) -> bool {
+        match input {
+            IntlFormattedNumberInput::Number(value) => value.is_nan(),
+            IntlFormattedNumberInput::BigInt(_) => false,
+            IntlFormattedNumberInput::DecimalString(text) => {
+                if Self::intl_parse_exact_decimal(text).is_some() {
+                    false
+                } else {
+                    to_number(&Value::from(text.as_str())).is_nan()
+                }
+            }
+        }
     }
 
     fn intl_number_format_format_value(
@@ -1976,9 +2162,13 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_apply_grouping(integer_digits: &str, options: &IntlNumberFormatOptions) -> String {
-        if !options.use_grouping {
+        if !Self::intl_should_use_grouping(integer_digits, options) {
             return integer_digits.to_string();
         }
+        Self::intl_group_integer_digits(integer_digits, options)
+    }
+
+    fn intl_group_integer_digits(integer_digits: &str, options: &IntlNumberFormatOptions) -> String {
         let groups = if options.resolved_locale.starts_with("en-IN") {
             vec![3usize, 2usize]
         } else {
@@ -2015,11 +2205,21 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_decimal_separator(options: &IntlNumberFormatOptions) -> char {
-        if options.resolved_locale.starts_with("de") { ',' } else { '.' }
+        if options.resolved_locale.starts_with("de") || options.resolved_locale.starts_with("pt") {
+            ','
+        } else {
+            '.'
+        }
     }
 
     fn intl_group_separator(options: &IntlNumberFormatOptions) -> char {
-        if options.resolved_locale.starts_with("de") { '.' } else { ',' }
+        if options.resolved_locale.starts_with("pt") {
+            '\u{a0}'
+        } else if options.resolved_locale.starts_with("de") {
+            '.'
+        } else {
+            ','
+        }
     }
 
     fn intl_apply_sign_to_special(options: &IntlNumberFormatOptions, negative: bool, is_zeroish: bool, text: &str) -> String {
@@ -2059,7 +2259,7 @@ impl<'gc> VM<'gc> {
             && let Some(currency) = &options.currency
         {
             let symbol = Self::intl_currency_symbol(options, currency);
-            if options.resolved_locale.starts_with("de") {
+            if options.resolved_locale.starts_with("de") || options.resolved_locale.starts_with("pt-PT") {
                 out.push_str(core);
                 out.push('\u{a0}');
                 out.push_str(symbol);
@@ -2121,6 +2321,9 @@ impl<'gc> VM<'gc> {
     fn intl_currency_symbol<'a>(options: &IntlNumberFormatOptions, currency: &'a str) -> &'a str {
         if options.currency_display == "code" || options.currency_display == "name" {
             return currency;
+        }
+        if currency == "EUR" {
+            return "€";
         }
         if currency != "USD" {
             return currency;
@@ -2269,7 +2472,17 @@ impl<'gc> VM<'gc> {
     fn intl_format_compact_decimal(options: &IntlNumberFormatOptions, value: f64) -> Option<String> {
         let locale = options.resolved_locale.as_str();
         let compact_display = options.compact_display.as_deref().unwrap_or("short");
-        let (divisor, suffix) = if locale.starts_with("en") {
+        let (divisor, suffix) = if locale.starts_with("en-IN") {
+            if value >= 10_000_000.0 {
+                (10_000_000.0, if compact_display == "long" { " crore" } else { "Cr" })
+            } else if value >= 100_000.0 {
+                (100_000.0, if compact_display == "long" { " lakh" } else { "L" })
+            } else if value >= 1_000.0 {
+                (1_000.0, if compact_display == "long" { " thousand" } else { "K" })
+            } else {
+                return Some(Self::intl_format_compact_plain(options, value, false));
+            }
+        } else if locale.starts_with("en") {
             #[allow(clippy::if_same_then_else)]
             if value >= 1_000_000_000.0 {
                 (1_000_000.0, if compact_display == "long" { " million" } else { "M" })
@@ -3243,7 +3456,7 @@ impl<'gc> VM<'gc> {
             rounding_priority: "auto".to_string(),
             rounding_increment: 1,
             trailing_zero_display: "auto".to_string(),
-            use_grouping: true,
+            use_grouping: IntlUseGrouping::Auto,
             minimum_integer_digits: 1,
             minimum_fraction_digits: 0,
             maximum_fraction_digits: 3,
@@ -3389,9 +3602,13 @@ impl<'gc> VM<'gc> {
         )? {
             out.trailing_zero_display = trailing_zero_display;
         }
-        if let Some(use_grouping) = self.intl_boolean_option_from_value(ctx, raw_options.get("useGrouping"))? {
-            out.use_grouping = use_grouping;
-        }
+        out.use_grouping = if let Some(use_grouping) = self.intl_use_grouping_option(ctx, raw_options.get("useGrouping"))? {
+            use_grouping
+        } else if out.notation == "compact" {
+            IntlUseGrouping::Min2
+        } else {
+            IntlUseGrouping::Auto
+        };
         if let Some(minimum_integer_digits) =
             self.intl_default_u8_option_value(ctx, raw_options.get("minimumIntegerDigits"), "minimumIntegerDigits", 1, 21)?
         {
@@ -3558,14 +3775,29 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn intl_boolean_option_from_value(&mut self, _ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<Option<bool>, Value<'gc>> {
+    fn intl_use_grouping_option(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+    ) -> Result<Option<IntlUseGrouping>, Value<'gc>> {
         let Some(value) = value else {
             return Ok(None);
         };
-        if matches!(value, Value::Undefined) {
-            return Ok(None);
+        match value {
+            Value::Undefined => Ok(None),
+            Value::Boolean(true) => Ok(Some(IntlUseGrouping::Always)),
+            Value::Boolean(false) | Value::Null => Ok(Some(IntlUseGrouping::False)),
+            Value::Number(number) if *number == 0.0 => Ok(Some(IntlUseGrouping::False)),
+            Value::String(text) => match crate::unicode::utf16_to_utf8(text).as_str() {
+                "" => Ok(Some(IntlUseGrouping::False)),
+                "min2" => Ok(Some(IntlUseGrouping::Min2)),
+                "auto" => Ok(Some(IntlUseGrouping::Auto)),
+                "always" => Ok(Some(IntlUseGrouping::Always)),
+                "true" | "false" => Ok(Some(IntlUseGrouping::Auto)),
+                _ => Err(self.make_range_error_object(ctx, "Invalid option value")),
+            },
+            _ => Err(self.make_range_error_object(ctx, "Invalid option value")),
         }
-        Ok(Some(value.to_truthy()))
     }
 
     fn intl_rounding_increment_option(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<Option<u16>, Value<'gc>> {
@@ -3640,7 +3872,10 @@ impl<'gc> VM<'gc> {
         if let Some(compact_display) = &options.compact_display {
             obj.insert("__intl_compact_display__".to_string(), Value::from(compact_display.as_str()));
         }
-        obj.insert("__intl_use_grouping__".to_string(), Value::Boolean(options.use_grouping));
+        obj.insert(
+            "__intl_use_grouping__".to_string(),
+            Self::intl_use_grouping_value(&options.use_grouping),
+        );
         obj.insert(
             "__intl_minimum_integer_digits__".to_string(),
             Value::Number(options.minimum_integer_digits as f64),
@@ -4430,6 +4665,73 @@ impl<'gc> VM<'gc> {
         own_data_from_legacy_map(&intl.borrow(), kind)
     }
 
+    fn intl_service_get_prototype_from_constructor(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_value: &Value<'gc>,
+        kind: &str,
+    ) -> Result<Value<'gc>, Value<'gc>> {
+        let prototype = self.read_named_property(ctx, ctor_value, "prototype");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if matches!(
+            prototype,
+            Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)
+        ) && !prototype.is_symbol_value()
+        {
+            return Ok(prototype);
+        }
+        if let Some(Value::Object(origin_global)) = self.constructor_origin_global(ctx, ctor_value) {
+            let intl = self.read_named_property(ctx, &Value::Object(origin_global), "Intl");
+            if self.pending_throw.is_none() {
+                let ctor = self.read_named_property(ctx, &intl, kind);
+                if self.pending_throw.is_none() {
+                    let prototype = self.read_named_property(ctx, &ctor, "prototype");
+                    if self.pending_throw.is_none() {
+                        return Ok(prototype);
+                    }
+                }
+            }
+            self.pending_throw = None;
+        }
+        Ok(self
+            .intl_service_constructor_from_global(kind)
+            .map(|ctor| self.read_named_property(ctx, &ctor, "prototype"))
+            .unwrap_or(Value::Undefined))
+    }
+
+    fn intl_use_grouping_value(mode: &IntlUseGrouping) -> Value<'gc> {
+        match mode {
+            IntlUseGrouping::False => Value::Boolean(false),
+            IntlUseGrouping::Auto => Value::from("auto"),
+            IntlUseGrouping::Always => Value::from("always"),
+            IntlUseGrouping::Min2 => Value::from("min2"),
+        }
+    }
+
+    fn intl_use_grouping_value_from_object(obj: &IndexMap<String, Value<'gc>>) -> Value<'gc> {
+        match obj.get("__intl_use_grouping__") {
+            Some(Value::Boolean(false)) => Value::Boolean(false),
+            Some(Value::String(text)) => Value::String(text.clone()),
+            _ => Value::from("auto"),
+        }
+    }
+
+    fn intl_should_use_grouping(integer_digits: &str, options: &IntlNumberFormatOptions) -> bool {
+        match options.use_grouping {
+            IntlUseGrouping::False => false,
+            IntlUseGrouping::Auto | IntlUseGrouping::Always => true,
+            IntlUseGrouping::Min2 => {
+                let grouped = Self::intl_group_integer_digits(integer_digits, options);
+                let separator = Self::intl_group_separator(options);
+                let separator_count = grouped.chars().filter(|ch| *ch == separator).count();
+                let first_separator = grouped.find(separator);
+                separator_count >= 2 || first_separator.is_some_and(|idx| idx >= 2)
+            }
+        }
+    }
+
     fn intl_service_kind_from_ctor_host(name: &str) -> Option<&'static str> {
         match name {
             "intl.collator.ctor" => Some("Collator"),
@@ -4770,7 +5072,15 @@ impl IntlNumberFormatOptions {
                 Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
                 _ => "auto".to_string(),
             },
-            use_grouping: !matches!(obj.get("__intl_use_grouping__"), Some(Value::Boolean(false))),
+            use_grouping: match obj.get("__intl_use_grouping__") {
+                Some(Value::Boolean(false)) => IntlUseGrouping::False,
+                Some(Value::String(text)) => match crate::unicode::utf16_to_utf8(text).as_str() {
+                    "always" => IntlUseGrouping::Always,
+                    "min2" => IntlUseGrouping::Min2,
+                    _ => IntlUseGrouping::Auto,
+                },
+                _ => IntlUseGrouping::Auto,
+            },
             minimum_integer_digits: match obj.get("__intl_minimum_integer_digits__") {
                 Some(Value::Number(value)) => *value as u8,
                 _ => 1,
@@ -4866,7 +5176,7 @@ struct IntlNumberFormatOptions {
     rounding_priority: String,
     rounding_increment: u16,
     trailing_zero_display: String,
-    use_grouping: bool,
+    use_grouping: IntlUseGrouping,
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,
     maximum_fraction_digits: u8,
@@ -4896,4 +5206,12 @@ enum IntlFormattedNumberInput {
     Number(f64),
     BigInt(String),
     DecimalString(String),
+}
+
+#[derive(Clone, Copy)]
+enum IntlUseGrouping {
+    False,
+    Auto,
+    Always,
+    Min2,
 }

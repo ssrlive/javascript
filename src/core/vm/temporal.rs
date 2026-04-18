@@ -3935,8 +3935,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = (None, None);
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
@@ -3986,8 +3985,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = (None, None);
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
@@ -4111,8 +4109,7 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("timeZone is not allowed"));
         }
 
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = (None, None);
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
@@ -4162,8 +4159,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = (None, None);
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
@@ -4282,8 +4278,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = (None, None);
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
@@ -4620,8 +4615,7 @@ impl<'gc> VM<'gc> {
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
         let day = self.temporal_optional_trunc_i32_property(ctx, value, "day")?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, &calendar, "Invalid Temporal input")?;
         let month = self.temporal_optional_trunc_i32_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
@@ -4766,8 +4760,7 @@ impl<'gc> VM<'gc> {
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
         let day = self.temporal_optional_trunc_i32_property(ctx, value, "day")?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, &calendar, "Invalid Temporal input")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
@@ -5038,7 +5031,7 @@ impl<'gc> VM<'gc> {
         let month_code = if matches!(month_code_value, Value::Undefined) {
             None
         } else {
-            Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?)
+            Some(self.temporal_month_code_text_property(ctx, &month_code_value)?)
         };
         let nanosecond = self.temporal_optional_u16_property(ctx, value, "nanosecond")?;
         let offset_value = self.read_named_property(ctx, value, "offset");
@@ -5180,7 +5173,7 @@ impl<'gc> VM<'gc> {
         if matches!(raw, Value::Undefined) {
             return Ok(None);
         }
-        let text = self.temporal_textual_property(ctx, &raw, key)?;
+        let text = self.temporal_month_code_text_property(ctx, &raw)?;
         Ok(Some(
             MonthCode::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?,
         ))
@@ -5204,6 +5197,48 @@ impl<'gc> VM<'gc> {
         Ok(Some(
             TinyAsciiStr::from_str(&text).map_err(|_| TemporalError::range().with_message("Invalid era"))?,
         ))
+    }
+
+    fn temporal_read_era_fields_if_needed(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &Value<'gc>,
+        calendar: &Calendar,
+        invalid_input_message: &'static str,
+    ) -> Result<(Option<TinyAsciiStr<19>>, Option<i32>), TemporalError> {
+        if calendar.identifier() == "iso8601" {
+            return Ok((None, None));
+        }
+        let era = self.temporal_optional_era_value(ctx, value, "era", invalid_input_message)?;
+        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        Ok((era, era_year))
+    }
+
+    fn temporal_month_code_text_property(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<String, TemporalError> {
+        match value {
+            Value::String(text) => Ok(crate::unicode::utf16_to_utf8(text)),
+            v if self.temporal_is_object_like(v) => {
+                let to_string = self.read_named_property(ctx, value, "toString");
+                if self.pending_throw.is_some() {
+                    return Err(TemporalError::r#type().with_message("monthCode must be a string"));
+                }
+                if !self.is_callable_value(&to_string) {
+                    return Err(TemporalError::r#type().with_message("monthCode must be a string"));
+                }
+                let result = match self.vm_call_function_value(ctx, &to_string, value, &[]) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                        return Err(TemporalError::r#type().with_message("monthCode must be a string"));
+                    }
+                };
+                match result {
+                    Value::String(text) => Ok(crate::unicode::utf16_to_utf8(&text)),
+                    _ => Err(TemporalError::r#type().with_message("monthCode must be a string")),
+                }
+            }
+            _ => Err(TemporalError::r#type().with_message("monthCode must be a string")),
+        }
     }
 
     fn temporal_era_to_value<'a, const N: usize>(era: Option<TinyAsciiStr<N>>) -> Value<'a> {
@@ -5458,8 +5493,7 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, &calendar, "Invalid Temporal input")?;
         let month = {
             let raw = self.read_named_property(ctx, value, "month");
             if self.pending_throw.is_some() {
@@ -5533,8 +5567,7 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal.PlainMonthDay input"));
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal.PlainMonthDay input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, &calendar, "Invalid Temporal.PlainMonthDay input")?;
         let day = {
             let raw = self.read_named_property(ctx, value, "day");
             if self.pending_throw.is_some() {
@@ -5666,8 +5699,7 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Invalid Temporal input"));
         }
         let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
-        let era = self.temporal_optional_era_value(ctx, value, "era", "Invalid Temporal input")?;
-        let era_year = self.temporal_optional_trunc_i32_property(ctx, value, "eraYear")?;
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, &calendar, "Invalid Temporal input")?;
         let month = self.temporal_optional_i32_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
@@ -5744,7 +5776,7 @@ impl<'gc> VM<'gc> {
         }
         let month_code = match month_code_value {
             Value::Undefined => None,
-            _ => Some(self.temporal_textual_property(ctx, &month_code_value, "monthCode")?),
+            _ => Some(self.temporal_month_code_text_property(ctx, &month_code_value)?),
         };
         let year = self.temporal_optional_i32_property(ctx, value, "year")?;
         let month_from_code = match month_code.as_deref() {
@@ -5788,8 +5820,9 @@ impl<'gc> VM<'gc> {
                         return Err(TemporalError::r#type().with_message("Invalid Temporal.ZonedDateTime input"));
                     }
                     let day = self.temporal_optional_trunc_i32_property(ctx, v, "day")?;
-                    let era = self.temporal_optional_era_value(ctx, v, "era", "Invalid Temporal.ZonedDateTime input")?;
-                    let era_year = self.temporal_optional_trunc_i32_property(ctx, v, "eraYear")?;
+                    let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
+                    let (era, era_year) =
+                        self.temporal_read_era_fields_if_needed(ctx, v, &calendar, "Invalid Temporal.ZonedDateTime input")?;
                     let hour = self.temporal_optional_trunc_i32_property(ctx, v, "hour")?;
                     let microsecond = self.temporal_optional_trunc_i32_property(ctx, v, "microsecond")?;
                     let millisecond = self.temporal_optional_trunc_i32_property(ctx, v, "millisecond")?;
@@ -5837,7 +5870,6 @@ impl<'gc> VM<'gc> {
                         return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
                     }
 
-                    let calendar = self.temporal_calendar_from_like_with_iso_default(ctx, &calendar_value)?;
                     let time_zone = self
                         .temporal_time_zone_from_like_arg(ctx, &time_zone_value)?
                         .ok_or_else(|| TemporalError::r#type().with_message("Missing timeZone"))?;

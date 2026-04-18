@@ -13093,7 +13093,10 @@ impl<'gc> VM<'gc> {
                     let to_key = to_idx.to_string();
                     let from_present = match self.array_like_has_index(ctx, &target, &from_key, from_idx as usize) {
                         Ok(v) => v,
-                        Err(v) => return v,
+                        Err(v) => {
+                            self.pending_throw = Some(v);
+                            return Value::Undefined;
+                        }
                     };
 
                     if from_present {

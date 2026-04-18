@@ -244,7 +244,12 @@ impl<'gc> VM<'gc> {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Constructor Intl.Locale requires 'new'"));
                 return Value::Undefined;
             }
-            return match self.intl_construct_service_instance(ctx, kind, None, args) {
+            let ctor_value = self
+                .new_target_stack
+                .last()
+                .filter(|value| !matches!(value, Value::Undefined))
+                .cloned();
+            return match self.intl_construct_service_instance(ctx, kind, ctor_value.as_ref(), args) {
                 Ok(value) => value,
                 Err(err) => {
                     self.pending_throw = Some(err);
@@ -305,6 +310,7 @@ impl<'gc> VM<'gc> {
             }
             "intl.pluralRules.select" => self.intl_plural_rules_select(ctx, receiver, args.first()),
             "intl.pluralRules.selectRange" => self.intl_plural_rules_select_range(ctx, receiver, args.first(), args.get(1)),
+            "intl.displayNames.resolvedOptions" => self.intl_resolved_options_for_kind(ctx, receiver, "DisplayNames"),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
             "intl.segmenter.segment" => {
                 let Some(segmenter) = self.intl_require_initialized_service(ctx, receiver, Some("Segmenter")) else {
@@ -396,7 +402,17 @@ impl<'gc> VM<'gc> {
             if display_name != "Locale" {
                 proto.insert(
                     "resolvedOptions".to_string(),
-                    Self::make_host_fn_with_name_len(ctx, "intl.service.resolvedOptions", "resolvedOptions", 0.0, false),
+                    Self::make_host_fn_with_name_len(
+                        ctx,
+                        if display_name == "DisplayNames" {
+                            "intl.displayNames.resolvedOptions"
+                        } else {
+                            "intl.service.resolvedOptions"
+                        },
+                        "resolvedOptions",
+                        0.0,
+                        false,
+                    ),
                 );
                 mark_nonenumerable(&mut proto, "resolvedOptions");
             }
@@ -547,7 +563,19 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        let ctor = Self::make_host_fn_with_name_len(ctx, host_name, display_name, if display_name == "Locale" { 1.0 } else { 0.0 }, true);
+        let ctor = Self::make_host_fn_with_name_len(
+            ctx,
+            host_name,
+            display_name,
+            if display_name == "Locale" {
+                1.0
+            } else if display_name == "DisplayNames" {
+                2.0
+            } else {
+                0.0
+            },
+            true,
+        );
         if let Value::Object(ctor_obj) = &ctor {
             let mut ctor_borrow = ctor_obj.borrow_mut(ctx);
             ctor_borrow.insert("prototype".to_string(), prototype.clone());
@@ -592,6 +620,11 @@ impl<'gc> VM<'gc> {
         if kind == "Locale" {
             return self.intl_construct_locale(ctx, ctor_value, args);
         }
+        let ctor_value = ctor_value
+            .cloned()
+            .or_else(|| self.intl_service_constructor_from_global(kind))
+            .unwrap_or(Value::Undefined);
+        let prototype = self.intl_service_get_prototype_from_constructor(ctx, &ctor_value, kind)?;
         let requested_locales = self.intl_canonicalize_locale_list(ctx, args.first())?;
         #[allow(clippy::if_same_then_else)]
         let collator_opts = if kind == "Collator" {
@@ -645,13 +678,6 @@ impl<'gc> VM<'gc> {
             None
         };
 
-        let ctor_value = ctor_value
-            .cloned()
-            .or_else(|| self.intl_service_constructor_from_global(kind))
-            .unwrap_or(Value::Undefined);
-
-        let prototype = self.intl_service_get_prototype_from_constructor(ctx, &ctor_value, kind)?;
-
         let mut obj = IndexMap::new();
         if !matches!(prototype, Value::Undefined) {
             obj.insert("__proto__".to_string(), prototype);
@@ -694,9 +720,8 @@ impl<'gc> VM<'gc> {
         if let Some(options) = plural_rules_options {
             self.intl_store_plural_rules_options(&mut obj, &options);
         }
-        if let Some((display_type, fallback)) = display_names_options {
-            obj.insert("__intl_type__".to_string(), Value::from(display_type.as_str()));
-            obj.insert("__intl_fallback__".to_string(), Value::from(fallback.as_str()));
+        if let Some(options) = display_names_options {
+            self.intl_store_display_names_options(&mut obj, &options);
         }
 
         if kind == "Segmenter"
@@ -707,6 +732,22 @@ impl<'gc> VM<'gc> {
                 obj.insert("__segments_proto__".to_string(), proto);
             }
             if let Some(proto) = borrow.get("__segment_iter_proto__").cloned() {
+                obj.insert("__segment_iter_proto__".to_string(), proto);
+            }
+        }
+        if kind == "Segmenter"
+            && (!obj.contains_key("__segments_proto__") || !obj.contains_key("__segment_iter_proto__"))
+            && let Some(Value::Object(default_ctor)) = self.intl_service_constructor_from_global("Segmenter")
+        {
+            let borrow = default_ctor.borrow();
+            if !obj.contains_key("__segments_proto__")
+                && let Some(proto) = borrow.get("__segments_proto__").cloned()
+            {
+                obj.insert("__segments_proto__".to_string(), proto);
+            }
+            if !obj.contains_key("__segment_iter_proto__")
+                && let Some(proto) = borrow.get("__segment_iter_proto__").cloned()
+            {
                 obj.insert("__segment_iter_proto__".to_string(), proto);
             }
         }
@@ -753,7 +794,17 @@ impl<'gc> VM<'gc> {
         let Some(obj) = self.intl_require_initialized_service(ctx, receiver, None) else {
             return Value::Undefined;
         };
+        self.intl_resolved_options_from_object(ctx, &obj)
+    }
 
+    fn intl_resolved_options_for_kind(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, kind: &str) -> Value<'gc> {
+        let Some(obj) = self.intl_require_initialized_service(ctx, receiver, Some(kind)) else {
+            return Value::Undefined;
+        };
+        self.intl_resolved_options_from_object(ctx, &obj)
+    }
+
+    fn intl_resolved_options_from_object(&self, ctx: &GcContext<'gc>, obj: &Gc<GcCell<IndexMap<String, Value<'gc>>>>) -> Value<'gc> {
         let mut result = IndexMap::new();
         let borrow = obj.borrow();
         if let Some(locale) = borrow.get("__intl_locale__").cloned() {
@@ -1050,6 +1101,10 @@ impl<'gc> VM<'gc> {
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "DisplayNames")
         {
             result.insert(
+                "style".to_string(),
+                borrow.get("__intl_style__").cloned().unwrap_or_else(|| Value::from("long")),
+            );
+            result.insert(
                 "type".to_string(),
                 borrow.get("__intl_type__").cloned().unwrap_or_else(|| Value::from("language")),
             );
@@ -1057,6 +1112,9 @@ impl<'gc> VM<'gc> {
                 "fallback".to_string(),
                 borrow.get("__intl_fallback__").cloned().unwrap_or_else(|| Value::from("code")),
             );
+            if let Some(language_display) = borrow.get("__intl_language_display__").cloned() {
+                result.insert("languageDisplay".to_string(), language_display);
+            }
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "ListFormat") {
             result.insert(
                 "type".to_string(),
@@ -1293,14 +1351,13 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "value is required");
             return Value::Undefined;
         };
-        let display_type = receiver.and_then(|receiver| match receiver {
-            Value::Object(obj) => obj.borrow().get("__intl_type__").cloned(),
-            _ => None,
-        });
-        let fallback = receiver.and_then(|receiver| match receiver {
-            Value::Object(obj) => obj.borrow().get("__intl_fallback__").cloned(),
-            _ => None,
-        });
+        let Some(display_names) = self.intl_require_initialized_service(ctx, receiver, Some("DisplayNames")) else {
+            return Value::Undefined;
+        };
+        let borrow = display_names.borrow();
+        let display_type = borrow.get("__intl_type__").cloned();
+        let fallback = borrow.get("__intl_fallback__").cloned();
+        drop(borrow);
         let fallback_none = matches!(fallback, Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == "none");
         match self.vm_to_string_like_spec(ctx, value) {
             Ok(text) => {
@@ -1308,26 +1365,33 @@ impl<'gc> VM<'gc> {
                     Some(Value::String(kind)) => crate::unicode::utf16_to_utf8(&kind),
                     _ => String::new(),
                 };
+                let canonical = match self.intl_display_names_canonical_code(ctx, display_type.as_str(), &text) {
+                    Ok(canonical) => canonical,
+                    Err(err) => {
+                        self.pending_throw = Some(err);
+                        return Value::Undefined;
+                    }
+                };
                 let supported = match display_type.as_str() {
-                    "calendar" => Self::intl_supported_calendar(&text).is_some(),
+                    "calendar" => Self::intl_supported_calendar(&canonical).is_some(),
                     "currency" => {
-                        let upper = text.to_ascii_uppercase();
-                        Self::intl_is_well_formed_currency_code(&text)
+                        let upper = canonical.to_ascii_uppercase();
+                        Self::intl_is_well_formed_currency_code(&canonical)
                             && INTL_SUPPORTED_CURRENCIES.iter().any(|candidate| *candidate == upper)
                     }
-                    "numberingSystem" => Self::intl_supported_numbering_system(&text).is_some(),
+                    "numberingSystem" => Self::intl_supported_numbering_system(&canonical).is_some(),
                     _ => true,
                 };
                 if supported {
                     match display_type.as_str() {
-                        "currency" => Value::from(text.to_ascii_uppercase().as_str()),
-                        "calendar" | "numberingSystem" => Value::from(text.to_ascii_lowercase().as_str()),
-                        _ => Value::from(text.as_str()),
+                        "currency" => Value::from(canonical.to_ascii_uppercase().as_str()),
+                        "calendar" | "numberingSystem" => Value::from(canonical.to_ascii_lowercase().as_str()),
+                        _ => Value::from(canonical.as_str()),
                     }
                 } else if fallback_none {
                     Value::Undefined
                 } else {
-                    Value::from(text.as_str())
+                    Value::from(canonical.as_str())
                 }
             }
             Err(err) => {
@@ -1695,6 +1759,60 @@ impl<'gc> VM<'gc> {
             }
         }
         Value::Undefined
+    }
+
+    fn intl_display_names_canonical_code(&self, ctx: &GcContext<'gc>, display_type: &str, code: &str) -> Result<String, Value<'gc>> {
+        match display_type {
+            "language" => {
+                if code.eq_ignore_ascii_case("root") || code.contains('_') || code.split('-').any(|part| part.len() == 1) {
+                    return Err(self.make_range_error_object(ctx, "Invalid language code"));
+                }
+                self.intl_validate_locale_tag(ctx, code)?;
+                let base = Self::intl_locale_without_unicode_extension(code);
+                let components = Self::intl_locale_base_components(&base);
+                if components.language == "und"
+                    || (components.language.len() == 4 && components.language.chars().all(|ch| ch.is_ascii_alphabetic()))
+                {
+                    return Err(self.make_range_error_object(ctx, "Invalid language code"));
+                }
+                Ok(Self::intl_canonicalize_locale_tag(code))
+            }
+            "region" => {
+                let is_alpha = code.len() == 2 && code.chars().all(|ch| ch.is_ascii_alphabetic());
+                let is_numeric = code.len() == 3 && code.chars().all(|ch| ch.is_ascii_digit());
+                if !is_alpha && !is_numeric {
+                    return Err(self.make_range_error_object(ctx, "Invalid region code"));
+                }
+                Ok(code.to_ascii_uppercase())
+            }
+            "calendar" => {
+                if !Self::intl_is_valid_unicode_type_identifier(code) {
+                    return Err(self.make_range_error_object(ctx, "Invalid calendar code"));
+                }
+                Ok(code.to_ascii_lowercase())
+            }
+            "dateTimeField" => {
+                if !matches!(
+                    code,
+                    "era"
+                        | "year"
+                        | "quarter"
+                        | "month"
+                        | "weekOfYear"
+                        | "weekday"
+                        | "day"
+                        | "dayPeriod"
+                        | "hour"
+                        | "minute"
+                        | "second"
+                        | "timeZoneName"
+                ) {
+                    return Err(self.make_range_error_object(ctx, "Invalid dateTimeField code"));
+                }
+                Ok(code.to_string())
+            }
+            _ => Ok(code.to_string()),
+        }
     }
 
     fn intl_duration_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
@@ -6227,13 +6345,17 @@ impl<'gc> VM<'gc> {
         &mut self,
         ctx: &GcContext<'gc>,
         options: Option<&Value<'gc>>,
-    ) -> Result<(String, String), Value<'gc>> {
+    ) -> Result<IntlDisplayNamesOptions, Value<'gc>> {
         let Some(options) = options else {
             return Err(self.make_type_error_object(ctx, "type is required"));
         };
         if matches!(options, Value::Undefined) || matches!(options, Value::Null) || !Self::intl_is_object_like(options) {
             return Err(self.make_type_error_object(ctx, "type is required"));
         }
+        let _ = self.intl_locale_matcher_option(ctx, Some(options))?;
+        let style = self
+            .intl_string_option(ctx, options, "style", &["narrow", "short", "long"], Some("long"))?
+            .unwrap_or_else(|| "long".to_string());
         let display_type = self
             .intl_string_option(
                 ctx,
@@ -6246,7 +6368,20 @@ impl<'gc> VM<'gc> {
         let fallback = self
             .intl_string_option(ctx, options, "fallback", &["code", "none"], Some("code"))?
             .unwrap_or_else(|| "code".to_string());
-        Ok((display_type, fallback))
+        let language_display = if display_type == "language" {
+            Some(
+                self.intl_string_option(ctx, options, "languageDisplay", &["dialect", "standard"], Some("dialect"))?
+                    .unwrap_or_else(|| "dialect".to_string()),
+            )
+        } else {
+            None
+        };
+        Ok(IntlDisplayNamesOptions {
+            display_type,
+            fallback,
+            style,
+            language_display,
+        })
     }
 
     fn intl_string_option(
@@ -6312,6 +6447,15 @@ impl<'gc> VM<'gc> {
         );
         obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
         obj.insert("__intl_numeric__".to_string(), Value::from(options.numeric.as_str()));
+    }
+
+    fn intl_store_display_names_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlDisplayNamesOptions) {
+        obj.insert("__intl_type__".to_string(), Value::from(options.display_type.as_str()));
+        obj.insert("__intl_fallback__".to_string(), Value::from(options.fallback.as_str()));
+        obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
+        if let Some(language_display) = &options.language_display {
+            obj.insert("__intl_language_display__".to_string(), Value::from(language_display.as_str()));
+        }
     }
 
     fn intl_store_segmenter_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlSegmenterOptions) {
@@ -8103,6 +8247,13 @@ struct IntlPluralRulesOptions {
 struct IntlSegmenterOptions {
     resolved_locale: String,
     granularity: String,
+}
+
+struct IntlDisplayNamesOptions {
+    display_type: String,
+    fallback: String,
+    style: String,
+    language_display: Option<String>,
 }
 
 struct IntlNumberFormatOptions {

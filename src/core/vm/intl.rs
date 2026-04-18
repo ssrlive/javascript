@@ -6,6 +6,129 @@ const INTL_DEFAULT_LOCALE: &str = "en-US";
 const INTL_COLLATOR_BOUND_COMPARE_SLOT: &str = "@@sym:900001";
 const INTL_DATE_TIME_FORMAT_BOUND_FORMAT_SLOT: &str = "@@sym:900003";
 const INTL_NUMBER_FORMAT_BOUND_FORMAT_SLOT: &str = "@@sym:900004";
+const INTL_SUPPORTED_CALENDARS: &[&str] = &[
+    "buddhist",
+    "chinese",
+    "coptic",
+    "dangi",
+    "ethioaa",
+    "ethiopic",
+    "gregory",
+    "hebrew",
+    "indian",
+    "islamic-civil",
+    "islamic-tbla",
+    "islamic-umalqura",
+    "iso8601",
+    "japanese",
+    "persian",
+    "roc",
+];
+const INTL_SUPPORTED_COLLATIONS: &[&str] = &[
+    "compat", "dict", "emoji", "eor", "phonebk", "phonetic", "pinyin", "searchjl", "stroke", "trad", "unihan", "zhuyin",
+];
+const INTL_SUPPORTED_CURRENCIES: &[&str] = &[
+    "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB",
+    "BRL",
+];
+const INTL_SUPPORTED_NUMBERING_SYSTEMS: &[&str] = &[
+    "adlm", "ahom", "arab", "arabext", "armn", "armnlow", "bali", "beng", "bhks", "brah", "cakm", "cham", "cyrl", "deva", "diak", "ethi",
+    "fullwide", "gara", "geor", "gong", "gonm", "grek", "greklow", "gujr", "gukh", "guru", "hanidays", "hanidec", "hans", "hansfin",
+    "hant", "hantfin", "hebr", "hmng", "hmnp", "java", "jpan", "jpanfin", "jpanyear", "kali", "kawi", "khmr", "knda", "krai", "lana",
+    "lanatham", "laoo", "latn", "lepc", "limb", "mathbold", "mathdbl", "mathmono", "mathsanb", "mathsans", "mlym", "modi", "mong", "mroo",
+    "mtei", "mymr", "mymrepka", "mymrpao", "mymrshan", "mymrtlng", "nagm", "newa", "nkoo", "olck", "onao", "orya", "osma", "outlined",
+    "rohg", "roman", "romanlow", "saur", "segment", "shrd", "sind", "sinh", "sora", "sund", "sunu", "takr", "talu", "taml", "tamldec",
+    "telu", "thai", "tibt", "tirh", "tnsa", "tols", "vaii", "wara", "wcho",
+];
+const INTL_SUPPORTED_TIME_ZONES: &[&str] = &[
+    "Africa/Abidjan",
+    "America/New_York",
+    "Antarctica/McMurdo",
+    "Arctic/Longyearbyen",
+    "Asia/Tokyo",
+    "Atlantic/Azores",
+    "Australia/Sydney",
+    "Etc/GMT+1",
+    "Etc/GMT+10",
+    "Etc/GMT+11",
+    "Etc/GMT+12",
+    "Etc/GMT+2",
+    "Etc/GMT+3",
+    "Etc/GMT+4",
+    "Etc/GMT+5",
+    "Etc/GMT+6",
+    "Etc/GMT+7",
+    "Etc/GMT+8",
+    "Etc/GMT+9",
+    "Etc/GMT-1",
+    "Etc/GMT-10",
+    "Etc/GMT-11",
+    "Etc/GMT-12",
+    "Etc/GMT-13",
+    "Etc/GMT-14",
+    "Etc/GMT-2",
+    "Etc/GMT-3",
+    "Etc/GMT-4",
+    "Etc/GMT-5",
+    "Etc/GMT-6",
+    "Etc/GMT-7",
+    "Etc/GMT-8",
+    "Etc/GMT-9",
+    "Europe/London",
+    "Indian/Maldives",
+    "Pacific/Apia",
+    "Pacific/Honolulu",
+    "Pacific/Kiritimati",
+    "Pacific/Marquesas",
+    "UTC",
+];
+const INTL_SUPPORTED_UNITS: &[&str] = &[
+    "acre",
+    "bit",
+    "byte",
+    "celsius",
+    "centimeter",
+    "day",
+    "degree",
+    "fahrenheit",
+    "fluid-ounce",
+    "foot",
+    "gallon",
+    "gigabit",
+    "gigabyte",
+    "gram",
+    "hectare",
+    "hour",
+    "inch",
+    "kilobit",
+    "kilobyte",
+    "kilogram",
+    "kilometer",
+    "liter",
+    "megabit",
+    "megabyte",
+    "meter",
+    "microsecond",
+    "mile",
+    "mile-scandinavian",
+    "milliliter",
+    "millimeter",
+    "millisecond",
+    "minute",
+    "month",
+    "nanosecond",
+    "ounce",
+    "percent",
+    "petabyte",
+    "pound",
+    "second",
+    "stone",
+    "terabit",
+    "terabyte",
+    "week",
+    "yard",
+    "year",
+];
 
 const INTL_SERVICE_CTORS: &[(&str, &str)] = &[
     ("Collator", "intl.collator.ctor"),
@@ -66,6 +189,12 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "intl.getCanonicalLocales", "getCanonicalLocales", 1.0, false),
         );
         mark_nonenumerable(&mut intl, "getCanonicalLocales");
+        intl.insert(
+            "supportedValuesOf".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "intl.supportedValuesOf", "supportedValuesOf", 1.0, false),
+        );
+        mark_nonenumerable(&mut intl, "supportedValuesOf");
+        Self::insert_property_with_attributes(&mut intl, "@@sym:4", &Value::from("Intl"), false, false, true);
 
         for (name, host_name) in INTL_SERVICE_CTORS {
             let ctor = self.intl_make_constructor(ctx, object_proto.clone(), name, host_name);
@@ -110,10 +239,13 @@ impl<'gc> VM<'gc> {
         }
         match name {
             "intl.getCanonicalLocales" => self.intl_get_canonical_locales(ctx, args.first()),
+            "intl.supportedValuesOf" => self.intl_supported_values_of(ctx, args.first()),
+            "intl.displayNames.of" => self.intl_display_names_of(ctx, receiver, args.first()),
             "intl.collator.get.compare" => self.intl_collator_compare_getter(ctx, receiver),
             "intl.collator.compare" => self.intl_collator_compare(ctx, receiver, args),
             "intl.dateTimeFormat.get.format" => self.intl_date_time_format_getter(ctx, receiver),
             "intl.dateTimeFormat.format" => self.intl_date_time_format_format(ctx, receiver, args),
+            "intl.locale.toString" => self.intl_locale_to_string(ctx, receiver),
             "intl.numberFormat.get.format" => self.intl_number_format_getter(ctx, receiver),
             "intl.numberFormat.format" => self.intl_number_format_format(ctx, receiver, args),
             "intl.service.resolvedOptions" => self.intl_resolved_options(ctx, receiver),
@@ -175,10 +307,17 @@ impl<'gc> VM<'gc> {
                 Self::make_host_fn_with_name_len(ctx, "intl.service.resolvedOptions", "resolvedOptions", 0.0, false),
             );
             mark_nonenumerable(&mut proto, "resolvedOptions");
+            Self::insert_property_with_attributes(
+                &mut proto,
+                "@@sym:4",
+                &Value::from(format!("Intl.{display_name}").as_str()),
+                false,
+                false,
+                true,
+            );
             if display_name == "Collator" {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.collator.get.compare", "get compare", 0.0, false);
                 Self::insert_getter_property_with_attributes(&mut proto, "compare", &getter, false, true);
-                Self::insert_property_with_attributes(&mut proto, "@@sym:4", &Value::from("Intl.Collator"), false, false, true);
             }
             if display_name == "DateTimeFormat" {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.dateTimeFormat.get.format", "get format", 0.0, false);
@@ -194,6 +333,20 @@ impl<'gc> VM<'gc> {
                     Self::make_host_fn_with_name_len(ctx, "intl.segmenter.segment", "segment", 1.0, false),
                 );
                 mark_nonenumerable(&mut proto, "segment");
+            }
+            if display_name == "DisplayNames" {
+                proto.insert(
+                    "of".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.displayNames.of", "of", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "of");
+            }
+            if display_name == "Locale" {
+                proto.insert(
+                    "toString".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.locale.toString", "toString", 0.0, false),
+                );
+                mark_nonenumerable(&mut proto, "toString");
             }
         }
 
@@ -239,6 +392,9 @@ impl<'gc> VM<'gc> {
         ctor_value: Option<&Value<'gc>>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Value<'gc>> {
+        if kind == "Locale" {
+            return self.intl_construct_locale(ctx, ctor_value, args);
+        }
         let requested_locales = self.intl_canonicalize_locale_list(ctx, args.first())?;
         #[allow(clippy::if_same_then_else)]
         let collator_opts = if kind == "Collator" {
@@ -258,6 +414,16 @@ impl<'gc> VM<'gc> {
         };
         let number_format_opts = if kind == "NumberFormat" {
             Some(self.intl_read_number_format_options(ctx, &requested_locales, args.get(1))?)
+        } else {
+            None
+        };
+        let relative_time_format_numbering_system = if kind == "RelativeTimeFormat" {
+            self.intl_read_relative_time_format_numbering_system(ctx, args.get(1))?
+        } else {
+            None
+        };
+        let display_names_options = if kind == "DisplayNames" {
+            Some(self.intl_read_display_names_options(ctx, args.get(1))?)
         } else {
             None
         };
@@ -293,6 +459,13 @@ impl<'gc> VM<'gc> {
         }
         if let Some(opts) = number_format_opts {
             self.intl_store_number_format_options(&mut obj, &opts);
+        }
+        if let Some(numbering_system) = relative_time_format_numbering_system {
+            obj.insert("__intl_numbering_system__".to_string(), Value::from(numbering_system.as_str()));
+        }
+        if let Some((display_type, fallback)) = display_names_options {
+            obj.insert("__intl_type__".to_string(), Value::from(display_type.as_str()));
+            obj.insert("__intl_fallback__".to_string(), Value::from(fallback.as_str()));
         }
 
         if kind == "Segmenter"
@@ -427,6 +600,9 @@ impl<'gc> VM<'gc> {
             if let Some(currency) = borrow.get("__intl_currency__").cloned() {
                 result.insert("currency".to_string(), currency);
             }
+            if let Some(unit) = borrow.get("__intl_unit__").cloned() {
+                result.insert("unit".to_string(), unit);
+            }
             result.insert(
                 "useGrouping".to_string(),
                 borrow.get("__intl_use_grouping__").cloned().unwrap_or(Value::Boolean(true)),
@@ -449,6 +625,25 @@ impl<'gc> VM<'gc> {
                     .cloned()
                     .unwrap_or(Value::Number(3.0)),
             );
+        } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "RelativeTimeFormat")
+        {
+            result.insert(
+                "numberingSystem".to_string(),
+                borrow
+                    .get("__intl_numbering_system__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("latn")),
+            );
+        } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "DisplayNames")
+        {
+            result.insert(
+                "type".to_string(),
+                borrow.get("__intl_type__").cloned().unwrap_or_else(|| Value::from("language")),
+            );
+            result.insert(
+                "fallback".to_string(),
+                borrow.get("__intl_fallback__").cloned().unwrap_or_else(|| Value::from("code")),
+            );
         }
         Value::Object(new_gc_cell_ptr(ctx, result))
     }
@@ -464,6 +659,184 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
         }
+    }
+
+    fn intl_supported_values_of(&mut self, ctx: &GcContext<'gc>, key: Option<&Value<'gc>>) -> Value<'gc> {
+        let key = match self.vm_to_string_like_spec(ctx, key.unwrap_or(&Value::Undefined)) {
+            Ok(key) => key,
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                return Value::Undefined;
+            }
+        };
+        let values = match key.as_str() {
+            "calendar" => INTL_SUPPORTED_CALENDARS,
+            "collation" => INTL_SUPPORTED_COLLATIONS,
+            "currency" => INTL_SUPPORTED_CURRENCIES,
+            "numberingSystem" => INTL_SUPPORTED_NUMBERING_SYSTEMS,
+            "timeZone" => INTL_SUPPORTED_TIME_ZONES,
+            "unit" => INTL_SUPPORTED_UNITS,
+            _ => {
+                self.pending_throw = Some(self.make_range_error_object(ctx, "Invalid key"));
+                return Value::Undefined;
+            }
+        };
+        Value::Array(new_gc_cell_ptr(
+            ctx,
+            VmArrayData::new(values.iter().map(|value| Value::from(*value)).collect()),
+        ))
+    }
+
+    fn intl_construct_locale(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        ctor_value: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+    ) -> Result<Value<'gc>, Value<'gc>> {
+        let requested_locales = self.intl_canonicalize_locale_list(ctx, args.first())?;
+        let requested = requested_locales.first().cloned().unwrap_or_else(|| "und".to_string());
+        let locale_info = Self::intl_locale_info(&requested);
+        let mut calendar = locale_info
+            .unicode_keywords
+            .get("ca")
+            .and_then(|value| Self::intl_supported_calendar(value));
+        let mut collation = locale_info
+            .unicode_keywords
+            .get("co")
+            .and_then(|value| Self::intl_collator_supported_collation("", value));
+        let mut numbering_system = locale_info
+            .unicode_keywords
+            .get("nu")
+            .and_then(|value| Self::intl_supported_numbering_system(value));
+        if let Some(options) = args.get(1)
+            && !matches!(options, Value::Undefined)
+        {
+            if matches!(options, Value::Null) {
+                return Err(self.make_type_error_object(ctx, "options must not be null"));
+            }
+            if Self::intl_is_object_like(options) {
+                if let Some(value) = self.intl_string_option(ctx, options, "calendar", &[], None)? {
+                    if !Self::intl_is_valid_unicode_type_identifier(&value) {
+                        return Err(self.make_range_error_object(ctx, "Invalid calendar"));
+                    }
+                    calendar = Self::intl_supported_calendar(&value);
+                }
+                if let Some(value) = self.intl_string_option(ctx, options, "collation", &[], None)? {
+                    if !Self::intl_is_valid_unicode_type_identifier(&value) {
+                        return Err(self.make_range_error_object(ctx, "Invalid collation"));
+                    }
+                    collation = Self::intl_collator_supported_collation("", &value);
+                }
+                if let Some(value) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
+                    if !Self::intl_is_valid_unicode_type_identifier(&value) {
+                        return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
+                    }
+                    numbering_system = Self::intl_supported_numbering_system(&value);
+                }
+            }
+        }
+        let locale = Self::intl_locale_with_extensions(
+            &locale_info.base,
+            calendar.as_deref(),
+            collation.as_deref(),
+            numbering_system.as_deref(),
+        );
+        let ctor_value = ctor_value
+            .cloned()
+            .or_else(|| self.intl_service_constructor_from_global("Locale"))
+            .unwrap_or(Value::Undefined);
+        let prototype = self.read_named_property(ctx, &ctor_value, "prototype");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        let mut obj = IndexMap::new();
+        if !matches!(prototype, Value::Undefined) {
+            obj.insert("__proto__".to_string(), prototype);
+        }
+        obj.insert("__intl_kind__".to_string(), Value::from("Locale"));
+        obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
+        obj.insert("baseName".to_string(), Value::from(locale_info.base.as_str()));
+        Self::insert_property_with_attributes(
+            &mut obj,
+            "calendar",
+            &calendar.as_deref().map(Value::from).unwrap_or(Value::Undefined),
+            false,
+            false,
+            true,
+        );
+        Self::insert_property_with_attributes(
+            &mut obj,
+            "collation",
+            &collation.as_deref().map(Value::from).unwrap_or(Value::Undefined),
+            false,
+            false,
+            true,
+        );
+        Self::insert_property_with_attributes(
+            &mut obj,
+            "numberingSystem",
+            &numbering_system.as_deref().map(Value::from).unwrap_or(Value::Undefined),
+            false,
+            false,
+            true,
+        );
+        Ok(Value::Object(new_gc_cell_ptr(ctx, obj)))
+    }
+
+    fn intl_display_names_of(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(value) = value else {
+            self.throw_type_error(ctx, "value is required");
+            return Value::Undefined;
+        };
+        let display_type = receiver.and_then(|receiver| match receiver {
+            Value::Object(obj) => obj.borrow().get("__intl_type__").cloned(),
+            _ => None,
+        });
+        let fallback = receiver.and_then(|receiver| match receiver {
+            Value::Object(obj) => obj.borrow().get("__intl_fallback__").cloned(),
+            _ => None,
+        });
+        let fallback_none = matches!(fallback, Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == "none");
+        match self.vm_to_string_like_spec(ctx, value) {
+            Ok(text) => {
+                let display_type = match display_type {
+                    Some(Value::String(kind)) => crate::unicode::utf16_to_utf8(&kind),
+                    _ => String::new(),
+                };
+                let supported = match display_type.as_str() {
+                    "calendar" => Self::intl_supported_calendar(&text).is_some(),
+                    "currency" => {
+                        let upper = text.to_ascii_uppercase();
+                        Self::intl_is_well_formed_currency_code(&text)
+                            && INTL_SUPPORTED_CURRENCIES.iter().any(|candidate| *candidate == upper)
+                    }
+                    "numberingSystem" => Self::intl_supported_numbering_system(&text).is_some(),
+                    _ => true,
+                };
+                if supported {
+                    match display_type.as_str() {
+                        "currency" => Value::from(text.to_ascii_uppercase().as_str()),
+                        "calendar" | "numberingSystem" => Value::from(text.to_ascii_lowercase().as_str()),
+                        _ => Value::from(text.as_str()),
+                    }
+                } else if fallback_none {
+                    Value::Undefined
+                } else {
+                    Value::from(text.as_str())
+                }
+            }
+            Err(err) => {
+                self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
+                Value::Undefined
+            }
+        }
+    }
+
+    fn intl_locale_to_string(&mut self, _ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(Value::Object(obj)) = receiver else {
+            return Value::Undefined;
+        };
+        obj.borrow().get("__intl_locale__").cloned().unwrap_or(Value::Undefined)
     }
 
     fn intl_read_constructor_options(&mut self, ctx: &GcContext<'gc>, kind: &str, options: Option<&Value<'gc>>) -> Result<(), Value<'gc>> {
@@ -1166,6 +1539,7 @@ impl<'gc> VM<'gc> {
             numbering_system: "latn".to_string(),
             style: "decimal".to_string(),
             currency: None,
+            unit: None,
             use_grouping: true,
             minimum_integer_digits: 1,
             minimum_fraction_digits: 0,
@@ -1181,7 +1555,9 @@ impl<'gc> VM<'gc> {
             if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
                 return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
             }
-            out.numbering_system = numbering_system;
+            if let Some(numbering_system) = Self::intl_supported_numbering_system(&numbering_system) {
+                out.numbering_system = numbering_system;
+            }
         }
         if let Some(style) = self.intl_string_option(ctx, options, "style", &["decimal", "percent", "currency", "unit"], Some("decimal"))? {
             out.style = style;
@@ -1198,6 +1574,12 @@ impl<'gc> VM<'gc> {
         if out.style == "currency" && out.currency.is_none() {
             return Err(self.make_type_error_object(ctx, "currency style requires currency"));
         }
+        if out.style == "unit"
+            && let Some(unit) = self.intl_string_option(ctx, options, "unit", &[], None)?
+            && INTL_SUPPORTED_UNITS.contains(&unit.as_str())
+        {
+            out.unit = Some(unit);
+        }
         Ok(out)
     }
 
@@ -1209,6 +1591,9 @@ impl<'gc> VM<'gc> {
         obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
         if let Some(currency) = &options.currency {
             obj.insert("__intl_currency__".to_string(), Value::from(currency.as_str()));
+        }
+        if let Some(unit) = &options.unit {
+            obj.insert("__intl_unit__".to_string(), Value::from(unit.as_str()));
         }
         obj.insert("__intl_use_grouping__".to_string(), Value::Boolean(options.use_grouping));
         obj.insert(
@@ -1223,6 +1608,52 @@ impl<'gc> VM<'gc> {
             "__intl_maximum_fraction_digits__".to_string(),
             Value::Number(options.maximum_fraction_digits as f64),
         );
+    }
+
+    fn intl_read_relative_time_format_numbering_system(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<Option<String>, Value<'gc>> {
+        let Some(options) = options else {
+            return Ok(None);
+        };
+        if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+            return Ok(None);
+        }
+        if let Some(numbering_system) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
+            if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
+                return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
+            }
+            return Ok(Self::intl_supported_numbering_system(&numbering_system));
+        }
+        Ok(None)
+    }
+
+    fn intl_read_display_names_options(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<(String, String), Value<'gc>> {
+        let Some(options) = options else {
+            return Err(self.make_type_error_object(ctx, "type is required"));
+        };
+        if matches!(options, Value::Undefined) || matches!(options, Value::Null) || !Self::intl_is_object_like(options) {
+            return Err(self.make_type_error_object(ctx, "type is required"));
+        }
+        let display_type = self
+            .intl_string_option(
+                ctx,
+                options,
+                "type",
+                &["language", "region", "script", "currency", "calendar", "dateTimeField"],
+                None,
+            )?
+            .ok_or_else(|| self.make_type_error_object(ctx, "type is required"))?;
+        let fallback = self
+            .intl_string_option(ctx, options, "fallback", &["code", "none"], Some("code"))?
+            .unwrap_or_else(|| "code".to_string());
+        Ok((display_type, fallback))
     }
 
     fn intl_string_option(
@@ -1630,17 +2061,11 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn intl_collator_supported_collation(locale_base: &str, value: &str) -> Option<String> {
+    fn intl_collator_supported_collation(_locale_base: &str, value: &str) -> Option<String> {
         if value.is_empty() || matches!(value, "default" | "search" | "standard" | "invalid") {
             return None;
         }
-        match value {
-            "phonebk" if locale_base.eq_ignore_ascii_case("de") || locale_base.to_ascii_lowercase().starts_with("de-") => {
-                Some("phonebk".to_string())
-            }
-            "eor" => Some("eor".to_string()),
-            _ => None,
-        }
+        INTL_SUPPORTED_COLLATIONS.contains(&value).then_some(value.to_string())
     }
 
     fn intl_collator_resolved_locale(locale_base: &str, collation: &str, numeric: Option<bool>, case_first: Option<&str>) -> String {
@@ -1700,6 +2125,30 @@ impl<'gc> VM<'gc> {
         out
     }
 
+    fn intl_locale_with_extensions(
+        locale_base: &str,
+        calendar: Option<&str>,
+        collation: Option<&str>,
+        numbering_system: Option<&str>,
+    ) -> String {
+        let mut out = locale_base.to_string();
+        let mut extensions = Vec::new();
+        if let Some(calendar) = calendar {
+            extensions.push(format!("ca-{}", calendar));
+        }
+        if let Some(collation) = collation {
+            extensions.push(format!("co-{}", collation));
+        }
+        if let Some(numbering_system) = numbering_system {
+            extensions.push(format!("nu-{}", numbering_system));
+        }
+        if !extensions.is_empty() {
+            out.push_str("-u-");
+            out.push_str(&extensions.join("-"));
+        }
+        out
+    }
+
     fn intl_has_explicit_date_time_components(ctx: &GcContext<'gc>, vm: &mut VM<'gc>, options: &Value<'gc>) -> Result<bool, Value<'gc>> {
         for key in [
             "weekday",
@@ -1737,6 +2186,17 @@ impl<'gc> VM<'gc> {
     fn intl_normalize_time_zone_name(value: &str) -> Option<String> {
         if value.eq_ignore_ascii_case("utc") {
             return Some("UTC".to_string());
+        }
+        if let Some(rest) = value.strip_prefix("Etc/GMT").or_else(|| value.strip_prefix("etc/gmt")) {
+            let sign = rest.chars().next()?;
+            if !matches!(sign, '+' | '-') {
+                return None;
+            }
+            let digits = &rest[1..];
+            if digits.is_empty() || digits.len() > 2 || !digits.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            return Some(format!("Etc/GMT{sign}{digits}"));
         }
         if let Some(offset) = Self::intl_normalize_offset_time_zone(value) {
             return Some(offset);
@@ -1781,17 +2241,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_supported_calendar(value: &str) -> Option<String> {
-        match value {
-            "gregory" | "iso8601" => Some(value.to_string()),
-            _ => None,
-        }
+        INTL_SUPPORTED_CALENDARS.contains(&value).then_some(value.to_string())
     }
 
     fn intl_supported_numbering_system(value: &str) -> Option<String> {
-        match value {
-            "latn" | "arab" => Some(value.to_string()),
-            _ => None,
-        }
+        INTL_SUPPORTED_NUMBERING_SYSTEMS.contains(&value).then_some(value.to_string())
     }
 
     fn intl_supported_hour_cycle(value: &str) -> Option<String> {
@@ -2197,6 +2651,7 @@ struct IntlNumberFormatOptions {
     numbering_system: String,
     style: String,
     currency: Option<String>,
+    unit: Option<String>,
     use_grouping: bool,
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,

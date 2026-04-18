@@ -226,7 +226,9 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Value<'gc> {
         if let Some(kind) = Self::intl_service_kind_from_ctor_host(name) {
-            if name == "intl.locale.ctor" && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined)) {
+            if matches!(name, "intl.locale.ctor" | "intl.durationFormat.ctor")
+                && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined))
+            {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Constructor Intl.Locale requires 'new'"));
                 return Value::Undefined;
             }
@@ -518,7 +520,12 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
-        let generic_numbering_system_options = if matches!(kind, "RelativeTimeFormat" | "DurationFormat") {
+        let duration_format_opts = if kind == "DurationFormat" {
+            Some(self.intl_read_duration_format_options(ctx, &requested_locales, args.get(1))?)
+        } else {
+            None
+        };
+        let generic_numbering_system_options = if kind == "RelativeTimeFormat" {
             Some(self.intl_read_generic_numbering_system_options(ctx, &requested_locales, args.get(1))?)
         } else {
             None
@@ -546,6 +553,7 @@ impl<'gc> VM<'gc> {
             .map(|opts| opts.resolved_locale.clone())
             .or_else(|| date_time_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| number_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
+            .or_else(|| duration_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| generic_numbering_system_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
@@ -558,6 +566,9 @@ impl<'gc> VM<'gc> {
         }
         if let Some(opts) = number_format_opts {
             self.intl_store_number_format_options(&mut obj, &opts);
+        }
+        if let Some(opts) = duration_format_opts {
+            self.intl_store_duration_format_options(&mut obj, &opts);
         }
         if let Some(options) = generic_numbering_system_options {
             obj.insert(
@@ -807,6 +818,39 @@ impl<'gc> VM<'gc> {
                     .cloned()
                     .unwrap_or_else(|| Value::from("latn")),
             );
+            result.insert(
+                "style".to_string(),
+                borrow.get("__intl_style__").cloned().unwrap_or_else(|| Value::from("short")),
+            );
+            for key in [
+                "years",
+                "yearsDisplay",
+                "months",
+                "monthsDisplay",
+                "weeks",
+                "weeksDisplay",
+                "days",
+                "daysDisplay",
+                "hours",
+                "hoursDisplay",
+                "minutes",
+                "minutesDisplay",
+                "seconds",
+                "secondsDisplay",
+                "milliseconds",
+                "millisecondsDisplay",
+                "microseconds",
+                "microsecondsDisplay",
+                "nanoseconds",
+                "nanosecondsDisplay",
+            ] {
+                if let Some(value) = borrow.get(&format!("__intl_{}__", key)).cloned() {
+                    result.insert(key.to_string(), value);
+                }
+            }
+            if let Some(fractional_digits) = borrow.get("__intl_fractional_digits__").cloned() {
+                result.insert("fractionalDigits".to_string(), fractional_digits);
+            }
         } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "DisplayNames")
         {
             result.insert(
@@ -4666,6 +4710,108 @@ impl<'gc> VM<'gc> {
         Ok(out)
     }
 
+    fn intl_read_duration_format_options(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        requested_locales: &[String],
+        options: Option<&Value<'gc>>,
+    ) -> Result<IntlDurationFormatOptions, Value<'gc>> {
+        let requested_locale = requested_locales
+            .first()
+            .cloned()
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let locale_info = Self::intl_locale_info(&requested_locale);
+        let locale_base = if locale_info.base.is_empty() {
+            INTL_DEFAULT_LOCALE.to_string()
+        } else {
+            locale_info.base.clone()
+        };
+        let ext_numbering_system = locale_info
+            .unicode_keywords
+            .get("nu")
+            .and_then(|value| Self::intl_supported_numbering_system(value));
+        let mut out = IntlDurationFormatOptions::new(
+            Self::intl_numbering_system_resolved_locale(&locale_base, ext_numbering_system.as_deref()),
+            ext_numbering_system.clone().unwrap_or_else(|| "latn".to_string()),
+        );
+        let Some(options) = options else {
+            return Ok(out);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(out);
+        }
+        if matches!(options, Value::Null) {
+            return Err(self.make_type_error_object(ctx, "options must not be null"));
+        }
+        let boxed_options = self.intl_box_primitive_if_needed(ctx, options);
+        if !Self::intl_is_object_like(&boxed_options) {
+            return Ok(out);
+        }
+
+        let _ = self.intl_locale_matcher_option(ctx, Some(&boxed_options))?;
+        let mut option_numbering_system = None;
+        if let Some(numbering_system) = self.intl_string_option(ctx, &boxed_options, "numberingSystem", &[], None)? {
+            if !Self::intl_is_valid_unicode_type_identifier(&numbering_system) {
+                return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
+            }
+            if let Some(numbering_system) = Self::intl_supported_numbering_system(&numbering_system) {
+                out.numbering_system = numbering_system;
+                option_numbering_system = Some(out.numbering_system.clone());
+            }
+        }
+        out.resolved_locale = Self::intl_numbering_system_resolved_locale(
+            &locale_base,
+            if option_numbering_system.is_none() {
+                ext_numbering_system.as_deref()
+            } else if ext_numbering_system.as_deref() == option_numbering_system.as_deref() {
+                option_numbering_system.as_deref()
+            } else {
+                None
+            },
+        );
+        out.style = self
+            .intl_string_option(ctx, &boxed_options, "style", &["long", "short", "narrow", "digital"], Some("short"))?
+            .unwrap_or_else(|| "short".to_string());
+        let fractional_digits_value = self.read_named_property(ctx, &boxed_options, "fractionalDigits");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        out.fractional_digits = self.intl_default_u8_option_value(ctx, Some(&fractional_digits_value), "fractionalDigits", 0, 9)?;
+
+        let mut prev_style = None::<String>;
+        for (slot, allowed) in [
+            ("years", &["long", "short", "narrow"][..]),
+            ("months", &["long", "short", "narrow"][..]),
+            ("weeks", &["long", "short", "narrow"][..]),
+            ("days", &["long", "short", "narrow"][..]),
+            ("hours", &["long", "short", "narrow", "numeric", "2-digit"][..]),
+            ("minutes", &["long", "short", "narrow", "numeric", "2-digit"][..]),
+            ("seconds", &["long", "short", "narrow", "numeric", "2-digit"][..]),
+            ("milliseconds", &["long", "short", "narrow", "numeric"][..]),
+            ("microseconds", &["long", "short", "narrow", "numeric"][..]),
+            ("nanoseconds", &["long", "short", "narrow", "numeric"][..]),
+        ] {
+            let explicit_style = self.intl_string_option(ctx, &boxed_options, slot, allowed, None)?;
+            let display_key = format!("{slot}Display");
+            let display = self
+                .intl_string_option(ctx, &boxed_options, &display_key, &["auto", "always"], Some("auto"))?
+                .unwrap_or_else(|| "auto".to_string());
+            let style = if let Some(style) = explicit_style {
+                if prev_style.as_deref().is_some_and(|prev| {
+                    matches!(prev, "numeric" | "2-digit") && !Self::intl_duration_is_following_numeric_style(slot, &style)
+                }) {
+                    return Err(self.make_range_error_object(ctx, "Invalid duration unit style"));
+                }
+                style
+            } else {
+                Self::intl_default_duration_unit_style(&out.style, slot, prev_style.as_deref())
+            };
+            out.set_unit(slot, style.clone(), display);
+            prev_style = Some(style);
+        }
+        Ok(out)
+    }
+
     fn intl_read_display_names_options(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -4717,6 +4863,32 @@ impl<'gc> VM<'gc> {
         Ok(Some(value))
     }
 
+    fn intl_store_duration_format_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlDurationFormatOptions) {
+        obj.insert(
+            "__intl_numbering_system__".to_string(),
+            Value::from(options.numbering_system.as_str()),
+        );
+        obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
+        for (slot, unit_options) in [
+            ("years", &options.years),
+            ("months", &options.months),
+            ("weeks", &options.weeks),
+            ("days", &options.days),
+            ("hours", &options.hours),
+            ("minutes", &options.minutes),
+            ("seconds", &options.seconds),
+            ("milliseconds", &options.milliseconds),
+            ("microseconds", &options.microseconds),
+            ("nanoseconds", &options.nanoseconds),
+        ] {
+            obj.insert(format!("__intl_{}__", slot), Value::from(unit_options.style.as_str()));
+            obj.insert(format!("__intl_{}Display__", slot), Value::from(unit_options.display.as_str()));
+        }
+        if let Some(fractional_digits) = options.fractional_digits {
+            obj.insert("__intl_fractional_digits__".to_string(), Value::Number(fractional_digits as f64));
+        }
+    }
+
     fn intl_boolean_option(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>, key: &str) -> Result<Option<bool>, Value<'gc>> {
         let value = self.read_named_property(ctx, options, key);
         if let Some(thrown) = self.pending_throw.take() {
@@ -4730,6 +4902,33 @@ impl<'gc> VM<'gc> {
 
     fn intl_locale_without_unicode_extension(locale: &str) -> String {
         Self::intl_locale_info(locale).base
+    }
+
+    fn intl_default_duration_unit_style(base_style: &str, unit: &str, prev_style: Option<&str>) -> String {
+        if matches!(prev_style, Some("numeric" | "2-digit" | "fractional")) {
+            if matches!(unit, "minutes" | "seconds") {
+                "2-digit".to_string()
+            } else {
+                "numeric".to_string()
+            }
+        } else if base_style == "digital" {
+            match unit {
+                "hours" => "numeric".to_string(),
+                "minutes" | "seconds" => "2-digit".to_string(),
+                "milliseconds" | "microseconds" | "nanoseconds" => "numeric".to_string(),
+                _ => "short".to_string(),
+            }
+        } else {
+            base_style.to_string()
+        }
+    }
+
+    fn intl_duration_is_following_numeric_style(unit: &str, style: &str) -> bool {
+        match unit {
+            "minutes" | "seconds" => matches!(style, "numeric" | "2-digit"),
+            "milliseconds" | "microseconds" | "nanoseconds" => style == "numeric",
+            _ => true,
+        }
     }
 
     fn intl_locale_value_tag(value: &Value<'gc>) -> Option<String> {
@@ -6272,6 +6471,28 @@ struct IntlDateTimeFormatOptions {
     time_style: Option<String>,
 }
 
+struct IntlDurationUnitOptions {
+    style: String,
+    display: String,
+}
+
+struct IntlDurationFormatOptions {
+    resolved_locale: String,
+    numbering_system: String,
+    style: String,
+    years: IntlDurationUnitOptions,
+    months: IntlDurationUnitOptions,
+    weeks: IntlDurationUnitOptions,
+    days: IntlDurationUnitOptions,
+    hours: IntlDurationUnitOptions,
+    minutes: IntlDurationUnitOptions,
+    seconds: IntlDurationUnitOptions,
+    milliseconds: IntlDurationUnitOptions,
+    microseconds: IntlDurationUnitOptions,
+    nanoseconds: IntlDurationUnitOptions,
+    fractional_digits: Option<u8>,
+}
+
 struct IntlNumberFormatOptions {
     resolved_locale: String,
     numbering_system: String,
@@ -6299,6 +6520,54 @@ struct IntlNumberFormatOptions {
 struct IntlGenericNumberingSystemOptions {
     resolved_locale: String,
     numbering_system: String,
+}
+
+impl IntlDurationFormatOptions {
+    fn new(resolved_locale: String, numbering_system: String) -> Self {
+        Self {
+            resolved_locale,
+            numbering_system,
+            style: "short".to_string(),
+            years: IntlDurationUnitOptions::new("short", "auto"),
+            months: IntlDurationUnitOptions::new("short", "auto"),
+            weeks: IntlDurationUnitOptions::new("short", "auto"),
+            days: IntlDurationUnitOptions::new("short", "auto"),
+            hours: IntlDurationUnitOptions::new("short", "auto"),
+            minutes: IntlDurationUnitOptions::new("short", "auto"),
+            seconds: IntlDurationUnitOptions::new("short", "auto"),
+            milliseconds: IntlDurationUnitOptions::new("short", "auto"),
+            microseconds: IntlDurationUnitOptions::new("short", "auto"),
+            nanoseconds: IntlDurationUnitOptions::new("short", "auto"),
+            fractional_digits: None,
+        }
+    }
+
+    fn set_unit(&mut self, slot: &str, style: String, display: String) {
+        let target = match slot {
+            "years" => &mut self.years,
+            "months" => &mut self.months,
+            "weeks" => &mut self.weeks,
+            "days" => &mut self.days,
+            "hours" => &mut self.hours,
+            "minutes" => &mut self.minutes,
+            "seconds" => &mut self.seconds,
+            "milliseconds" => &mut self.milliseconds,
+            "microseconds" => &mut self.microseconds,
+            "nanoseconds" => &mut self.nanoseconds,
+            _ => return,
+        };
+        target.style = style;
+        target.display = display;
+    }
+}
+
+impl IntlDurationUnitOptions {
+    fn new(style: &str, display: &str) -> Self {
+        Self {
+            style: style.to_string(),
+            display: display.to_string(),
+        }
+    }
 }
 
 struct IntlExactDecimal {

@@ -2685,7 +2685,11 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
-    fn intl_canonicalize_locale_list(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<Vec<String>, Value<'gc>> {
+    pub(super) fn intl_canonicalize_locale_list(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: Option<&Value<'gc>>,
+    ) -> Result<Vec<String>, Value<'gc>> {
         let Some(value) = value else {
             return Ok(vec![]);
         };
@@ -2794,7 +2798,7 @@ impl<'gc> VM<'gc> {
         Value::Object(new_gc_cell_ptr(ctx, wrapper))
     }
 
-    fn intl_box_primitive_if_needed(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Value<'gc> {
+    pub(super) fn intl_box_primitive_if_needed(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Value<'gc> {
         if Self::intl_is_object_like(value) {
             value.clone()
         } else {
@@ -2915,7 +2919,7 @@ impl<'gc> VM<'gc> {
         compare
     }
 
-    fn intl_collator_compare(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+    pub(super) fn intl_collator_compare(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         let Some(collator_obj) = self.intl_require_initialized_service(ctx, receiver, Some("Collator")) else {
             return Value::Undefined;
         };
@@ -3199,18 +3203,19 @@ impl<'gc> VM<'gc> {
                 rest = rest.strip_prefix(prefix_literal).unwrap_or(rest);
                 parts.push(Self::intl_part_object(ctx, "literal", prefix_literal));
             }
+            let rendered_suffix_unit = Self::intl_render_unit_label(&options, &pattern.suffix_unit, rest);
             let numeric_end = if let Some(suffix_literal) = pattern.suffix_literal.as_deref() {
-                rest.strip_suffix(&(suffix_literal.to_string() + &pattern.suffix_unit))
+                rest.strip_suffix(&(suffix_literal.to_string() + &rendered_suffix_unit))
                     .map(|numeric| (numeric, Some(suffix_literal)))
             } else {
-                rest.strip_suffix(&pattern.suffix_unit).map(|numeric| (numeric, None))
+                rest.strip_suffix(&rendered_suffix_unit).map(|numeric| (numeric, None))
             };
             if let Some((numeric, suffix_literal)) = numeric_end {
                 parts.extend(Self::intl_number_string_parts(ctx, formatter, numeric));
                 if let Some(suffix_literal) = suffix_literal {
                     parts.push(Self::intl_part_object(ctx, "literal", suffix_literal));
                 }
-                parts.push(Self::intl_part_object(ctx, "unit", &pattern.suffix_unit));
+                parts.push(Self::intl_part_object(ctx, "unit", &rendered_suffix_unit));
                 return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
             }
         }
@@ -3757,7 +3762,7 @@ impl<'gc> VM<'gc> {
         let sig_count = digits.len() - first_nonzero;
         if sig_count > max_sig {
             let cut = first_nonzero + max_sig;
-            let round_up = digits.as_bytes().get(cut).is_some_and(|digit| *digit >= b'5');
+            let round_up = options.rounding_mode == "halfExpand" && digits.as_bytes().get(cut).is_some_and(|digit| *digit >= b'5');
             let removed = digits.len() - cut;
             digits.truncate(cut);
             let integer_removed = removed.saturating_sub(scale);
@@ -3944,11 +3949,7 @@ impl<'gc> VM<'gc> {
         if options.style == "unit"
             && let Some(pattern) = Self::intl_unit_pattern(options)
         {
-            let suffix_unit = if options.resolved_locale.starts_with("en") {
-                Self::intl_english_plural_unit(&pattern.suffix_unit, core)
-            } else {
-                pattern.suffix_unit.clone()
-            };
+            let suffix_unit = Self::intl_render_unit_label(options, &pattern.suffix_unit, core);
             if let Some(prefix_unit) = pattern.prefix_unit {
                 out.push_str(&prefix_unit);
             }
@@ -4057,7 +4058,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_english_plural_unit(unit: &str, core: &str) -> String {
-        if unit.ends_with("/h") || unit.len() == 1 {
+        if unit.ends_with("/h") || unit.len() == 1 || unit.contains(" per ") {
             return unit.to_string();
         }
         let normalized = core.replace([',', '.'], "");
@@ -4065,6 +4066,14 @@ impl<'gc> VM<'gc> {
             unit.to_string()
         } else {
             format!("{unit}s")
+        }
+    }
+
+    fn intl_render_unit_label(options: &IntlNumberFormatOptions, unit: &str, core: &str) -> String {
+        if options.resolved_locale.starts_with("en") {
+            Self::intl_english_plural_unit(unit, core)
+        } else {
+            unit.to_string()
         }
     }
 
@@ -6502,7 +6511,7 @@ impl<'gc> VM<'gc> {
         Ok(Some(value.to_truthy()))
     }
 
-    fn intl_locale_without_unicode_extension(locale: &str) -> String {
+    pub(super) fn intl_locale_without_unicode_extension(locale: &str) -> String {
         Self::intl_locale_info(locale).base
     }
 
@@ -7638,7 +7647,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_collator_sort_key(value: &str, options: &IntlCollatorOptions) -> String {
-        let mut normalized = value.nfd().collect::<String>();
+        let mut normalized = value.nfc().collect::<String>();
         if options.ignore_punctuation {
             normalized.retain(|ch| !ch.is_ascii_punctuation() && !ch.is_whitespace());
         }
@@ -7650,13 +7659,31 @@ impl<'gc> VM<'gc> {
                 .replace("Ö", "Oe")
                 .replace("ü", "ue")
                 .replace("Ü", "Ue");
+        } else if options.usage == "sort" && options.resolved_locale.starts_with("de") {
+            normalized = normalized
+                .replace("ä", "a\u{0002}")
+                .replace("Ä", "A\u{0002}")
+                .replace("ö", "o\u{0002}")
+                .replace("Ö", "O\u{0002}")
+                .replace("ü", "u\u{0002}")
+                .replace("Ü", "U\u{0002}");
         }
+        normalized = normalized.nfd().collect::<String>();
         match options.sensitivity.as_str() {
             "base" => Self::intl_collator_strip_accents(&normalized).to_ascii_lowercase(),
             "accent" => normalized.to_ascii_lowercase(),
-            "case" => Self::intl_collator_strip_accents(&normalized),
-            _ => normalized.to_ascii_lowercase(),
+            "case" => Self::intl_collator_case_key(&Self::intl_collator_strip_accents(&normalized)),
+            _ => Self::intl_collator_case_key(&normalized),
         }
+    }
+
+    fn intl_collator_case_key(value: &str) -> String {
+        let mut key = String::new();
+        for ch in value.chars() {
+            key.extend(ch.to_lowercase());
+            key.push(if ch.is_uppercase() { '\u{0001}' } else { '\u{0000}' });
+        }
+        key
     }
 
     fn intl_collator_strip_accents(value: &str) -> String {

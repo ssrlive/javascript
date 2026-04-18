@@ -194,9 +194,9 @@ impl<'gc> VM<'gc> {
                 self.throw_type_error(ctx, "this is not a Date object");
                 Value::Undefined
             }
-            "date.toLocaleDateString" => self.date_to_locale_string(ctx, receiver, args),
-            "date.toLocaleTimeString" => self.date_to_locale_string(ctx, receiver, args),
-            "date.toLocaleString" => self.date_to_locale_string(ctx, receiver, args),
+            "date.toLocaleDateString" => self.date_to_locale_string(ctx, receiver, args, "date"),
+            "date.toLocaleTimeString" => self.date_to_locale_string(ctx, receiver, args, "time"),
+            "date.toLocaleString" => self.date_to_locale_string(ctx, receiver, args, "all"),
             n if n.starts_with("date.set") => self.date_setter_host_fn(ctx, n, receiver, args),
             _ => {
                 log::warn!("Unhandled date host fn: {}", name);
@@ -205,7 +205,13 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn date_to_locale_string(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+    fn date_to_locale_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+        mode: &str,
+    ) -> Value<'gc> {
         let Some(Value::Object(obj)) = receiver else {
             self.throw_type_error(ctx, "this is not a Date object");
             return Value::Undefined;
@@ -218,7 +224,15 @@ impl<'gc> VM<'gc> {
             return Value::from("Invalid Date");
         }
 
-        let formatter = match self.intl_construct_service_instance(ctx, "DateTimeFormat", None, args) {
+        let formatter_args = match self.date_time_format_args_for_locale_string(ctx, args, mode) {
+            Ok(args) => args,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+
+        let formatter = match self.intl_construct_service_instance(ctx, "DateTimeFormat", None, &formatter_args) {
             Ok(value) => value,
             Err(err) => {
                 self.pending_throw = Some(err);
@@ -226,6 +240,92 @@ impl<'gc> VM<'gc> {
             }
         };
         self.intl_date_time_format_format(ctx, Some(&formatter), &[Value::Number(ms)])
+    }
+
+    fn date_time_format_args_for_locale_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        args: &[Value<'gc>],
+        mode: &str,
+    ) -> Result<Vec<Value<'gc>>, Value<'gc>> {
+        let locales = args.first().cloned().unwrap_or(Value::Undefined);
+        let options = args.get(1).cloned().unwrap_or(Value::Undefined);
+        if matches!(options, Value::Undefined) {
+            return Ok(vec![locales, Value::Object(self.date_locale_default_options(ctx, mode))]);
+        }
+        if matches!(options, Value::Null) {
+            return Ok(vec![locales, Value::Null]);
+        }
+        let boxed_options = if matches!(
+            options,
+            Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_)
+        ) {
+            options
+        } else {
+            self.intl_box_primitive_if_needed(ctx, &options)
+        };
+        let has_date_or_time_fields = [
+            "weekday",
+            "year",
+            "month",
+            "day",
+            "dayPeriod",
+            "hour",
+            "minute",
+            "second",
+            "fractionalSecondDigits",
+        ]
+        .into_iter()
+        .any(|key| {
+            let value = self.read_named_property(ctx, &boxed_options, key);
+            self.pending_throw.is_none() && !matches!(value, Value::Undefined)
+        });
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if has_date_or_time_fields {
+            return Ok(vec![locales, boxed_options]);
+        }
+
+        let mut merged = match boxed_options {
+            Value::Object(obj) => obj.borrow().clone(),
+            _ => IndexMap::new(),
+        };
+        for (key, value) in Self::date_locale_default_entries(mode) {
+            merged.entry(key.to_string()).or_insert(value);
+        }
+        Ok(vec![locales, Value::Object(new_gc_cell_ptr(ctx, merged))])
+    }
+
+    fn date_locale_default_options(&self, ctx: &GcContext<'gc>, mode: &str) -> ObjectHandle<'gc> {
+        let mut defaults = IndexMap::new();
+        for (key, value) in Self::date_locale_default_entries(mode) {
+            defaults.insert(key.to_string(), value);
+        }
+        new_gc_cell_ptr(ctx, defaults)
+    }
+
+    fn date_locale_default_entries(mode: &str) -> Vec<(&'static str, Value<'gc>)> {
+        match mode {
+            "date" => vec![
+                ("year", Value::from("numeric")),
+                ("month", Value::from("numeric")),
+                ("day", Value::from("numeric")),
+            ],
+            "time" => vec![
+                ("hour", Value::from("numeric")),
+                ("minute", Value::from("numeric")),
+                ("second", Value::from("numeric")),
+            ],
+            _ => vec![
+                ("year", Value::from("numeric")),
+                ("month", Value::from("numeric")),
+                ("day", Value::from("numeric")),
+                ("hour", Value::from("numeric")),
+                ("minute", Value::from("numeric")),
+                ("second", Value::from("numeric")),
+            ],
+        }
     }
 
     /// Initialize Date constructor and Date.prototype.

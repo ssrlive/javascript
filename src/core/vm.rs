@@ -10099,6 +10099,8 @@ impl<'gc> VM<'gc> {
                 }
                 Value::from(&out)
             }
+            "string.toLocaleLowerCase" => self.string_to_locale_case(ctx, receiver, args.first(), false),
+            "string.toLocaleUpperCase" => self.string_to_locale_case(ctx, receiver, args.first(), true),
             "string.localeCompare" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 if matches!(this_val, Value::Undefined | Value::Null) {
@@ -10106,19 +10108,28 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 let base = match self.vm_coerce_arg_to_string(ctx, this_val) {
-                    Some(s) => s.nfc().collect::<String>(),
+                    Some(s) => s,
                     None => return Value::Undefined,
                 };
                 let other = match self.vm_coerce_arg_to_string(ctx, args.first().unwrap_or(&Value::Undefined)) {
-                    Some(s) => s.nfc().collect::<String>(),
+                    Some(s) => s,
                     None => return Value::Undefined,
                 };
-                let ord = match base.cmp(&other) {
-                    std::cmp::Ordering::Less => -1.0,
-                    std::cmp::Ordering::Equal => 0.0,
-                    std::cmp::Ordering::Greater => 1.0,
+                let mut collator_args = Vec::new();
+                if args.len() >= 2 {
+                    collator_args.push(args[1].clone());
+                }
+                if args.len() >= 3 {
+                    collator_args.push(args[2].clone());
+                }
+                let collator = match self.intl_construct_service_instance(ctx, "Collator", None, &collator_args) {
+                    Ok(collator) => collator,
+                    Err(err) => {
+                        self.pending_throw = Some(err);
+                        return Value::Undefined;
+                    }
                 };
-                Value::Number(ord)
+                self.intl_collator_compare(ctx, Some(&collator), &[Value::from(base.as_str()), Value::from(other.as_str())])
             }
             "string.substr" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
@@ -12817,7 +12828,11 @@ impl<'gc> VM<'gc> {
                         self.throw_type_error(ctx, "Array.prototype.toLocaleString element method is not callable");
                         return Value::Undefined;
                     }
-                    let localized = match self.vm_call_function_value(ctx, &method, &element, args) {
+                    let locale_args = [
+                        args.first().cloned().unwrap_or(Value::Undefined),
+                        args.get(1).cloned().unwrap_or(Value::Undefined),
+                    ];
+                    let localized = match self.vm_call_function_value(ctx, &method, &element, &locale_args) {
                         Ok(v) => v,
                         Err(err) => {
                             self.set_pending_throw_from_error(&err);
@@ -19343,8 +19358,6 @@ impl<'gc> VM<'gc> {
         for (name, builtin_id, length) in [
             ("toString", BUILTIN_STRING_TOSTRING, 0.0),
             ("valueOf", BUILTIN_STRING_VALUEOF, 0.0),
-            ("toLocaleLowerCase", BUILTIN_STRING_TOLOWERCASE, 0.0),
-            ("toLocaleUpperCase", BUILTIN_STRING_TOUPPERCASE, 0.0),
             ("split", BUILTIN_STRING_SPLIT, 2.0),
             ("indexOf", BUILTIN_STRING_INDEXOF, 1.0),
             ("slice", BUILTIN_STRING_SLICE, 2.0),
@@ -19399,6 +19412,16 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "string.localeCompare", "localeCompare", 1.0, false),
         );
         mark_nonenumerable(&mut string_proto, "localeCompare");
+        string_proto.insert(
+            "toLocaleLowerCase".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "string.toLocaleLowerCase", "toLocaleLowerCase", 0.0, false),
+        );
+        mark_nonenumerable(&mut string_proto, "toLocaleLowerCase");
+        string_proto.insert(
+            "toLocaleUpperCase".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "string.toLocaleUpperCase", "toLocaleUpperCase", 0.0, false),
+        );
+        mark_nonenumerable(&mut string_proto, "toLocaleUpperCase");
         // Annex B: HTML wrapper methods and substr
         for (method, host_name, length) in [
             ("anchor", "string.anchor", 1.0),
@@ -21003,6 +21026,264 @@ impl<'gc> VM<'gc> {
                 None
             }
         }
+    }
+
+    fn string_to_locale_case(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        locales: Option<&Value<'gc>>,
+        upper: bool,
+    ) -> Value<'gc> {
+        let this_val = receiver.unwrap_or(&Value::Undefined);
+        if matches!(this_val, Value::Undefined | Value::Null) {
+            self.throw_type_error(ctx, "String.prototype method called on null or undefined");
+            return Value::Undefined;
+        }
+        let source = match self.vm_to_string_like_spec(ctx, this_val) {
+            Ok(source) => source,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return Value::Undefined;
+            }
+        };
+        let requested_locales = match self.intl_canonicalize_locale_list(ctx, locales) {
+            Ok(locales) => locales,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        let locale = requested_locales
+            .first()
+            .map(|locale| Self::intl_locale_without_unicode_extension(locale))
+            .unwrap_or_default();
+        let transformed = Self::string_transform_locale_case(&source, locale.as_str(), upper);
+        Value::from(transformed.as_str())
+    }
+
+    fn string_transform_locale_case(source: &str, locale: &str, upper: bool) -> String {
+        let language = locale.split('-').next().unwrap_or(locale);
+        if upper {
+            match language {
+                "tr" | "az" => Self::string_locale_uppercase_turkic(source),
+                "lt" => Self::string_locale_uppercase_lithuanian(source),
+                _ => source.to_uppercase(),
+            }
+        } else {
+            match language {
+                "tr" | "az" => Self::string_locale_lowercase_turkic(source),
+                "lt" => Self::string_locale_lowercase_lithuanian(source),
+                _ => source.to_lowercase(),
+            }
+        }
+    }
+
+    fn string_locale_lowercase_turkic(source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            match chars[i] {
+                '\u{0130}' => {
+                    out.push('i');
+                    i += 1;
+                }
+                'I' => {
+                    let mut j = i + 1;
+                    let mut saw_above = false;
+                    let mut remove_dot_index = None;
+                    while j < chars.len() {
+                        let ccc = Self::string_canonical_combining_class(chars[j]);
+                        if ccc == 0 {
+                            break;
+                        }
+                        if chars[j] == '\u{0307}' && !saw_above {
+                            remove_dot_index = Some(j);
+                            break;
+                        }
+                        if ccc == 230 {
+                            saw_above = true;
+                        }
+                        j += 1;
+                    }
+                    out.push(if remove_dot_index.is_some() { 'i' } else { '\u{0131}' });
+                    i += 1;
+                    while i < chars.len() {
+                        let ccc = Self::string_canonical_combining_class(chars[i]);
+                        if ccc == 0 {
+                            break;
+                        }
+                        if remove_dot_index == Some(i) {
+                            i += 1;
+                            continue;
+                        }
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                ch => {
+                    out.extend(ch.to_lowercase());
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    fn string_locale_uppercase_turkic(source: &str) -> String {
+        let mut out = String::new();
+        for ch in source.chars() {
+            match ch {
+                'i' => out.push('\u{0130}'),
+                '\u{0131}' => out.push('I'),
+                other => out.extend(other.to_uppercase()),
+            }
+        }
+        out
+    }
+
+    fn string_locale_lowercase_lithuanian(source: &str) -> String {
+        let chars: Vec<char> = source.nfd().collect();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            let ch = chars[i];
+            if matches!(ch, 'I' | 'J' | '\u{012E}') {
+                let mut j = i + 1;
+                let mut has_above = false;
+                let mut has_ogonek = false;
+                while j < chars.len() {
+                    let ccc = Self::string_canonical_combining_class(chars[j]);
+                    if ccc == 0 {
+                        break;
+                    }
+                    if chars[j] == '\u{0328}' {
+                        has_ogonek = true;
+                    }
+                    if ccc == 230 {
+                        has_above = true;
+                    }
+                    j += 1;
+                }
+                match ch {
+                    'I' if has_ogonek => out.push('\u{012F}'),
+                    'I' => out.push('i'),
+                    'J' => out.push('j'),
+                    '\u{012E}' => out.push('\u{012F}'),
+                    _ => {}
+                }
+                if has_above {
+                    out.push('\u{0307}');
+                }
+                i += 1;
+                while i < chars.len() {
+                    let ccc = Self::string_canonical_combining_class(chars[i]);
+                    if ccc == 0 {
+                        break;
+                    }
+                    if has_ogonek && chars[i] == '\u{0328}' {
+                        i += 1;
+                        continue;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+            out.extend(ch.to_lowercase());
+            i += 1;
+        }
+        out
+    }
+
+    fn string_locale_uppercase_lithuanian(source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < chars.len() {
+            let ch = chars[i];
+            if Self::string_is_soft_dotted(ch) {
+                out.extend(ch.to_uppercase());
+                i += 1;
+                while i < chars.len() {
+                    let ccc = Self::string_canonical_combining_class(chars[i]);
+                    if ccc == 0 {
+                        break;
+                    }
+                    if chars[i] != '\u{0307}' {
+                        out.push(chars[i]);
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            out.extend(ch.to_uppercase());
+            i += 1;
+        }
+        out
+    }
+
+    fn string_canonical_combining_class(ch: char) -> u8 {
+        match ch as u32 {
+            0x0300 | 0x0301 | 0x0303 | 0x0307 | 0x1D185 => 230,
+            0x0323 | 0x0325 | 0x101FD => 220,
+            0x0328 => 202,
+            0x0300..=0x036F => 1,
+            _ => 0,
+        }
+    }
+
+    fn string_is_soft_dotted(ch: char) -> bool {
+        matches!(
+            ch as u32,
+            0x0069
+                | 0x006A
+                | 0x012F
+                | 0x0249
+                | 0x0268
+                | 0x029D
+                | 0x02B2
+                | 0x03F3
+                | 0x0456
+                | 0x0458
+                | 0x1D62
+                | 0x1D96
+                | 0x1DA4
+                | 0x1DA8
+                | 0x1E2D
+                | 0x1ECB
+                | 0x2071
+                | 0x2148
+                | 0x2149
+                | 0x2C7C
+                | 0x1D422
+                | 0x1D423
+                | 0x1D456
+                | 0x1D457
+                | 0x1D48A
+                | 0x1D48B
+                | 0x1D4BE
+                | 0x1D4BF
+                | 0x1D4F2
+                | 0x1D4F3
+                | 0x1D526
+                | 0x1D527
+                | 0x1D55A
+                | 0x1D55B
+                | 0x1D58E
+                | 0x1D58F
+                | 0x1D5C2
+                | 0x1D5C3
+                | 0x1D5F6
+                | 0x1D5F7
+                | 0x1D62A
+                | 0x1D62B
+                | 0x1D65E
+                | 0x1D65F
+                | 0x1D692
+                | 0x1D693
+        )
     }
 
     fn is_regexp_like(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> Option<bool> {

@@ -627,12 +627,26 @@ impl<'gc> VM<'gc> {
                 "style".to_string(),
                 borrow.get("__intl_style__").cloned().unwrap_or_else(|| Value::from("decimal")),
             );
+            result.insert(
+                "notation".to_string(),
+                borrow.get("__intl_notation__").cloned().unwrap_or_else(|| Value::from("standard")),
+            );
             if let Some(currency) = borrow.get("__intl_currency__").cloned() {
                 result.insert("currency".to_string(), currency);
+            }
+            if let Some(currency_sign) = borrow.get("__intl_currency_sign__").cloned() {
+                result.insert("currencySign".to_string(), currency_sign);
             }
             if let Some(unit) = borrow.get("__intl_unit__").cloned() {
                 result.insert("unit".to_string(), unit);
             }
+            if let Some(compact_display) = borrow.get("__intl_compact_display__").cloned() {
+                result.insert("compactDisplay".to_string(), compact_display);
+            }
+            result.insert(
+                "signDisplay".to_string(),
+                borrow.get("__intl_sign_display__").cloned().unwrap_or_else(|| Value::from("auto")),
+            );
             result.insert(
                 "useGrouping".to_string(),
                 borrow.get("__intl_use_grouping__").cloned().unwrap_or(Value::Boolean(true)),
@@ -1491,6 +1505,11 @@ impl<'gc> VM<'gc> {
         while digits.len() < options.minimum_integer_digits as usize {
             digits.insert(0, '0');
         }
+        if options.notation == "compact" {
+            if let Some(formatted) = Self::intl_format_compact_integer(options, &digits) {
+                return Self::intl_apply_sign_and_affixes(options, negative, false, false, &formatted);
+            }
+        }
         let mut formatted = Self::intl_apply_grouping(&digits, options);
         if options.maximum_fraction_digits > 0 || options.minimum_fraction_digits > 0 {
             let fraction = "0".repeat(options.minimum_fraction_digits as usize);
@@ -1499,25 +1518,33 @@ impl<'gc> VM<'gc> {
                 formatted.push_str(&fraction);
             }
         }
-        Self::intl_affix_formatted_number(options, negative, &formatted)
+        let is_zeroish = digits.chars().all(|ch| ch == '0');
+        Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted)
     }
 
     fn intl_format_f64_value(options: &IntlNumberFormatOptions, mut value: f64) -> String {
         if value.is_nan() {
-            return "NaN".to_string();
+            let nan = Self::intl_nan_string(options);
+            let show_plus = options.sign_display == "always";
+            return if show_plus { format!("+{}", nan) } else { nan };
         }
         if value.is_infinite() {
-            return if value.is_sign_negative() {
-                "-Infinity".to_string()
-            } else {
-                "Infinity".to_string()
-            };
+            return Self::intl_apply_sign_to_special(options, value.is_sign_negative(), false, "∞");
         }
         if options.style == "percent" {
             value *= 100.0;
         }
         let negative = value.is_sign_negative();
         value = value.abs();
+        if options.notation == "compact" {
+            if let Some(formatted) = Self::intl_format_compact_decimal(options, value) {
+                let is_zeroish = formatted
+                    .trim_start_matches('0')
+                    .trim_matches(Self::intl_decimal_separator(options))
+                    .is_empty();
+                return Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted);
+            }
+        }
         let (mut integer_digits, fraction_digits) = if let Some(maximum_significant_digits) = options.maximum_significant_digits {
             let rounded = Self::intl_round_to_significant_digits(value, maximum_significant_digits);
             Self::intl_split_fixed_decimal(rounded, 0, options.minimum_significant_digits.unwrap_or(1), true)
@@ -1533,7 +1560,8 @@ impl<'gc> VM<'gc> {
             formatted.push(Self::intl_decimal_separator(options));
             formatted.push_str(&fraction_digits);
         }
-        Self::intl_affix_formatted_number(options, negative, &formatted)
+        let is_zeroish = integer_digits.chars().all(|ch| ch == '0') && fraction_digits.chars().all(|ch| ch == '0');
+        Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted)
     }
 
     fn intl_round_to_fraction_digits(value: f64, digits: u8) -> f64 {
@@ -1651,21 +1679,32 @@ impl<'gc> VM<'gc> {
         if options.resolved_locale.starts_with("de") { '.' } else { ',' }
     }
 
-    fn intl_affix_formatted_number(options: &IntlNumberFormatOptions, negative: bool, core: &str) -> String {
+    fn intl_apply_sign_to_special(options: &IntlNumberFormatOptions, negative: bool, is_zeroish: bool, text: &str) -> String {
+        let (prefix, suffix) = Self::intl_sign_parts(options, negative, is_zeroish, false);
+        format!("{}{}{}", prefix, text, suffix)
+    }
+
+    fn intl_apply_sign_and_affixes(
+        options: &IntlNumberFormatOptions,
+        negative: bool,
+        is_zeroish: bool,
+        is_nan: bool,
+        core: &str,
+    ) -> String {
         let mut out = String::new();
-        if negative {
-            out.push('-');
-        }
+        let (prefix, suffix) = Self::intl_sign_parts(options, negative, is_zeroish, is_nan);
+        out.push_str(&prefix);
         if options.style == "currency" {
             if let Some(currency) = &options.currency {
+                let symbol = Self::intl_currency_symbol(options, currency);
                 if options.resolved_locale.starts_with("de") {
                     out.push_str(core);
                     out.push('\u{a0}');
-                    out.push_str(currency);
+                    out.push_str(symbol);
+                    out.push_str(&suffix);
                     return out;
                 }
-                out.push_str(currency);
-                out.push(' ');
+                out.push_str(symbol);
             }
         }
         out.push_str(core);
@@ -1675,7 +1714,155 @@ impl<'gc> VM<'gc> {
             }
             out.push('%');
         }
+        out.push_str(&suffix);
         out
+    }
+
+    fn intl_sign_parts(options: &IntlNumberFormatOptions, negative: bool, is_zeroish: bool, is_nan: bool) -> (String, String) {
+        let show_negative = negative
+            && match options.sign_display.as_str() {
+                "never" => false,
+                "exceptZero" | "negative" => !is_zeroish,
+                _ => true,
+            };
+        let show_positive = !negative
+            && !is_nan
+            && match options.sign_display.as_str() {
+                "always" => true,
+                "exceptZero" => !is_zeroish,
+                _ => false,
+            };
+        if show_negative
+            && options.style == "currency"
+            && options.currency_sign == "accounting"
+            && !options.resolved_locale.starts_with("de")
+        {
+            return ("(".to_string(), ")".to_string());
+        }
+        let prefix = if show_negative {
+            "-".to_string()
+        } else if show_positive {
+            "+".to_string()
+        } else {
+            String::new()
+        };
+        (prefix, String::new())
+    }
+
+    fn intl_currency_symbol<'a>(options: &IntlNumberFormatOptions, currency: &'a str) -> &'a str {
+        if currency != "USD" {
+            return currency;
+        }
+        if matches!(
+            options.resolved_locale.as_str(),
+            locale if locale.starts_with("ko") || locale.starts_with("zh-TW")
+        ) {
+            "US$"
+        } else {
+            "$"
+        }
+    }
+
+    fn intl_nan_string(options: &IntlNumberFormatOptions) -> String {
+        if options.resolved_locale.starts_with("zh-TW") {
+            "非數值".to_string()
+        } else {
+            "NaN".to_string()
+        }
+    }
+
+    fn intl_format_compact_integer(options: &IntlNumberFormatOptions, digits: &str) -> Option<String> {
+        let value = digits.parse::<f64>().ok()?;
+        Self::intl_format_compact_decimal(options, value)
+    }
+
+    fn intl_format_compact_decimal(options: &IntlNumberFormatOptions, value: f64) -> Option<String> {
+        let locale = options.resolved_locale.as_str();
+        let compact_display = options.compact_display.as_deref().unwrap_or("short");
+        let (divisor, suffix) = if locale.starts_with("en") {
+            if value >= 1_000_000_000.0 {
+                (1_000_000.0, if compact_display == "long" { " million" } else { "M" })
+            } else if value >= 1_000_000.0 {
+                (1_000_000.0, if compact_display == "long" { " million" } else { "M" })
+            } else if value >= 1_000.0 {
+                (1_000.0, if compact_display == "long" { " thousand" } else { "K" })
+            } else {
+                return Some(Self::intl_format_compact_plain(options, value, false));
+            }
+        } else if locale.starts_with("de") {
+            if value >= 1_000_000.0 {
+                (1_000_000.0, if compact_display == "long" { " Millionen" } else { "\u{a0}Mio." })
+            } else if compact_display == "long" && value >= 1_000.0 {
+                (1_000.0, " Tausend")
+            } else {
+                return Some(Self::intl_format_compact_plain(options, value, value >= 10_000.0));
+            }
+        } else if locale.starts_with("ja") {
+            if value >= 100_000_000.0 {
+                (100_000_000.0, "億")
+            } else if value >= 10_000.0 {
+                (10_000.0, "万")
+            } else {
+                return Some(Self::intl_format_compact_plain(options, value, false));
+            }
+        } else if locale.starts_with("ko") {
+            if value >= 100_000_000.0 {
+                (100_000_000.0, "억")
+            } else if value >= 10_000.0 {
+                (10_000.0, "만")
+            } else if value >= 1_000.0 {
+                (1_000.0, "천")
+            } else {
+                return Some(Self::intl_format_compact_plain(options, value, false));
+            }
+        } else if locale.starts_with("zh-TW") {
+            if value >= 100_000_000.0 {
+                (100_000_000.0, "億")
+            } else if value >= 10_000.0 {
+                (10_000.0, "萬")
+            } else {
+                return Some(Self::intl_format_compact_plain(options, value, false));
+            }
+        } else {
+            return None;
+        };
+        let scaled = value / divisor;
+        let fraction_digits = if scaled < 10.0 { 1 } else { 0 };
+        let rounded = Self::intl_round_to_fraction_digits(scaled, fraction_digits);
+        let (integer_digits, fraction_digits) = Self::intl_split_fixed_decimal(rounded, fraction_digits, 0, false);
+        let mut formatted = integer_digits;
+        if !fraction_digits.is_empty() {
+            formatted.push(Self::intl_decimal_separator(options));
+            formatted.push_str(&fraction_digits);
+        }
+        formatted.push_str(suffix);
+        Some(formatted)
+    }
+
+    fn intl_format_compact_plain(options: &IntlNumberFormatOptions, value: f64, use_grouping: bool) -> String {
+        let max_fraction_digits = if value >= 10.0 {
+            0
+        } else if value >= 1.0 {
+            1
+        } else if value >= 0.1 {
+            2
+        } else if value >= 0.01 {
+            3
+        } else {
+            4
+        };
+        let rounded = Self::intl_round_to_fraction_digits(value, max_fraction_digits);
+        let (integer_digits, fraction_digits) = Self::intl_split_fixed_decimal(rounded, max_fraction_digits, 0, false);
+        let mut formatted = if use_grouping {
+            Self::intl_apply_grouping(&integer_digits, options)
+        } else {
+            integer_digits
+        };
+        if !fraction_digits.is_empty() {
+            formatted.push(Self::intl_decimal_separator(options));
+            formatted.push_str(&fraction_digits);
+        }
+        formatted
     }
 
     fn intl_require_initialized_service(
@@ -2337,6 +2524,10 @@ impl<'gc> VM<'gc> {
             style: "decimal".to_string(),
             currency: None,
             unit: None,
+            notation: "standard".to_string(),
+            compact_display: None,
+            currency_sign: "standard".to_string(),
+            sign_display: "auto".to_string(),
             use_grouping: true,
             minimum_integer_digits: 1,
             minimum_fraction_digits: 0,
@@ -2408,6 +2599,26 @@ impl<'gc> VM<'gc> {
             &["standard", "scientific", "engineering", "compact"],
             Some("standard"),
         )?;
+        out.notation = notation.clone().unwrap_or_else(|| "standard".to_string());
+        if out.style == "currency" {
+            if let Some(currency_sign) =
+                self.intl_string_option_from_value(ctx, raw_options.get("currencySign"), &["standard", "accounting"], Some("standard"))?
+            {
+                out.currency_sign = currency_sign;
+            }
+        }
+        if let Some(sign_display) = self.intl_string_option_from_value(
+            ctx,
+            raw_options.get("signDisplay"),
+            &["auto", "never", "always", "exceptZero", "negative"],
+            Some("auto"),
+        )? {
+            out.sign_display = sign_display;
+        }
+        if out.notation == "compact" {
+            out.compact_display =
+                self.intl_string_option_from_value(ctx, raw_options.get("compactDisplay"), &["short", "long"], Some("short"))?;
+        }
         let _ = self.intl_string_option_from_value(
             ctx,
             raw_options.get("roundingMode"),
@@ -2433,7 +2644,7 @@ impl<'gc> VM<'gc> {
             out.minimum_integer_digits = minimum_integer_digits;
         }
         let default_currency_digits = out.currency.as_deref().map(Self::intl_currency_digits).unwrap_or(2);
-        let notation = notation.unwrap_or_else(|| "standard".to_string());
+        let notation = out.notation.clone();
         let default_minimum_fraction_digits = if out.style == "currency" && notation == "standard" {
             default_currency_digits
         } else {
@@ -2608,11 +2819,17 @@ impl<'gc> VM<'gc> {
             Value::from(options.numbering_system.as_str()),
         );
         obj.insert("__intl_style__".to_string(), Value::from(options.style.as_str()));
+        obj.insert("__intl_notation__".to_string(), Value::from(options.notation.as_str()));
+        obj.insert("__intl_currency_sign__".to_string(), Value::from(options.currency_sign.as_str()));
+        obj.insert("__intl_sign_display__".to_string(), Value::from(options.sign_display.as_str()));
         if let Some(currency) = &options.currency {
             obj.insert("__intl_currency__".to_string(), Value::from(currency.as_str()));
         }
         if let Some(unit) = &options.unit {
             obj.insert("__intl_unit__".to_string(), Value::from(unit.as_str()));
+        }
+        if let Some(compact_display) = &options.compact_display {
+            obj.insert("__intl_compact_display__".to_string(), Value::from(compact_display.as_str()));
         }
         obj.insert("__intl_use_grouping__".to_string(), Value::Boolean(options.use_grouping));
         obj.insert(
@@ -3694,6 +3911,22 @@ impl IntlNumberFormatOptions {
                 Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(text)),
                 _ => None,
             },
+            notation: match obj.get("__intl_notation__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "standard".to_string(),
+            },
+            compact_display: match obj.get("__intl_compact_display__") {
+                Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            },
+            currency_sign: match obj.get("__intl_currency_sign__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "standard".to_string(),
+            },
+            sign_display: match obj.get("__intl_sign_display__") {
+                Some(Value::String(text)) => crate::unicode::utf16_to_utf8(text),
+                _ => "auto".to_string(),
+            },
             use_grouping: !matches!(obj.get("__intl_use_grouping__"), Some(Value::Boolean(false))),
             minimum_integer_digits: match obj.get("__intl_minimum_integer_digits__") {
                 Some(Value::Number(value)) => *value as u8,
@@ -3780,6 +4013,10 @@ struct IntlNumberFormatOptions {
     style: String,
     currency: Option<String>,
     unit: Option<String>,
+    notation: String,
+    compact_display: Option<String>,
+    currency_sign: String,
+    sign_display: String,
     use_grouping: bool,
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,

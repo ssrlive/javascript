@@ -17,11 +17,10 @@ fn get_next_file_id() -> u64 {
     current
 }
 /// Store a file and return its id (used by VM's create_vm_tmpfile).
-pub fn vm_store_file(file: File) -> u64 {
-    let id = get_next_file_id();
+pub fn vm_store_file(id: u64, file: File) {
     FILE_STORE.lock().unwrap().insert(id, file);
-    id
 }
+
 /// Write string args to the file identified by `file_id`.
 pub fn vm_file_puts(file_id: u64, args: &[crate::core::Value<'_>]) {
     use std::io::Write;
@@ -78,11 +77,12 @@ pub fn vm_file_close(file_id: u64) {
 }
 /// Create a VM tmpfile object with host-fn method slots.
 pub fn vm_create_tmpfile<'gc>(ctx: &GcContext<'gc>) -> Value<'gc> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    // Allocate the file_id first so the filename is guaranteed unique even
+    // when multiple tests run in parallel within the same process.
+    let file_id = get_next_file_id();
     let pid = std::process::id();
     let temp_dir = std::env::temp_dir();
-    let filename = temp_dir.join(format!("rust_js_vm_tmp_{}_{}.tmp", timestamp, pid));
+    let filename = temp_dir.join(format!("rust_js_vm_tmp_{}_{}.tmp", pid, file_id));
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -91,7 +91,7 @@ pub fn vm_create_tmpfile<'gc>(ctx: &GcContext<'gc>) -> Value<'gc> {
         .open(&filename)
     {
         Ok(file) => {
-            let file_id = vm_store_file(file);
+            vm_store_file(file_id, file);
             let mut obj = IndexMap::new();
             obj.insert("__file_id__".to_string(), Value::Number(file_id as f64));
             fn make_host_fn<'a>(ctx: &GcContext<'a>, name: &str) -> Value<'a> {

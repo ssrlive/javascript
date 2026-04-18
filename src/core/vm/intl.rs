@@ -250,6 +250,24 @@ impl<'gc> VM<'gc> {
             "intl.dateTimeFormat.formatRangeToParts" => {
                 self.intl_date_time_format_format_range_to_parts(ctx, receiver, args.first(), args.get(1))
             }
+            "intl.locale.get.baseName" => self.intl_locale_slot_getter(ctx, receiver, "__intl_base_name__"),
+            "intl.locale.get.language" => self.intl_locale_slot_getter(ctx, receiver, "__intl_language__"),
+            "intl.locale.get.script" => self.intl_locale_slot_getter(ctx, receiver, "__intl_script__"),
+            "intl.locale.get.region" => self.intl_locale_slot_getter(ctx, receiver, "__intl_region__"),
+            "intl.locale.get.variants" => self.intl_locale_slot_getter(ctx, receiver, "__intl_variants__"),
+            "intl.locale.get.calendar" => self.intl_locale_slot_getter(ctx, receiver, "__intl_calendar__"),
+            "intl.locale.get.collation" => self.intl_locale_slot_getter(ctx, receiver, "__intl_collation__"),
+            "intl.locale.get.hourCycle" => self.intl_locale_slot_getter(ctx, receiver, "__intl_hour_cycle__"),
+            "intl.locale.get.caseFirst" => self.intl_locale_slot_getter(ctx, receiver, "__intl_case_first__"),
+            "intl.locale.get.numeric" => self.intl_locale_slot_getter(ctx, receiver, "__intl_numeric__"),
+            "intl.locale.get.numberingSystem" => self.intl_locale_slot_getter(ctx, receiver, "__intl_numbering_system__"),
+            "intl.locale.get.firstDayOfWeek" => self.intl_locale_slot_getter(ctx, receiver, "__intl_first_day_of_week__"),
+            "intl.locale.getCalendars" => self.intl_locale_get_calendars(ctx, receiver),
+            "intl.locale.getCollations" => self.intl_locale_get_collations(ctx, receiver),
+            "intl.locale.getHourCycles" => self.intl_locale_get_hour_cycles(ctx, receiver),
+            "intl.locale.getNumberingSystems" => self.intl_locale_get_numbering_systems(ctx, receiver),
+            "intl.locale.getTextInfo" => self.intl_locale_get_text_info(ctx, receiver),
+            "intl.locale.getTimeZones" => self.intl_locale_get_time_zones(ctx, receiver),
             "intl.locale.toString" => self.intl_locale_to_string(ctx, receiver),
             "intl.numberFormat.get.format" => self.intl_number_format_getter(ctx, receiver),
             "intl.numberFormat.format" => self.intl_number_format_format(ctx, receiver, args),
@@ -312,11 +330,6 @@ impl<'gc> VM<'gc> {
         let prototype = self.intl_plain_proto_object(ctx, object_proto);
         if let Value::Object(proto_obj) = &prototype {
             let mut proto = proto_obj.borrow_mut(ctx);
-            proto.insert(
-                "resolvedOptions".to_string(),
-                Self::make_host_fn_with_name_len(ctx, "intl.service.resolvedOptions", "resolvedOptions", 0.0, false),
-            );
-            mark_nonenumerable(&mut proto, "resolvedOptions");
             Self::insert_property_with_attributes(
                 &mut proto,
                 "@@sym:4",
@@ -325,6 +338,13 @@ impl<'gc> VM<'gc> {
                 false,
                 true,
             );
+            if display_name != "Locale" {
+                proto.insert(
+                    "resolvedOptions".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.service.resolvedOptions", "resolvedOptions", 0.0, false),
+                );
+                mark_nonenumerable(&mut proto, "resolvedOptions");
+            }
             if display_name == "Collator" {
                 let getter = Self::make_host_fn_with_name_len(ctx, "intl.collator.get.compare", "get compare", 0.0, false);
                 Self::insert_getter_property_with_attributes(&mut proto, "compare", &getter, false, true);
@@ -382,11 +402,42 @@ impl<'gc> VM<'gc> {
                 mark_nonenumerable(&mut proto, "of");
             }
             if display_name == "Locale" {
+                for (prop, host) in [
+                    ("baseName", "intl.locale.get.baseName"),
+                    ("language", "intl.locale.get.language"),
+                    ("script", "intl.locale.get.script"),
+                    ("region", "intl.locale.get.region"),
+                    ("variants", "intl.locale.get.variants"),
+                    ("calendar", "intl.locale.get.calendar"),
+                    ("collation", "intl.locale.get.collation"),
+                    ("hourCycle", "intl.locale.get.hourCycle"),
+                    ("caseFirst", "intl.locale.get.caseFirst"),
+                    ("numeric", "intl.locale.get.numeric"),
+                    ("numberingSystem", "intl.locale.get.numberingSystem"),
+                    ("firstDayOfWeek", "intl.locale.get.firstDayOfWeek"),
+                ] {
+                    let getter = Self::make_host_fn_with_name_len(ctx, host, &format!("get {prop}"), 0.0, false);
+                    Self::insert_getter_property_with_attributes(&mut proto, prop, &getter, false, true);
+                }
                 proto.insert(
                     "toString".to_string(),
                     Self::make_host_fn_with_name_len(ctx, "intl.locale.toString", "toString", 0.0, false),
                 );
                 mark_nonenumerable(&mut proto, "toString");
+                for (name, length) in [
+                    ("getCalendars", 0.0),
+                    ("getCollations", 0.0),
+                    ("getHourCycles", 0.0),
+                    ("getNumberingSystems", 0.0),
+                    ("getTextInfo", 0.0),
+                    ("getTimeZones", 0.0),
+                ] {
+                    proto.insert(
+                        name.to_string(),
+                        Self::make_host_fn_with_name_len(ctx, &format!("intl.locale.{name}"), name, length, false),
+                    );
+                    mark_nonenumerable(&mut proto, name);
+                }
             }
         }
 
@@ -805,9 +856,9 @@ impl<'gc> VM<'gc> {
         ctor_value: Option<&Value<'gc>>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Value<'gc>> {
-        let requested_locales = self.intl_canonicalize_locale_list(ctx, args.first())?;
-        let requested = requested_locales.first().cloned().unwrap_or_else(|| "und".to_string());
+        let requested = self.intl_locale_constructor_tag(ctx, args.first())?;
         let locale_info = Self::intl_locale_info(&requested);
+        let mut base = Self::intl_locale_base_components(&locale_info.base);
         let mut calendar = locale_info
             .unicode_keywords
             .get("ca")
@@ -815,43 +866,115 @@ impl<'gc> VM<'gc> {
         let mut collation = locale_info
             .unicode_keywords
             .get("co")
-            .and_then(|value| Self::intl_collator_supported_collation("", value));
+            .and_then(|value| Self::intl_locale_collation_keyword(value));
+        let mut hour_cycle = locale_info
+            .unicode_keywords
+            .get("hc")
+            .and_then(|value| Self::intl_supported_hour_cycle(value));
+        let mut case_first = locale_info
+            .unicode_keywords
+            .get("kf")
+            .and_then(|value| Self::intl_locale_case_first_keyword(value));
+        let mut numeric = locale_info
+            .unicode_keywords
+            .get("kn")
+            .and_then(|value| Self::intl_collator_unicode_bool(value));
         let mut numbering_system = locale_info
             .unicode_keywords
             .get("nu")
             .and_then(|value| Self::intl_supported_numbering_system(value));
+        let mut first_day_of_week = locale_info
+            .unicode_keywords
+            .get("fw")
+            .and_then(|value| Self::intl_locale_first_day_of_week(value));
         if let Some(options) = args.get(1)
             && !matches!(options, Value::Undefined)
         {
             if matches!(options, Value::Null) {
                 return Err(self.make_type_error_object(ctx, "options must not be null"));
             }
-            if Self::intl_is_object_like(options) {
-                if let Some(value) = self.intl_string_option(ctx, options, "calendar", &[], None)? {
+            let boxed_options = self.intl_box_primitive_if_needed(ctx, options);
+            let options = if Self::intl_is_object_like(&boxed_options) {
+                boxed_options
+            } else {
+                Value::Undefined
+            };
+            if !matches!(options, Value::Undefined) {
+                if let Some(value) = self.intl_string_option(ctx, &options, "language", &[], None)? {
+                    let Some(language) = Self::intl_locale_language_option(&value) else {
+                        return Err(self.make_range_error_object(ctx, "Invalid language"));
+                    };
+                    base.language = language;
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "script", &[], None)? {
+                    let Some(script) = Self::intl_locale_script_option(&value) else {
+                        return Err(self.make_range_error_object(ctx, "Invalid script"));
+                    };
+                    base.script = Some(script);
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "region", &[], None)? {
+                    let Some(region) = Self::intl_locale_region_option(&value) else {
+                        return Err(self.make_range_error_object(ctx, "Invalid region"));
+                    };
+                    base.region = Some(region);
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "variants", &[], None)? {
+                    let Some(variants) = Self::intl_locale_variants_option(&value) else {
+                        return Err(self.make_range_error_object(ctx, "Invalid variants"));
+                    };
+                    base.variants = variants;
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "calendar", &[], None)? {
                     if !Self::intl_is_valid_unicode_type_identifier(&value) {
                         return Err(self.make_range_error_object(ctx, "Invalid calendar"));
                     }
-                    calendar = Self::intl_supported_calendar(&value);
+                    calendar = Self::intl_supported_calendar(&value).or_else(|| Some(value.to_ascii_lowercase()));
                 }
-                if let Some(value) = self.intl_string_option(ctx, options, "collation", &[], None)? {
+                if let Some(value) = self.intl_string_option(ctx, &options, "collation", &[], None)? {
                     if !Self::intl_is_valid_unicode_type_identifier(&value) {
                         return Err(self.make_range_error_object(ctx, "Invalid collation"));
                     }
-                    collation = Self::intl_collator_supported_collation("", &value);
+                    collation = Self::intl_locale_collation_keyword(&value);
                 }
-                if let Some(value) = self.intl_string_option(ctx, options, "numberingSystem", &[], None)? {
+                if let Some(value) = self.intl_string_option(ctx, &options, "hourCycle", &["h11", "h12", "h23", "h24"], None)? {
+                    hour_cycle = Some(value);
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "caseFirst", &["upper", "lower", "false"], None)? {
+                    case_first = Some(value);
+                }
+                if let Some(value) = self.intl_boolean_option(ctx, &options, "numeric")? {
+                    numeric = Some(value);
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "numberingSystem", &[], None)? {
                     if !Self::intl_is_valid_unicode_type_identifier(&value) {
                         return Err(self.make_range_error_object(ctx, "Invalid numberingSystem"));
                     }
-                    numbering_system = Self::intl_supported_numbering_system(&value);
+                    numbering_system = Self::intl_supported_numbering_system(&value).or_else(|| Some(value.to_ascii_lowercase()));
+                }
+                if let Some(value) = self.intl_string_option(ctx, &options, "firstDayOfWeek", &[], None)? {
+                    let Some(normalized) = Self::intl_locale_first_day_of_week(&value) else {
+                        return Err(self.make_range_error_object(ctx, "Invalid firstDayOfWeek"));
+                    };
+                    first_day_of_week = Some(normalized);
                 }
             }
         }
-        let locale = Self::intl_locale_with_extensions(
-            &locale_info.base,
-            calendar.as_deref(),
-            collation.as_deref(),
-            numbering_system.as_deref(),
+        Self::intl_apply_language_aliases(&mut base.language, &mut base.script, &mut base.region);
+        Self::intl_apply_region_aliases(&base.language, base.script.as_deref(), &mut base.region);
+        Self::intl_apply_variant_aliases(&mut base.language, &mut base.script, &mut base.region, &mut base.variants);
+        base.variants.sort();
+        let base_name = Self::intl_locale_base_name_string(&base);
+        let locale = Self::intl_locale_with_keywords(
+            &base_name,
+            IntlLocaleKeywordOptions {
+                calendar: calendar.as_deref(),
+                collation: collation.as_deref(),
+                first_day_of_week: first_day_of_week.as_deref(),
+                hour_cycle: hour_cycle.as_deref(),
+                case_first: case_first.as_deref(),
+                numeric,
+                numbering_system: numbering_system.as_deref(),
+            },
         );
         let ctor_value = ctor_value
             .cloned()
@@ -867,31 +990,38 @@ impl<'gc> VM<'gc> {
         }
         obj.insert("__intl_kind__".to_string(), Value::from("Locale"));
         obj.insert("__intl_locale__".to_string(), Value::from(locale.as_str()));
-        obj.insert("baseName".to_string(), Value::from(locale_info.base.as_str()));
-        Self::insert_property_with_attributes(
-            &mut obj,
-            "calendar",
-            &calendar.as_deref().map(Value::from).unwrap_or(Value::Undefined),
-            false,
-            false,
-            true,
-        );
-        Self::insert_property_with_attributes(
-            &mut obj,
-            "collation",
-            &collation.as_deref().map(Value::from).unwrap_or(Value::Undefined),
-            false,
-            false,
-            true,
-        );
-        Self::insert_property_with_attributes(
-            &mut obj,
-            "numberingSystem",
-            &numbering_system.as_deref().map(Value::from).unwrap_or(Value::Undefined),
-            false,
-            false,
-            true,
-        );
+        obj.insert("__intl_base_name__".to_string(), Value::from(base_name.as_str()));
+        obj.insert("__intl_language__".to_string(), Value::from(base.language.as_str()));
+        if let Some(script) = &base.script {
+            obj.insert("__intl_script__".to_string(), Value::from(script.as_str()));
+        }
+        if let Some(region) = &base.region {
+            obj.insert("__intl_region__".to_string(), Value::from(region.as_str()));
+        }
+        if !base.variants.is_empty() {
+            obj.insert("__intl_variants__".to_string(), Value::from(base.variants.join("-").as_str()));
+        }
+        if let Some(calendar) = &calendar {
+            obj.insert("__intl_calendar__".to_string(), Value::from(calendar.as_str()));
+        }
+        if let Some(collation) = &collation {
+            obj.insert("__intl_collation__".to_string(), Value::from(collation.as_str()));
+        }
+        if let Some(hour_cycle) = &hour_cycle {
+            obj.insert("__intl_hour_cycle__".to_string(), Value::from(hour_cycle.as_str()));
+        }
+        if let Some(case_first) = &case_first {
+            obj.insert("__intl_case_first__".to_string(), Value::from(case_first.as_str()));
+        }
+        if let Some(numeric) = numeric {
+            obj.insert("__intl_numeric__".to_string(), Value::Boolean(numeric));
+        }
+        if let Some(numbering_system) = &numbering_system {
+            obj.insert("__intl_numbering_system__".to_string(), Value::from(numbering_system.as_str()));
+        }
+        if let Some(first_day_of_week) = &first_day_of_week {
+            obj.insert("__intl_first_day_of_week__".to_string(), Value::from(first_day_of_week.as_str()));
+        }
         Ok(Value::Object(new_gc_cell_ptr(ctx, obj)))
     }
 
@@ -945,10 +1075,144 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_locale_to_string(&mut self, _ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
-        let Some(Value::Object(obj)) = receiver else {
+        let Some(locale) = self.intl_require_initialized_service(_ctx, receiver, Some("Locale")) else {
             return Value::Undefined;
         };
-        obj.borrow().get("__intl_locale__").cloned().unwrap_or(Value::Undefined)
+        locale.borrow().get("__intl_locale__").cloned().unwrap_or(Value::Undefined)
+    }
+
+    fn intl_locale_slot_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, slot: &str) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        locale.borrow().get(slot).cloned().unwrap_or(Value::Undefined)
+    }
+
+    fn intl_locale_get_calendars(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        let borrow = locale.borrow();
+        let calendar = own_data_from_legacy_map(&borrow, "__intl_calendar__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "gregory".to_string());
+        Self::intl_string_array(ctx, &[calendar.as_str()])
+    }
+
+    fn intl_locale_get_collations(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        let borrow = locale.borrow();
+        let mut values: Vec<String> = Vec::new();
+        if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_collation__") {
+            let value = crate::unicode::utf16_to_utf8(&text);
+            if value != "standard" && value != "search" && !value.is_empty() {
+                values.push(value);
+            }
+        }
+        if values.is_empty() {
+            let language = own_data_from_legacy_map(&borrow, "__intl_language__")
+                .and_then(|value| match value {
+                    Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "en".to_string());
+            values.extend(match language.as_str() {
+                "de" => ["phonebk"].into_iter().map(str::to_string).collect::<Vec<_>>(),
+                "zh" => ["pinyin", "stroke"].into_iter().map(str::to_string).collect::<Vec<_>>(),
+                _ => ["emoji"].into_iter().map(str::to_string).collect::<Vec<_>>(),
+            });
+        }
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        Self::intl_string_array(ctx, &refs)
+    }
+
+    fn intl_locale_get_hour_cycles(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        let borrow = locale.borrow();
+        let values: Vec<String> = if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_hour_cycle__") {
+            vec![crate::unicode::utf16_to_utf8(&text)]
+        } else if matches!(
+            own_data_from_legacy_map(&borrow, "__intl_region__"),
+            Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == "US"
+        ) {
+            vec!["h12".to_string()]
+        } else {
+            vec!["h23".to_string()]
+        };
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        Self::intl_string_array(ctx, &refs)
+    }
+
+    fn intl_locale_get_numbering_systems(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        let borrow = locale.borrow();
+        let numbering_system = own_data_from_legacy_map(&borrow, "__intl_numbering_system__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "latn".to_string());
+        Self::intl_string_array(ctx, &[numbering_system.as_str()])
+    }
+
+    fn intl_locale_get_text_info(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        let borrow = locale.borrow();
+        let language = own_data_from_legacy_map(&borrow, "__intl_language__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "en".to_string());
+        let direction = if matches!(language.as_str(), "ar" | "fa" | "he" | "ur") {
+            "rtl"
+        } else {
+            "ltr"
+        };
+        let object_proto = self.globals.get("Object").and_then(|value| match value {
+            Value::Object(object) => own_data_from_legacy_map(&object.borrow(), "prototype"),
+            _ => None,
+        });
+        let mut object = IndexMap::new();
+        if let Some(proto) = object_proto {
+            object.insert("__proto__".to_string(), proto);
+        }
+        object.insert("direction".to_string(), Value::from(direction));
+        Value::Object(new_gc_cell_ptr(ctx, object))
+    }
+
+    fn intl_locale_get_time_zones(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
+            return Value::Undefined;
+        };
+        let borrow = locale.borrow();
+        let region = own_data_from_legacy_map(&borrow, "__intl_region__").and_then(|value| match value {
+            Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+            _ => None,
+        });
+        let values: &[&str] = match region.as_deref() {
+            Some("GB") => &["Europe/London"],
+            Some("JP") => &["Asia/Tokyo"],
+            Some("US") => &["America/New_York", "Pacific/Honolulu"],
+            _ => &["UTC"],
+        };
+        Self::intl_string_array(ctx, values)
+    }
+
+    fn intl_string_array(ctx: &GcContext<'gc>, values: &[&str]) -> Value<'gc> {
+        let values = values.iter().map(|value| Value::from(*value)).collect::<Vec<_>>();
+        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
     }
 
     fn intl_read_constructor_options(&mut self, ctx: &GcContext<'gc>, kind: &str, options: Option<&Value<'gc>>) -> Result<(), Value<'gc>> {
@@ -1104,6 +1368,35 @@ impl<'gc> VM<'gc> {
             _ => return value.clone(),
         }
         Value::Object(new_gc_cell_ptr(ctx, wrapper))
+    }
+
+    fn intl_box_primitive_if_needed(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Value<'gc> {
+        if Self::intl_is_object_like(value) {
+            value.clone()
+        } else {
+            self.intl_box_locale_list_value(ctx, value)
+        }
+    }
+
+    fn intl_locale_constructor_tag(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<String, Value<'gc>> {
+        let Some(value) = value else {
+            return Ok("und".to_string());
+        };
+        if matches!(value, Value::Undefined) {
+            return Ok("und".to_string());
+        }
+        if let Value::Object(object) = value
+            && matches!(object.borrow().get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "Locale")
+            && let Some(Value::String(locale)) = object.borrow().get("__intl_locale__")
+        {
+            return Ok(crate::unicode::utf16_to_utf8(locale));
+        }
+        let tag = match self.vm_to_string_like_spec(ctx, value) {
+            Ok(tag) => tag,
+            Err(err) => return Err(self.vm_value_from_error(ctx, &err)),
+        };
+        self.intl_validate_locale_tag(ctx, &tag)?;
+        Ok(Self::intl_canonicalize_locale_tag(&tag))
     }
 
     fn intl_validate_locale_tag(&self, ctx: &GcContext<'gc>, tag: &str) -> Result<(), Value<'gc>> {
@@ -4640,7 +4933,7 @@ impl<'gc> VM<'gc> {
     fn intl_locale_info(locale: &str) -> IntlLocaleInfo {
         let parts: Vec<&str> = locale.split('-').collect();
         let mut base = Vec::new();
-        let mut unicode_keywords = std::collections::HashMap::new();
+        let mut unicode_keywords = IndexMap::new();
         let mut idx = 0;
         while idx < parts.len() {
             let part = parts[idx];
@@ -4728,11 +5021,19 @@ impl<'gc> VM<'gc> {
         if let Some(collation) = collation {
             extensions.push(format!("co-{}", collation));
         }
-        if numeric == Some(true) {
-            extensions.push("kn".to_string());
+        if let Some(numeric) = numeric {
+            if numeric {
+                extensions.push("kn".to_string());
+            } else {
+                extensions.push("kn-false".to_string());
+            }
         }
         if let Some(case_first) = case_first {
-            extensions.push(format!("kf-{}", case_first));
+            if case_first.is_empty() {
+                extensions.push("kf".to_string());
+            } else {
+                extensions.push(format!("kf-{}", case_first));
+            }
         }
         if !extensions.is_empty() {
             out.push_str("-u-");
@@ -4769,21 +5070,36 @@ impl<'gc> VM<'gc> {
         Self::intl_date_time_format_resolved_locale(locale_base, None, numbering_system, None)
     }
 
-    fn intl_locale_with_extensions(
-        locale_base: &str,
-        calendar: Option<&str>,
-        collation: Option<&str>,
-        numbering_system: Option<&str>,
-    ) -> String {
+    fn intl_locale_with_keywords(locale_base: &str, keywords: IntlLocaleKeywordOptions<'_>) -> String {
         let mut out = locale_base.to_string();
         let mut extensions = Vec::new();
-        if let Some(calendar) = calendar {
+        if let Some(calendar) = keywords.calendar {
             extensions.push(format!("ca-{}", calendar));
         }
-        if let Some(collation) = collation {
+        if let Some(collation) = keywords.collation {
             extensions.push(format!("co-{}", collation));
         }
-        if let Some(numbering_system) = numbering_system {
+        if let Some(first_day_of_week) = keywords.first_day_of_week {
+            extensions.push(format!("fw-{}", first_day_of_week));
+        }
+        if let Some(hour_cycle) = keywords.hour_cycle {
+            extensions.push(format!("hc-{}", hour_cycle));
+        }
+        if let Some(case_first) = keywords.case_first {
+            if case_first.is_empty() {
+                extensions.push("kf".to_string());
+            } else {
+                extensions.push(format!("kf-{}", case_first));
+            }
+        }
+        if let Some(numeric) = keywords.numeric {
+            if numeric {
+                extensions.push("kn".to_string());
+            } else {
+                extensions.push("kn-false".to_string());
+            }
+        }
+        if let Some(numbering_system) = keywords.numbering_system {
             extensions.push(format!("nu-{}", numbering_system));
         }
         if !extensions.is_empty() {
@@ -4901,6 +5217,111 @@ impl<'gc> VM<'gc> {
     fn intl_supported_hour_cycle(value: &str) -> Option<String> {
         match value {
             "h11" | "h12" | "h23" | "h24" => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_locale_base_components(locale_base: &str) -> IntlLocaleComponents {
+        let parts: Vec<&str> = locale_base.split('-').collect();
+        let language = parts.first().copied().unwrap_or("und").to_string();
+        let mut script = None;
+        let mut region = None;
+        let mut variants = Vec::new();
+        for part in parts.iter().skip(1) {
+            if script.is_none() && part.len() == 4 && part.chars().all(|c| c.is_ascii_alphabetic()) {
+                script = Some(Self::intl_titlecase_subtag(part));
+            } else if region.is_none()
+                && ((part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
+                    || (part.len() == 3 && part.chars().all(|c| c.is_ascii_digit())))
+            {
+                region = Some(part.to_ascii_uppercase());
+            } else {
+                variants.push(part.to_ascii_lowercase());
+            }
+        }
+        IntlLocaleComponents {
+            language,
+            script,
+            region,
+            variants,
+        }
+    }
+
+    fn intl_locale_base_name_string(base: &IntlLocaleComponents) -> String {
+        let mut out = vec![base.language.clone()];
+        if let Some(script) = &base.script {
+            out.push(script.clone());
+        }
+        if let Some(region) = &base.region {
+            out.push(region.clone());
+        }
+        out.extend(base.variants.iter().cloned());
+        out.join("-")
+    }
+
+    fn intl_locale_language_option(value: &str) -> Option<String> {
+        let lower = value.to_ascii_lowercase();
+        (((2..=3).contains(&lower.len()) || (5..=8).contains(&lower.len())) && lower.chars().all(|c| c.is_ascii_alphabetic()))
+            .then_some(lower)
+    }
+
+    fn intl_locale_script_option(value: &str) -> Option<String> {
+        (value.len() == 4 && value.chars().all(|c| c.is_ascii_alphabetic())).then(|| Self::intl_titlecase_subtag(value))
+    }
+
+    fn intl_locale_region_option(value: &str) -> Option<String> {
+        ((value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()))
+            || (value.len() == 3 && value.chars().all(|c| c.is_ascii_digit())))
+        .then(|| value.to_ascii_uppercase())
+    }
+
+    fn intl_locale_variants_option(value: &str) -> Option<Vec<String>> {
+        if value.is_empty() {
+            return None;
+        }
+        let mut out = Vec::new();
+        for part in value.split('-') {
+            let valid = (5..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric())
+                || (part.len() == 4
+                    && part.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && part.chars().all(|c| c.is_ascii_alphanumeric()));
+            if !valid {
+                return None;
+            }
+            let lowered = part.to_ascii_lowercase();
+            if out.iter().any(|existing| existing == &lowered) {
+                return None;
+            }
+            out.push(lowered);
+        }
+        out.sort();
+        Some(out)
+    }
+
+    fn intl_locale_collation_keyword(value: &str) -> Option<String> {
+        if value.is_empty() || !Self::intl_is_valid_unicode_type_identifier(value) {
+            return None;
+        }
+        Some(value.to_ascii_lowercase())
+    }
+
+    fn intl_locale_case_first_keyword(value: &str) -> Option<String> {
+        match value {
+            "" | "true" => Some(String::new()),
+            "upper" | "lower" | "false" => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn intl_locale_first_day_of_week(value: &str) -> Option<String> {
+        match value.to_ascii_lowercase().as_str() {
+            "1" | "mon" => Some("mon".to_string()),
+            "2" | "tue" => Some("tue".to_string()),
+            "3" | "wed" => Some("wed".to_string()),
+            "4" | "thu" => Some("thu".to_string()),
+            "5" | "fri" => Some("fri".to_string()),
+            "6" | "sat" => Some("sat".to_string()),
+            "0" | "7" | "sun" => Some("sun".to_string()),
             _ => None,
         }
     }
@@ -5307,6 +5728,28 @@ impl<'gc> VM<'gc> {
     }
 }
 
+struct IntlLocaleComponents {
+    language: String,
+    script: Option<String>,
+    region: Option<String>,
+    variants: Vec<String>,
+}
+
+struct IntlLocaleKeywordOptions<'a> {
+    calendar: Option<&'a str>,
+    collation: Option<&'a str>,
+    first_day_of_week: Option<&'a str>,
+    hour_cycle: Option<&'a str>,
+    case_first: Option<&'a str>,
+    numeric: Option<bool>,
+    numbering_system: Option<&'a str>,
+}
+
+struct IntlLocaleInfo {
+    base: String,
+    unicode_keywords: IndexMap<String, String>,
+}
+
 #[derive(Clone)]
 struct IntlCollatorOptions {
     resolved_locale: String,
@@ -5444,11 +5887,6 @@ impl IntlCollatorOptions {
             },
         }
     }
-}
-
-struct IntlLocaleInfo {
-    base: String,
-    unicode_keywords: std::collections::HashMap<String, String>,
 }
 
 struct IntlDateTimeFormatOptions {

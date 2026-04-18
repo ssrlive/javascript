@@ -226,7 +226,7 @@ impl<'gc> VM<'gc> {
         args: &[Value<'gc>],
     ) -> Value<'gc> {
         if let Some(kind) = Self::intl_service_kind_from_ctor_host(name) {
-            if matches!(name, "intl.locale.ctor" | "intl.durationFormat.ctor")
+            if matches!(name, "intl.locale.ctor" | "intl.durationFormat.ctor" | "intl.listFormat.ctor")
                 && self.new_target_stack.last().is_none_or(|value| matches!(value, Value::Undefined))
             {
                 self.pending_throw = Some(self.make_type_error_object(ctx, "Constructor Intl.Locale requires 'new'"));
@@ -256,6 +256,8 @@ impl<'gc> VM<'gc> {
             "intl.dateTimeFormat.formatRangeToParts" => {
                 self.intl_date_time_format_format_range_to_parts(ctx, receiver, args.first(), args.get(1))
             }
+            "intl.listFormat.format" => self.intl_list_format(ctx, receiver, args.first()),
+            "intl.listFormat.formatToParts" => self.intl_list_format_to_parts(ctx, receiver, args.first()),
             "intl.locale.get.baseName" => self.intl_locale_slot_getter(ctx, receiver, "__intl_base_name__"),
             "intl.locale.get.language" => self.intl_locale_slot_getter(ctx, receiver, "__intl_language__"),
             "intl.locale.get.script" => self.intl_locale_slot_getter(ctx, receiver, "__intl_script__"),
@@ -410,6 +412,18 @@ impl<'gc> VM<'gc> {
                 );
                 mark_nonenumerable(&mut proto, "of");
             }
+            if display_name == "ListFormat" {
+                proto.insert(
+                    "format".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.listFormat.format", "format", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "format");
+                proto.insert(
+                    "formatToParts".to_string(),
+                    Self::make_host_fn_with_name_len(ctx, "intl.listFormat.formatToParts", "formatToParts", 1.0, false),
+                );
+                mark_nonenumerable(&mut proto, "formatToParts");
+            }
             if display_name == "Locale" {
                 for (prop, host) in [
                     ("baseName", "intl.locale.get.baseName"),
@@ -535,6 +549,11 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
+        let list_format_options = if kind == "ListFormat" {
+            Some(self.intl_read_list_format_options(&requested_locales, ctx, args.get(1))?)
+        } else {
+            None
+        };
 
         let ctor_value = ctor_value
             .cloned()
@@ -554,6 +573,7 @@ impl<'gc> VM<'gc> {
             .or_else(|| date_time_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| number_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| duration_format_opts.as_ref().map(|opts| opts.resolved_locale.clone()))
+            .or_else(|| list_format_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| generic_numbering_system_options.as_ref().map(|opts| opts.resolved_locale.clone()))
             .or_else(|| requested_locales.first().cloned())
             .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
@@ -569,6 +589,9 @@ impl<'gc> VM<'gc> {
         }
         if let Some(opts) = duration_format_opts {
             self.intl_store_duration_format_options(&mut obj, &opts);
+        }
+        if let Some(opts) = list_format_options {
+            self.intl_store_list_format_options(&mut obj, &opts);
         }
         if let Some(options) = generic_numbering_system_options {
             obj.insert(
@@ -861,6 +884,18 @@ impl<'gc> VM<'gc> {
                 "fallback".to_string(),
                 borrow.get("__intl_fallback__").cloned().unwrap_or_else(|| Value::from("code")),
             );
+        } else if matches!(borrow.get("__intl_kind__"), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(kind) == "ListFormat") {
+            result.insert(
+                "type".to_string(),
+                borrow
+                    .get("__intl_list_type__")
+                    .cloned()
+                    .unwrap_or_else(|| Value::from("conjunction")),
+            );
+            result.insert(
+                "style".to_string(),
+                borrow.get("__intl_list_style__").cloned().unwrap_or_else(|| Value::from("long")),
+            );
         }
         Value::Object(new_gc_cell_ptr(ctx, result))
     }
@@ -1127,6 +1162,72 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
         }
+    }
+
+    fn intl_list_format(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(parts) = self.intl_list_format_parts(ctx, receiver, value) else {
+            return Value::Undefined;
+        };
+        Value::from(parts.into_iter().map(|part| part.value).collect::<Vec<_>>().join("").as_str())
+    }
+
+    fn intl_list_format_to_parts(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, value: Option<&Value<'gc>>) -> Value<'gc> {
+        let Some(parts) = self.intl_list_format_parts(ctx, receiver, value) else {
+            return Value::Undefined;
+        };
+        Value::Array(new_gc_cell_ptr(
+            ctx,
+            VmArrayData::new(
+                parts
+                    .into_iter()
+                    .map(|part| {
+                        let mut obj = IndexMap::new();
+                        obj.insert("type".to_string(), Value::from(part.part_type.as_str()));
+                        obj.insert("value".to_string(), Value::from(part.value.as_str()));
+                        Value::Object(new_gc_cell_ptr(ctx, obj))
+                    })
+                    .collect(),
+            ),
+        ))
+    }
+
+    fn intl_list_format_parts(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        value: Option<&Value<'gc>>,
+    ) -> Option<Vec<IntlListPart>> {
+        let formatter = self.intl_require_initialized_service(ctx, receiver, Some("ListFormat"))?;
+        let items = match self.intl_string_list_from_iterable(ctx, value) {
+            Ok(items) => items,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return None;
+            }
+        };
+        let borrow = formatter.borrow();
+        let locale = borrow
+            .get("__intl_locale__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string());
+        let style = borrow
+            .get("__intl_list_style__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "long".to_string());
+        let list_type = borrow
+            .get("__intl_list_type__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "conjunction".to_string());
+        Some(Self::intl_format_list_parts(&locale, &list_type, &style, &items))
     }
 
     fn intl_locale_to_string(&mut self, _ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -1558,10 +1659,18 @@ impl<'gc> VM<'gc> {
         let Some(options) = options else {
             return Ok("best fit");
         };
-        if matches!(options, Value::Undefined) || !Self::intl_is_object_like(options) {
+        if matches!(options, Value::Undefined) {
             return Ok("best fit");
         }
-        let value = self.read_named_property(ctx, options, "localeMatcher");
+        if matches!(options, Value::Null) {
+            return Err(self.make_type_error_object(ctx, "options must not be null"));
+        }
+        let boxed_options = if Self::intl_is_object_like(options) {
+            options.clone()
+        } else {
+            self.intl_box_primitive_if_needed(ctx, options)
+        };
+        let value = self.read_named_property(ctx, &boxed_options, "localeMatcher");
         if let Some(thrown) = self.pending_throw.take() {
             return Err(thrown);
         }
@@ -4812,6 +4921,46 @@ impl<'gc> VM<'gc> {
         Ok(out)
     }
 
+    fn intl_read_list_format_options(
+        &mut self,
+        requested_locales: &[String],
+        ctx: &GcContext<'gc>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<IntlListFormatOptions, Value<'gc>> {
+        let mut out = IntlListFormatOptions {
+            resolved_locale: requested_locales
+                .first()
+                .cloned()
+                .unwrap_or_else(|| INTL_DEFAULT_LOCALE.to_string()),
+            list_type: "conjunction".to_string(),
+            style: "long".to_string(),
+        };
+        let Some(options) = options else {
+            return Ok(out);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(out);
+        }
+        if matches!(options, Value::Null) || !Self::intl_is_object_like(options) {
+            return Err(self.make_type_error_object(ctx, "options must not be null"));
+        }
+        let boxed_options = options.clone();
+        let _ = self.intl_locale_matcher_option(ctx, Some(&boxed_options))?;
+        out.list_type = self
+            .intl_string_option(
+                ctx,
+                &boxed_options,
+                "type",
+                &["conjunction", "disjunction", "unit"],
+                Some("conjunction"),
+            )?
+            .unwrap_or_else(|| "conjunction".to_string());
+        out.style = self
+            .intl_string_option(ctx, &boxed_options, "style", &["long", "short", "narrow"], Some("long"))?
+            .unwrap_or_else(|| "long".to_string());
+        Ok(out)
+    }
+
     fn intl_read_display_names_options(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -4889,6 +5038,11 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn intl_store_list_format_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlListFormatOptions) {
+        obj.insert("__intl_list_type__".to_string(), Value::from(options.list_type.as_str()));
+        obj.insert("__intl_list_style__".to_string(), Value::from(options.style.as_str()));
+    }
+
     fn intl_boolean_option(&mut self, ctx: &GcContext<'gc>, options: &Value<'gc>, key: &str) -> Result<Option<bool>, Value<'gc>> {
         let value = self.read_named_property(ctx, options, key);
         if let Some(thrown) = self.pending_throw.take() {
@@ -4928,6 +5082,122 @@ impl<'gc> VM<'gc> {
             "minutes" | "seconds" => matches!(style, "numeric" | "2-digit"),
             "milliseconds" | "microseconds" | "nanoseconds" => style == "numeric",
             _ => true,
+        }
+    }
+
+    fn intl_string_list_from_iterable(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<Vec<String>, Value<'gc>> {
+        let Some(value) = value else {
+            return Ok(vec![]);
+        };
+        if matches!(value, Value::Undefined) {
+            return Ok(vec![]);
+        }
+        let iterable = if Self::intl_is_object_like(value) {
+            value.clone()
+        } else {
+            self.intl_box_primitive_if_needed(ctx, value)
+        };
+        let iter_fn = self.read_named_property(ctx, &iterable, "@@sym:1");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        if matches!(iter_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&iter_fn) {
+            return Err(self.make_type_error_object(ctx, "object is not iterable"));
+        }
+        let iterator = match self.vm_call_function_value(ctx, &iter_fn, &iterable, &[]) {
+            Ok(value) => value,
+            Err(err) => return Err(self.vm_value_from_error(ctx, &err)),
+        };
+        let mut out = Vec::new();
+        loop {
+            let next_fn = self.read_named_property(ctx, &iterator, "next");
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(thrown);
+            }
+            let result = match self.vm_call_function_value(ctx, &next_fn, &iterator, &[]) {
+                Ok(value) => value,
+                Err(err) => return Err(self.vm_value_from_error(ctx, &err)),
+            };
+            let done = self.read_named_property(ctx, &result, "done");
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(thrown);
+            }
+            if Self::value_is_truthy(&done) {
+                break;
+            }
+            let next_value = self.read_named_property(ctx, &result, "value");
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(thrown);
+            }
+            let Value::String(text) = next_value else {
+                self.intl_iterator_close(ctx, &iterator);
+                return Err(self.make_type_error_object(ctx, "Iterable elements must be strings"));
+            };
+            out.push(crate::unicode::utf16_to_utf8(&text));
+        }
+        Ok(out)
+    }
+
+    fn intl_iterator_close(&mut self, ctx: &GcContext<'gc>, iterator: &Value<'gc>) {
+        let return_fn = self.read_named_property(ctx, iterator, "return");
+        if self.pending_throw.is_some() {
+            return;
+        }
+        if matches!(return_fn, Value::Undefined | Value::Null) || !self.is_value_callable(&return_fn) {
+            return;
+        }
+        let _ = self.vm_call_function_value(ctx, &return_fn, iterator, &[]);
+        self.pending_throw = None;
+    }
+
+    fn intl_format_list_parts(locale: &str, list_type: &str, style: &str, items: &[String]) -> Vec<IntlListPart> {
+        let literals = Self::intl_list_format_literals(locale, list_type, style);
+        match items.len() {
+            0 => vec![],
+            1 => vec![IntlListPart::element(items[0].clone())],
+            2 => vec![
+                IntlListPart::element(items[0].clone()),
+                IntlListPart::literal(literals.pair.to_string()),
+                IntlListPart::element(items[1].clone()),
+            ],
+            len => {
+                let mut parts = Vec::new();
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        let literal = if index + 1 == len { literals.end } else { literals.middle };
+                        parts.push(IntlListPart::literal(literal.to_string()));
+                    }
+                    parts.push(IntlListPart::element(item.clone()));
+                }
+                parts
+            }
+        }
+    }
+
+    fn intl_list_format_literals(locale: &str, list_type: &str, style: &str) -> IntlListLiterals {
+        if locale.starts_with("es") {
+            return match (list_type, style) {
+                ("unit", "narrow") => IntlListLiterals::new(" ", " ", " "),
+                ("unit", "short") => IntlListLiterals::new(" y ", ", ", ", "),
+                ("unit", _) => IntlListLiterals::new(" y ", ", ", " y "),
+                ("conjunction", _) => IntlListLiterals::new(" y ", ", ", " y "),
+                ("disjunction", _) => IntlListLiterals::new(" o ", ", ", " o "),
+                _ => IntlListLiterals::new(", ", ", ", ", "),
+            };
+        }
+        if locale.starts_with("en") {
+            return match (list_type, style) {
+                ("conjunction", "short") => IntlListLiterals::new(" & ", ", ", ", & "),
+                ("disjunction", _) => IntlListLiterals::new(" or ", ", ", ", or "),
+                ("unit", "narrow") => IntlListLiterals::new(" ", " ", " "),
+                ("unit", _) => IntlListLiterals::new(", ", ", ", ", "),
+                _ => IntlListLiterals::new(" and ", ", ", ", and "),
+            };
+        }
+        match list_type {
+            "conjunction" => IntlListLiterals::new(" and ", ", ", ", and "),
+            "disjunction" => IntlListLiterals::new(" or ", ", ", ", or "),
+            _ => IntlListLiterals::new(", ", ", ", ", "),
         }
     }
 
@@ -6493,6 +6763,12 @@ struct IntlDurationFormatOptions {
     fractional_digits: Option<u8>,
 }
 
+struct IntlListFormatOptions {
+    resolved_locale: String,
+    list_type: String,
+    style: String,
+}
+
 struct IntlNumberFormatOptions {
     resolved_locale: String,
     numbering_system: String,
@@ -6570,6 +6846,28 @@ impl IntlDurationUnitOptions {
     }
 }
 
+impl IntlListPart {
+    fn element(value: String) -> Self {
+        Self {
+            part_type: "element".to_string(),
+            value,
+        }
+    }
+
+    fn literal(value: String) -> Self {
+        Self {
+            part_type: "literal".to_string(),
+            value,
+        }
+    }
+}
+
+impl IntlListLiterals {
+    fn new(pair: &'static str, middle: &'static str, end: &'static str) -> Self {
+        Self { pair, middle, end }
+    }
+}
+
 struct IntlExactDecimal {
     negative: bool,
     digits: String,
@@ -6581,6 +6879,17 @@ struct IntlUnitPattern {
     prefix_literal: Option<String>,
     suffix_literal: Option<String>,
     suffix_unit: String,
+}
+
+struct IntlListPart {
+    part_type: String,
+    value: String,
+}
+
+struct IntlListLiterals {
+    pair: &'static str,
+    middle: &'static str,
+    end: &'static str,
 }
 
 enum IntlFormattedNumberInput {

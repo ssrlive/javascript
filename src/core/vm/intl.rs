@@ -1491,14 +1491,19 @@ impl<'gc> VM<'gc> {
         if let Value::BigInt(bi) = &prim {
             return Ok(IntlFormattedNumberInput::BigInt(bi.to_string()));
         }
+        if let Value::String(text) = &prim {
+            return Ok(IntlFormattedNumberInput::DecimalString(crate::unicode::utf16_to_utf8(text)));
+        }
         Ok(IntlFormattedNumberInput::Number(to_number(&prim)))
     }
 
     fn intl_format_number_value(options: &IntlNumberFormatOptions, input: IntlFormattedNumberInput) -> String {
-        match input {
+        let formatted = match input {
             IntlFormattedNumberInput::BigInt(value) => Self::intl_format_bigint_value(options, &value),
+            IntlFormattedNumberInput::DecimalString(value) => Self::intl_format_decimal_string_or_number(options, &value),
             IntlFormattedNumberInput::Number(value) => Self::intl_format_f64_value(options, value),
-        }
+        };
+        Self::intl_remap_numbering_system_digits(&formatted, &options.numbering_system)
     }
 
     fn intl_format_bigint_value(options: &IntlNumberFormatOptions, value: &str) -> String {
@@ -1562,7 +1567,13 @@ impl<'gc> VM<'gc> {
         }
         let (mut integer_digits, fraction_digits) = if let Some(maximum_significant_digits) = options.maximum_significant_digits {
             let rounded = Self::intl_round_to_significant_digits(value, maximum_significant_digits);
-            Self::intl_split_fixed_decimal(rounded, 0, options.minimum_significant_digits.unwrap_or(1), true)
+            Self::intl_format_standard_significant_digits(
+                rounded,
+                options.minimum_significant_digits.unwrap_or(1),
+                options
+                    .maximum_significant_digits
+                    .unwrap_or(options.minimum_significant_digits.unwrap_or(1)),
+            )
         } else {
             let rounded = Self::intl_round_to_fraction_digits(value, options.maximum_fraction_digits);
             Self::intl_split_fixed_decimal(rounded, options.maximum_fraction_digits, options.minimum_fraction_digits, false)
@@ -1579,6 +1590,17 @@ impl<'gc> VM<'gc> {
         Self::intl_apply_sign_and_affixes(options, negative, is_zeroish, false, &formatted)
     }
 
+    fn intl_format_decimal_string_or_number(options: &IntlNumberFormatOptions, value: &str) -> String {
+        if let Some(decimal) = Self::intl_parse_exact_decimal(value)
+            && options.minimum_significant_digits.is_none()
+            && options.maximum_significant_digits.is_none()
+            && options.notation == "standard"
+        {
+            return Self::intl_format_exact_decimal(options, &decimal);
+        }
+        Self::intl_format_f64_value(options, value.parse::<f64>().unwrap_or(f64::NAN))
+    }
+
     fn intl_round_to_fraction_digits(value: f64, digits: u8) -> f64 {
         let factor = 10f64.powi(digits as i32);
         (value * factor).round() / factor
@@ -1591,6 +1613,34 @@ impl<'gc> VM<'gc> {
         let integer_digits = value.log10().floor() as i32 + 1;
         let factor = 10f64.powi(digits as i32 - integer_digits);
         (value * factor).round() / factor
+    }
+
+    fn intl_format_standard_significant_digits(
+        value: f64,
+        minimum_significant_digits: u8,
+        maximum_significant_digits: u8,
+    ) -> (String, String) {
+        let rounded = Self::intl_round_to_significant_digits(value, maximum_significant_digits);
+        let mut text = rounded.to_string();
+        let mut significant_digits = Self::intl_count_significant_digits(&text);
+        while significant_digits < minimum_significant_digits as usize {
+            if !text.contains('.') {
+                text.push('.');
+            }
+            text.push('0');
+            significant_digits += 1;
+        }
+        if let Some((integer, fraction)) = text.split_once('.') {
+            (integer.to_string(), fraction.to_string())
+        } else {
+            (text, String::new())
+        }
+    }
+
+    fn intl_count_significant_digits(text: &str) -> usize {
+        let digits: String = text.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        let trimmed = digits.trim_start_matches('0');
+        if trimmed.is_empty() { 1 } else { trimmed.len() }
     }
 
     fn intl_split_fixed_decimal(
@@ -1909,6 +1959,104 @@ impl<'gc> VM<'gc> {
         formatted
     }
 
+    fn intl_parse_exact_decimal(text: &str) -> Option<IntlExactDecimal> {
+        let text = text.trim();
+        if text.is_empty() || text.contains(['e', 'E']) {
+            return None;
+        }
+        let (negative, rest) = if let Some(rest) = text.strip_prefix('-') {
+            (true, rest)
+        } else if let Some(rest) = text.strip_prefix('+') {
+            (false, rest)
+        } else {
+            (false, text)
+        };
+        let (integer_part, fraction_part) = if let Some((integer_part, fraction_part)) = rest.split_once('.') {
+            (integer_part, fraction_part)
+        } else {
+            (rest, "")
+        };
+        if (!integer_part.is_empty() && !integer_part.chars().all(|ch| ch.is_ascii_digit()))
+            || !fraction_part.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return None;
+        }
+        let digits = format!("{}{}", integer_part, fraction_part);
+        if digits.is_empty() || !digits.chars().any(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        Some(IntlExactDecimal {
+            negative,
+            digits,
+            scale: fraction_part.len(),
+        })
+    }
+
+    fn intl_format_exact_decimal(options: &IntlNumberFormatOptions, decimal: &IntlExactDecimal) -> String {
+        let mut digits = decimal.digits.clone();
+        let mut scale = decimal.scale;
+        if options.style == "percent" {
+            if scale >= 2 {
+                scale -= 2;
+            } else {
+                digits.push_str(&"0".repeat(2 - scale));
+                scale = 0;
+            }
+        }
+        Self::intl_round_exact_fraction_digits(&mut digits, &mut scale, options.maximum_fraction_digits as usize);
+        let split = digits.len().saturating_sub(scale);
+        let integer_part_raw = if split == 0 { "0".to_string() } else { digits[..split].to_string() };
+        let mut integer_part = integer_part_raw.trim_start_matches('0').to_string();
+        if integer_part.is_empty() {
+            integer_part = "0".to_string();
+        }
+        while integer_part.len() < options.minimum_integer_digits as usize {
+            integer_part.insert(0, '0');
+        }
+        let mut fraction_part = if scale == 0 { String::new() } else { digits[split..].to_string() };
+        while fraction_part.len() > options.minimum_fraction_digits as usize && fraction_part.ends_with('0') {
+            fraction_part.pop();
+        }
+        while fraction_part.len() < options.minimum_fraction_digits as usize {
+            fraction_part.push('0');
+        }
+        let mut formatted = Self::intl_apply_grouping(&integer_part, options);
+        if !fraction_part.is_empty() {
+            formatted.push(Self::intl_decimal_separator(options));
+            formatted.push_str(&fraction_part);
+        }
+        let is_zeroish = integer_part.chars().all(|ch| ch == '0') && fraction_part.chars().all(|ch| ch == '0');
+        Self::intl_apply_sign_and_affixes(options, decimal.negative, is_zeroish, false, &formatted)
+    }
+
+    fn intl_round_exact_fraction_digits(digits: &mut String, scale: &mut usize, maximum_fraction_digits: usize) {
+        if *scale <= maximum_fraction_digits {
+            return;
+        }
+        let cut = digits.len() - *scale + maximum_fraction_digits;
+        let round_up = digits.as_bytes().get(cut).is_some_and(|digit| *digit >= b'5');
+        digits.truncate(cut);
+        *scale = maximum_fraction_digits;
+        if round_up {
+            let mut bytes = digits.as_bytes().to_vec();
+            let mut index = bytes.len();
+            loop {
+                if index == 0 {
+                    bytes.insert(0, b'1');
+                    break;
+                }
+                index -= 1;
+                if bytes[index] == b'9' {
+                    bytes[index] = b'0';
+                } else {
+                    bytes[index] += 1;
+                    break;
+                }
+            }
+            *digits = String::from_utf8(bytes).unwrap_or_else(|_| digits.clone());
+        }
+    }
+
     fn intl_require_initialized_service(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -2213,21 +2361,113 @@ impl<'gc> VM<'gc> {
         } else {
             value.to_string()
         };
-        let digits = match numbering_system {
-            "arab" => Some(['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩']),
-            "arabext" => Some(['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹']),
-            _ => None,
-        };
-        if let Some(digits) = digits {
-            text = text
+        text = Self::intl_remap_numbering_system_digits(&text, numbering_system);
+        text
+    }
+
+    fn intl_remap_numbering_system_digits(text: &str, numbering_system: &str) -> String {
+        let hanidec_digits = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+        if numbering_system == "hanidec" {
+            return text
                 .chars()
                 .map(|ch| match ch {
-                    '0'..='9' => digits[ch as usize - '0' as usize],
+                    '0'..='9' => hanidec_digits[ch as usize - '0' as usize],
                     _ => ch,
                 })
                 .collect();
         }
-        text
+        let Some(zero) = Self::intl_numbering_system_zero(numbering_system) else {
+            return text.to_string();
+        };
+        text.chars()
+            .map(|ch| match ch {
+                '0'..='9' => char::from_u32(zero + (ch as u32 - '0' as u32)).unwrap_or(ch),
+                _ => ch,
+            })
+            .collect()
+    }
+
+    fn intl_numbering_system_zero(numbering_system: &str) -> Option<u32> {
+        match numbering_system {
+            "adlm" => Some(0x1E950),
+            "ahom" => Some(0x11730),
+            "arab" => Some(0x0660),
+            "arabext" => Some(0x06F0),
+            "bali" => Some(0x1B50),
+            "beng" => Some(0x09E6),
+            "bhks" => Some(0x11C50),
+            "brah" => Some(0x11066),
+            "cakm" => Some(0x11136),
+            "cham" => Some(0xAA50),
+            "deva" => Some(0x0966),
+            "diak" => Some(0x11950),
+            "fullwide" => Some(0xFF10),
+            "gara" => Some(0x10D40),
+            "gong" => Some(0x11DA0),
+            "gonm" => Some(0x11D50),
+            "gujr" => Some(0x0AE6),
+            "gukh" => Some(0x16130),
+            "guru" => Some(0x0A66),
+            "hmng" => Some(0x16B50),
+            "hmnp" => Some(0x1E140),
+            "java" => Some(0xA9D0),
+            "kali" => Some(0xA900),
+            "kawi" => Some(0x11F50),
+            "khmr" => Some(0x17E0),
+            "knda" => Some(0x0CE6),
+            "krai" => Some(0x16D70),
+            "lana" => Some(0x1A80),
+            "lanatham" => Some(0x1A90),
+            "laoo" => Some(0x0ED0),
+            "latn" => Some(0x0030),
+            "lepc" => Some(0x1C40),
+            "limb" => Some(0x1946),
+            "mathbold" => Some(0x1D7CE),
+            "mathdbl" => Some(0x1D7D8),
+            "mathmono" => Some(0x1D7F6),
+            "mathsanb" => Some(0x1D7EC),
+            "mathsans" => Some(0x1D7E2),
+            "mlym" => Some(0x0D66),
+            "modi" => Some(0x11650),
+            "mong" => Some(0x1810),
+            "mroo" => Some(0x16A60),
+            "mtei" => Some(0xABF0),
+            "mymr" => Some(0x1040),
+            "mymrepka" => Some(0x116DA),
+            "mymrpao" => Some(0x116D0),
+            "mymrshan" => Some(0x1090),
+            "mymrtlng" => Some(0xA9F0),
+            "nagm" => Some(0x1E4F0),
+            "newa" => Some(0x11450),
+            "nkoo" => Some(0x07C0),
+            "olck" => Some(0x1C50),
+            "onao" => Some(0x1E5F1),
+            "orya" => Some(0x0B66),
+            "osma" => Some(0x104A0),
+            "outlined" => Some(0x1CCF0),
+            "rohg" => Some(0x10D30),
+            "saur" => Some(0xA8D0),
+            "segment" => Some(0x1FBF0),
+            "shrd" => Some(0x111D0),
+            "sind" => Some(0x112F0),
+            "sinh" => Some(0x0DE6),
+            "sora" => Some(0x110F0),
+            "sund" => Some(0x1BB0),
+            "sunu" => Some(0x11BF0),
+            "takr" => Some(0x116C0),
+            "talu" => Some(0x19D0),
+            "tamldec" => Some(0x0BE6),
+            "telu" => Some(0x0C66),
+            "thai" => Some(0x0E50),
+            "tibt" => Some(0x0F20),
+            "tirh" => Some(0x114D0),
+            "tnsa" => Some(0x16AC0),
+            "tols" => Some(0x11DE0),
+            "vaii" => Some(0xA620),
+            "wara" => Some(0x118E0),
+            "wcho" => Some(0x1E2F0),
+            _ => None,
+        }
     }
 
     fn intl_read_collator_options(
@@ -4149,7 +4389,14 @@ struct IntlGenericNumberingSystemOptions {
     numbering_system: String,
 }
 
+struct IntlExactDecimal {
+    negative: bool,
+    digits: String,
+    scale: usize,
+}
+
 enum IntlFormattedNumberInput {
     Number(f64),
     BigInt(String),
+    DecimalString(String),
 }

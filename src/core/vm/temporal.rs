@@ -243,7 +243,7 @@ impl<'gc> VM<'gc> {
                 Value::Boolean(value == other)
             }
             "temporal.instant.toString" => self.temporal_instant_to_string(ctx, receiver, args.first()),
-            "temporal.instant.toLocaleString" => self.temporal_instant_to_string(ctx, receiver, None),
+            "temporal.instant.toLocaleString" => self.temporal_instant_to_locale_string(ctx, receiver, args),
             "temporal.instant.toJSON" => self.temporal_instant_to_string(ctx, receiver, None),
             "temporal.instant.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.Instant to a primitive value");
@@ -631,7 +631,13 @@ impl<'gc> VM<'gc> {
                 };
                 Value::from(value.to_ixdtf_string(display_calendar))
             }
-            "temporal.plainDate.toJSON" | "temporal.plainDate.toLocaleString" => self.temporal_repr_result(ctx, receiver, "PlainDate"),
+            "temporal.plainDate.toJSON" => self.temporal_repr_result(ctx, receiver, "PlainDate"),
+            "temporal.plainDate.toLocaleString" => {
+                if self.temporal_expect_plain_date(ctx, receiver).is_none() {
+                    return Value::Undefined;
+                }
+                self.temporal_date_time_to_locale_string(ctx, receiver, args.first(), args.get(1))
+            }
             "temporal.plainDate.equals" => {
                 let Some(value) = self.temporal_expect_plain_date(ctx, receiver) else {
                     return Value::Undefined;
@@ -920,7 +926,12 @@ impl<'gc> VM<'gc> {
                 )
             }
             "temporal.plainTime.toString" => self.temporal_plain_time_to_string(ctx, receiver, args.first()),
-            "temporal.plainTime.toLocaleString" => self.temporal_plain_time_to_string(ctx, receiver, None),
+            "temporal.plainTime.toLocaleString" => {
+                if self.temporal_expect_plain_time(ctx, receiver).is_none() {
+                    return Value::Undefined;
+                }
+                self.temporal_date_time_to_locale_string(ctx, receiver, args.first(), args.get(1))
+            }
             "temporal.plainTime.toJSON" => self.temporal_plain_time_to_string(ctx, receiver, None),
             "temporal.plainTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainTime to a primitive value");
@@ -1300,7 +1311,12 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.plainDateTime.toString" => self.temporal_plain_date_time_to_string(ctx, receiver, args.first()),
-            "temporal.plainDateTime.toLocaleString" => self.temporal_plain_date_time_to_string(ctx, receiver, None),
+            "temporal.plainDateTime.toLocaleString" => {
+                if self.temporal_expect_plain_date_time(ctx, receiver).is_none() {
+                    return Value::Undefined;
+                }
+                self.temporal_date_time_to_locale_string(ctx, receiver, args.first(), args.get(1))
+            }
             "temporal.plainDateTime.toJSON" => self.temporal_plain_date_time_to_string(ctx, receiver, None),
             "temporal.plainDateTime.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.PlainDateTime to a primitive value");
@@ -1444,7 +1460,12 @@ impl<'gc> VM<'gc> {
                 }
             }
             "temporal.duration.toString" => self.temporal_duration_to_string(ctx, receiver, args.first()),
-            "temporal.duration.toLocaleString" => self.temporal_duration_to_string(ctx, receiver, None),
+            "temporal.duration.toLocaleString" => {
+                if self.temporal_expect_duration(ctx, receiver).is_none() {
+                    return Value::Undefined;
+                }
+                self.temporal_duration_to_locale_string(ctx, receiver, args.first(), args.get(1))
+            }
             "temporal.duration.toJSON" => self.temporal_duration_to_string(ctx, receiver, None),
             "temporal.duration.valueOf" => {
                 self.throw_type_error(ctx, "Cannot convert Temporal.Duration to a primitive value");
@@ -1899,7 +1920,12 @@ impl<'gc> VM<'gc> {
                 )
             }
             "temporal.plainYearMonth.toString" => self.temporal_plain_year_month_to_string(ctx, receiver, args.first()),
-            "temporal.plainYearMonth.toLocaleString" => self.temporal_plain_year_month_to_string(ctx, receiver, None),
+            "temporal.plainYearMonth.toLocaleString" => {
+                if self.temporal_expect_plain_year_month(ctx, receiver).is_none() {
+                    return Value::Undefined;
+                }
+                self.temporal_date_time_to_locale_string(ctx, receiver, args.first(), args.get(1))
+            }
             "temporal.plainYearMonth.toJSON" => self.temporal_plain_year_month_to_string(ctx, receiver, None),
             "temporal.plainYearMonth.toPlainDate" => {
                 let Some(value) = self.temporal_expect_plain_year_month(ctx, receiver) else {
@@ -2042,7 +2068,12 @@ impl<'gc> VM<'gc> {
                 )
             }
             "temporal.plainMonthDay.toString" => self.temporal_plain_month_day_to_string(ctx, receiver, args.first()),
-            "temporal.plainMonthDay.toLocaleString" => self.temporal_plain_month_day_to_string(ctx, receiver, None),
+            "temporal.plainMonthDay.toLocaleString" => {
+                if self.temporal_expect_plain_month_day(ctx, receiver).is_none() {
+                    return Value::Undefined;
+                }
+                self.temporal_date_time_to_locale_string(ctx, receiver, args.first(), args.get(1))
+            }
             "temporal.plainMonthDay.toJSON" => self.temporal_plain_month_day_to_string(ctx, receiver, None),
             "temporal.plainMonthDay.toPlainDate" => {
                 let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
@@ -3021,7 +3052,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn temporal_slot_string_if_kind(&self, value: &Value<'gc>, kind: &str, slot: &str) -> Option<String> {
+    pub(super) fn temporal_slot_string_if_kind(&self, value: &Value<'gc>, kind: &str, slot: &str) -> Option<String> {
         let Value::Object(obj) = value else {
             return None;
         };
@@ -3031,6 +3062,17 @@ impl<'gc> VM<'gc> {
                 Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             },
+            _ => None,
+        }
+    }
+
+    pub(super) fn temporal_value_kind(&self, value: &Value<'gc>) -> Option<String> {
+        let Value::Object(obj) = value else {
+            return None;
+        };
+        let borrow = obj.borrow();
+        match own_data_from_legacy_map(&borrow, SLOT_KIND) {
+            Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => None,
         }
     }
@@ -6022,24 +6064,24 @@ impl<'gc> VM<'gc> {
         .map(Some)
     }
 
-    fn temporal_expect_instant(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<Instant> {
+    pub(super) fn temporal_expect_instant(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<Instant> {
         let epoch_ns = self.temporal_slot_string_value(ctx, receiver, "Instant", SLOT_EPOCH_NS)?;
         let bigint = BigInt::from_str(&epoch_ns).ok()?;
         let epoch = bigint.to_i128()?;
         Instant::try_new(epoch).ok()
     }
 
-    fn temporal_expect_plain_date(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainDate> {
+    pub(super) fn temporal_expect_plain_date(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainDate> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainDate", SLOT_REPR)?;
         PlainDate::from_utf8(repr.as_bytes()).ok()
     }
 
-    fn temporal_expect_plain_time(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainTime> {
+    pub(super) fn temporal_expect_plain_time(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainTime> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainTime", SLOT_REPR)?;
         PlainTime::from_utf8(repr.as_bytes()).ok()
     }
 
-    fn temporal_expect_plain_date_time(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainDateTime> {
+    pub(super) fn temporal_expect_plain_date_time(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainDateTime> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainDateTime", SLOT_REPR)?;
         PlainDateTime::from_utf8(repr.as_bytes()).ok()
     }
@@ -6100,7 +6142,11 @@ impl<'gc> VM<'gc> {
         TemporalDuration::from_utf8(repr.as_bytes()).ok()
     }
 
-    fn temporal_expect_plain_year_month(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainYearMonth> {
+    pub(super) fn temporal_expect_plain_year_month(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+    ) -> Option<PlainYearMonth> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainYearMonth", SLOT_REPR)?;
         let parsed = PlainYearMonth::from_utf8(repr.as_bytes()).ok()?;
         let Some(reference_day) = self.temporal_slot_string_value(ctx, receiver, "PlainYearMonth", SLOT_REFERENCE_DAY) else {
@@ -6114,7 +6160,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn temporal_expect_plain_month_day(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainMonthDay> {
+    pub(super) fn temporal_expect_plain_month_day(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainMonthDay> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REPR)?;
         let parsed = PlainMonthDay::from_utf8(repr.as_bytes()).ok()?;
         let Some(reference_year) = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REFERENCE_YEAR) else {
@@ -6524,6 +6570,96 @@ impl<'gc> VM<'gc> {
             Ok(text) => Value::from(text),
             Err(err) => self.temporal_throw(ctx, err),
         }
+    }
+
+    fn temporal_date_time_to_locale_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        locales: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(receiver_value) = receiver.cloned() else {
+            self.throw_type_error(ctx, "Temporal method called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let mut args = Vec::new();
+        match (locales, options) {
+            (None, None) => {}
+            (Some(locales), None) => args.push(locales.clone()),
+            (None, Some(options)) => {
+                args.push(Value::Undefined);
+                args.push(options.clone());
+            }
+            (Some(locales), Some(options)) => {
+                args.push(locales.clone());
+                args.push(options.clone());
+            }
+        }
+        let formatter = match self.intl_construct_service_instance(ctx, "DateTimeFormat", None, &args) {
+            Ok(value) => value,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        self.call_host_fn(ctx, "intl.dateTimeFormat.format", Some(&formatter), &[receiver_value])
+    }
+
+    fn temporal_instant_to_locale_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
+        let Some(value) = self.temporal_expect_instant(ctx, receiver) else {
+            return Value::Undefined;
+        };
+        let epoch_ms = match i64::try_from(value.epoch_nanoseconds().as_i128() / 1_000_000) {
+            Ok(value) => value as f64,
+            Err(_) => {
+                self.throw_range_error_object(ctx, "Instant out of range for Date");
+                return Value::Undefined;
+            }
+        };
+        let mut obj = IndexMap::new();
+        obj.insert("__date_ms__".to_string(), Value::Number(epoch_ms));
+        let date_value = Value::Object(new_gc_cell_ptr(ctx, obj));
+        self.call_host_fn(ctx, "date.toLocaleString", Some(&date_value), args)
+    }
+
+    fn temporal_duration_to_locale_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        locales: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Value<'gc> {
+        let Some(receiver_value) = receiver.cloned() else {
+            self.throw_type_error(ctx, "Temporal method called on incompatible receiver");
+            return Value::Undefined;
+        };
+        let mut args = Vec::new();
+        match (locales, options) {
+            (None, None) => {}
+            (Some(locales), None) => args.push(locales.clone()),
+            (None, Some(options)) => {
+                args.push(Value::Undefined);
+                args.push(options.clone());
+            }
+            (Some(locales), Some(options)) => {
+                args.push(locales.clone());
+                args.push(options.clone());
+            }
+        }
+        let formatter = match self.intl_construct_service_instance(ctx, "DurationFormat", None, &args) {
+            Ok(value) => value,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
+            }
+        };
+        self.call_host_fn(ctx, "intl.durationFormat.format", Some(&formatter), &[receiver_value])
     }
 
     fn temporal_plain_time_to_string(

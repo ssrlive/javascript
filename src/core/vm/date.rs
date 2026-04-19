@@ -274,13 +274,17 @@ impl<'gc> VM<'gc> {
                 let value = self.read_named_property(ctx, &boxed_options, key);
                 self.pending_throw.is_none() && !matches!(value, Value::Undefined)
             });
+        let date_style = self.read_named_property(ctx, &boxed_options, "dateStyle");
+        let time_style = self.read_named_property(ctx, &boxed_options, "timeStyle");
         if let Some(thrown) = self.pending_throw.take() {
             return Err(thrown);
         }
+        let has_date_style = !matches!(date_style, Value::Undefined);
+        let has_time_style = !matches!(time_style, Value::Undefined);
         let needs_defaults = match mode {
-            "date" => !has_date_fields,
-            "time" => !has_time_fields,
-            _ => !has_date_fields && !has_time_fields,
+            "date" => !has_date_fields && !has_date_style,
+            "time" => !has_time_fields && !has_time_style,
+            _ => !has_date_fields && !has_time_fields && !has_date_style && !has_time_style,
         };
         if !needs_defaults {
             return Ok(vec![locales, boxed_options]);

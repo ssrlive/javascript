@@ -379,11 +379,16 @@ impl<'gc> VM<'gc> {
         }
         // Check if this local has been captured as an upvalue cell
         let val = if let Some(frame) = self.frames.last() {
-            if let Some(cell) = frame.local_cells.get(&index) {
+            // Fast path: skip HashMap lookup when no upvalue cells exist (common case)
+            if frame.local_cells.is_empty() {
+                self.stack[bp + index].clone()
+            } else if let Some(cell) = frame.local_cells.get(&index) {
                 cell.borrow().clone()
             } else {
                 self.stack[bp + index].clone()
             }
+        } else if self.top_level_cells.is_empty() {
+            self.stack[bp + index].clone()
         } else if let Some(cell) = self.top_level_cells.get(&index) {
             cell.borrow().clone()
         } else {
@@ -411,8 +416,15 @@ impl<'gc> VM<'gc> {
         }
         let val = self.stack.last().expect("VM Stack underflow").clone();
         // Check if this local has been captured as an upvalue cell
+        // Fast path: skip HashMap lookup when no upvalue cells exist (common case)
         let cell = if let Some(frame) = self.frames.last() {
-            frame.local_cells.get(&index).cloned()
+            if frame.local_cells.is_empty() {
+                None
+            } else {
+                frame.local_cells.get(&index).cloned()
+            }
+        } else if self.top_level_cells.is_empty() {
+            None
         } else {
             self.top_level_cells.get(&index).cloned()
         };
@@ -2115,6 +2127,12 @@ impl<'gc> VM<'gc> {
         let b_raw = self.stack.pop().expect("VM Stack underflow on Add (b)");
         let a_raw = self.stack.pop().expect("VM Stack underflow on Add (a)");
 
+        // Ultra-fast path: two plain numbers (most common in numeric loops)
+        if let (Value::Number(a_n), Value::Number(b_n)) = (&a_raw, &b_raw) {
+            self.stack.push(Value::Number(a_n + b_n));
+            return Ok(OpcodeAction::Continue);
+        }
+
         // Symbol operands must throw in + regardless of potential
         // object-to-string fallback paths.
         if a_raw.is_symbol_value() || b_raw.is_symbol_value() {
@@ -2125,16 +2143,47 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
 
-        let a = self.try_to_primitive(ctx, &a_raw, "default");
-        if let Some(thrown) = self.pending_throw.take() {
-            self.handle_throw(ctx, &thrown)?;
-            return Ok(OpcodeAction::Continue);
+        // Optimization: strings/numbers/booleans/null/undefined/bigint are already
+        // primitives — skip try_to_primitive (which would clone them) and consume them
+        // by value instead.
+        #[inline(always)]
+        fn is_primitive<'gc>(v: &Value<'gc>) -> bool {
+            matches!(
+                v,
+                Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::Null | Value::Undefined | Value::BigInt(_)
+            )
         }
-        let b = self.try_to_primitive(ctx, &b_raw, "default");
-        if let Some(thrown) = self.pending_throw.take() {
-            self.handle_throw(ctx, &thrown)?;
-            return Ok(OpcodeAction::Continue);
-        }
+
+        let (a, b) = if is_primitive(&a_raw) && is_primitive(&b_raw) {
+            (a_raw, b_raw)
+        } else if is_primitive(&a_raw) {
+            let b = self.try_to_primitive(ctx, &b_raw, "default");
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            (a_raw, b)
+        } else if is_primitive(&b_raw) {
+            let a = self.try_to_primitive(ctx, &a_raw, "default");
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            (a, b_raw)
+        } else {
+            let a = self.try_to_primitive(ctx, &a_raw, "default");
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            let b = self.try_to_primitive(ctx, &b_raw, "default");
+            if let Some(thrown) = self.pending_throw.take() {
+                self.handle_throw(ctx, &thrown)?;
+                return Ok(OpcodeAction::Continue);
+            }
+            (a, b)
+        };
+
         // Symbols cannot be implicitly converted
         if a.is_symbol_value() || b.is_symbol_value() {
             let mut err_map = IndexMap::new();
@@ -2145,54 +2194,43 @@ impl<'gc> VM<'gc> {
         }
         let is_a_str = matches!(&a, Value::String(_));
         let is_b_str = matches!(&b, Value::String(_));
-        match (&a, &b) {
-            // String concatenation happens before numeric BigInt checks.
-            _ if is_a_str
-                || is_b_str
-                || matches!(&a, Value::Array(_) | Value::Object(_))
-                || matches!(&b, Value::Array(_) | Value::Object(_)) =>
-            {
-                // Concatenate preserving raw UTF-16 (lone surrogates included)
-                let a_u16 = match &a {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        let s = self.vm_to_string(ctx, &a);
-                        crate::unicode::utf8_to_utf16(&s)
-                    }
-                };
-                let b_u16 = match &b {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        let s = self.vm_to_string(ctx, &b);
-                        crate::unicode::utf8_to_utf16(&s)
-                    }
-                };
-                let mut result = a_u16;
-                result.extend_from_slice(&b_u16);
-                self.stack.push(Value::String(result));
+        if is_a_str || is_b_str || matches!(&a, Value::Array(_) | Value::Object(_)) || matches!(&b, Value::Array(_) | Value::Object(_)) {
+            // Concatenate preserving raw UTF-16 (lone surrogates included).
+            // `a` is owned (moved off the stack), so extract Vec<u16> without cloning.
+            let mut result: Vec<u16> = match a {
+                Value::String(s) => s,
+                other => {
+                    let s = self.vm_to_string(ctx, &other);
+                    crate::unicode::utf8_to_utf16(&s)
+                }
+            };
+            match &b {
+                Value::String(s) => result.extend_from_slice(s),
+                other => {
+                    let s = self.vm_to_string(ctx, other);
+                    result.extend(s.encode_utf16());
+                }
             }
-            (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
-                self.stack.push(Value::BigInt(Box::new((**a_bi).clone() + (**b_bi).clone())));
-            }
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-                let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in +");
-                self.handle_throw(ctx, &err)?;
-                return Ok(OpcodeAction::Continue);
-            }
-            (Value::Number(a_num), Value::Number(b_num)) => {
-                self.stack.push(Value::Number(a_num + b_num));
-            }
-            // String concatenation
-            (Value::String(a_str), Value::String(b_str)) => {
-                let mut result = a_str.clone();
-                result.extend_from_slice(b_str);
-                self.stack.push(Value::String(result));
-            }
-            _ => {
-                // Coerce both to numbers: undefined → NaN, null → 0, bool → 0/1
-                let a_num = to_number(&a);
-                let b_num = to_number(&b);
-                self.stack.push(Value::Number(a_num + b_num));
+            self.stack.push(Value::String(result));
+        } else {
+            match (&a, &b) {
+                (Value::BigInt(a_bi), Value::BigInt(b_bi)) => {
+                    self.stack.push(Value::BigInt(Box::new((**a_bi).clone() + (**b_bi).clone())));
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    let err = self.make_type_error_object(ctx, "Cannot mix BigInt and other types in +");
+                    self.handle_throw(ctx, &err)?;
+                    return Ok(OpcodeAction::Continue);
+                }
+                (Value::Number(a_num), Value::Number(b_num)) => {
+                    self.stack.push(Value::Number(a_num + b_num));
+                }
+                _ => {
+                    // Coerce both to numbers: undefined → NaN, null → 0, bool → 0/1
+                    let a_num = to_number(&a);
+                    let b_num = to_number(&b);
+                    self.stack.push(Value::Number(a_num + b_num));
+                }
             }
         }
         Ok(OpcodeAction::Continue)
@@ -2367,6 +2405,11 @@ impl<'gc> VM<'gc> {
     fn run_opcode_less_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
+        // Fast path: both plain numbers (most common in loop counters)
+        if let (Value::Number(a_n), Value::Number(b_n)) = (&a, &b) {
+            self.stack.push(Value::Boolean(a_n < b_n));
+            return Ok(OpcodeAction::Continue);
+        }
         // Per spec §13.10.1: a < b → IsLessThan(lval, rval, true)
         let result = self.abstract_relational_comparison(ctx, &a, &b, true);
         if let Some(thrown) = self.pending_throw.take() {
@@ -2381,6 +2424,11 @@ impl<'gc> VM<'gc> {
     fn run_opcode_greater_than(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
+        // Fast path: both plain numbers
+        if let (Value::Number(a_n), Value::Number(b_n)) = (&a, &b) {
+            self.stack.push(Value::Boolean(a_n > b_n));
+            return Ok(OpcodeAction::Continue);
+        }
         // Per spec §13.10.1: a > b → IsLessThan(rval, lval, false)
         let result = self.abstract_relational_comparison(ctx, &b, &a, false);
         if let Some(thrown) = self.pending_throw.take() {
@@ -2474,6 +2522,11 @@ impl<'gc> VM<'gc> {
     fn run_opcode_less_equal(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
+        // Fast path: both plain numbers
+        if let (Value::Number(a_n), Value::Number(b_n)) = (&a, &b) {
+            self.stack.push(Value::Boolean(a_n <= b_n));
+            return Ok(OpcodeAction::Continue);
+        }
         // Per spec: x <= y is !(y < x), where undefined means false
         let result = self.abstract_relational_comparison(ctx, &b, &a, false);
         if let Some(thrown) = self.pending_throw.take() {
@@ -2489,6 +2542,11 @@ impl<'gc> VM<'gc> {
     fn run_opcode_greater_equal(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let b = self.stack.pop().expect("VM Stack underflow");
         let a = self.stack.pop().expect("VM Stack underflow");
+        // Fast path: both plain numbers
+        if let (Value::Number(a_n), Value::Number(b_n)) = (&a, &b) {
+            self.stack.push(Value::Boolean(a_n >= b_n));
+            return Ok(OpcodeAction::Continue);
+        }
         let result = self.abstract_relational_comparison(ctx, &a, &b, true);
         if let Some(thrown) = self.pending_throw.take() {
             self.handle_throw(ctx, &thrown)?;
@@ -5613,6 +5671,44 @@ impl<'gc> VM<'gc> {
         let index = self.stack.pop().expect("VM Stack underflow on SetIndex (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetIndex (obj)");
         let _is_strict = self.current_execution_is_strict();
+
+        // Fast path: plain array append with a non-negative integer index.
+        // Bypasses as_property_key_string and the full assign_named_property machinery.
+        if let (Value::Array(arr), Value::Number(idx_n)) = (&obj, &index) {
+            let idx_f = *idx_n;
+            if idx_f >= 0.0 && idx_f == idx_f.floor() && idx_f < 4_294_967_295.0 {
+                let uidx = idx_f as usize;
+                let borrow = arr.borrow();
+                // Only apply to plain (non-typed, non-frozen, non-sealed) arrays
+                if !borrow.props.contains_key("__frozen__")
+                    && !borrow.props.contains_key("__typedarray_name__")
+                    && !borrow.props.contains_key("__non_extensible__")
+                {
+                    let cur_len = borrow.elements.len();
+                    if uidx == cur_len
+                        && !borrow.props.contains_key(&format!("__set_{uidx}"))
+                        && !borrow.props.contains_key(&format!("__get_{uidx}"))
+                    {
+                        // Sequential append: no accessor possible at a brand-new index
+                        let old_len = match borrow.props.get("__array_length__") {
+                            Some(Value::Number(n)) => *n as u64,
+                            _ => cur_len as u64,
+                        };
+                        drop(borrow);
+                        let new_len_u64 = (uidx as u64).saturating_add(1);
+                        let mut a = arr.borrow_mut(ctx);
+                        a.elements.push(val.clone());
+                        if new_len_u64 > old_len {
+                            a.props.insert("__array_length__".to_string(), Value::Number(new_len_u64 as f64));
+                        }
+                        drop(a);
+                        self.stack.push(val);
+                        return Ok(OpcodeAction::Continue);
+                    }
+                }
+            }
+        }
+
         let coerced_key = match self.as_property_key_string(ctx, &index) {
             Ok(key) => key,
             Err(err) => {

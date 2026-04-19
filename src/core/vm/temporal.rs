@@ -2075,6 +2075,63 @@ impl<'gc> VM<'gc> {
             "temporal.plainMonthDay.get.day" => self.temporal_plain_month_day_day(ctx, receiver),
             "temporal.plainMonthDay.get.calendarId" => self.temporal_plain_month_day_calendar(ctx, receiver),
 
+            "temporal.timeZone.constructor" => {
+                let Some(new_target) = self.temporal_constructor_new_target(ctx, "TimeZone") else {
+                    return Value::Undefined;
+                };
+                let Some(id_arg) = args.first() else {
+                    self.throw_type_error(ctx, "Temporal.TimeZone requires a timeZoneIdentifier");
+                    return Value::Undefined;
+                };
+                let time_zone = match self.temporal_time_zone_identifier_arg(ctx, Some(id_arg)) {
+                    Ok(Some(tz)) => tz,
+                    Ok(None) => {
+                        self.throw_range_error_object(ctx, "Invalid time zone identifier");
+                        return Value::Undefined;
+                    }
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let id = match time_zone.identifier() {
+                    Ok(id) => id,
+                    Err(err) => return self.temporal_throw(ctx, err),
+                };
+                let ctor_value = Some(new_target);
+                self.temporal_wrap_time_zone(ctx, ctor_value.as_ref(), &id)
+            }
+            "temporal.timeZone.get.id" => match self.temporal_slot_string_value(ctx, receiver, "TimeZone", SLOT_REPR) {
+                Some(id) => Value::from(id.as_str()),
+                None => Value::Undefined,
+            },
+            "temporal.timeZone.equals" => {
+                let Some(stored_id) = self.temporal_slot_string_value(ctx, receiver, "TimeZone", SLOT_REPR) else {
+                    return Value::Undefined;
+                };
+                let other_id = match args.first() {
+                    Some(Value::String(s)) => crate::unicode::utf16_to_utf8(s),
+                    Some(other) => {
+                        // May be a TimeZone object
+                        match self.temporal_slot_string_if_kind(other, "TimeZone", SLOT_REPR) {
+                            Some(id) => id,
+                            None => match self.temporal_value_string(ctx, other) {
+                                Some(s) => s,
+                                None => return Value::Boolean(false),
+                            },
+                        }
+                    }
+                    None => return Value::Boolean(false),
+                };
+                let t1 = TimeZone::try_from_identifier_str(&stored_id)
+                    .and_then(|tz| tz.primary_identifier())
+                    .and_then(|tz| tz.identifier());
+                let t2 = TimeZone::try_from_identifier_str(&other_id)
+                    .and_then(|tz| tz.primary_identifier())
+                    .and_then(|tz| tz.identifier());
+                match (t1, t2) {
+                    (Ok(p1), Ok(p2)) => Value::Boolean(p1 == p2),
+                    _ => Value::Boolean(stored_id.eq_ignore_ascii_case(&other_id)),
+                }
+            }
+
             "temporal.zonedDateTime.constructor" => {
                 let Some(new_target) = self.temporal_constructor_new_target(ctx, "ZonedDateTime") else {
                     return Value::Undefined;
@@ -2922,6 +2979,18 @@ impl<'gc> VM<'gc> {
         write_attrs_to_legacy_map(&mut now_map, "@@sym:4", PropAttrs::CONFIGURABLE);
         let now_obj = Value::Object(new_gc_cell_ptr(ctx, now_map));
 
+        let time_zone_ctor = self.temporal_make_ctor(
+            ctx,
+            "temporal.timeZone.constructor",
+            "TimeZone",
+            1.0,
+            "Temporal.TimeZone",
+            &[("from", "temporal.timeZone.constructor", "from", 1.0)],
+            &[("equals", "temporal.timeZone.equals", "equals", 1.0)],
+            &[("id", "temporal.timeZone.get.id")],
+            &object_proto,
+        );
+
         let mut temporal_map = IndexMap::new();
         temporal_map.insert("__proto__".to_string(), object_proto);
         for (key, value) in [
@@ -2933,6 +3002,7 @@ impl<'gc> VM<'gc> {
             ("PlainYearMonth", plain_year_month_ctor),
             ("PlainMonthDay", plain_month_day_ctor),
             ("ZonedDateTime", zoned_date_time_ctor),
+            ("TimeZone", time_zone_ctor),
             ("Now", now_obj),
         ] {
             Self::insert_property_with_attributes(&mut temporal_map, key, &value, true, false, true);
@@ -3534,6 +3604,25 @@ impl<'gc> VM<'gc> {
             Self::temporal_store_readonly(&mut borrow, "dayOfWeek", Value::Number(value.day_of_week() as f64));
             Self::temporal_store_readonly(&mut borrow, "dayOfYear", Value::Number(value.day_of_year() as f64));
             Self::temporal_store_readonly(&mut borrow, "daysInWeek", Value::Number(value.days_in_week() as f64));
+        }
+        wrapped
+    }
+
+    fn temporal_wrap_time_zone(&mut self, ctx: &GcContext<'gc>, ctor_value: Option<&Value<'gc>>, id: &str) -> Value<'gc> {
+        let wrapped = self.temporal_wrap_value(ctx, ctor_value, "TimeZone", id, &[]);
+        if let Value::Object(obj) = &wrapped {
+            self.temporal_attach_bound_methods(
+                ctx,
+                obj,
+                &[
+                    ("equals", "temporal.timeZone.equals"),
+                    ("toString", "temporal.instant.toString"),
+                    ("toJSON", "temporal.instant.toJSON"),
+                    ("valueOf", "temporal.instant.valueOf"),
+                ],
+            );
+            let mut borrow = obj.borrow_mut(ctx);
+            Self::temporal_store_readonly(&mut borrow, "id", Value::from(id));
         }
         wrapped
     }

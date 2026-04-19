@@ -1,7 +1,7 @@
 use super::*;
 use crate::core::GcPtr;
 use std::str::FromStr;
-use temporal_rs::{Calendar, PlainDate, PlainDateTime, PlainMonthDay, PlainTime, PlainYearMonth};
+use temporal_rs::{Calendar, PlainDate, PlainDateTime, PlainMonthDay, PlainTime, PlainYearMonth, TimeZone};
 use unicode_normalization::UnicodeNormalization;
 
 const INTL_DEFAULT_LOCALE: &str = "en-US";
@@ -8729,39 +8729,13 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_normalize_time_zone_name(value: &str) -> Option<String> {
-        if value.eq_ignore_ascii_case("utc") {
-            return Some("UTC".to_string());
-        }
-        if let Some(rest) = value.strip_prefix("Etc/GMT").or_else(|| value.strip_prefix("etc/gmt")) {
-            let sign = rest.chars().next()?;
-            if !matches!(sign, '+' | '-') {
-                return None;
-            }
-            let digits = &rest[1..];
-            if digits.is_empty() || digits.len() > 2 || !digits.chars().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            return Some(format!("Etc/GMT{sign}{digits}"));
-        }
+        // Offset-format time zones handled first (e.g. "+05:30").
         if let Some(offset) = Self::intl_normalize_offset_time_zone(value) {
             return Some(offset);
         }
-        let canonical = match value {
-            "Asia/Calcutta" | "asia/calcutta" => "Asia/Kolkata",
-            _ => value,
-        };
-        let (left, right) = canonical.split_once('/')?;
-        if left.is_empty() || right.is_empty() {
-            return None;
-        }
-        if !left
-            .chars()
-            .chain(right.chars())
-            .all(|c| c.is_ascii_alphabetic() || c == '_' || c == '-' || c == '/')
-        {
-            return None;
-        }
-        Some(canonical.to_string())
+        // Use temporal_rs to validate and case-normalize all IANA names.
+        // identifier() returns the canonical IANA case without resolving links.
+        TimeZone::try_from_identifier_str(value).ok()?.identifier().ok()
     }
 
     fn intl_normalize_offset_time_zone(value: &str) -> Option<String> {
@@ -8805,12 +8779,18 @@ impl<'gc> VM<'gc> {
                 _ => format!("GMT{sign}{hours}:{minutes:02}"),
             };
         }
-        match (style, time_zone) {
+        // For IANA zones without a fixed offset, use the primary (canonical) identifier for
+        // display so that link names and their targets produce the same timezone name string.
+        let canonical = TimeZone::try_from_identifier_str(time_zone)
+            .and_then(|tz| tz.primary_identifier())
+            .and_then(|tz| tz.identifier())
+            .unwrap_or_else(|_| time_zone.to_string());
+        match (style, canonical.as_str()) {
             ("long", "Europe/Vienna") => "Central European Standard Time".to_string(),
             ("long", "UTC") => "UTC".to_string(),
             ("short", "UTC") => "UTC".to_string(),
             ("shortOffset", "UTC") | ("longOffset", "UTC") => "GMT".to_string(),
-            _ => time_zone.to_string(),
+            _ => canonical.to_string(),
         }
     }
 

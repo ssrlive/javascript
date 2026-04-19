@@ -299,12 +299,6 @@ function detectFeature(feat) {
     return true;
   }
 
-  // Intl.* features and related Intl flags are assumed supported
-  if (/^Intl\./i.test(feat) || feat === 'Intl-enumeration' || feat === 'intl-normative-optional') {
-    FEATURE_SUPPORTED[feat] = true;
-    return true;
-  }
-
   // Short-circuit for known-unsupported features
   if (HARDCODED_UNSUPPORTED.has(feat)) {
     FEATURE_SUPPORTED[feat] = false;
@@ -312,6 +306,12 @@ function detectFeature(feat) {
   }
 
   if (feat in FEATURE_SUPPORTED) return FEATURE_SUPPORTED[feat];
+
+  // Intl.* features and related Intl flags are assumed supported
+  if (/^Intl\./i.test(feat) || feat === 'Intl-enumeration' || feat === 'intl-normative-optional') {
+    FEATURE_SUPPORTED[feat] = true;
+    return true;
+  }
 
   const probeFile = findProbeFile(feat);
   if (probeFile && BIN) {

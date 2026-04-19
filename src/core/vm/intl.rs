@@ -4915,50 +4915,41 @@ impl<'gc> VM<'gc> {
         let supports_day = fields.day.is_some();
         let supports_weekday = fields.weekday.is_some();
         let supports_time = fields.hour.is_some();
-        if formatter.contains_key("__intl_dateStyle__") && !(supports_year || supports_month || supports_day) {
-            return false;
+        // Return true if AT LEAST ONE formatter field overlaps with this Temporal type's fields.
+        if formatter.contains_key("__intl_dateStyle__") && (supports_year || supports_month || supports_day) {
+            return true;
         }
-        if formatter.contains_key("__intl_timeStyle__") && !supports_time {
-            return false;
+        if formatter.contains_key("__intl_timeStyle__") && supports_time {
+            return true;
         }
-        if formatter.contains_key("__intl_weekday__") && !supports_weekday {
-            return false;
+        if formatter.contains_key("__intl_weekday__") && supports_weekday {
+            return true;
         }
-        if formatter.contains_key("__intl_year__") && !supports_year {
-            return false;
+        if formatter.contains_key("__intl_year__") && supports_year {
+            return true;
         }
-        if formatter.contains_key("__intl_month__") && !supports_month {
-            return false;
+        if formatter.contains_key("__intl_month__") && supports_month {
+            return true;
         }
-        if formatter.contains_key("__intl_day__") && !supports_day {
-            return false;
+        if formatter.contains_key("__intl_day__") && supports_day {
+            return true;
         }
-        if formatter.contains_key("__intl_dayPeriod__") && !supports_time {
-            return false;
+        if formatter.contains_key("__intl_dayPeriod__") && supports_time {
+            return true;
         }
-        if formatter.contains_key("__intl_hour__") && !supports_time {
-            return false;
+        if formatter.contains_key("__intl_hour__") && supports_time {
+            return true;
         }
-        if formatter.contains_key("__intl_minute__") && !supports_time {
-            return false;
+        if formatter.contains_key("__intl_minute__") && supports_time {
+            return true;
         }
-        if formatter.contains_key("__intl_second__") && !supports_time {
-            return false;
+        if formatter.contains_key("__intl_second__") && supports_time {
+            return true;
         }
-        if formatter.contains_key("__intl_fractionalSecondDigits__") && !supports_time {
-            return false;
+        if formatter.contains_key("__intl_fractionalSecondDigits__") && supports_time {
+            return true;
         }
-        formatter.contains_key("__intl_dateStyle__")
-            || formatter.contains_key("__intl_timeStyle__")
-            || formatter.contains_key("__intl_weekday__")
-            || formatter.contains_key("__intl_year__")
-            || formatter.contains_key("__intl_month__")
-            || formatter.contains_key("__intl_day__")
-            || formatter.contains_key("__intl_dayPeriod__")
-            || formatter.contains_key("__intl_hour__")
-            || formatter.contains_key("__intl_minute__")
-            || formatter.contains_key("__intl_second__")
-            || formatter.contains_key("__intl_fractionalSecondDigits__")
+        false
     }
 
     fn intl_temporal_normalized_formatter(
@@ -6848,7 +6839,7 @@ impl<'gc> VM<'gc> {
             } else if let Some(hour_cycle) = ext_hour_cycle.clone() {
                 Some(hour_cycle)
             } else {
-                Some(Self::intl_default_true_hour_cycle(&locale_base))
+                Some(Self::intl_locale_default_hour_cycle(&locale_base))
             };
             out.hour_cycle = resolved_hour_cycle;
             out.hour12 = out.hour_cycle.as_deref().map(Self::intl_hour_cycle_is_twelve_hour);
@@ -6868,7 +6859,7 @@ impl<'gc> VM<'gc> {
             } else if let Some(hour_cycle) = ext_hour_cycle.clone() {
                 Some(hour_cycle)
             } else {
-                Some(Self::intl_default_true_hour_cycle(&locale_base))
+                Some(Self::intl_locale_default_hour_cycle(&locale_base))
             };
             out.hour12 = out.hour_cycle.as_deref().map(Self::intl_hour_cycle_is_twelve_hour);
         }
@@ -9133,6 +9124,14 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_default_true_hour_cycle(locale_base: &str) -> String {
+        if locale_base.eq("ja") || locale_base.starts_with("ja-") {
+            "h11".to_string()
+        } else {
+            "h12".to_string()
+        }
+    }
+
+    fn intl_locale_default_hour_cycle(locale_base: &str) -> String {
         if locale_base.eq("ja") || locale_base.starts_with("ja-") {
             "h11".to_string()
         } else if locale_base.eq("de") || locale_base.starts_with("de-") || locale_base.eq("fr") || locale_base.starts_with("fr-") {

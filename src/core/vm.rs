@@ -39933,11 +39933,13 @@ impl<'gc> VM<'gc> {
         map.insert("__type__".to_string(), Value::from("TypeError"));
         map.insert("name".to_string(), Value::from("TypeError"));
         map.insert("message".to_string(), Value::from(message));
-        if let Some(ctor) = self.globals.get("TypeError").cloned()
-            && let Value::Object(ctor_obj) = ctor
-            && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
-        {
-            map.insert("__proto__".to_string(), proto);
+        if let Some(ctor) = self.globals.get("TypeError").cloned() {
+            map.insert("constructor".to_string(), ctor.clone());
+            if let Value::Object(ctor_obj) = ctor
+                && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+            {
+                map.insert("__proto__".to_string(), proto);
+            }
         }
         Value::Object(new_gc_cell_ptr(ctx, map))
     }

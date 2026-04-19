@@ -344,15 +344,15 @@ let pass = 0, fail = 0, skip = 0, n = 0;
 
 // Skip tests known to be too slow for a tree-walking interpreter
 const SLOW_TESTS = [
-  'S15.1.3.1_A2.5_T1.js',
-  'S15.1.3.1_A2.4_T1.js',
-  'S15.1.3.2_A2.5_T1.js',
-  'S15.1.3.2_A2.4_T1.js',
+  // 'S15.1.3.1_A2.5_T1.js',
+  // 'S15.1.3.1_A2.4_T1.js',
+  // 'S15.1.3.2_A2.5_T1.js',
+  // 'S15.1.3.2_A2.4_T1.js',
 ];
 
 // Skip entire directories whose tests are too slow
 const SLOW_DIRS = [
-  'built-ins/RegExp/property-escapes/generated',
+  // 'built-ins/RegExp/property-escapes/generated',
 ];
 
 /*

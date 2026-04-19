@@ -1254,8 +1254,8 @@ impl<'gc> VM<'gc> {
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
-            let input = value_to_string(&prim);
-            return self.regex_exec(ctx, map, &input);
+            let input_u16 = crate::core::value_to_u16(&prim);
+            return self.regex_exec(ctx, map, &input_u16);
         }
         self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
         Value::Undefined
@@ -1273,8 +1273,8 @@ impl<'gc> VM<'gc> {
             if self.pending_throw.is_some() {
                 return Value::Undefined;
             }
-            let input = value_to_string(&prim);
-            let result = self.regex_exec(ctx, map, &input);
+            let input_u16 = crate::core::value_to_u16(&prim);
+            let result = self.regex_exec(ctx, map, &input_u16);
             return Value::Boolean(!matches!(result, Value::Null));
         }
         self.throw_type_error(ctx, "RegExp.prototype.test called on incompatible receiver");
@@ -1339,7 +1339,10 @@ impl<'gc> VM<'gc> {
         }
         // 3. If R does not have a [[RegExpMatcher]] internal slot, throw a TypeError.
         match rx {
-            Value::Object(obj) if obj.borrow().get("__regex_pattern__").is_some() => self.regex_exec(ctx, obj, s),
+            Value::Object(obj) if obj.borrow().get("__regex_pattern__").is_some() => {
+                let input_u16: Vec<u16> = s.encode_utf16().collect();
+                self.regex_exec(ctx, obj, &input_u16)
+            }
             _ => {
                 self.throw_type_error(ctx, "RegExp.prototype.exec called on incompatible receiver");
                 Value::Null
@@ -2598,10 +2601,9 @@ impl<'gc> VM<'gc> {
         format!("/{}/{}", source, flags)
     }
 
-    fn regex_prepare_input(&self, input: &str, flags: &str) -> (Vec<u16>, bool) {
-        let input_u16: Vec<u16> = input.encode_utf16().collect();
+    fn regex_prepare_input(&self, input_u16: &[u16], flags: &str) -> (Vec<u16>, bool) {
         if !flags.contains('R') {
-            return (input_u16, false);
+            return (input_u16.to_vec(), false);
         }
 
         let mut normalized = Vec::with_capacity(input_u16.len());
@@ -2634,7 +2636,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Execute a regex match, returning an array result or Null
-    pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &ObjectHandle<'gc>, input: &str) -> Value<'gc> {
+    pub(super) fn regex_exec(&mut self, ctx: &GcContext<'gc>, re_obj: &ObjectHandle<'gc>, input_u16: &[u16]) -> Value<'gc> {
         let rx = Value::Object(*re_obj);
         let borrow = re_obj.borrow();
         let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
@@ -2670,8 +2672,7 @@ impl<'gc> VM<'gc> {
             Err(_) => return Value::Null,
         };
 
-        let input_u16: Vec<u16> = input.encode_utf16().collect();
-        let (working_input, mapped_input) = self.regex_prepare_input(input, &flags);
+        let (working_input, mapped_input) = self.regex_prepare_input(input_u16, &flags);
         let match_result = if flags.contains('u') || flags.contains('v') {
             re.find_from_utf16(&working_input, last_index).next()
         } else {
@@ -2682,8 +2683,8 @@ impl<'gc> VM<'gc> {
             Some(m) if !is_sticky || m.range.start == last_index => {
                 let (match_start, match_end) = if mapped_input {
                     (
-                        Self::regex_map_index_back(&input_u16, m.range.start),
-                        Self::regex_map_index_back(&input_u16, m.range.end),
+                        Self::regex_map_index_back(input_u16, m.range.start),
+                        Self::regex_map_index_back(input_u16, m.range.end),
                     )
                 } else {
                     (m.range.start, m.range.end)
@@ -2697,8 +2698,8 @@ impl<'gc> VM<'gc> {
                         Some(r) => {
                             let (cap_start, cap_end) = if mapped_input {
                                 (
-                                    Self::regex_map_index_back(&input_u16, r.start),
-                                    Self::regex_map_index_back(&input_u16, r.end),
+                                    Self::regex_map_index_back(input_u16, r.start),
+                                    Self::regex_map_index_back(input_u16, r.end),
                                 )
                             } else {
                                 (r.start, r.end)
@@ -2712,15 +2713,15 @@ impl<'gc> VM<'gc> {
 
                 let mut arr_data = VmArrayData::new(result_items);
                 arr_data.props.insert("index".to_string(), Value::Number(match_start as f64));
-                arr_data.props.insert("input".to_string(), Value::from(input));
+                arr_data.props.insert("input".to_string(), Value::String(input_u16.to_vec()));
                 let mut groups_map = IndexMap::new();
                 for (name, range) in m.named_groups() {
                     let value = match range {
                         Some(r) => {
                             let (group_start, group_end) = if mapped_input {
                                 (
-                                    Self::regex_map_index_back(&input_u16, r.start),
-                                    Self::regex_map_index_back(&input_u16, r.end),
+                                    Self::regex_map_index_back(input_u16, r.start),
+                                    Self::regex_map_index_back(input_u16, r.end),
                                 )
                             } else {
                                 (r.start, r.end)
@@ -2757,8 +2758,8 @@ impl<'gc> VM<'gc> {
                             Some(r) => {
                                 let (cap_start, cap_end) = if mapped_input {
                                     (
-                                        Self::regex_map_index_back(&input_u16, r.start),
-                                        Self::regex_map_index_back(&input_u16, r.end),
+                                        Self::regex_map_index_back(input_u16, r.start),
+                                        Self::regex_map_index_back(input_u16, r.end),
                                     )
                                 } else {
                                     (r.start, r.end)
@@ -2774,8 +2775,8 @@ impl<'gc> VM<'gc> {
                             Some(r) => {
                                 let (group_start, group_end) = if mapped_input {
                                     (
-                                        Self::regex_map_index_back(&input_u16, r.start),
-                                        Self::regex_map_index_back(&input_u16, r.end),
+                                        Self::regex_map_index_back(input_u16, r.start),
+                                        Self::regex_map_index_back(input_u16, r.end),
                                     )
                                 } else {
                                     (r.start, r.end)
@@ -2807,7 +2808,7 @@ impl<'gc> VM<'gc> {
 
                 let arr = Value::Array(new_gc_cell_ptr(ctx, arr_data));
 
-                self.update_legacy_regexp_static_state(ctx, &input_u16, match_start, match_end, &m.captures, mapped_input);
+                self.update_legacy_regexp_static_state(ctx, input_u16, match_start, match_end, &m.captures, mapped_input);
 
                 // Update lastIndex for global/sticky
                 if (is_global || is_sticky)

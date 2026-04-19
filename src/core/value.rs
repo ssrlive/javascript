@@ -320,6 +320,17 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
     VTOS_DEPTH.with(|d| d.set(d.get() - 1));
     res
 }
+
+/// Like `value_to_string` but returns the raw UTF-16 code units of the string
+/// value, preserving lone surrogates. For non-String values, converts via
+/// `value_to_string` and then re-encodes to UTF-16.
+pub fn value_to_u16<'gc>(val: &Value<'gc>) -> Vec<u16> {
+    match val {
+        Value::String(s) => s.clone(),
+        other => value_to_string(other).encode_utf16().collect(),
+    }
+}
+
 pub fn value_to_compact_result_string<'gc>(val: &Value<'gc>) -> String {
     match val {
         Value::Number(_) | Value::BigInt(_) | Value::Boolean(_) | Value::Symbol(_) | Value::Function(..) | Value::Closure(..) => {

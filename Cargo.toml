@@ -31,7 +31,7 @@ indexmap = "2.14.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-regress = { version = "0.11", git = "https://github.com/ssrlive/regress.git", rev = "225ae0b", features = [
+regress = { version = "0.11", git = "https://github.com/ridiculousfish/regress.git", rev = "ca8f885", features = [
     "utf16",
 ] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }

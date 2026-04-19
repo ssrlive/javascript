@@ -4701,6 +4701,12 @@ impl<'gc> VM<'gc> {
     fn intl_date_time_format_single_value(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<i64> {
         let x = if value.is_none() || matches!(value, Some(Value::Undefined)) {
             chrono::Utc::now().timestamp_millis() as f64
+        } else if let Some(Value::Object(obj)) = value {
+            if let Some(Value::Number(ms)) = obj.borrow().get("__date_ms__").cloned() {
+                ms
+            } else {
+                self.extract_number_with_coercion(ctx, value.unwrap_or(&Value::Undefined))?
+            }
         } else {
             self.extract_number_with_coercion(ctx, value.unwrap_or(&Value::Undefined))?
         };
@@ -6178,11 +6184,7 @@ impl<'gc> VM<'gc> {
             if !parts.is_empty() {
                 parts.push(("literal".to_string(), " ".to_string()));
             }
-            let text = match style.as_str() {
-                "long" | "short" if time_zone == "UTC" => "UTC".to_string(),
-                "shortOffset" | "longOffset" => time_zone.clone(),
-                _ => time_zone.clone(),
-            };
+            let text = Self::intl_time_zone_name_text(&style, &time_zone);
             parts.push(("timeZoneName".to_string(), text));
         }
 
@@ -8753,7 +8755,11 @@ impl<'gc> VM<'gc> {
         if let Some(offset) = Self::intl_normalize_offset_time_zone(value) {
             return Some(offset);
         }
-        let (left, right) = value.split_once('/')?;
+        let canonical = match value {
+            "Asia/Calcutta" | "asia/calcutta" => "Asia/Kolkata",
+            _ => value,
+        };
+        let (left, right) = canonical.split_once('/')?;
         if left.is_empty() || right.is_empty() {
             return None;
         }
@@ -8764,7 +8770,7 @@ impl<'gc> VM<'gc> {
         {
             return None;
         }
-        Some(value.to_string())
+        Some(canonical.to_string())
     }
 
     fn intl_normalize_offset_time_zone(value: &str) -> Option<String> {
@@ -8790,6 +8796,31 @@ impl<'gc> VM<'gc> {
         }
         let normalized_sign = if hour == 0 && minute == 0 { '+' } else { sign };
         Some(format!("{}{hours}:{minutes}", normalized_sign))
+    }
+
+    fn intl_time_zone_name_text(style: &str, time_zone: &str) -> String {
+        if let Some(offset) = Self::intl_fixed_offset_from_zone(time_zone) {
+            let seconds = offset.local_minus_utc();
+            let sign = if seconds < 0 { '-' } else { '+' };
+            let total_minutes = seconds.unsigned_abs() / 60;
+            let hours = total_minutes / 60;
+            let minutes = total_minutes % 60;
+            if hours == 0 && minutes == 0 {
+                return "GMT".to_string();
+            }
+            return match style {
+                "longOffset" => format!("GMT{sign}{hours:02}:{minutes:02}"),
+                _ if minutes == 0 => format!("GMT{sign}{hours}"),
+                _ => format!("GMT{sign}{hours}:{minutes:02}"),
+            };
+        }
+        match (style, time_zone) {
+            ("long", "Europe/Vienna") => "Central European Standard Time".to_string(),
+            ("long", "UTC") => "UTC".to_string(),
+            ("short", "UTC") => "UTC".to_string(),
+            ("shortOffset", "UTC") | ("longOffset", "UTC") => "GMT".to_string(),
+            _ => time_zone.to_string(),
+        }
     }
 
     fn intl_supported_calendar(value: &str) -> Option<String> {

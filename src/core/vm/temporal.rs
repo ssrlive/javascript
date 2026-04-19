@@ -6567,9 +6567,18 @@ impl<'gc> VM<'gc> {
             && let Some(calendar) = self
                 .temporal_slot_string_value(ctx, receiver, "PlainMonthDay", "calendarId")
                 .and_then(|value| Calendar::from_str(&value).ok())
-            && let Ok(reconstructed) = reference_date.with_calendar(calendar).to_plain_month_day()
         {
-            return Some(reconstructed);
+            let reference_year = reference_date.year();
+            let cal_date = reference_date.with_calendar(calendar.clone());
+            if let Ok(reconstructed) = PlainMonthDay::new_with_overflow(
+                cal_date.month(),
+                cal_date.day(),
+                calendar,
+                Overflow::Constrain,
+                Some(reference_year),
+            ) {
+                return Some(reconstructed);
+            }
         }
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REPR)?;
         let parsed = PlainMonthDay::from_utf8(repr.as_bytes()).ok()?;

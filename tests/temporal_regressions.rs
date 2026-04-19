@@ -525,7 +525,7 @@ fn test_temporal_to_locale_string_and_era_getters_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(
         result,
-        "\"3/6/2000|3/6/2000, 1:02:03 AM|1:02:03 AM|1 hour|3/2000|3/6|2000-03-06T00:02:03+00:00[UTC]|undefined|undefined|undefined|undefined|ce|2000|undefined|undefined\""
+        "\"3/6/2000|3/6/2000, 1:02:03 AM|1:02:03 AM|1 hour|3/2000|3/6|3/6/2000, 12:02:03 AM UTC|undefined|undefined|undefined|undefined|ce|2000|undefined|undefined\""
     );
 }
 

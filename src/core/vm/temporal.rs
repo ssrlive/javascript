@@ -21,7 +21,6 @@ const SLOT_REPR: &str = "__temporal_repr__";
 const SLOT_EPOCH_NS: &str = "__temporal_epoch_nanoseconds__";
 const SLOT_REFERENCE_DAY: &str = "__temporal_reference_day__";
 const SLOT_REFERENCE_ISO_DATE: &str = "__temporal_reference_iso_date__";
-const SLOT_REFERENCE_YEAR: &str = "__temporal_reference_year__";
 
 impl<'gc> VM<'gc> {
     pub(super) fn temporal_handle_host_fn(
@@ -500,44 +499,13 @@ impl<'gc> VM<'gc> {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let (hour, minute, second, millisecond, microsecond, nanosecond) = match plain_time {
-                    Some(value) => (
-                        value.hour(),
-                        value.minute(),
-                        value.second(),
-                        value.millisecond(),
-                        value.microsecond(),
-                        value.nanosecond(),
-                    ),
-                    None => (0, 0, 0, 0, 0, 0),
-                };
-                let date_time = if value.calendar() == &Calendar::ISO {
-                    PlainDateTime::try_new_iso(
-                        value.year(),
-                        value.month(),
-                        value.day(),
-                        hour,
-                        minute,
-                        second,
-                        millisecond,
-                        microsecond,
-                        nanosecond,
-                    )
-                } else {
-                    PlainDateTime::try_new(
-                        value.year(),
-                        value.month(),
-                        value.day(),
-                        hour,
-                        minute,
-                        second,
-                        millisecond,
-                        microsecond,
-                        nanosecond,
-                        value.calendar().clone(),
-                    )
-                };
-                match date_time.and_then(|value| value.to_zoned_date_time(time_zone, Disambiguation::Compatible)) {
+                // Use PlainDate::to_zoned_date_time which handles two cases correctly:
+                // 1. plain_time = None  → uses get_start_of_day (spec-correct start-of-day)
+                // 2. plain_time = Some  → uses Compatible disambiguation for the given local time
+                // Using to_plain_date_time() + to_zoned_date_time() would always go via midnight,
+                // breaking start-of-day for timezones where midnight is in a DST gap.
+                // PlainDate internally uses IsoDate so non-ISO calendar years are handled correctly.
+                match value.to_zoned_date_time(time_zone, plain_time) {
                     Ok(value) => {
                         let ctor_value = self.temporal_intrinsic_ctor_value("ZonedDateTime");
                         self.temporal_wrap_zoned_date_time(ctx, ctor_value.as_ref(), &value)
@@ -1897,25 +1865,25 @@ impl<'gc> VM<'gc> {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
-                let self_ref = self
-                    .temporal_plain_year_month_reference_day_slot(receiver)
-                    .unwrap_or_else(|| value.reference_day());
-                let other_ref = self
-                    .temporal_plain_year_month_reference_day_slot(Some(arg))
-                    .unwrap_or_else(|| other.reference_day());
-                Value::Boolean(
-                    (
-                        value.year(),
-                        value.month(),
-                        self_ref,
-                        Self::temporal_canonical_calendar_id(value.calendar().identifier()),
-                    ) == (
-                        other.year(),
-                        other.month(),
-                        other_ref,
-                        Self::temporal_canonical_calendar_id(other.calendar().identifier()),
-                    ),
-                )
+                // Spec: PlainYearMonth.equals compares [[ISODate]] + calendar identifier.
+                // Use to_ixdtf_string(Always) to get the canonical ISO date representation
+                // (includes the ISO day for all calendars). Canonicalize calendar IDs before
+                // comparing so aliases like "islamicc" == "islamic-civil" are treated as equal.
+                let canonicalize_pym_repr = |s: String| -> String {
+                    // Replace calendar ID in "[u-ca=ID]" annotation with canonical form
+                    if let Some(bracket_pos) = s.find('[') {
+                        let date_part = &s[..bracket_pos];
+                        let inner = &s[bracket_pos + 1..s.len().saturating_sub(1)];
+                        let cal_id = inner.strip_prefix("u-ca=").unwrap_or(inner);
+                        let canonical = Self::temporal_canonical_calendar_id(cal_id);
+                        format!("{date_part}[u-ca={canonical}]")
+                    } else {
+                        s
+                    }
+                };
+                let self_str = canonicalize_pym_repr(value.to_ixdtf_string(DisplayCalendar::Always));
+                let other_str = canonicalize_pym_repr(other.to_ixdtf_string(DisplayCalendar::Always));
+                Value::Boolean(self_str == other_str)
             }
             "temporal.plainYearMonth.toString" => self.temporal_plain_year_month_to_string(ctx, receiver, args.first()),
             "temporal.plainYearMonth.toLocaleString" => {
@@ -2086,7 +2054,8 @@ impl<'gc> VM<'gc> {
                 let Some(value) = self.temporal_expect_plain_month_day(ctx, receiver) else {
                     return Value::Undefined;
                 };
-                let fields = match self.temporal_plain_month_day_to_plain_date_arg(ctx, args.first()) {
+                let pmd_calendar = value.calendar().clone();
+                let fields = match self.temporal_plain_month_day_to_plain_date_arg(ctx, args.first(), &pmd_calendar) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -3435,46 +3404,6 @@ impl<'gc> VM<'gc> {
                 Self::temporal_store_slot(&mut borrow, SLOT_REFERENCE_ISO_DATE, Value::from(reference_iso_date.as_str()));
             }
         }
-        let mut computed_reference_day = value.reference_day();
-        if let Value::Object(obj) = &wrapped
-            && value.calendar() != &Calendar::ISO
-        {
-            for _ in 0..3 {
-                {
-                    let mut borrow = obj.borrow_mut(ctx);
-                    if let Some(Value::String(repr)) = own_data_from_legacy_map(&borrow, SLOT_REPR) {
-                        let base = crate::unicode::utf16_to_utf8(&repr);
-                        let updated = if let Some((date_part, calendar_part)) = base.split_once('[') {
-                            if let Some((year_month_part, _)) = date_part.rsplit_once('-') {
-                                format!("{year_month_part}-{computed_reference_day:02}[{calendar_part}")
-                            } else {
-                                base
-                            }
-                        } else {
-                            base
-                        };
-                        borrow.insert(SLOT_REPR.to_string(), Value::from(updated.as_str()));
-                    }
-                    borrow.insert(
-                        SLOT_REFERENCE_DAY.to_string(),
-                        Value::from(computed_reference_day.to_string().as_str()),
-                    );
-                }
-                let next_reference_day = self
-                    .temporal_expect_plain_year_month(ctx, Some(&wrapped))
-                    .and_then(|value| {
-                        value
-                            .to_plain_date(Some(CalendarFields::new().with_day(1)))
-                            .ok()
-                            .map(|date| date.with_calendar(Calendar::ISO).day())
-                    })
-                    .unwrap_or(computed_reference_day);
-                if next_reference_day == computed_reference_day {
-                    break;
-                }
-                computed_reference_day = next_reference_day;
-            }
-        }
         wrapped
     }
 
@@ -3505,23 +3434,15 @@ impl<'gc> VM<'gc> {
         ctor_value: Option<&Value<'gc>>,
         value: &PlainMonthDay,
     ) -> Value<'gc> {
-        // Get the ISO year from the IXDTF string (which always uses the ISO year)
-        // This is essential: `reference_year()` returns the CALENDAR year (e.g., 2515 for Buddhist),
-        // but `PlainMonthDay::new_with_overflow` treats ref_year as the ISO year, so we must store
-        // the ISO year here or reconstruction will create a wrong IsoDate.
-        let iso_ixdtf = value.to_ixdtf_string(DisplayCalendar::Never);
-        let iso_ref_year = Self::parse_ixdtf_year(&iso_ixdtf).unwrap_or(1972);
+        // Store the full IXDTF string with calendarName=Always so the ISO year is always
+        // present in SLOT_REPR. This lets temporal_expect_plain_month_day reconstruct the
+        // exact PMD (including reference year) without calendar-year normalization.
+        let repr_always = value.to_ixdtf_string(DisplayCalendar::Always);
         let reference_iso_date = value
             .to_plain_date(Some(CalendarFields::new().with_year(value.reference_year())))
             .ok()
             .map(|date| date.with_calendar(Calendar::ISO).to_string());
-        let wrapped = self.temporal_wrap_value(
-            ctx,
-            ctor_value,
-            "PlainMonthDay",
-            &value.to_string(),
-            &[(SLOT_REFERENCE_YEAR, Value::from(iso_ref_year.to_string().as_str()))],
-        );
+        let wrapped = self.temporal_wrap_value(ctx, ctor_value, "PlainMonthDay", &repr_always, &[]);
         if let Value::Object(obj) = &wrapped {
             self.temporal_attach_bound_methods(
                 ctx,
@@ -4359,9 +4280,11 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
         let preserve_year_fields = year.is_none() && era.is_none() && era_year.is_none();
+        // Fill monthCode first: if user didn't provide month or monthCode, preserve current.month_code().
+        // This ensures `with({ day: N })` on a non-ISO PMD preserves the existing monthCode.
+        let month_code = month_code.or_else(|| if month.is_none() { Some(current.month_code()) } else { None });
         let current_month = Self::temporal_month_from_code(Some(current.month_code().as_str()));
         let month = month.or_else(|| if month_code.is_none() { current_month } else { None });
-        let month_code = month_code.or_else(|| if month.is_none() { Some(current.month_code()) } else { None });
         // For non-ISO calendars, monthCode must be determinable from the bag or current.
         // Providing only `month` (without monthCode) on a non-ISO PlainMonthDay is not sufficient.
         if *current.calendar() != Calendar::ISO && month_code.is_none() {
@@ -4402,6 +4325,7 @@ impl<'gc> VM<'gc> {
         &mut self,
         ctx: &GcContext<'gc>,
         value: Option<&Value<'gc>>,
+        pmd_calendar: &Calendar,
     ) -> Result<CalendarFields, TemporalError> {
         let Some(value) = value else {
             return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay.prototype.toPlainDate requires an object"));
@@ -4409,9 +4333,22 @@ impl<'gc> VM<'gc> {
         if !self.temporal_is_object_like(value) {
             return Err(TemporalError::r#type().with_message("Temporal.PlainMonthDay.prototype.toPlainDate requires an object"));
         }
-        let year = self
-            .temporal_optional_trunc_i32_property(ctx, value, "year")?
-            .ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
+        // For ISO calendars, spec says only `year` is read. Reading era/eraYear changes
+        // the operation order vs the spec (which reads only get year, year.valueOf).
+        if *pmd_calendar == Calendar::ISO {
+            let year = self
+                .temporal_optional_trunc_i32_property(ctx, value, "year")?
+                .ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
+            return Ok(CalendarFields::new().with_year(year));
+        }
+        // Non-ISO: read era/eraYear FIRST so that eraYear: Infinity throws RangeError
+        // before the missing-year TypeError.
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, pmd_calendar, "Invalid Temporal input")?;
+        let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        if era.is_some() || era_year.is_some() {
+            return Ok(CalendarFields::new().with_era(era).with_era_year(era_year).with_optional_year(year));
+        }
+        let year = year.ok_or_else(|| TemporalError::r#type().with_message("year is required"))?;
         Ok(CalendarFields::new().with_year(year))
     }
 
@@ -5386,7 +5323,6 @@ impl<'gc> VM<'gc> {
         }
 
         let time_zone = self.temporal_relative_to_time_zone_arg(ctx, &time_zone_value)?;
-        let _ = offset;
         let pdt = if calendar == Calendar::ISO {
             PlainDateTime::try_new_iso(
                 year,
@@ -5413,9 +5349,39 @@ impl<'gc> VM<'gc> {
                 calendar,
             )?
         };
-        Ok(Some(RelativeTo::from(
-            pdt.to_zoned_date_time(time_zone, Disambiguation::Compatible)?,
-        )))
+        // When an offset is provided, use it with Reject so that mismatched sub-minute offsets throw.
+        let zdt = if let Some(ref offset_str) = offset {
+            let normalized = Self::normalize_offset_hms(offset_str);
+            let utc_offset =
+                UtcOffset::from_utf8(normalized.as_bytes()).map_err(|_| TemporalError::range().with_message("Invalid offset"))?;
+            let partial = PartialZonedDateTime {
+                fields: ZonedDateTimeFields {
+                    calendar_fields: CalendarFields::new()
+                        .with_year(pdt.year())
+                        .with_month(pdt.month())
+                        .with_day(pdt.day()),
+                    time: PartialTime::new()
+                        .with_hour(Some(pdt.hour()))
+                        .with_minute(Some(pdt.minute()))
+                        .with_second(Some(pdt.second()))
+                        .with_millisecond(Some(pdt.millisecond()))
+                        .with_microsecond(Some(pdt.microsecond()))
+                        .with_nanosecond(Some(pdt.nanosecond())),
+                    offset: Some(utc_offset),
+                },
+                timezone: Some(time_zone),
+                calendar: pdt.calendar().clone(),
+            };
+            ZonedDateTime::from_partial(
+                partial,
+                Some(Overflow::Constrain),
+                Some(Disambiguation::Compatible),
+                Some(OffsetDisambiguation::Reject),
+            )?
+        } else {
+            pdt.to_zoned_date_time(time_zone, Disambiguation::Compatible)?
+        };
+        Ok(Some(RelativeTo::from(zdt)))
     }
 
     fn temporal_relative_to_string_property(&self, value: &Value<'gc>, _name: &str) -> Result<String, TemporalError> {
@@ -5559,19 +5525,6 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    /// Parse the ISO year from the beginning of an IXDTF date string.
-    /// Handles both positive years ("1972-01-01") and negative/extended years ("-000543-01-01").
-    fn parse_ixdtf_year(s: &str) -> Option<i32> {
-        if let Some(rest) = s.strip_prefix('-') {
-            // Negative extended year: -YYYYY-MM-DD
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<i32>().ok().map(|y| -y)
-        } else {
-            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<i32>().ok()
-        }
-    }
-
     fn temporal_month_from_code(month_code: Option<&str>) -> Option<u8> {
         let code = month_code?;
         let digits = code.strip_prefix('M')?;
@@ -5646,15 +5599,33 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    /// Normalize a validated offset string to HH:MM:SS/HHMMSS format for UtcOffset::from_utf8.
+    /// "+HH:MM" → "+HH:MM:00", "+HHMM" → "+HHMM00", "+HH:MM:SS"/"+HHMMSS" unchanged.
+    fn normalize_offset_hms(offset: &str) -> String {
+        let sign = if offset.starts_with('-') { "-" } else { "+" };
+        let rest = offset.trim_start_matches(['+', '-']);
+        let base = rest.split('.').next().unwrap_or(rest);
+        match base.len() {
+            // +HH:MM (5 chars with colon) → +HH:MM:00
+            5 if base.contains(':') => format!("{sign}{base}:00"),
+            // +HHMM (4 chars no colon) → +HHMM00
+            4 => format!("{sign}{base}00"),
+            // Already HH:MM:SS or HHMMSS (6+ chars)
+            _ => offset.to_string(),
+        }
+    }
+
     fn temporal_validate_offset_string(&self, value: &str) -> Result<(), TemporalError> {
         let valid = if let Some(rest) = value.strip_prefix('+').or_else(|| value.strip_prefix('-')) {
             let base = rest.split('.').next().unwrap_or(rest);
             let fraction = rest.strip_prefix(base).unwrap_or("");
+            // Fractions (.N) are only allowed when seconds are present (HH:MM:SS or HHMMSS formats).
+            let has_seconds = matches!(base.as_bytes(), [_, _, b':', _, _, b':', _, _] | [_, _, _, _, _, _]);
             let valid_basic = matches!(base.as_bytes(), [a, b, b':', c, d] if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() && d.is_ascii_digit())
                 || matches!(base.as_bytes(), [a, b, c, d] if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() && d.is_ascii_digit())
                 || matches!(base.as_bytes(), [a, b, b':', c, d, b':', e, f] if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() && d.is_ascii_digit() && *e == b'0' && *f == b'0')
                 || matches!(base.as_bytes(), [a, b, c, d, e, f] if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() && d.is_ascii_digit() && *e == b'0' && *f == b'0');
-            valid_basic && fraction.chars().all(|ch| ch == '.' || ch == '0')
+            valid_basic && (fraction.is_empty() || (has_seconds && fraction.chars().all(|ch| ch == '.' || ch == '0')))
         } else {
             false
         };
@@ -5720,6 +5691,25 @@ impl<'gc> VM<'gc> {
         if text.contains('Z') {
             return Err(TemporalError::range().with_message("Invalid Temporal.PlainYearMonth string"));
         }
+        // Canonicalize calendar aliases in the annotation (e.g. "islamicc" → "islamic-civil")
+        // before calling the IXDTF parser, which only knows canonical identifiers.
+        let text_owned;
+        let text = if let Some(cal_start) = text.find("[u-ca=") {
+            if let Some(cal_end) = text[cal_start..].find(']') {
+                let cal_str = &text[cal_start + 6..cal_start + cal_end];
+                let canonical = Self::temporal_canonical_calendar_id(cal_str);
+                if canonical != cal_str {
+                    text_owned = format!("{0}[u-ca={canonical}]{1}", &text[..cal_start], &text[cal_start + cal_end + 1..]);
+                    &text_owned as &str
+                } else {
+                    text
+                }
+            } else {
+                text
+            }
+        } else {
+            text
+        };
         PlainYearMonth::from_utf8(text.as_bytes())
             .or_else(|err| {
                 PlainDate::from_utf8(text.as_bytes())
@@ -6379,10 +6369,13 @@ impl<'gc> VM<'gc> {
                                         .transpose()?,
                                 ),
                             offset: match offset {
-                                Some(offset) => Some(
-                                    UtcOffset::from_utf8(offset.as_bytes())
-                                        .map_err(|_| TemporalError::range().with_message("Invalid offset"))?,
-                                ),
+                                Some(ref offset) => {
+                                    let normalized = Self::normalize_offset_hms(offset);
+                                    Some(
+                                        UtcOffset::from_utf8(normalized.as_bytes())
+                                            .map_err(|_| TemporalError::range().with_message("Invalid offset"))?,
+                                    )
+                                }
                                 None => None,
                             },
                         },
@@ -6604,9 +6597,19 @@ impl<'gc> VM<'gc> {
 
         if let Some(reference_iso_date) = reference_iso_date
             && let Ok(reference_date) = PlainDate::from_utf8(reference_iso_date.as_bytes())
-            && let Ok(reconstructed) = reference_date.with_calendar(calendar.clone()).to_plain_year_month()
         {
-            return Some(reconstructed);
+            // reference_date is in ISO calendar; its year/month/day ARE the ISO components.
+            // Build PYM directly with these ISO components so iso.day is preserved
+            // (going through to_plain_year_month() drops the day, normalizing it to 1).
+            if let Ok(reconstructed) = PlainYearMonth::new_with_overflow(
+                reference_date.year(),      // ISO year (ISO calendar: year() == iso.year)
+                reference_date.month(),     // ISO month
+                Some(reference_date.day()), // ISO day preserved
+                calendar.clone(),
+                Overflow::Constrain,
+            ) {
+                return Some(reconstructed);
+            }
         }
 
         let partial = PartialYearMonth {
@@ -6624,13 +6627,18 @@ impl<'gc> VM<'gc> {
         })?;
         if let Some(reference_day) = reference_day {
             if parsed.calendar() == &Calendar::ISO {
+                // For ISO calendars, the reference_day IS the ISO day (referenceISODay parameter).
+                // Use try_new_iso to create a PYM with that specific ISO day.
                 PlainYearMonth::try_new_iso(parsed.year(), parsed.month(), Some(reference_day))
                     .ok()
                     .or(Some(parsed))
             } else {
-                PlainYearMonth::try_new(parsed.year(), parsed.month(), Some(reference_day), parsed.calendar().clone())
-                    .ok()
-                    .or(Some(parsed))
+                // For non-ISO calendars, `parsed.year()` returns the CALENDAR year (not ISO year),
+                // so try_new(calendar_year, ...) would store the calendar year as ISO year (wrong).
+                // The `from_partial` path already computed the correct internal ISO date.
+                // Applying reference_day via try_new would corrupt the ISO date.
+                // Return parsed as-is; the correct ISO date is preserved.
+                Some(parsed)
             }
         } else {
             Some(parsed)
@@ -6679,16 +6687,38 @@ impl<'gc> VM<'gc> {
     }
 
     pub(super) fn temporal_expect_plain_month_day(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainMonthDay> {
-        // The SLOT_REPR contains the IXDTF string with the correct ISO date (year, month, day)
-        // stored by temporal_wrap_plain_month_day. Parsing it directly gives a PlainMonthDay
-        // whose month_code() is correct for all calendars (ISO and non-ISO alike), because
-        // temporal_rs derives the month code from the stored ISO date via the calendar.
-        //
-        // DO NOT use temporal_month_from_code() + new_with_overflow() here: that interprets the
-        // month code number as an ISO month ordinal, which is wrong for non-ISO calendars
-        // (e.g., Hebrew M06 = Adar is ISO month 2-3, not month 6).
+        // SLOT_REPR is stored as to_ixdtf_string(Always), e.g. "1972-10-31[u-ca=iso8601]" or
+        // "-100000-12-03[u-ca=gregory]". Parse out ISO year/month/day and calendar, then
+        // reconstruct via new_with_overflow so non-ISO calendars don't re-normalize the year.
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REPR)?;
+        if let Some((year, month, day, calendar)) = Self::parse_pmd_repr(&repr)
+            && let Ok(pmd) = PlainMonthDay::new_with_overflow(month, day, calendar, Overflow::Constrain, Some(year))
+        {
+            return Some(pmd);
+        }
+        // Fallback: try from_utf8 (works for ISO calendar MM-DD strings and legacy reprs)
         PlainMonthDay::from_utf8(repr.as_bytes()).ok()
+    }
+
+    /// Parse a PMD SLOT_REPR string like "2019-10-31[u-ca=iso8601]" or "-100000-12-03[u-ca=gregory]"
+    /// into (iso_year, iso_month, iso_day, calendar). The date part uses ISO coordinates.
+    fn parse_pmd_repr(repr: &str) -> Option<(i32, u8, u8, Calendar)> {
+        let cal_start = repr.find("[u-ca=")?;
+        let cal_end = repr[cal_start..].find(']')? + cal_start;
+        let cal_str = &repr[cal_start + 6..cal_end];
+        let calendar = Calendar::from_str(cal_str).ok()?;
+        let date_part = &repr[..cal_start];
+        // rsplit_once handles negative years: "-100000-12-03" → ("-100000-12", "03")
+        let (without_day, day_str) = date_part.rsplit_once('-')?;
+        let (year_str, month_str) = without_day.rsplit_once('-')?;
+        let day: u8 = day_str.parse().ok()?;
+        let month: u8 = month_str.parse().ok()?;
+        let year: i32 = if let Some(rest) = year_str.strip_prefix('+') {
+            rest.parse().ok()?
+        } else {
+            year_str.parse().ok()?
+        };
+        Some((year, month, day, calendar))
     }
 
     pub(super) fn temporal_parse_plain_month_day_repr(

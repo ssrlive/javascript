@@ -501,7 +501,8 @@ fn test_temporal_to_locale_string_and_era_getters_basic() {
     let script = r#"
         const date = new Temporal.PlainDate(2000, 3, 6);
         const dateTime = new Temporal.PlainDateTime(2000, 3, 6, 1, 2, 3);
-        const yearMonth = new Temporal.PlainYearMonth(2000, 3);
+        const yearMonth = new Temporal.PlainDate(2000, 3, 6, "gregory").toPlainYearMonth();
+        const monthDay = new Temporal.PlainDate(2000, 3, 6, "gregory").toPlainMonthDay();
         const zoned = new Temporal.ZonedDateTime(952300923000000000n, "UTC");
         [
           date.toLocaleString("en-US"),
@@ -509,7 +510,7 @@ fn test_temporal_to_locale_string_and_era_getters_basic() {
           new Temporal.PlainTime(1, 2, 3).toLocaleString("en-US"),
           Temporal.Duration.from("PT1H").toLocaleString("en-US"),
           yearMonth.toLocaleString("en-US"),
-          new Temporal.PlainMonthDay(3, 6).toLocaleString("en-US"),
+          monthDay.toLocaleString("en-US"),
           zoned.toLocaleString("en-US"),
           String(date.era),
           String(date.eraYear),
@@ -524,7 +525,7 @@ fn test_temporal_to_locale_string_and_era_getters_basic() {
     let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
     assert_eq!(
         result,
-        "\"3/6/2000|3/6/2000, 1:02:03 AM|1:02:03 AM|1 hour|3/2000|3/6|2000-03-06T00:02:03+00:00[UTC]|undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined\""
+        "\"3/6/2000|3/6/2000, 1:02:03 AM|1:02:03 AM|1 hour|3/2000|3/6|2000-03-06T00:02:03+00:00[UTC]|undefined|undefined|undefined|undefined|ce|2000|undefined|undefined\""
     );
 }
 

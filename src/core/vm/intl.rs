@@ -4852,11 +4852,11 @@ impl<'gc> VM<'gc> {
                 .map(Self::intl_temporal_fields_from_time)
                 .map(IntlDateTimeInput::Plain),
             Some("PlainYearMonth") => self
-                .temporal_expect_plain_year_month(ctx, Some(value))
+                .temporal_parse_plain_year_month_repr(ctx, Some(value))
                 .map(Self::intl_temporal_fields_from_year_month)
                 .map(IntlDateTimeInput::Plain),
             Some("PlainMonthDay") => self
-                .temporal_expect_plain_month_day(ctx, Some(value))
+                .temporal_parse_plain_month_day_repr(ctx, Some(value))
                 .map(Self::intl_temporal_fields_from_month_day)
                 .map(IntlDateTimeInput::Plain),
             _ => self
@@ -5240,26 +5240,45 @@ impl<'gc> VM<'gc> {
         let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
         let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)))
             || matches!(hour_cycle.as_deref(), Some("h11" | "h12"))
-            || (!matches!(hour_cycle.as_deref(), Some("h23" | "h24")) && locale.starts_with("en"));
+            || (!matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(false)))
+                && !matches!(hour_cycle.as_deref(), Some("h23" | "h24"))
+                && locale.starts_with("en"));
         let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, numbering_system);
         let mut parts = Vec::new();
         if let Some(date_style) = date_style
             && let (Some(month), Some(day)) = (fields.month, fields.day)
         {
-            let month_name = [
-                "January",
-                "February",
-                "March",
-                "April",
-                "May",
-                "June",
-                "July",
-                "August",
-                "September",
-                "October",
-                "November",
-                "December",
-            ][month.saturating_sub(1) as usize];
+            let month_name = if fields.calendar.starts_with("islamic") {
+                [
+                    "Muharram",
+                    "Safar",
+                    "Rabiʻ I",
+                    "Rabiʻ II",
+                    "Jumada I",
+                    "Jumada II",
+                    "Rajab",
+                    "Shaʻban",
+                    "Ramadan",
+                    "Shawwal",
+                    "Dhuʻl-Qiʻdah",
+                    "Dhuʻl-Hijjah",
+                ][month.saturating_sub(1) as usize]
+            } else {
+                [
+                    "January",
+                    "February",
+                    "March",
+                    "April",
+                    "May",
+                    "June",
+                    "July",
+                    "August",
+                    "September",
+                    "October",
+                    "November",
+                    "December",
+                ][month.saturating_sub(1) as usize]
+            };
             if date_style == "full"
                 && let Some(weekday) = fields.weekday
             {
@@ -5299,20 +5318,37 @@ impl<'gc> VM<'gc> {
                     parts.push(("year".to_string(), numeric((year.rem_euclid(100)) as i64, 2)));
                 }
             } else {
-                let month_name = [
-                    "January",
-                    "February",
-                    "March",
-                    "April",
-                    "May",
-                    "June",
-                    "July",
-                    "August",
-                    "September",
-                    "October",
-                    "November",
-                    "December",
-                ][month.saturating_sub(1) as usize];
+                let month_name = if fields.calendar.starts_with("islamic") {
+                    [
+                        "Muharram",
+                        "Safar",
+                        "Rabiʻ I",
+                        "Rabiʻ II",
+                        "Jumada I",
+                        "Jumada II",
+                        "Rajab",
+                        "Shaʻban",
+                        "Ramadan",
+                        "Shawwal",
+                        "Dhuʻl-Qiʻdah",
+                        "Dhuʻl-Hijjah",
+                    ][month.saturating_sub(1) as usize]
+                } else {
+                    [
+                        "January",
+                        "February",
+                        "March",
+                        "April",
+                        "May",
+                        "June",
+                        "July",
+                        "August",
+                        "September",
+                        "October",
+                        "November",
+                        "December",
+                    ][month.saturating_sub(1) as usize]
+                };
                 parts.push(("month".to_string(), month_name.to_string()));
                 if let Some(year) = fields.year {
                     parts.push(("literal".to_string(), " ".to_string()));
@@ -5444,6 +5480,39 @@ impl<'gc> VM<'gc> {
                 {
                     name.to_string()
                 }
+                "narrow" | "short" | "long" if fields.calendar.starts_with("islamic") => match month_style.as_str() {
+                    "narrow" => ["M", "S", "R", "R", "J", "J", "R", "S", "R", "S", "D", "D"][month_index].to_string(),
+                    "short" => [
+                        "Muh.",
+                        "Saf.",
+                        "Rab. I",
+                        "Rab. II",
+                        "Jum. I",
+                        "Jum. II",
+                        "Raj.",
+                        "Sha.",
+                        "Ram.",
+                        "Shaw.",
+                        "Dhuʻl-Q.",
+                        "Dhuʻl-H.",
+                    ][month_index]
+                        .to_string(),
+                    _ => [
+                        "Muharram",
+                        "Safar",
+                        "Rabiʻ I",
+                        "Rabiʻ II",
+                        "Jumada I",
+                        "Jumada II",
+                        "Rajab",
+                        "Shaʻban",
+                        "Ramadan",
+                        "Shawwal",
+                        "Dhuʻl-Qiʻdah",
+                        "Dhuʻl-Hijjah",
+                    ][month_index]
+                        .to_string(),
+                },
                 "narrow" => ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"][month_index].to_string(),
                 "short" => ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month_index].to_string(),
                 _ => [
@@ -5555,16 +5624,21 @@ impl<'gc> VM<'gc> {
             let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
             let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)))
                 || matches!(hour_cycle.as_deref(), Some("h11" | "h12"))
-                || (!matches!(hour_cycle.as_deref(), Some("h23" | "h24")) && locale.starts_with("en"));
+                || (!matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(false)))
+                    && !matches!(hour_cycle.as_deref(), Some("h23" | "h24"))
+                    && locale.starts_with("en"));
+            let zero_to_twelve = hour12 && !matches!(hour_cycle.as_deref(), Some("h11"));
             let mut hour_value = fields.hour.unwrap_or(0) as i64;
             if day_period.is_some() || hour12 || matches!(hour_cycle.as_deref(), Some("h11" | "h12")) {
                 hour_value %= 12;
-                if (hour12 || matches!(hour_cycle.as_deref(), Some("h12"))) && hour_value == 0 {
+                if zero_to_twelve && hour_value == 0 {
                     hour_value = 12;
                 }
-                if day_period.is_some() && hour_value == 0 {
+                if day_period.is_some() && zero_to_twelve && hour_value == 0 {
                     hour_value = 12;
                 }
+            } else if matches!(hour_cycle.as_deref(), Some("h24")) && hour_value == 0 {
+                hour_value = 24;
             }
             if let Some(ref hour_style) = hour {
                 let width = if hour_style == "2-digit"
@@ -5880,6 +5954,39 @@ impl<'gc> VM<'gc> {
                 {
                     name.to_string()
                 }
+                "narrow" | "short" | "long" if calendar.starts_with("islamic") => match month_style.as_str() {
+                    "narrow" => ["M", "S", "R", "R", "J", "J", "R", "S", "R", "S", "D", "D"][month_index].to_string(),
+                    "short" => [
+                        "Muh.",
+                        "Saf.",
+                        "Rab. I",
+                        "Rab. II",
+                        "Jum. I",
+                        "Jum. II",
+                        "Raj.",
+                        "Sha.",
+                        "Ram.",
+                        "Shaw.",
+                        "Dhuʻl-Q.",
+                        "Dhuʻl-H.",
+                    ][month_index]
+                        .to_string(),
+                    _ => [
+                        "Muharram",
+                        "Safar",
+                        "Rabiʻ I",
+                        "Rabiʻ II",
+                        "Jumada I",
+                        "Jumada II",
+                        "Rajab",
+                        "Shaʻban",
+                        "Ramadan",
+                        "Shawwal",
+                        "Dhuʻl-Qiʻdah",
+                        "Dhuʻl-Hijjah",
+                    ][month_index]
+                        .to_string(),
+                },
                 "narrow" => ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"][month_index].to_string(),
                 "short" => ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month_index].to_string(),
                 _ => [
@@ -5993,16 +6100,21 @@ impl<'gc> VM<'gc> {
             let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
             let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)))
                 || matches!(hour_cycle.as_deref(), Some("h11" | "h12"))
-                || (!matches!(hour_cycle.as_deref(), Some("h23" | "h24")) && locale.starts_with("en"));
+                || (!matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(false)))
+                    && !matches!(hour_cycle.as_deref(), Some("h23" | "h24"))
+                    && locale.starts_with("en"));
+            let zero_to_twelve = hour12 && !matches!(hour_cycle.as_deref(), Some("h11"));
             let mut hour_value = date_time.hour() as i64;
             if day_period.is_some() || hour12 || matches!(hour_cycle.as_deref(), Some("h11" | "h12")) {
                 hour_value %= 12;
-                if (hour12 || matches!(hour_cycle.as_deref(), Some("h12"))) && hour_value == 0 {
+                if zero_to_twelve && hour_value == 0 {
                     hour_value = 12;
                 }
-                if day_period.is_some() && hour_value == 0 {
+                if day_period.is_some() && zero_to_twelve && hour_value == 0 {
                     hour_value = 12;
                 }
+            } else if matches!(hour_cycle.as_deref(), Some("h24")) && hour_value == 0 {
+                hour_value = 24;
             }
             if let Some(ref hour_style) = hour {
                 let width = if hour_style == "2-digit"
@@ -6119,24 +6231,52 @@ impl<'gc> VM<'gc> {
         let hour_cycle = formatter.get("__intl_hour_cycle__").map(value_to_string);
         let hour12 = matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(true)))
             || matches!(hour_cycle.as_deref(), Some("h11" | "h12"))
-            || (!matches!(hour_cycle.as_deref(), Some("h23" | "h24")) && locale.starts_with("en"));
+            || (!matches!(formatter.get("__intl_hour12__"), Some(Value::Boolean(false)))
+                && !matches!(hour_cycle.as_deref(), Some("h23" | "h24"))
+                && locale.starts_with("en"));
+        let zero_to_twelve = hour12 && !matches!(hour_cycle.as_deref(), Some("h11"));
         let numeric = |value: i64, width: usize| Self::intl_format_numbering_digits(value, width, numbering_system);
         let mut parts = Vec::new();
         if let Some(date_style) = date_style {
-            let month_name = [
-                "January",
-                "February",
-                "March",
-                "April",
-                "May",
-                "June",
-                "July",
-                "August",
-                "September",
-                "October",
-                "November",
-                "December",
-            ][date_time.month0() as usize];
+            let calendar = formatter
+                .get("__intl_calendar__")
+                .map(value_to_string)
+                .unwrap_or_else(|| "gregory".to_string());
+            let calendar_fields = Self::intl_calendar_date_fields(date_time.year(), date_time.month(), date_time.day(), &calendar);
+            let display_month = calendar_fields.as_ref().map_or(date_time.month() as u8, |value| value.month);
+            let display_day = calendar_fields.as_ref().map_or(date_time.day() as u8, |value| value.day);
+            let display_year = calendar_fields.as_ref().map_or(date_time.year(), |value| value.year);
+            let month_name = if calendar.starts_with("islamic") {
+                [
+                    "Muharram",
+                    "Safar",
+                    "Rabiʻ I",
+                    "Rabiʻ II",
+                    "Jumada I",
+                    "Jumada II",
+                    "Rajab",
+                    "Shaʻban",
+                    "Ramadan",
+                    "Shawwal",
+                    "Dhuʻl-Qiʻdah",
+                    "Dhuʻl-Hijjah",
+                ][display_month.saturating_sub(1) as usize]
+            } else {
+                [
+                    "January",
+                    "February",
+                    "March",
+                    "April",
+                    "May",
+                    "June",
+                    "July",
+                    "August",
+                    "September",
+                    "October",
+                    "November",
+                    "December",
+                ][display_month.saturating_sub(1) as usize]
+            };
             if date_style == "full" {
                 parts.push((
                     "weekday".to_string(),
@@ -6148,18 +6288,18 @@ impl<'gc> VM<'gc> {
             }
             match date_style {
                 "short" => {
-                    parts.push(("month".to_string(), numeric(date_time.month() as i64, 1)));
+                    parts.push(("month".to_string(), numeric(display_month as i64, 1)));
                     parts.push(("literal".to_string(), "/".to_string()));
-                    parts.push(("day".to_string(), numeric(date_time.day() as i64, 1)));
+                    parts.push(("day".to_string(), numeric(display_day as i64, 1)));
                     parts.push(("literal".to_string(), "/".to_string()));
-                    parts.push(("year".to_string(), numeric((date_time.year().rem_euclid(100)) as i64, 2)));
+                    parts.push(("year".to_string(), numeric((display_year.rem_euclid(100)) as i64, 2)));
                 }
                 _ => {
                     parts.push(("month".to_string(), month_name.to_string()));
                     parts.push(("literal".to_string(), " ".to_string()));
-                    parts.push(("day".to_string(), numeric(date_time.day() as i64, 1)));
+                    parts.push(("day".to_string(), numeric(display_day as i64, 1)));
                     parts.push(("literal".to_string(), ", ".to_string()));
-                    parts.push(("year".to_string(), numeric(date_time.year() as i64, 1)));
+                    parts.push(("year".to_string(), numeric(display_year as i64, 1)));
                 }
             }
         }
@@ -6171,7 +6311,7 @@ impl<'gc> VM<'gc> {
             let day_period = if hour12 {
                 let dp = if hour < 12 { "AM" } else { "PM" };
                 hour %= 12;
-                if hour == 0 {
+                if zero_to_twelve && hour == 0 {
                     hour = 12;
                 }
                 Some(dp)
@@ -6758,6 +6898,7 @@ impl<'gc> VM<'gc> {
             && out.hour.is_none()
             && out.minute.is_none()
             && out.second.is_none()
+            && out.fractional_second_digits.is_none()
             && out.time_zone_name.is_none()
         {
             out.year = Some("numeric".to_string());

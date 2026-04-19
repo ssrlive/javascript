@@ -424,7 +424,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDate.prototype.with requires an object");
                     return Value::Undefined;
                 };
-                let fields = match self.temporal_plain_date_with_fields_arg(ctx, fields_arg) {
+                let fields = match self.temporal_plain_date_with_fields_arg(ctx, &value, fields_arg) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1100,7 +1100,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainDateTime.prototype.with requires an object");
                     return Value::Undefined;
                 };
-                let fields = match self.temporal_plain_date_time_with_fields_arg(ctx, fields_arg) {
+                let fields = match self.temporal_plain_date_time_with_fields_arg(ctx, &value, fields_arg) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -1883,7 +1883,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainYearMonth.prototype.with requires an object");
                     return Value::Undefined;
                 };
-                let fields = match self.temporal_plain_year_month_with_fields_arg(ctx, fields_arg) {
+                let fields = match self.temporal_plain_year_month_with_fields_arg(ctx, &value, fields_arg) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -2022,7 +2022,7 @@ impl<'gc> VM<'gc> {
                     self.throw_type_error(ctx, "Temporal.PlainMonthDay.prototype.with requires an object");
                     return Value::Undefined;
                 };
-                let fields = match self.temporal_plain_month_day_with_fields_arg(ctx, fields_arg) {
+                let fields = match self.temporal_plain_month_day_with_fields_arg(ctx, &value, fields_arg) {
                     Ok(value) => value,
                     Err(err) => return self.temporal_throw(ctx, err),
                 };
@@ -3947,7 +3947,12 @@ impl<'gc> VM<'gc> {
         Ok((disambiguation, offset, overflow))
     }
 
-    fn temporal_plain_date_with_fields_arg(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<CalendarFields, TemporalError> {
+    fn temporal_plain_date_with_fields_arg(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        current: &PlainDate,
+        value: &Value<'gc>,
+    ) -> Result<CalendarFields, TemporalError> {
         if !self.temporal_is_object_like(value) {
             return Err(TemporalError::r#type().with_message("Temporal.PlainDate.prototype.with requires an object"));
         }
@@ -3977,7 +3982,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let (era, era_year) = (None, None);
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, current.calendar(), "Invalid Temporal input")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
@@ -3996,6 +4001,7 @@ impl<'gc> VM<'gc> {
     fn temporal_plain_date_time_with_fields_arg(
         &mut self,
         ctx: &GcContext<'gc>,
+        current: &PlainDateTime,
         value: &Value<'gc>,
     ) -> Result<DateTimeFields, TemporalError> {
         if !self.temporal_is_object_like(value) {
@@ -4027,7 +4033,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let (era, era_year) = (None, None);
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, current.calendar(), "Invalid Temporal input")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
@@ -4121,6 +4127,7 @@ impl<'gc> VM<'gc> {
     fn temporal_plain_year_month_with_fields_arg(
         &mut self,
         ctx: &GcContext<'gc>,
+        current: &PlainYearMonth,
         value: &Value<'gc>,
     ) -> Result<YearMonthCalendarFields, TemporalError> {
         if !self.temporal_is_object_like(value) {
@@ -4151,25 +4158,31 @@ impl<'gc> VM<'gc> {
             return Err(TemporalError::r#type().with_message("timeZone is not allowed"));
         }
 
-        let (era, era_year) = (None, None);
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, current.calendar(), "Invalid Temporal input")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
-        let fields = YearMonthCalendarFields::new()
-            .with_era(era)
-            .with_era_year(era_year)
-            .with_optional_year(year)
-            .with_optional_month(month)
-            .with_optional_month_code(month_code);
-        if fields.is_empty() {
+        let had_any_property = era.is_some() || era_year.is_some() || month.is_some() || month_code.is_some() || year.is_some();
+        if !had_any_property {
             return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
         }
+        let preserve_year_fields = year.is_none() && era.is_none() && era_year.is_none();
+        let month = month.or_else(|| if month_code.is_none() { Some(current.month()) } else { None });
+        let month_code = month_code.or_else(|| if month.is_none() { Some(current.month_code()) } else { None });
+        let current_era = current.era().and_then(|era| TinyAsciiStr::<19>::from_str(era.as_str()).ok());
+        let fields = YearMonthCalendarFields::new()
+            .with_era(if preserve_year_fields { current_era } else { era })
+            .with_era_year(if preserve_year_fields { current.era_year() } else { era_year })
+            .with_optional_year(if preserve_year_fields { Some(current.year()) } else { year })
+            .with_optional_month(month)
+            .with_optional_month_code(month_code);
         Ok(fields)
     }
 
     fn temporal_plain_month_day_with_fields_arg(
         &mut self,
         ctx: &GcContext<'gc>,
+        current: &PlainMonthDay,
         value: &Value<'gc>,
     ) -> Result<CalendarFields, TemporalError> {
         if !self.temporal_is_object_like(value) {
@@ -4201,20 +4214,30 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let (era, era_year) = (None, None);
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, current.calendar(), "Invalid Temporal input")?;
         let month = self.temporal_optional_trunc_u8_property(ctx, value, "month")?;
         let month_code = self.temporal_optional_month_code_value(ctx, value, "monthCode", "Invalid Temporal input")?;
         let year = self.temporal_optional_trunc_i32_property(ctx, value, "year")?;
+        let had_any_property =
+            day.is_some() || era.is_some() || era_year.is_some() || month.is_some() || month_code.is_some() || year.is_some();
+        if !had_any_property {
+            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
+        }
+        let preserve_year_fields = year.is_none() && era.is_none() && era_year.is_none();
+        let current_month = Self::temporal_month_from_code(Some(current.month_code().as_str()));
+        let month = month.or_else(|| if month_code.is_none() { current_month } else { None });
+        let month_code = month_code.or_else(|| if month.is_none() { Some(current.month_code()) } else { None });
         let fields = CalendarFields::new()
             .with_era(era)
             .with_era_year(era_year)
-            .with_optional_year(year)
+            .with_optional_year(if preserve_year_fields {
+                Some(current.reference_year())
+            } else {
+                year
+            })
             .with_optional_month(month)
             .with_optional_month_code(month_code)
-            .with_optional_day(day);
-        if fields.is_empty() {
-            return Err(TemporalError::r#type().with_message("Property bag must contain at least one recognized property"));
-        }
+            .with_optional_day(day.or(Some(current.day())));
         Ok(fields)
     }
 
@@ -4320,7 +4343,7 @@ impl<'gc> VM<'gc> {
         }
 
         let day = self.temporal_optional_trunc_u8_property(ctx, value, "day")?;
-        let (era, era_year) = (None, None);
+        let (era, era_year) = self.temporal_read_era_fields_if_needed(ctx, value, current.calendar(), "Invalid Temporal input")?;
         let hour = self.temporal_optional_trunc_u8_property(ctx, value, "hour")?;
         let microsecond = self.temporal_optional_trunc_u16_property(ctx, value, "microsecond")?;
         let millisecond = self.temporal_optional_trunc_u16_property(ctx, value, "millisecond")?;
@@ -6160,6 +6183,15 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    pub(super) fn temporal_parse_plain_year_month_repr(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+    ) -> Option<PlainYearMonth> {
+        let repr = self.temporal_slot_string_value(ctx, receiver, "PlainYearMonth", SLOT_REPR)?;
+        PlainYearMonth::from_utf8(repr.as_bytes()).ok()
+    }
+
     pub(super) fn temporal_expect_plain_month_day(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<PlainMonthDay> {
         let repr = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REPR)?;
         let parsed = PlainMonthDay::from_utf8(repr.as_bytes()).ok()?;
@@ -6176,6 +6208,15 @@ impl<'gc> VM<'gc> {
             Some(reference_year),
         )
         .ok()
+    }
+
+    pub(super) fn temporal_parse_plain_month_day_repr(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+    ) -> Option<PlainMonthDay> {
+        let repr = self.temporal_slot_string_value(ctx, receiver, "PlainMonthDay", SLOT_REPR)?;
+        PlainMonthDay::from_utf8(repr.as_bytes()).ok()
     }
 
     fn temporal_expect_zoned_date_time(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Option<ZonedDateTime> {
@@ -6583,19 +6624,13 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "Temporal method called on incompatible receiver");
             return Value::Undefined;
         };
-        let mut args = Vec::new();
-        match (locales, options) {
-            (None, None) => {}
-            (Some(locales), None) => args.push(locales.clone()),
-            (None, Some(options)) => {
-                args.push(Value::Undefined);
-                args.push(options.clone());
+        let args = match self.temporal_date_time_format_args_for_locale_string(ctx, receiver, locales, options) {
+            Ok(value) => value,
+            Err(err) => {
+                self.pending_throw = Some(err);
+                return Value::Undefined;
             }
-            (Some(locales), Some(options)) => {
-                args.push(locales.clone());
-                args.push(options.clone());
-            }
-        }
+        };
         let formatter = match self.intl_construct_service_instance(ctx, "DateTimeFormat", None, &args) {
             Ok(value) => value,
             Err(err) => {
@@ -6603,6 +6638,10 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
         };
+        if let Err(err) = self.temporal_validate_locale_calendar(ctx, receiver, &formatter) {
+            self.pending_throw = Some(err);
+            return Value::Undefined;
+        }
         self.call_host_fn(ctx, "intl.dateTimeFormat.format", Some(&formatter), &[receiver_value])
     }
 
@@ -6626,6 +6665,153 @@ impl<'gc> VM<'gc> {
         obj.insert("__date_ms__".to_string(), Value::Number(epoch_ms));
         let date_value = Value::Object(new_gc_cell_ptr(ctx, obj));
         self.call_host_fn(ctx, "date.toLocaleString", Some(&date_value), args)
+    }
+
+    fn temporal_date_time_format_args_for_locale_string(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        locales: Option<&Value<'gc>>,
+        options: Option<&Value<'gc>>,
+    ) -> Result<Vec<Value<'gc>>, Value<'gc>> {
+        let locales = locales.cloned().unwrap_or(Value::Undefined);
+        let options = options.cloned().unwrap_or(Value::Undefined);
+        let Some(kind) = receiver.and_then(|value| self.temporal_value_kind(value)) else {
+            return Ok(vec![locales, options]);
+        };
+        if matches!(options, Value::Undefined) {
+            return Ok(vec![locales, Value::Object(self.temporal_locale_default_options(ctx, &kind))]);
+        }
+        if matches!(options, Value::Null) {
+            return Ok(vec![locales, Value::Null]);
+        }
+        let boxed_options = if self.temporal_is_object_like(&options) {
+            options
+        } else {
+            self.intl_box_primitive_if_needed(ctx, &options)
+        };
+        let has_date_fields = ["weekday", "era", "year", "month", "day"].into_iter().any(|key| {
+            let value = self.read_named_property(ctx, &boxed_options, key);
+            self.pending_throw.is_none() && !matches!(value, Value::Undefined)
+        });
+        let has_time_fields = ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"]
+            .into_iter()
+            .any(|key| {
+                let value = self.read_named_property(ctx, &boxed_options, key);
+                self.pending_throw.is_none() && !matches!(value, Value::Undefined)
+            });
+        let date_style = self.read_named_property(ctx, &boxed_options, "dateStyle");
+        let time_style = self.read_named_property(ctx, &boxed_options, "timeStyle");
+        let fractional_second_digits = self.read_named_property(ctx, &boxed_options, "fractionalSecondDigits");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        let has_date_style = !matches!(date_style, Value::Undefined);
+        let has_time_style = !matches!(time_style, Value::Undefined);
+        let has_fractional_second_digits = !matches!(fractional_second_digits, Value::Undefined);
+        let needs_fractional_second_time_defaults =
+            matches!(kind.as_str(), "PlainTime" | "PlainDateTime") && !has_date_fields && !has_date_style && has_fractional_second_digits;
+        let needs_defaults = match kind.as_str() {
+            "PlainTime" => (!has_time_fields && !has_time_style) || needs_fractional_second_time_defaults,
+            "PlainDate" | "PlainMonthDay" | "PlainYearMonth" => !has_date_fields && !has_date_style,
+            _ => (!has_date_fields && !has_time_fields && !has_date_style && !has_time_style) || needs_fractional_second_time_defaults,
+        };
+        if !needs_defaults {
+            return Ok(vec![locales, boxed_options]);
+        }
+        let mut merged = match boxed_options {
+            Value::Object(obj) => obj.borrow().clone(),
+            _ => IndexMap::new(),
+        };
+        let defaults_kind = if needs_fractional_second_time_defaults {
+            "PlainTime"
+        } else {
+            &kind
+        };
+        for (key, value) in Self::temporal_locale_default_entries(defaults_kind) {
+            merged.entry(key.to_string()).or_insert(value);
+        }
+        Ok(vec![locales, Value::Object(new_gc_cell_ptr(ctx, merged))])
+    }
+
+    fn temporal_locale_default_options(&self, ctx: &GcContext<'gc>, kind: &str) -> ObjectHandle<'gc> {
+        let mut defaults = IndexMap::new();
+        for (key, value) in Self::temporal_locale_default_entries(kind) {
+            defaults.insert(key.to_string(), value);
+        }
+        new_gc_cell_ptr(ctx, defaults)
+    }
+
+    fn temporal_locale_default_entries(kind: &str) -> Vec<(&'static str, Value<'gc>)> {
+        match kind {
+            "PlainTime" => vec![
+                ("hour", Value::from("numeric")),
+                ("minute", Value::from("numeric")),
+                ("second", Value::from("numeric")),
+            ],
+            "PlainMonthDay" => vec![("month", Value::from("numeric")), ("day", Value::from("numeric"))],
+            "PlainYearMonth" => vec![("year", Value::from("numeric")), ("month", Value::from("numeric"))],
+            "PlainDate" => vec![
+                ("year", Value::from("numeric")),
+                ("month", Value::from("numeric")),
+                ("day", Value::from("numeric")),
+            ],
+            _ => vec![
+                ("year", Value::from("numeric")),
+                ("month", Value::from("numeric")),
+                ("day", Value::from("numeric")),
+                ("hour", Value::from("numeric")),
+                ("minute", Value::from("numeric")),
+                ("second", Value::from("numeric")),
+            ],
+        }
+    }
+
+    fn temporal_validate_locale_calendar(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        receiver: Option<&Value<'gc>>,
+        formatter: &Value<'gc>,
+    ) -> Result<(), Value<'gc>> {
+        let Some(receiver) = receiver else {
+            return Ok(());
+        };
+        let Some(kind) = self.temporal_value_kind(receiver) else {
+            return Ok(());
+        };
+        let receiver_calendar = match kind.as_str() {
+            "PlainDate" => self
+                .temporal_expect_plain_date(ctx, Some(receiver))
+                .map(|value| value.calendar().identifier().to_string()),
+            "PlainDateTime" => self
+                .temporal_expect_plain_date_time(ctx, Some(receiver))
+                .map(|value| value.calendar().identifier().to_string()),
+            "PlainMonthDay" => self
+                .temporal_expect_plain_month_day(ctx, Some(receiver))
+                .map(|value| value.calendar().identifier().to_string()),
+            "PlainYearMonth" => self
+                .temporal_expect_plain_year_month(ctx, Some(receiver))
+                .map(|value| value.calendar().identifier().to_string()),
+            _ => None,
+        };
+        let Some(receiver_calendar) = receiver_calendar else {
+            return Ok(());
+        };
+        if receiver_calendar == "iso8601" && matches!(kind.as_str(), "PlainDate" | "PlainDateTime" | "ZonedDateTime") {
+            return Ok(());
+        }
+        let Value::Object(formatter_obj) = formatter else {
+            return Ok(());
+        };
+        let formatter_borrow = formatter_obj.borrow();
+        let formatter_calendar = formatter_borrow
+            .get("__intl_calendar__")
+            .map(value_to_string)
+            .unwrap_or_else(|| "gregory".to_string());
+        if formatter_calendar != receiver_calendar {
+            return Err(self.make_range_error_object(ctx, "calendar mismatch"));
+        }
+        Ok(())
     }
 
     fn temporal_duration_to_locale_string(

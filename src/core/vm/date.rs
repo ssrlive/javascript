@@ -268,7 +268,7 @@ impl<'gc> VM<'gc> {
             let value = self.read_named_property(ctx, &boxed_options, key);
             self.pending_throw.is_none() && !matches!(value, Value::Undefined)
         });
-        let has_time_fields = ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName"]
+        let has_time_fields = ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"]
             .into_iter()
             .any(|key| {
                 let value = self.read_named_property(ctx, &boxed_options, key);
@@ -276,17 +276,32 @@ impl<'gc> VM<'gc> {
             });
         let date_style = self.read_named_property(ctx, &boxed_options, "dateStyle");
         let time_style = self.read_named_property(ctx, &boxed_options, "timeStyle");
+        let time_zone_name = self.read_named_property(ctx, &boxed_options, "timeZoneName");
+        let fractional_second_digits = self.read_named_property(ctx, &boxed_options, "fractionalSecondDigits");
         if let Some(thrown) = self.pending_throw.take() {
             return Err(thrown);
         }
         let has_date_style = !matches!(date_style, Value::Undefined);
         let has_time_style = !matches!(time_style, Value::Undefined);
+        let has_time_zone_name = !matches!(time_zone_name, Value::Undefined);
+        let has_fractional_second_digits = !matches!(fractional_second_digits, Value::Undefined);
+        let needs_fractional_second_time_defaults = mode == "all" && !has_date_fields && !has_date_style && has_fractional_second_digits;
         let needs_defaults = match mode {
             "date" => !has_date_fields && !has_date_style,
             "time" => !has_time_fields && !has_time_style,
-            _ => !has_date_fields && !has_time_fields && !has_date_style && !has_time_style,
+            _ => (!has_date_fields && !has_time_fields && !has_date_style && !has_time_style) || needs_fractional_second_time_defaults,
         };
         if !needs_defaults {
+            if mode == "all" && !has_date_fields && !has_date_style && has_time_zone_name {
+                let mut merged = match &boxed_options {
+                    Value::Object(obj) => obj.borrow().clone(),
+                    _ => IndexMap::new(),
+                };
+                for (key, value) in Self::date_locale_default_entries("all") {
+                    merged.entry(key.to_string()).or_insert(value);
+                }
+                return Ok(vec![locales, Value::Object(new_gc_cell_ptr(ctx, merged))]);
+            }
             return Ok(vec![locales, boxed_options]);
         }
 
@@ -294,7 +309,8 @@ impl<'gc> VM<'gc> {
             Value::Object(obj) => obj.borrow().clone(),
             _ => IndexMap::new(),
         };
-        for (key, value) in Self::date_locale_default_entries(mode) {
+        let defaults_mode = if needs_fractional_second_time_defaults { "time" } else { mode };
+        for (key, value) in Self::date_locale_default_entries(defaults_mode) {
             merged.entry(key.to_string()).or_insert(value);
         }
         Ok(vec![locales, Value::Object(new_gc_cell_ptr(ctx, merged))])

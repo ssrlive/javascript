@@ -19752,6 +19752,8 @@ impl<'gc> VM<'gc> {
         // globalThis — refers to the global this object
         self.globals.insert("globalThis".to_string(), Value::Object(self.global_this));
         let is_html_dda_fn = Self::make_is_html_dda_fn(ctx);
+        self.globals
+            .insert("__buildString__".to_string(), Value::NativeFunction(BUILTIN_BUILD_STRING));
         self.globals.insert(
             "__detachArrayBuffer__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
@@ -19765,6 +19767,9 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
         );
         self.globals.insert("__isHTMLDDA__".to_string(), is_html_dda_fn.clone());
+        self.global_this
+            .borrow_mut(ctx)
+            .insert("__buildString__".to_string(), Value::NativeFunction(BUILTIN_BUILD_STRING));
         self.global_this.borrow_mut(ctx).insert(
             "__detachArrayBuffer__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__detachArrayBuffer__", "__detachArrayBuffer__", 1.0, false),
@@ -30297,6 +30302,54 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             BUILTIN_CTOR_REGEXP => self.regexp_call_builtin(ctx, args),
+            BUILTIN_BUILD_STRING => {
+                // Native fast implementation of the test262 harness buildString({loneCodePoints, ranges}) function.
+                // Replaces the JS loop (which takes ~5s for 1.1M code points) with a Rust loop (~1ms).
+                let arg = args.first().unwrap_or(&Value::Undefined);
+                let mut utf16: Vec<u16> = Vec::with_capacity(1 << 20);
+
+                // Helper: push a Unicode code point as UTF-16 (surrogate pair if necessary)
+                fn push_cp(utf16: &mut Vec<u16>, cp: u32) {
+                    if cp < 0x10000 {
+                        utf16.push(cp as u16);
+                    } else {
+                        let cp = cp - 0x10000;
+                        utf16.push(0xD800 + (cp >> 10) as u16);
+                        utf16.push(0xDC00 + (cp & 0x3FF) as u16);
+                    }
+                }
+
+                // Read loneCodePoints array
+                let lone = self.read_named_property(ctx, arg, "loneCodePoints");
+                if let Value::Array(arr) = &lone {
+                    let b = arr.borrow();
+                    for elem in &b.elements {
+                        if let Value::Number(n) = elem {
+                            push_cp(&mut utf16, *n as u32);
+                        }
+                    }
+                }
+
+                // Read ranges array: [[start, end], ...]
+                let ranges = self.read_named_property(ctx, arg, "ranges");
+                if let Value::Array(ranges_arr) = &ranges {
+                    let b = ranges_arr.borrow();
+                    for range in &b.elements {
+                        if let Value::Array(range_arr) = range {
+                            let rb = range_arr.borrow();
+                            if let (Some(Value::Number(start)), Some(Value::Number(end))) = (rb.elements.first(), rb.elements.get(1)) {
+                                let start = *start as u32;
+                                let end = *end as u32;
+                                for cp in start..=end {
+                                    push_cp(&mut utf16, cp);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Value::String(utf16)
+            }
             _ => {
                 log::warn!("Unknown builtin ID: {}", id);
                 Value::Undefined

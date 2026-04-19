@@ -392,3 +392,5 @@ pub(crate) const BUILTIN_CTOR_SHADOWREALM: FunctionID = 620;
 pub(crate) const BUILTIN_SHADOWREALM_EVALUATE: FunctionID = 621;
 pub(crate) const BUILTIN_SHADOWREALM_IMPORTVALUE: FunctionID = 622;
 // Next available group: 630
+// Test262 harness acceleration
+pub(crate) const BUILTIN_BUILD_STRING: FunctionID = 630;

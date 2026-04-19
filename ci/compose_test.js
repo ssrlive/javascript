@@ -454,6 +454,12 @@ function composeTest({ testPath, repoDir, harnessIndex, prependFiles = [], needS
     outLines.push('}');
     outLines.push('');
 
+    // Override harness buildString with native implementation when available
+    // This replaces the JS loop (5s for 1.1M code points) with a Rust function (~1ms).
+    outLines.push('// Inject: native buildString override for performance');
+    outLines.push('if (typeof __buildString__ !== "undefined" && typeof buildString !== "undefined") { buildString = __buildString__; }');
+    outLines.push('');
+
     // Expose common harness helpers on globalThis for imported modules
     outLines.push('// Inject: expose common harness helpers on globalThis for imported modules');
     outLines.push('if (typeof globalThis !== "undefined") {');

@@ -4918,7 +4918,7 @@ impl<'gc> VM<'gc> {
         Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
-    /// Settle a promise and flush its __then_queue__.
+    /// Settle a promise and enqueue its pending reactions as microtasks.
     fn settle_promise(&mut self, ctx: &GcContext<'gc>, promise: &Value<'gc>, value: &Value<'gc>, rejected: bool) {
         if let Value::Object(obj) = promise {
             // Set the value
@@ -4931,7 +4931,8 @@ impl<'gc> VM<'gc> {
                     b.shift_remove("__promise_rejected__");
                 }
             }
-            // Flush __then_queue__
+            // Move any pending reactions into the microtask queue. Running them
+            // synchronously here grows the Rust call stack for long promise chains.
             let queue = obj.borrow_mut(ctx).shift_remove("__then_queue__");
             if let Some(Value::Array(arr)) = queue {
                 let entries: Vec<Value<'gc>> = arr.borrow().elements.clone();
@@ -4947,29 +4948,13 @@ impl<'gc> VM<'gc> {
                             )
                         };
                         let callback = if rejected { on_rejected } else { on_fulfilled };
-
-                        let (cb_result, cb_rejected) = if let Some(ref cb) = callback
-                            && self.is_value_callable(cb)
-                        {
-                            let saved = std::mem::take(&mut self.try_stack);
-                            let out = self.vm_call_function_value(ctx, cb, &Value::Undefined, std::slice::from_ref(value));
-                            self.try_stack = saved;
-                            let leaked_throw = self.pending_throw.take();
-                            match (out, leaked_throw) {
-                                (_, Some(thrown)) => (thrown, true),
-                                (Ok(v), None) => (v, false),
-                                (Err(e), None) => (self.vm_value_from_error(ctx, &e), true),
-                            }
-                        } else {
-                            // No matching callback — propagate value/rejection
-                            (value.clone(), rejected)
-                        };
-
-                        let capability_fn = if cb_rejected { &reject } else { &resolve };
-                        if let Err(err) = self.call_promise_capability_function(ctx, capability_fn, &cb_result) {
-                            self.pending_throw = Some(self.vm_value_from_error(ctx, &err));
-                            return;
-                        }
+                        self.microtask_queue.push(Microtask {
+                            callback,
+                            value: value.clone(),
+                            rejected,
+                            resolve,
+                            reject,
+                        });
                     }
                 }
             }

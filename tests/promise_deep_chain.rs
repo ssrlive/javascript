@@ -11,6 +11,13 @@ fn __init_test_logger() {
 mod deep_chain_tests {
     use super::*;
 
+    const WINDOWS_LIKE_STACK_SIZE: usize = 1024 * 1024;
+    const TEST_STACK_SIZE: usize = if cfg!(debug_assertions) {
+        8 * 1024 * 1024
+    } else {
+        WINDOWS_LIKE_STACK_SIZE
+    };
+
     #[test]
     fn test_deep_promise_chain_no_stack_overflow() {
         // Build a script that chains many .then() calls where each step
@@ -36,6 +43,36 @@ mod deep_chain_tests {
 
         let result = evaluate_script(&script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, depth.to_string());
+    }
+
+    #[cfg_attr(debug_assertions, ignore = "debug frames are too large for the 1 MiB Windows-like stack budget")]
+    #[test]
+    fn test_deep_promise_chain_on_windows_like_stack() {
+        let depth = 2_000;
+        let script = format!(
+            r#"
+            function asyncOperation(x) {{
+              return Promise.resolve(x + 1);
+            }}
+            (async function() {{
+                let v = 0;
+                for (let i = 0; i < {depth}; i = i + 1) {{
+                    v = await asyncOperation(v);
+                }}
+                return v;
+            }})()
+        "#
+        );
+
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(&script, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, depth.to_string());
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]

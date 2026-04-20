@@ -1,5 +1,12 @@
 use javascript::*;
 
+const WINDOWS_LIKE_STACK_SIZE: usize = 1024 * 1024;
+const TEST_STACK_SIZE: usize = if cfg!(debug_assertions) {
+    8 * 1024 * 1024
+} else {
+    WINDOWS_LIKE_STACK_SIZE
+};
+
 fn eval_vm(script: &str) -> String {
     evaluate_script(script, false, None::<&std::path::Path>).unwrap()
 }
@@ -43,7 +50,7 @@ fn spec_allsettled_mixed_outcomes() {
     "#;
 
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = eval_vm_async_iife(body);
             assert_eq!(

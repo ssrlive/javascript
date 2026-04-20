@@ -1,5 +1,12 @@
 use javascript::*;
 
+const WINDOWS_LIKE_STACK_SIZE: usize = 1024 * 1024;
+const TEST_STACK_SIZE: usize = if cfg!(debug_assertions) {
+    8 * 1024 * 1024
+} else {
+    WINDOWS_LIKE_STACK_SIZE
+};
+
 #[test]
 fn test_promise_async_resolution() {
     // Test that we can get the async result of a Promise
@@ -9,7 +16,7 @@ fn test_promise_async_resolution() {
         })
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "\"async result\"");
@@ -32,7 +39,7 @@ fn test_await_async_function() {
         getResult()
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "42");
@@ -55,7 +62,7 @@ fn test_promise_chaining_async() {
         })
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "25");
@@ -76,7 +83,7 @@ fn test_promise_allsettled() {
         ])
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert_eq!(
@@ -99,7 +106,7 @@ fn test_main() {
         ])
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert_eq!(
@@ -132,7 +139,7 @@ fn test_sync_catch_silences_non_error_rejection() {
         result
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>);
             match result {
@@ -159,7 +166,7 @@ fn test_unhandled_non_error_rejection_not_immediate() {
     // Non-Error rejections are not reported immediately; ensure they don't surface as Err here.
     let script = r#"new Promise(function(resolve, reject) { reject(2); })"#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             // The script should evaluate to the rejection reason being observable after microtask processing
@@ -188,7 +195,7 @@ fn test_allsettled_reject_does_not_report_unhandled() {
     "#;
 
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>);
             match result {
@@ -213,7 +220,7 @@ fn test_error_rejection_reported_immediately() {
     let script = r#"new Promise(function(resolve, reject) { let e = {message: 'boom', __is_error: true}; reject(e); })"#;
 
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>);
             // Plain-object rejection is non-error-like -> Ok (the rejected promise serialized)
@@ -239,7 +246,7 @@ fn test_error_rejection_silenced_by_sync_catch() {
         result
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>);
             match result {
@@ -275,7 +282,7 @@ fn test_allsettled_with_error_like_does_not_report_unhandled() {
         result
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>);
             match result {
@@ -298,7 +305,7 @@ fn test_executor_throw_non_error_not_immediate() {
         after
     "#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert_eq!(result, "1");
@@ -313,7 +320,7 @@ fn test_executor_throw_non_error_not_immediate() {
 fn test_executor_throw_error_reported_immediately() {
     let script = r#"new Promise(function(resolve, reject) { throw new Error('boom'); })"#;
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
             let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
             assert!(result.contains("Error: boom"));

@@ -1,5 +1,12 @@
 use javascript::*;
 
+const WINDOWS_LIKE_STACK_SIZE: usize = 1024 * 1024;
+const TEST_STACK_SIZE: usize = if cfg!(debug_assertions) {
+    8 * 1024 * 1024
+} else {
+    WINDOWS_LIKE_STACK_SIZE
+};
+
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
 #[ctor::ctor]
@@ -23,8 +30,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "200");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "200");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -43,8 +57,15 @@ mod promise_tests {
             });
             finalResult
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "30");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "30");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -65,8 +86,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "6");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "6");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -84,8 +112,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "1");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "1");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -100,9 +135,15 @@ mod promise_tests {
             });
             executionOrder
         "#;
-
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[\"sync\",\"async result\"]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "[\"sync\",\"async result\"]");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -114,8 +155,15 @@ mod promise_tests {
                 .then(function(v) { finalResult = v; });
             finalResult
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "42");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "42");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -135,11 +183,18 @@ mod promise_tests {
             });
             Promise.allSettled([p1, p2, p3])
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(
-            result,
-            "[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":\"error\"},{\"status\":\"fulfilled\",\"value\":3}]"
-        );
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(
+                    result,
+                    r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":"error"},{"status":"fulfilled","value":3}]"#
+                );
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -167,8 +222,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[true,true,true,true,1,2,3,true]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "[true,true,true,true,1,2,3,true]");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -185,8 +247,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"boom\"");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "\"boom\"");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -210,8 +279,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[true,\"first\",\"second\",\"fulfilled\",1,\"rejected\",\"boom\"]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, r#"[true,"first","second","fulfilled",1,"rejected","boom"]"#);
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -227,8 +303,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "7");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "7");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -243,8 +326,15 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[\"AggregateError\",\"All promises were rejected\",\"e1\",\"e2\"]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "[\"AggregateError\",\"All promises were rejected\",\"e1\",\"e2\"]");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -258,8 +348,15 @@ mod promise_tests {
                 Promise.reject("boom")
             ])
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert!(result.contains("pending"), "expected pending promise, got: {result}");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert!(result.contains("pending"), "expected pending promise, got: {result}");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -279,8 +376,15 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"from-thenable\"");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "\"from-thenable\"");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -300,8 +404,15 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"thenable-reject\"]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"thenable-reject\"]");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -321,12 +432,19 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        // assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"then-throw\"]");
-        assert!(
-            result.contains("p-reject") && result.contains("then-throw") && result.contains("AggregateError"),
-            "unexpected result: {result}"
-        );
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                // assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"then-throw\"]");
+                assert!(
+                    result.contains("p-reject") && result.contains("then-throw") && result.contains("AggregateError"),
+                    "unexpected result: {result}"
+                );
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -347,11 +465,18 @@ mod promise_tests {
             });
             out
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert!(
-            result.contains("p-reject") && result.contains("getter-throw") && result.contains("AggregateError"),
-            "unexpected result: {result}"
-        );
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert!(
+                    result.contains("p-reject") && result.contains("getter-throw") && result.contains("AggregateError"),
+                    "unexpected result: {result}"
+                );
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -362,8 +487,15 @@ mod promise_tests {
             out = [e.name, e.message, e.errors[0], e.errors[1]];
             out
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[\"AggregateError\",\"boom\",\"x\",\"y\"]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "[\"AggregateError\",\"boom\",\"x\",\"y\"]");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -378,8 +510,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"direct test\"");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "\"direct test\"");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -395,8 +534,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "84");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "84");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -412,8 +558,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"caught: test error\"");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "\"caught: test error\"");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -428,8 +581,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "\"cleanup done\"");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "\"cleanup done\"");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -449,8 +609,15 @@ mod promise_tests {
 
             [resolveResult, rejectResult]
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "[\"resolved\",\"rejected\"]");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "[\"resolved\",\"rejected\"]");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -463,8 +630,15 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(result, "84");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(result, "84");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 
     #[test]
@@ -483,8 +657,14 @@ mod promise_tests {
         // Wait briefly to let timers / microtasks run and observe side-effects
         new Promise((resolve) => setTimeout(() => resolve(printed), 10));
     "#;
-
-        let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-        assert_eq!(res, "\"Done!\"");
+        std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+                assert_eq!(res, "\"Done!\"");
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("thread panicked");
     }
 }

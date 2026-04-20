@@ -11,6 +11,24 @@ shopt -s nullglob
 
 TIMEOUT_SEC=5
 
+# Use GNU timeout if available; Windows timeout.exe is incompatible with
+# `timeout N command ...` and can make every test look like a failure.
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+  if timeout --version 2>/dev/null | grep -qi "coreutils"; then
+    TIMEOUT_BIN="timeout"
+  fi
+fi
+
+# macOS users often install coreutils as gtimeout.
+if [[ -z "$TIMEOUT_BIN" ]] && command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+fi
+
+if [[ -z "$TIMEOUT_BIN" ]]; then
+  echo "⚠️  GNU timeout not found; running without per-test timeout."
+fi
+
 cargo fmt --all
 
 echo "🔍 Running clippy... (warnings ignored)"
@@ -41,12 +59,17 @@ for f in "${examples[@]}"; do
   fi
 
   echo "testing $f"
-  output=$(timeout "$TIMEOUT_SEC" "${cmd[@]}" 2>&1)
-  rc=$?
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    output=$($TIMEOUT_BIN "$TIMEOUT_SEC" "${cmd[@]}" 2>&1)
+    rc=$?
+  else
+    output=$("${cmd[@]}" 2>&1)
+    rc=$?
+  fi
 
   if [[ $rc -eq 0 ]]; then
     pass+=("$name")
-  elif [[ $rc -eq 124 ]]; then
+  elif [[ -n "$TIMEOUT_BIN" && $rc -eq 124 ]]; then
     tout+=("$name")
   elif echo "$output" | grep -q "Unimplemented"; then
     skip+=("$name")

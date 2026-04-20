@@ -365,7 +365,7 @@ async function runAll() {
   let scheduledCount = 0;
   const running = new Set();
 
-  async function runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative) {
+  async function runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative, needsAgent) {
     let currentSucceeds = false;
     try {
       log(`RUN ${f}`);
@@ -516,7 +516,6 @@ async function runAll() {
         }
       }
     }
-    if (flagsBlock && flagsBlock.includes('CanBlockIsFalse')) { skip++; log(`SKIP (CanBlockIsFalse) ${f}`); continue; }
 
     // Feature detection
     const feats = (meta.match(/features:\s*\[(.*?)\]/s) || [])[1];
@@ -537,13 +536,10 @@ async function runAll() {
     // Read test source once and reuse for all checks below
     const testSrc = fs.readFileSync(f, 'utf8');
 
-    // Detect tests that require $262.agent (multi-threaded worker support)
+    // Detect tests that require $262.agent (multi-threaded worker support).
+    // These require an engine-side host implementation. Do not route them through Node,
+    // because that tests the host shim rather than the Rust engine.
     const needsAgent = /\$262\.agent\b/.test(testSrc);
-    if (needsAgent) {
-      skip++;
-      log(`SKIP (agent unsupported in vm mode) ${f}`);
-      continue;
-    }
 
     // Handle includes
     const includes = parseList(meta, 'includes');
@@ -611,7 +607,7 @@ async function runAll() {
 
     const testCwd = path.dirname(tmpPath);
 
-    const p = runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative)
+    const p = runSingleComposedTest(f, tmpPath, cleanupTmp, testCwd, isModule, expectedNegative, needsAgent)
       .finally(() => running.delete(p));
     running.add(p);
     scheduledCount++;

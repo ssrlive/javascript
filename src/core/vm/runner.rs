@@ -21,11 +21,14 @@ impl<'gc> VM<'gc> {
     /// Core execution loop of the VM (Fetch-Decode-Execute)
     pub fn run(&mut self, ctx: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
         let result = self.run_inner(ctx, 0)?;
+        self.flush_async_atomics_waits(ctx, true);
         self.drain_microtasks(ctx);
         if let Some(thrown) = self.pending_throw.take() {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }
         self.drain_timers(ctx)?;
+        self.flush_async_atomics_waits(ctx, true);
+        self.drain_microtasks(ctx);
         if let Some(thrown) = self.pending_throw.take() {
             return Err(self.vm_error_to_js_error(ctx, &thrown));
         }
@@ -5296,90 +5299,9 @@ impl<'gc> VM<'gc> {
                     if let Value::Number(n) = &index {
                         let i = *n as usize;
                         if *n >= 0.0 && *n == (i as f64) {
-                            let ta_name = arr
-                                .borrow()
-                                .props
-                                .get("__typedarray_name__")
-                                .map(|v| value_to_string(v))
-                                .unwrap_or_default();
-                            if let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
-                                let bb = buf_bytes.borrow();
-                                let base = byte_offset + i * bpe;
-                                let in_range = base + bpe <= bb.elements.len();
-                                if in_range {
-                                    let val = match ta_name.as_str() {
-                                        "Uint8Array" | "Uint8ClampedArray" => {
-                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(b as f64)
-                                        }
-                                        "Int8Array" => {
-                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number((b as i8) as f64)
-                                        }
-                                        "Uint16Array" => {
-                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(u16::from_ne_bytes([b0, b1]) as f64)
-                                        }
-                                        "Int16Array" => {
-                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(i16::from_ne_bytes([b0, b1]) as f64)
-                                        }
-                                        "Uint32Array" => {
-                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(u32::from_ne_bytes(arr4) as f64)
-                                        }
-                                        "Int32Array" => {
-                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(i32::from_ne_bytes(arr4) as f64)
-                                        }
-                                        "Float16Array" => {
-                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(f16_bits_to_f64(u16::from_ne_bytes([b0, b1])))
-                                        }
-                                        "Float32Array" => {
-                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(f32::from_ne_bytes(arr4) as f64)
-                                        }
-                                        "Float64Array" => {
-                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(f64::from_ne_bytes(arr8))
-                                        }
-                                        "BigInt64Array" => {
-                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::BigInt(Box::new(num_bigint::BigInt::from(i64::from_ne_bytes(arr8))))
-                                        }
-                                        "BigUint64Array" => {
-                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::BigInt(Box::new(num_bigint::BigInt::from(u64::from_ne_bytes(arr8))))
-                                        }
-                                        _ => {
-                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(b as f64)
-                                        }
-                                    };
-                                    self.stack.push(val);
-                                    return Ok(OpcodeAction::Continue);
-                                } else {
-                                    // Out of bounds → undefined (don't fall to prototype)
-                                    self.stack.push(Value::Undefined);
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                            }
+                            let val = self.ta_get_element(ctx, arr, i);
+                            self.stack.push(val);
+                            return Ok(OpcodeAction::Continue);
                         } else {
                             // Non-integer numeric index (e.g. 1.5, -0) → undefined
                             self.stack.push(Value::Undefined);
@@ -5389,7 +5311,6 @@ impl<'gc> VM<'gc> {
 
                     // String key that is a canonical numeric index
                     if let Some(numeric_index) = Self::canonical_numeric_index_string(&coerced_key) {
-                        // Valid non-negative integer → try buffer read
                         if numeric_index >= 0.0
                             && numeric_index.fract() == 0.0
                             && !numeric_index.is_nan()
@@ -5397,138 +5318,16 @@ impl<'gc> VM<'gc> {
                             && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
                         {
                             let i = numeric_index as usize;
-                            let ta_name = arr
-                                .borrow()
-                                .props
-                                .get("__typedarray_name__")
-                                .map(|v| value_to_string(v))
-                                .unwrap_or_default();
-                            if let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
-                                let bb = buf_bytes.borrow();
-                                let base = byte_offset + i * bpe;
-                                let in_range = base + bpe <= bb.elements.len();
-                                if in_range {
-                                    let val = match ta_name.as_str() {
-                                        "Uint8Array" | "Uint8ClampedArray" => {
-                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(b as f64)
-                                        }
-                                        "Int8Array" => {
-                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number((b as i8) as f64)
-                                        }
-                                        "Uint16Array" => {
-                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(u16::from_ne_bytes([b0, b1]) as f64)
-                                        }
-                                        "Int16Array" => {
-                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(i16::from_ne_bytes([b0, b1]) as f64)
-                                        }
-                                        "Uint32Array" => {
-                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(u32::from_ne_bytes(arr4) as f64)
-                                        }
-                                        "Int32Array" => {
-                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(i32::from_ne_bytes(arr4) as f64)
-                                        }
-                                        "Float16Array" => {
-                                            let b0 = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            let b1 = to_number(bb.elements.get(base + 1).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(f16_bits_to_f64(u16::from_ne_bytes([b0, b1])))
-                                        }
-                                        "Float32Array" => {
-                                            let arr4: [u8; 4] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(f32::from_ne_bytes(arr4) as f64)
-                                        }
-                                        "Float64Array" => {
-                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::Number(f64::from_ne_bytes(arr8))
-                                        }
-                                        "BigInt64Array" => {
-                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::BigInt(Box::new(num_bigint::BigInt::from(i64::from_ne_bytes(arr8))))
-                                        }
-                                        "BigUint64Array" => {
-                                            let arr8: [u8; 8] = core::array::from_fn(|j| {
-                                                to_number(bb.elements.get(base + j).unwrap_or(&Value::Number(0.0))) as u8
-                                            });
-                                            Value::BigInt(Box::new(num_bigint::BigInt::from(u64::from_ne_bytes(arr8))))
-                                        }
-                                        _ => {
-                                            let b = to_number(bb.elements.get(base).unwrap_or(&Value::Number(0.0))) as u8;
-                                            Value::Number(b as f64)
-                                        }
-                                    };
-                                    self.stack.push(val);
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                            }
+                            let val = self.ta_get_element(ctx, arr, i);
+                            self.stack.push(val);
+                            return Ok(OpcodeAction::Continue);
                         }
-                        // Invalid canonical numeric index (non-integer, -0, OOB) → undefined
                         self.stack.push(Value::Undefined);
                         return Ok(OpcodeAction::Continue);
                     }
-                }
 
-                if let Value::Number(n) = &index {
-                    let i = *n as usize;
-                    if *n >= 0.0 && *n == (i as f64) {
-                        let live_iter = arr.borrow().props.get("__forof_live_iterator__").cloned();
-                        if let Some(Value::Object(iter_obj)) = live_iter {
-                            let next_fn = self.read_named_property(ctx, &Value::Object(iter_obj), "next");
-                            if let Some(thrown) = self.pending_throw.take() {
-                                self.handle_throw(ctx, &thrown)?;
-                                return Ok(OpcodeAction::Continue);
-                            }
-                            let next_result = match self.vm_call_function_value(ctx, &next_fn, &Value::Object(iter_obj), &[]) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    if let Some(thrown) = self.pending_throw.take() {
-                                        self.handle_throw(ctx, &thrown)?;
-                                        return Ok(OpcodeAction::Continue);
-                                    }
-                                    self.stack.push(Value::Undefined);
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                            };
-                            let done = self.read_named_property(ctx, &next_result, "done").to_truthy();
-                            if let Some(thrown) = self.pending_throw.take() {
-                                self.handle_throw(ctx, &thrown)?;
-                                return Ok(OpcodeAction::Continue);
-                            }
-                            if done {
-                                self.stack.push(Value::Undefined);
-                            } else {
-                                let value = self.read_named_property(ctx, &next_result, "value");
-                                if let Some(thrown) = self.pending_throw.take() {
-                                    self.handle_throw(ctx, &thrown)?;
-                                    return Ok(OpcodeAction::Continue);
-                                }
-                                self.stack.push(value);
-                            }
-                            return Ok(OpcodeAction::Continue);
-                        }
-                        let val = self.read_named_property(ctx, &obj, &coerced_key);
-                        self.stack.push(val);
-                    } else {
-                        let val = self.read_named_property(ctx, &obj, &coerced_key);
-                        self.stack.push(val);
-                    }
+                    let val = self.read_named_property(ctx, &obj, &coerced_key);
+                    self.stack.push(val);
                 } else {
                     if let Ok(i) = coerced_key.parse::<usize>() {
                         let _ = i;

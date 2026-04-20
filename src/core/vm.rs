@@ -443,6 +443,13 @@ struct Microtask<'gc> {
     reject: Value<'gc>,
 }
 
+struct AsyncAtomicsWait<'gc> {
+    shared_id: u64,
+    byte_index: usize,
+    promise: Value<'gc>,
+    times_out: bool,
+}
+
 /// Saved state for a suspended generator (used by suspendable sync generators).
 #[derive(Clone)]
 struct GeneratorState<'gc> {
@@ -764,6 +771,8 @@ pub struct VM<'gc> {
     cleared_timers: std::collections::HashSet<usize>,
     // Microtask queue for deferred .then() on settled promises
     microtask_queue: Vec<Microtask<'gc>>,
+    // Main-thread async Atomics.waitAsync registrations.
+    async_atomics_waits: Vec<AsyncAtomicsWait<'gc>>,
     // Suspendable generator states, keyed by unique generator ID
     generator_states: HashMap<usize, GeneratorState<'gc>>,
     // Suspended async-function states, keyed by unique ID.
@@ -927,6 +936,244 @@ impl<'gc> VM<'gc> {
             self.restricted_thrower_intrinsic = thrower;
         }
         self.restricted_thrower_intrinsic.clone()
+    }
+
+    fn script_has_can_block_is_false(&self) -> bool {
+        self.script_source.as_deref().is_some_and(|src| src.contains("CanBlockIsFalse")) && !crate::js_agent::is_agent_thread()
+    }
+
+    fn shared_buffer_id_from_obj(&self, buf_obj: &ObjectHandle<'gc>) -> Option<u64> {
+        match buf_obj.borrow().get("__shared_buffer_id__") {
+            Some(Value::Number(n)) if *n >= 1.0 => Some(*n as u64),
+            _ => None,
+        }
+    }
+
+    fn ensure_shared_buffer_id(&mut self, ctx: &GcContext<'gc>, buf_obj: &ObjectHandle<'gc>) -> Option<u64> {
+        if let Some(id) = self.shared_buffer_id_from_obj(buf_obj) {
+            return Some(id);
+        }
+
+        let snapshot = {
+            let borrow = buf_obj.borrow();
+            let Value::Array(bytes) = borrow.get("__buffer_bytes__")?.clone() else {
+                return None;
+            };
+            bytes.borrow().elements.iter().map(|v| to_number(v) as u8).collect::<Vec<_>>()
+        };
+        let id = crate::js_agent::register_shared_buffer(snapshot);
+        buf_obj
+            .borrow_mut(ctx)
+            .insert("__shared_buffer_id__".to_string(), Value::Number(id as f64));
+        Some(id)
+    }
+
+    fn shared_ta_info(&self, arr: &ArrayHandle<'gc>) -> Option<(u64, usize, usize, String)> {
+        let borrow = arr.borrow();
+        let Value::Object(buf_obj) = borrow.props.get("__typedarray_buffer__")?.clone() else {
+            return None;
+        };
+        let shared_id = self.shared_buffer_id_from_obj(&buf_obj)?;
+        let byte_offset = borrow
+            .props
+            .get("__byte_offset__")
+            .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+            .unwrap_or(0);
+        let bpe = borrow
+            .props
+            .get("__bytes_per_element__")
+            .and_then(|v| {
+                if let Value::Number(n) = v {
+                    Some((*n as usize).max(1))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1);
+        let ta_name = borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
+        Some((shared_id, byte_offset, bpe, ta_name))
+    }
+
+    fn ensure_shared_ta_info(&mut self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>) -> Option<(u64, usize, usize, String)> {
+        let buf_obj = {
+            let borrow = arr.borrow();
+            let Value::Object(buf_obj) = borrow.props.get("__typedarray_buffer__")?.clone() else {
+                return None;
+            };
+            buf_obj
+        };
+        self.ensure_shared_buffer_id(ctx, &buf_obj)?;
+        self.shared_ta_info(arr)
+    }
+
+    fn shared_ta_read_element(&self, arr: &ArrayHandle<'gc>, idx: usize) -> Option<Value<'gc>> {
+        let (shared_id, byte_offset, bpe, ta_name) = self.shared_ta_info(arr)?;
+        let base = byte_offset.checked_add(idx.checked_mul(bpe)?)?;
+        let raw = crate::js_agent::shared_buffer_read(shared_id, base, bpe)?;
+        let bytes: Vec<Value<'gc>> = raw.into_iter().map(|b| Value::Number(b as f64)).collect();
+        Some(Self::decode_typed_element(&bytes, 0, bpe, &ta_name))
+    }
+
+    fn local_ta_read_element(&self, arr: &ArrayHandle<'gc>, idx: usize) -> Option<Value<'gc>> {
+        let (buf_obj, byte_offset, bpe, ta_name) = {
+            let borrow = arr.borrow();
+            let Value::Object(buf_obj) = borrow.props.get("__typedarray_buffer__")?.clone() else {
+                return None;
+            };
+            let byte_offset = borrow
+                .props
+                .get("__byte_offset__")
+                .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                .unwrap_or(0);
+            let bpe = borrow
+                .props
+                .get("__bytes_per_element__")
+                .and_then(|v| {
+                    if let Value::Number(n) = v {
+                        Some((*n as usize).max(1))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(1);
+            let ta_name = borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default();
+            (buf_obj, byte_offset, bpe, ta_name)
+        };
+        let base = byte_offset.checked_add(idx.checked_mul(bpe)?)?;
+        let Value::Array(bytes) = buf_obj.borrow().get("__buffer_bytes__")?.clone() else {
+            return None;
+        };
+        let bb = bytes.borrow();
+        if base + bpe > bb.elements.len() {
+            return None;
+        }
+        Some(Self::decode_typed_element(&bb.elements, base, bpe, &ta_name))
+    }
+
+    fn decode_typed_element_from_raw(&self, raw: &[u8], bpe: usize, ta_name: &str) -> Value<'gc> {
+        let bytes: Vec<Value<'gc>> = raw.iter().map(|b| Value::Number(*b as f64)).collect();
+        Self::decode_typed_element(&bytes, 0, bpe, ta_name)
+    }
+
+    fn encode_typed_element_to_raw(&self, bpe: usize, ta_name: &str, value: &Value<'gc>) -> Option<Vec<u8>> {
+        let mut bytes = vec![Value::Number(0.0); bpe];
+        if ta_name == "BigInt64Array" || ta_name == "BigUint64Array" {
+            let Value::BigInt(bigint) = value else {
+                return None;
+            };
+            Self::encode_typed_element_bigint(&mut bytes, 0, ta_name, bigint);
+        } else {
+            Self::encode_typed_element(&mut bytes, 0, bpe, ta_name, to_number(value));
+        }
+        Some(bytes.into_iter().map(|v| to_number(&v) as u8).collect())
+    }
+
+    fn shared_or_local_ta_element(&self, arr: &ArrayHandle<'gc>, idx: usize) -> Value<'gc> {
+        self.shared_ta_read_element(arr, idx)
+            .or_else(|| self.local_ta_read_element(arr, idx))
+            .unwrap_or_else(|| arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined))
+    }
+
+    fn shared_atomic_rmw(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        arr: &ArrayHandle<'gc>,
+        idx: usize,
+        ta_name: &str,
+        replacement_v: &Value<'gc>,
+        op: usize,
+    ) -> Option<Value<'gc>> {
+        let (shared_id, byte_offset, bpe, _) = self.ensure_shared_ta_info(ctx, arr)?;
+        let base = byte_offset.checked_add(idx.checked_mul(bpe)?)?;
+        let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
+
+        if is_bigint_ta {
+            let replacement_bi = self.value_to_bigint(ctx, replacement_v)?;
+            loop {
+                let old_raw = crate::js_agent::shared_buffer_read(shared_id, base, bpe)?;
+                let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, ta_name);
+                let Value::BigInt(old_bi) = old_value.clone() else {
+                    return Some(Value::Undefined);
+                };
+
+                let new_bi = match op {
+                    BUILTIN_ATOMICS_ADD => old_bi.as_ref() + &replacement_bi,
+                    BUILTIN_ATOMICS_SUB => old_bi.as_ref() - &replacement_bi,
+                    BUILTIN_ATOMICS_AND => old_bi.as_ref() & &replacement_bi,
+                    BUILTIN_ATOMICS_OR => old_bi.as_ref() | &replacement_bi,
+                    BUILTIN_ATOMICS_XOR => old_bi.as_ref() ^ &replacement_bi,
+                    BUILTIN_ATOMICS_EXCHANGE => replacement_bi.clone(),
+                    _ => old_bi.as_ref().clone(),
+                };
+                let new_coerced = coerce_bigint_for_ta(&new_bi, ta_name);
+                let new_value = Value::BigInt(Box::new(new_coerced));
+                let new_raw = self.encode_typed_element_to_raw(bpe, ta_name, &new_value)?;
+                let actual_old = crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &old_raw, &new_raw)?;
+                if actual_old == old_raw {
+                    arr.borrow_mut(ctx).elements[idx] = new_value;
+                    return Some(old_value);
+                }
+            }
+        }
+
+        let replacement_i32 = to_int32(to_number(replacement_v));
+        let replacement_f64 = replacement_i32 as f64;
+        loop {
+            let old_raw = crate::js_agent::shared_buffer_read(shared_id, base, bpe)?;
+            let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, ta_name);
+            let old_f64 = to_number(&old_value);
+
+            let new_f64 = match op {
+                BUILTIN_ATOMICS_ADD => old_f64 + replacement_f64,
+                BUILTIN_ATOMICS_SUB => old_f64 - replacement_f64,
+                BUILTIN_ATOMICS_AND => (to_int32(old_f64) & replacement_i32) as f64,
+                BUILTIN_ATOMICS_OR => (to_int32(old_f64) | replacement_i32) as f64,
+                BUILTIN_ATOMICS_XOR => (to_int32(old_f64) ^ replacement_i32) as f64,
+                BUILTIN_ATOMICS_EXCHANGE => replacement_f64,
+                _ => old_f64,
+            };
+            let new_coerced = coerce_typed_array_value(new_f64, ta_name);
+            let new_value = Value::Number(new_coerced);
+            let new_raw = self.encode_typed_element_to_raw(bpe, ta_name, &new_value)?;
+            let actual_old = crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &old_raw, &new_raw)?;
+            if actual_old == old_raw {
+                arr.borrow_mut(ctx).elements[idx] = new_value;
+                return Some(old_value);
+            }
+        }
+    }
+
+    fn make_shared_array_buffer_from_id(&mut self, ctx: &GcContext<'gc>, shared_id: u64) -> Option<Value<'gc>> {
+        let snapshot = crate::js_agent::shared_buffer_snapshot(shared_id)?;
+        let byte_length = snapshot.len();
+        let mut map = IndexMap::new();
+        map.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
+        map.insert("byteLength".to_string(), Value::Number(byte_length as f64));
+        map.insert("__shared_buffer_id__".to_string(), Value::Number(shared_id as f64));
+        map.insert(
+            "__buffer_bytes__".to_string(),
+            Value::Array(new_gc_cell_ptr(
+                ctx,
+                VmArrayData::new(snapshot.into_iter().map(|b| Value::Number(b as f64)).collect()),
+            )),
+        );
+        if let Some(Value::Object(sab_ctor)) = self.globals.get("SharedArrayBuffer").cloned()
+            && let Some(proto) = sab_ctor.borrow().get("prototype").cloned()
+        {
+            map.insert("__proto__".to_string(), proto);
+        }
+        Some(Value::Object(new_gc_cell_ptr(ctx, map)))
+    }
+
+    fn flush_async_atomics_waits(&mut self, ctx: &GcContext<'gc>, settle_timeouts: bool) {
+        let waits = std::mem::take(&mut self.async_atomics_waits);
+        for wait in waits {
+            if settle_timeouts && wait.times_out {
+                self.settle_promise(ctx, &wait.promise, &Value::from("timed-out"), false);
+            } else {
+                self.async_atomics_waits.push(wait);
+            }
+        }
     }
 
     fn eval_comment_only_fast_path(&self, code: &str) -> Option<Value<'gc>> {
@@ -1096,6 +1343,7 @@ impl<'gc> VM<'gc> {
             next_timer_id: 1,
             cleared_timers: std::collections::HashSet::new(),
             microtask_queue: Vec::new(),
+            async_atomics_waits: Vec::new(),
             generator_states: HashMap::new(),
             async_function_states: HashMap::new(),
             generator_objects: HashMap::new(),
@@ -5229,6 +5477,101 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
+            "__agent_start" => {
+                let src = if let Some(v) = args.first() {
+                    match self.vm_to_string_like_spec(ctx, v) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+                crate::js_agent::start_agent(src);
+                Value::Undefined
+            }
+            "__agent_broadcast" => {
+                let Some(Value::Object(buf_obj)) = args.first().cloned() else {
+                    self.throw_type_error(ctx, "agent broadcast requires SharedArrayBuffer");
+                    return Value::Undefined;
+                };
+                let is_sab = matches!(
+                    buf_obj.borrow().get("__type__"),
+                    Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "SharedArrayBuffer"
+                );
+                if !is_sab {
+                    self.throw_type_error(ctx, "agent broadcast requires SharedArrayBuffer");
+                    return Value::Undefined;
+                }
+                let Some(shared_id) = self.ensure_shared_buffer_id(ctx, &buf_obj) else {
+                    self.throw_type_error(ctx, "SharedArrayBuffer backing store is unavailable");
+                    return Value::Undefined;
+                };
+                if !crate::js_agent::broadcast_shared_buffer(shared_id) {
+                    self.throw_type_error(ctx, "failed to broadcast SharedArrayBuffer");
+                }
+                Value::Undefined
+            }
+            "__agent_getReport" => match crate::js_agent::pop_report() {
+                Some(report) => Value::from(report),
+                None => Value::Null,
+            },
+            "__agent_sleep" => {
+                let duration = args.first().map(to_number).unwrap_or(0.0);
+                crate::js_agent::sleep_ms(duration);
+                Value::Undefined
+            }
+            "__agent_monotonicNow" => Value::Number(crate::js_agent::monotonic_now_ms()),
+            "__agent_report" => {
+                let report = if let Some(v) = args.first() {
+                    match self.vm_to_string_like_spec(ctx, v) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.set_pending_throw_from_error(&err);
+                            return Value::Undefined;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+                crate::js_agent::push_report(report);
+                Value::Undefined
+            }
+            "__agent_leaving" => Value::Undefined,
+            "__agent_receiveBroadcast" => {
+                let Some(callback) = args.first().cloned() else {
+                    self.throw_type_error(ctx, "agent receiveBroadcast requires callback");
+                    return Value::Undefined;
+                };
+                if !self.is_value_callable(&callback) {
+                    self.throw_type_error(ctx, "agent receiveBroadcast callback must be callable");
+                    return Value::Undefined;
+                }
+                let Some(info) = crate::js_agent::wait_for_broadcast() else {
+                    self.throw_type_error(ctx, "agent broadcast channel is unavailable");
+                    return Value::Undefined;
+                };
+                let Some(sab) = self.make_shared_array_buffer_from_id(ctx, info.shared_buffer_id) else {
+                    self.throw_type_error(ctx, "failed to materialize broadcast SharedArrayBuffer");
+                    return Value::Undefined;
+                };
+                let result = match self.vm_call_function_value(ctx, &callback, &Value::Undefined, &[sab]) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        return Value::Undefined;
+                    }
+                };
+                match self.await_promise_sync(ctx, &result) {
+                    Ok(_) => Value::Undefined,
+                    Err(err) => {
+                        self.set_pending_throw_from_error(&err);
+                        Value::Undefined
+                    }
+                }
+            }
             "module.dynamicImport" => self.host_dynamic_import_promise(ctx, args),
             "import.defer" => self.host_deferred_import_namespace(ctx, args),
             "__createRealm__" => {
@@ -6585,14 +6928,15 @@ impl<'gc> VM<'gc> {
                         }
 
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
+                        let current = self.shared_or_local_ta_element(&arr, idx);
                         if is_bigint_ta {
-                            match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => Value::BigInt(b.clone()),
-                                Some(Value::Number(n)) => Value::BigInt(Box::new(num_bigint::BigInt::from(*n as i64))),
+                            match current {
+                                Value::BigInt(b) => Value::BigInt(b),
+                                Value::Number(n) => Value::BigInt(Box::new(num_bigint::BigInt::from(n as i64))),
                                 _ => Value::BigInt(Box::new(num_bigint::BigInt::from(0))),
                             }
                         } else {
-                            arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined)
+                            current
                         }
                     }
                     _ => {
@@ -6676,10 +7020,11 @@ impl<'gc> VM<'gc> {
 
                 match target {
                     Value::Array(arr) => {
-                        let (ta_name, has_buffer_type, len) = {
+                        let (ta_name, buffer_type, has_buffer_type, len) = {
                             let arr_borrow = arr.borrow();
                             (
                                 arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.get("__buffer_type__").map(value_to_string).unwrap_or_default(),
                                 arr_borrow.props.contains_key("__buffer_type__"),
                                 arr_borrow.elements.len(),
                             )
@@ -6780,6 +7125,10 @@ impl<'gc> VM<'gc> {
                             err_map.insert("message".to_string(), Value::from("Index out of range"));
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
+                        }
+
+                        if buffer_type == "SharedArrayBuffer" {
+                            let _ = self.ensure_shared_ta_info(ctx, &arr);
                         }
 
                         let value_v = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -6972,7 +7321,7 @@ impl<'gc> VM<'gc> {
 
                         // count is evaluated before the non-shared early return.
                         let count_v = args.get(2).cloned().unwrap_or(Value::Undefined);
-                        let _count = if matches!(count_v, Value::Undefined) {
+                        let count = if matches!(count_v, Value::Undefined) {
                             f64::INFINITY
                         } else {
                             if count_v.is_symbol_value() {
@@ -7052,8 +7401,29 @@ impl<'gc> VM<'gc> {
                             return Value::Number(0.0);
                         }
 
-                        // Agent waiter-list semantics are not implemented yet.
-                        Value::Number(0.0)
+                        let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, &arr) else {
+                            return Value::Number(0.0);
+                        };
+                        let byte_index = byte_offset + idx * bpe;
+                        let wake_count = if count.is_infinite() { usize::MAX } else { count as usize };
+                        let mut remaining = wake_count;
+                        let mut local_notified = 0usize;
+                        let waits = std::mem::take(&mut self.async_atomics_waits);
+                        for wait in waits {
+                            let matches_waiter =
+                                wait.shared_id == shared_id && wait.byte_index == byte_index && (remaining == usize::MAX || remaining > 0);
+                            if matches_waiter {
+                                self.settle_promise(ctx, &wait.promise, &Value::from("ok"), false);
+                                local_notified += 1;
+                                if remaining != usize::MAX {
+                                    remaining -= 1;
+                                }
+                            } else {
+                                self.async_atomics_waits.push(wait);
+                            }
+                        }
+                        let shared_notified = crate::js_agent::atomics_notify(shared_id, byte_index, remaining).unwrap_or(0);
+                        Value::Number((local_notified + shared_notified) as f64)
                     }
                     _ => {
                         let mut err_map = IndexMap::new();
@@ -7287,11 +7657,15 @@ impl<'gc> VM<'gc> {
                                 None => return Value::Undefined,
                             }
                         };
-                        let current = arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined);
+                        let current = self
+                            .shared_ta_read_element(&arr, idx)
+                            .unwrap_or_else(|| arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined));
 
                         // Coerce timeout for abrupt-completion coverage (e.g. Symbol/object valueOf throws).
                         let timeout_v = args.get(3).cloned().unwrap_or(Value::Undefined);
-                        if !matches!(timeout_v, Value::Undefined) {
+                        let timeout_num = if matches!(timeout_v, Value::Undefined) {
+                            f64::INFINITY
+                        } else {
                             if timeout_v.is_symbol_value() {
                                 let mut err_map = IndexMap::new();
                                 err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -7353,13 +7727,40 @@ impl<'gc> VM<'gc> {
                                 self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                                 return Value::Undefined;
                             }
-                            let _ = to_number(&timeout_prim);
+                            let timeout_num = to_number(&timeout_prim);
+                            if timeout_num.is_nan() {
+                                f64::INFINITY
+                            } else {
+                                timeout_num.max(0.0)
+                            }
+                        };
+
+                        if self.script_has_can_block_is_false() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert("message".to_string(), Value::from("Agent cannot be suspended"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
                         }
 
                         if !self.strict_equal(&current, &expected) {
                             Value::from("not-equal")
                         } else {
-                            Value::from("timed-out")
+                            let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, &arr) else {
+                                return Value::from("timed-out");
+                            };
+                            if timeout_num <= 0.0 {
+                                Value::from("timed-out")
+                            } else {
+                                let byte_index = byte_offset + idx * bpe;
+                                let woke = crate::js_agent::atomics_wait(
+                                    shared_id,
+                                    byte_index,
+                                    if timeout_num.is_infinite() { None } else { Some(timeout_num) },
+                                )
+                                .unwrap_or(false);
+                                if woke { Value::from("ok") } else { Value::from("timed-out") }
+                            }
                         }
                     }
                     _ => {
@@ -7497,12 +7898,15 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
+                        if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_OR) {
+                            return old_value;
+                        }
                         if is_bigint_ta {
                             let Some(big_val) = self.value_to_bigint(ctx, value_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let new_bi = &old_bi | &big_val;
@@ -7512,10 +7916,9 @@ impl<'gc> VM<'gc> {
                             Value::BigInt(Box::new(coerce_bigint_for_ta(&old_bi, &ta_name)))
                         } else {
                             let or_with = to_int32(to_number(value_v));
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
                             let old_i32 = to_int32(old_num);
                             let new_i32 = old_i32 | or_with;
@@ -7661,12 +8064,15 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
+                        if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_AND) {
+                            return old_value;
+                        }
                         if is_bigint_ta {
                             let Some(big_val) = self.value_to_bigint(ctx, value_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let new_bi = &old_bi & &big_val;
@@ -7676,10 +8082,9 @@ impl<'gc> VM<'gc> {
                             Value::BigInt(Box::new(coerce_bigint_for_ta(&old_bi, &ta_name)))
                         } else {
                             let and_with = to_int32(to_number(value_v));
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
                             let old_i32 = to_int32(old_num);
                             let new_i32 = old_i32 & and_with;
@@ -7842,6 +8247,64 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
 
+                        if let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, &arr) {
+                            let base = byte_offset + idx * bpe;
+                            if is_bigint_ta {
+                                let Some(expected_bi) = self.value_to_bigint(ctx, expected_v) else {
+                                    return Value::Undefined;
+                                };
+                                let Some(replacement_bi) = self.value_to_bigint(ctx, replacement_v) else {
+                                    return Value::Undefined;
+                                };
+                                let expected_value = Value::BigInt(Box::new(coerce_bigint_for_ta(&expected_bi, &ta_name)));
+                                let replacement_value = Value::BigInt(Box::new(coerce_bigint_for_ta(&replacement_bi, &ta_name)));
+                                let Some(expected_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &expected_value) else {
+                                    return Value::Undefined;
+                                };
+                                let Some(replacement_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &replacement_value) else {
+                                    return Value::Undefined;
+                                };
+                                let Some(old_raw) =
+                                    crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &expected_bytes, &replacement_bytes)
+                                else {
+                                    return Value::Undefined;
+                                };
+                                let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, &ta_name);
+                                let new_local_value = if old_raw == expected_bytes {
+                                    replacement_value
+                                } else {
+                                    old_value.clone()
+                                };
+                                arr.borrow_mut(ctx).elements[idx] = new_local_value;
+                                return old_value;
+                            }
+
+                            let expected_coerced = coerce_typed_array_value(to_number(expected_v), &ta_name);
+                            let replacement_i32 = to_int32(to_number(replacement_v));
+                            let replacement_coerced = coerce_typed_array_value(replacement_i32 as f64, &ta_name);
+                            let expected_value = Value::Number(expected_coerced);
+                            let replacement_value = Value::Number(replacement_coerced);
+                            let Some(expected_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &expected_value) else {
+                                return Value::Undefined;
+                            };
+                            let Some(replacement_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &replacement_value) else {
+                                return Value::Undefined;
+                            };
+                            let Some(old_raw) =
+                                crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &expected_bytes, &replacement_bytes)
+                            else {
+                                return Value::Undefined;
+                            };
+                            let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, &ta_name);
+                            let new_local_value = if old_raw == expected_bytes {
+                                replacement_value
+                            } else {
+                                old_value.clone()
+                            };
+                            arr.borrow_mut(ctx).elements[idx] = new_local_value;
+                            return old_value;
+                        }
+
                         if is_bigint_ta {
                             let Some(expected_bi) = self.value_to_bigint(ctx, expected_v) else {
                                 return Value::Undefined;
@@ -7849,8 +8312,8 @@ impl<'gc> VM<'gc> {
                             let Some(replacement_bi) = self.value_to_bigint(ctx, replacement_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let old_coerced = coerce_bigint_for_ta(&old_bi, &ta_name);
@@ -7864,10 +8327,9 @@ impl<'gc> VM<'gc> {
                         } else {
                             let _expected_i32 = to_int32(to_number(expected_v));
                             let replacement_i32 = to_int32(to_number(replacement_v));
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
                             let old_coerced = coerce_typed_array_value(old_num, &ta_name);
                             let expected_coerced = coerce_typed_array_value(to_number(expected_v), &ta_name);
@@ -8014,12 +8476,15 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
+                        if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_ADD) {
+                            return old_value;
+                        }
                         if is_bigint_ta {
                             let Some(big_val) = self.value_to_bigint(ctx, value_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let new_bi = &old_bi + &big_val;
@@ -8029,10 +8494,9 @@ impl<'gc> VM<'gc> {
                             Value::BigInt(Box::new(coerce_bigint_for_ta(&old_bi, &ta_name)))
                         } else {
                             let add_with = to_int32(to_number(value_v));
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
                             let old_i32 = to_int32(old_num);
                             let new_i32 = old_i32.wrapping_add(add_with);
@@ -8178,13 +8642,16 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
+                        if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_EXCHANGE) {
+                            return old_value;
+                        }
 
                         if is_bigint_ta {
                             let Some(big_val) = self.value_to_bigint(ctx, value_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let coerced = coerce_bigint_for_ta(&big_val, &ta_name);
@@ -8193,10 +8660,9 @@ impl<'gc> VM<'gc> {
                             Value::BigInt(Box::new(coerce_bigint_for_ta(&old_bi, &ta_name)))
                         } else {
                             let exchanged_with = to_number(value_v);
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
 
                             let new_num = coerce_typed_array_value(exchanged_with, &ta_name);
@@ -8340,12 +8806,15 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
+                        if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_SUB) {
+                            return old_value;
+                        }
                         if is_bigint_ta {
                             let Some(big_val) = self.value_to_bigint(ctx, value_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let new_bi = &old_bi - &big_val;
@@ -8355,10 +8824,9 @@ impl<'gc> VM<'gc> {
                             Value::BigInt(Box::new(coerce_bigint_for_ta(&old_bi, &ta_name)))
                         } else {
                             let sub_with = to_int32(to_number(value_v));
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
                             let old_i32 = to_int32(old_num);
                             let new_i32 = old_i32.wrapping_sub(sub_with);
@@ -8505,12 +8973,15 @@ impl<'gc> VM<'gc> {
                             self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                             return Value::Undefined;
                         }
+                        if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_XOR) {
+                            return old_value;
+                        }
                         if is_bigint_ta {
                             let Some(big_val) = self.value_to_bigint(ctx, value_v) else {
                                 return Value::Undefined;
                             };
-                            let old_bi = match arr.borrow().elements.get(idx) {
-                                Some(Value::BigInt(b)) => (**b).clone(),
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
                                 _ => num_bigint::BigInt::from(0),
                             };
                             let new_bi = &old_bi ^ &big_val;
@@ -8520,10 +8991,9 @@ impl<'gc> VM<'gc> {
                             Value::BigInt(Box::new(coerce_bigint_for_ta(&old_bi, &ta_name)))
                         } else {
                             let xor_with = to_int32(to_number(value_v));
-                            let old_num = match arr.borrow().elements.get(idx) {
-                                Some(Value::Number(n)) => *n,
-                                Some(v) => to_number(v),
-                                None => 0.0,
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
                             };
                             let old_i32 = to_int32(old_num);
                             let new_i32 = old_i32 ^ xor_with;
@@ -15255,13 +15725,7 @@ impl<'gc> VM<'gc> {
             // If key is a canonical numeric index, check receiver identity.
             if is_ta && let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
                 self.maybe_sync_resizable_ta(ctx, arr);
-                let is_valid_integer_index = numeric_index >= 0.0
-                    && numeric_index.fract() == 0.0
-                    && !numeric_index.is_nan()
-                    && numeric_index != f64::INFINITY
-                    && numeric_index != f64::NEG_INFINITY
-                    && !(numeric_index == 0.0 && numeric_index.is_sign_negative())
-                    && (numeric_index as usize) < arr.borrow().elements.len();
+                let is_valid_integer_index = Self::is_valid_integer_index(arr, numeric_index);
 
                 // Check if SameValue(O, Receiver) — i.e., receiver is the target itself
                 let is_same_receiver = match receiver {
@@ -15300,12 +15764,7 @@ impl<'gc> VM<'gc> {
                     }
                     // Re-check bounds after coercion (valueOf may have resized buffer)
                     self.maybe_sync_resizable_ta(ctx, arr);
-                    let valid_after_coerce = idx < arr.borrow().elements.len()
-                        && numeric_index >= 0.0
-                        && numeric_index.fract() == 0.0
-                        && !numeric_index.is_nan()
-                        && numeric_index != f64::INFINITY
-                        && !(numeric_index == 0.0 && numeric_index.is_sign_negative());
+                    let valid_after_coerce = Self::is_valid_integer_index(arr, numeric_index);
                     if !valid_after_coerce {
                         return Ok(val.clone());
                     }
@@ -15329,12 +15788,7 @@ impl<'gc> VM<'gc> {
                 }
                 // Re-check bounds after coercion (valueOf may have resized buffer)
                 self.maybe_sync_resizable_ta(ctx, arr);
-                let valid_after_coerce = idx < arr.borrow().elements.len()
-                    && numeric_index >= 0.0
-                    && numeric_index.fract() == 0.0
-                    && !numeric_index.is_nan()
-                    && numeric_index != f64::INFINITY
-                    && !(numeric_index == 0.0 && numeric_index.is_sign_negative());
+                let valid_after_coerce = Self::is_valid_integer_index(arr, numeric_index);
                 if !valid_after_coerce {
                     return Ok(val.clone());
                 }
@@ -17141,7 +17595,7 @@ impl<'gc> VM<'gc> {
                         drop(borrow);
                         if Self::is_valid_integer_index(arr, numeric_index) {
                             let idx = numeric_index as usize;
-                            return arr.borrow().elements[idx].clone();
+                            return self.shared_or_local_ta_element(arr, idx);
                         }
                         // Canonical numeric index but invalid → return undefined per spec
                         return Value::Undefined;
@@ -19766,6 +20220,19 @@ impl<'gc> VM<'gc> {
             "__evalScript__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
         );
+        for (name, length) in [
+            ("__agent_start", 1.0),
+            ("__agent_broadcast", 1.0),
+            ("__agent_getReport", 0.0),
+            ("__agent_sleep", 1.0),
+            ("__agent_monotonicNow", 0.0),
+            ("__agent_leaving", 0.0),
+            ("__agent_report", 1.0),
+            ("__agent_receiveBroadcast", 1.0),
+        ] {
+            self.globals
+                .insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, name, name, length, false));
+        }
         self.globals.insert("__isHTMLDDA__".to_string(), is_html_dda_fn.clone());
         self.global_this
             .borrow_mut(ctx)
@@ -19782,6 +20249,20 @@ impl<'gc> VM<'gc> {
             "__evalScript__".to_string(),
             Self::make_host_fn_with_name_len(ctx, "__evalScript__", "__evalScript__", 1.0, false),
         );
+        for (name, length) in [
+            ("__agent_start", 1.0),
+            ("__agent_broadcast", 1.0),
+            ("__agent_getReport", 0.0),
+            ("__agent_sleep", 1.0),
+            ("__agent_monotonicNow", 0.0),
+            ("__agent_leaving", 0.0),
+            ("__agent_report", 1.0),
+            ("__agent_receiveBroadcast", 1.0),
+        ] {
+            self.global_this
+                .borrow_mut(ctx)
+                .insert(name.to_string(), Self::make_host_fn_with_name_len(ctx, name, name, length, false));
+        }
         self.global_this.borrow_mut(ctx).insert("__isHTMLDDA__".to_string(), is_html_dda_fn);
         {
             let mut gt = self.global_this.borrow_mut(ctx);
@@ -24359,12 +24840,21 @@ impl<'gc> VM<'gc> {
                     } else {
                         0
                     };
+                    if let Some(value) = self.shared_ta_read_element(arr, i) {
+                        return value;
+                    }
                     return arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
                 }
                 Value::Undefined
             }
             BUILTIN_ATOMICS_STORE => {
                 if let (Some(Value::Array(arr)), Some(idx_val), Some(val)) = (args.first(), args.get(1), args.get(2)) {
+                    let ta_name = arr
+                        .borrow()
+                        .props
+                        .get("__typedarray_name__")
+                        .map(value_to_string)
+                        .unwrap_or_default();
                     let mut idx_num = to_number(idx_val);
                     if idx_num.is_nan() {
                         idx_num = 0.0;
@@ -24375,51 +24865,503 @@ impl<'gc> VM<'gc> {
                         0
                     };
                     if i < arr.borrow().elements.len() {
-                        arr.borrow_mut(ctx).elements[i] = val.clone();
+                        if ta_name == "BigInt64Array" || ta_name == "BigUint64Array" {
+                            let Some(big_val) = self.value_to_bigint(ctx, val) else {
+                                return Value::Undefined;
+                            };
+                            let coerced = coerce_bigint_for_ta(&big_val, &ta_name);
+                            arr.borrow_mut(ctx).elements[i] = Value::BigInt(Box::new(coerced));
+                            self.sync_ta_element_to_buffer(ctx, arr, i, 0.0, &ta_name);
+                            return Value::BigInt(Box::new(big_val));
+                        }
+
+                        let val_num = to_number(val);
+                        let to_integer = if val_num.is_nan() {
+                            0.0
+                        } else if val_num == 0.0 || !val_num.is_finite() {
+                            val_num
+                        } else {
+                            val_num.trunc()
+                        };
+                        let normalized_ret = if to_integer == 0.0 { 0.0 } else { to_integer };
+                        let store_i32 = to_int32(normalized_ret);
+                        let store_num = if normalized_ret >= 0.0 && store_i32 < 0 {
+                            (store_i32 as u32) as f64
+                        } else {
+                            store_i32 as f64
+                        };
+                        arr.borrow_mut(ctx).elements[i] = Value::Number(store_num);
+                        self.sync_ta_element_to_buffer(ctx, arr, i, store_num, &ta_name);
+                        return Value::Number(normalized_ret);
                     }
                     return val.clone();
                 }
                 Value::Undefined
             }
             BUILTIN_ATOMICS_COMPAREEXCHANGE => {
-                if let (Some(Value::Array(arr)), Some(Value::Number(idx)), Some(expected), Some(replacement)) =
-                    (args.first(), args.get(1), args.get(2), args.get(3))
-                {
-                    let i = (*idx as isize).max(0) as usize;
-                    let old = arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
-                    if self.strict_equal(&old, expected) && i < arr.borrow().elements.len() {
-                        arr.borrow_mut(ctx).elements[i] = replacement.clone();
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                    err_map.insert("message".to_string(), Value::from("Atomics.compareExchange requires a typed array"));
+                    self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::Array(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array"
+                                | "Uint8Array"
+                                | "Int16Array"
+                                | "Uint16Array"
+                                | "Int32Array"
+                                | "Uint32Array"
+                                | "BigInt64Array"
+                                | "BigUint64Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::from("Atomics.compareExchange requires integer typed array"),
+                            );
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+
+                        let Some(index_v) = args.get(1) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert("message".to_string(), Value::from("Atomics.compareExchange requires index"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        };
+
+                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
+                        if let Some(thrown) = self.pending_throw.take() {
+                            self.pending_throw = Some(thrown);
+                            return Value::Undefined;
+                        }
+                        if let Value::Object(obj) = index_prim.clone() {
+                            let this_obj = Value::Object(obj);
+                            let value_of = obj.borrow().get("valueOf").cloned();
+                            if let Some(value_of_fn) = value_of
+                                && matches!(
+                                    value_of_fn,
+                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
+                                )
+                            {
+                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
+                                    Ok(v) => index_prim = v,
+                                    Err(err) => {
+                                        self.set_pending_throw_from_error(&err);
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
+                                let to_string = obj.borrow().get("toString").cloned();
+                                if let Some(to_string_fn) = to_string
+                                    && matches!(
+                                        to_string_fn,
+                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
+                                    )
+                                {
+                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
+                                        Ok(v) => index_prim = v,
+                                        Err(err) => {
+                                            self.set_pending_throw_from_error(&err);
+                                            return Value::Undefined;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        if !idx_num.is_finite() {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Index out of range"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Index out of range"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+
+                        let Some(expected_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::from("Atomics.compareExchange requires expected value"),
+                            );
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        };
+                        let Some(replacement_v) = args.get(3) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert(
+                                "message".to_string(),
+                                Value::from("Atomics.compareExchange requires replacement value"),
+                            );
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        };
+                        let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
+
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Index out of range"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+
+                        if let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, &arr) {
+                            let base = byte_offset + idx * bpe;
+                            if is_bigint_ta {
+                                let Some(expected_bi) = self.value_to_bigint(ctx, expected_v) else {
+                                    return Value::Undefined;
+                                };
+                                let Some(replacement_bi) = self.value_to_bigint(ctx, replacement_v) else {
+                                    return Value::Undefined;
+                                };
+                                let expected_value = Value::BigInt(Box::new(coerce_bigint_for_ta(&expected_bi, &ta_name)));
+                                let replacement_value = Value::BigInt(Box::new(coerce_bigint_for_ta(&replacement_bi, &ta_name)));
+                                let Some(expected_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &expected_value) else {
+                                    return Value::Undefined;
+                                };
+                                let Some(replacement_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &replacement_value) else {
+                                    return Value::Undefined;
+                                };
+                                let Some(old_raw) =
+                                    crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &expected_bytes, &replacement_bytes)
+                                else {
+                                    return Value::Undefined;
+                                };
+                                let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, &ta_name);
+                                let new_local_value = if old_raw == expected_bytes {
+                                    replacement_value
+                                } else {
+                                    old_value.clone()
+                                };
+                                arr.borrow_mut(ctx).elements[idx] = new_local_value;
+                                return old_value;
+                            }
+
+                            let expected_coerced = coerce_typed_array_value(to_number(expected_v), &ta_name);
+                            let replacement_i32 = to_int32(to_number(replacement_v));
+                            let replacement_coerced = coerce_typed_array_value(replacement_i32 as f64, &ta_name);
+                            let expected_value = Value::Number(expected_coerced);
+                            let replacement_value = Value::Number(replacement_coerced);
+                            let Some(expected_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &expected_value) else {
+                                return Value::Undefined;
+                            };
+                            let Some(replacement_bytes) = self.encode_typed_element_to_raw(bpe, &ta_name, &replacement_value) else {
+                                return Value::Undefined;
+                            };
+                            let Some(old_raw) =
+                                crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &expected_bytes, &replacement_bytes)
+                            else {
+                                return Value::Undefined;
+                            };
+                            let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, &ta_name);
+                            let new_local_value = if old_raw == expected_bytes {
+                                replacement_value
+                            } else {
+                                old_value.clone()
+                            };
+                            arr.borrow_mut(ctx).elements[idx] = new_local_value;
+                            return old_value;
+                        }
+
+                        if is_bigint_ta {
+                            let Some(expected_bi) = self.value_to_bigint(ctx, expected_v) else {
+                                return Value::Undefined;
+                            };
+                            let Some(replacement_bi) = self.value_to_bigint(ctx, replacement_v) else {
+                                return Value::Undefined;
+                            };
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let old_coerced = coerce_bigint_for_ta(&old_bi, &ta_name);
+                            let expected_coerced = coerce_bigint_for_ta(&expected_bi, &ta_name);
+                            if old_coerced == expected_coerced {
+                                let new_bi = coerce_bigint_for_ta(&replacement_bi, &ta_name);
+                                arr.borrow_mut(ctx).elements[idx] = Value::BigInt(Box::new(new_bi));
+                                self.sync_ta_element_to_buffer(ctx, &arr, idx, 0.0, &ta_name);
+                            }
+                            Value::BigInt(Box::new(old_coerced))
+                        } else {
+                            let replacement_i32 = to_int32(to_number(replacement_v));
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
+                            };
+                            let old_coerced = coerce_typed_array_value(old_num, &ta_name);
+                            let expected_coerced = coerce_typed_array_value(to_number(expected_v), &ta_name);
+                            if old_coerced == expected_coerced {
+                                let new_num = coerce_typed_array_value(replacement_i32 as f64, &ta_name);
+                                arr.borrow_mut(ctx).elements[idx] = Value::Number(new_num);
+                                self.sync_ta_element_to_buffer(ctx, &arr, idx, new_num, &ta_name);
+                            }
+
+                            Value::Number(old_coerced)
+                        }
                     }
-                    return old;
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                        err_map.insert("message".to_string(), Value::from("Atomics.compareExchange requires typed array"));
+                        self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        Value::Undefined
+                    }
                 }
-                Value::Undefined
             }
-            BUILTIN_ATOMICS_ADD => {
-                if let (Some(Value::Array(arr)), Some(Value::Number(idx)), Some(Value::Number(delta))) =
-                    (args.first(), args.get(1), args.get(2))
-                {
-                    let i = (*idx as isize).max(0) as usize;
-                    let old_num = match arr.borrow().elements.get(i) {
-                        Some(Value::Number(n)) => *n,
-                        _ => 0.0,
-                    };
-                    if i < arr.borrow().elements.len() {
-                        arr.borrow_mut(ctx).elements[i] = Value::Number(old_num + *delta);
+            BUILTIN_ATOMICS_ADD
+            | BUILTIN_ATOMICS_SUB
+            | BUILTIN_ATOMICS_AND
+            | BUILTIN_ATOMICS_OR
+            | BUILTIN_ATOMICS_XOR
+            | BUILTIN_ATOMICS_EXCHANGE => {
+                let op = id;
+                let Some(target) = args.first().cloned() else {
+                    let mut err_map = IndexMap::new();
+                    err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                    err_map.insert("message".to_string(), Value::from("Atomics operation requires a typed array"));
+                    self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                    return Value::Undefined;
+                };
+                match target {
+                    Value::Array(arr) => {
+                        let (ta_name, has_buffer_type, len) = {
+                            let arr_borrow = arr.borrow();
+                            (
+                                arr_borrow.props.get("__typedarray_name__").map(value_to_string).unwrap_or_default(),
+                                arr_borrow.props.contains_key("__buffer_type__"),
+                                arr_borrow.elements.len(),
+                            )
+                        };
+
+                        let is_integer_ta = matches!(
+                            ta_name.as_str(),
+                            "Int8Array"
+                                | "Uint8Array"
+                                | "Int16Array"
+                                | "Uint16Array"
+                                | "Int32Array"
+                                | "Uint32Array"
+                                | "BigInt64Array"
+                                | "BigUint64Array"
+                        );
+
+                        if !(is_integer_ta || (ta_name.is_empty() && has_buffer_type)) {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert("message".to_string(), Value::from("Atomics operation requires integer typed array"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+
+                        let index_prim = {
+                            let idx_val = args.get(1).cloned().unwrap_or(Value::Undefined);
+                            match self.try_to_primitive(ctx, &idx_val, "number") {
+                                Value::Undefined if self.pending_throw.is_some() => return Value::Undefined,
+                                prim => match self.try_to_primitive(ctx, &prim, "number") {
+                                    Value::Undefined if self.pending_throw.is_some() => return Value::Undefined,
+                                    prim => prim,
+                                },
+                            }
+                        };
+                        let mut idx_num = to_number(&index_prim);
+                        if idx_num.is_nan() {
+                            idx_num = 0.0;
+                        }
+                        let idx_int = idx_num.trunc();
+                        if !idx_int.is_finite() || idx_int < 0.0 {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Index out of range"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+                        let idx = idx_int as usize;
+                        if idx >= len {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
+                            err_map.insert("message".to_string(), Value::from("Index out of range"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        }
+
+                        let Some(replacement_v) = args.get(2) else {
+                            let mut err_map = IndexMap::new();
+                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                            err_map.insert("message".to_string(), Value::from("Atomics operation requires value"));
+                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                            return Value::Undefined;
+                        };
+
+                        let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
+
+                        if let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, &arr) {
+                            let base = byte_offset + idx * bpe;
+                            if is_bigint_ta {
+                                let Some(replacement_bi) = self.value_to_bigint(ctx, replacement_v) else {
+                                    return Value::Undefined;
+                                };
+                                loop {
+                                    let Some(old_raw) = crate::js_agent::shared_buffer_read(shared_id, base, bpe) else {
+                                        return Value::Undefined;
+                                    };
+                                    let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, &ta_name);
+                                    let Value::BigInt(old_bi) = old_value else {
+                                        return Value::Undefined;
+                                    };
+                                    let old_return_value = Value::BigInt(Box::new(old_bi.as_ref().clone()));
+
+                                    let new_bi = match op {
+                                        BUILTIN_ATOMICS_ADD => old_bi.as_ref() + &replacement_bi,
+                                        BUILTIN_ATOMICS_SUB => old_bi.as_ref() - &replacement_bi,
+                                        BUILTIN_ATOMICS_AND => old_bi.as_ref() & &replacement_bi,
+                                        BUILTIN_ATOMICS_OR => old_bi.as_ref() | &replacement_bi,
+                                        BUILTIN_ATOMICS_XOR => old_bi.as_ref() ^ &replacement_bi,
+                                        BUILTIN_ATOMICS_EXCHANGE => replacement_bi.clone(),
+                                        _ => old_bi.as_ref().clone(),
+                                    };
+                                    let new_coerced = coerce_bigint_for_ta(&new_bi, &ta_name);
+                                    let Some(new_raw) =
+                                        self.encode_typed_element_to_raw(bpe, &ta_name, &Value::BigInt(Box::new(new_coerced)))
+                                    else {
+                                        return Value::Undefined;
+                                    };
+
+                                    if let Some(actual_old) =
+                                        crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &old_raw, &new_raw)
+                                    {
+                                        if actual_old == old_raw {
+                                            return old_return_value;
+                                        }
+                                    } else {
+                                        return Value::Undefined;
+                                    }
+                                }
+                            } else {
+                                let replacement_i32 = to_int32(to_number(replacement_v));
+                                let replacement_f64 = replacement_i32 as f64;
+                                loop {
+                                    let Some(old_raw) = crate::js_agent::shared_buffer_read(shared_id, base, bpe) else {
+                                        return Value::Undefined;
+                                    };
+                                    let old_value = self.decode_typed_element_from_raw(&old_raw, bpe, &ta_name);
+                                    let old_f64 = to_number(&old_value);
+
+                                    let new_f64 = match op {
+                                        BUILTIN_ATOMICS_ADD => old_f64 + replacement_f64,
+                                        BUILTIN_ATOMICS_SUB => old_f64 - replacement_f64,
+                                        BUILTIN_ATOMICS_AND => (to_int32(old_f64) & replacement_i32) as f64,
+                                        BUILTIN_ATOMICS_OR => (to_int32(old_f64) | replacement_i32) as f64,
+                                        BUILTIN_ATOMICS_XOR => (to_int32(old_f64) ^ replacement_i32) as f64,
+                                        BUILTIN_ATOMICS_EXCHANGE => replacement_f64,
+                                        _ => old_f64,
+                                    };
+                                    let new_coerced = coerce_typed_array_value(new_f64, &ta_name);
+                                    let Some(new_raw) = self.encode_typed_element_to_raw(bpe, &ta_name, &Value::Number(new_coerced)) else {
+                                        return Value::Undefined;
+                                    };
+
+                                    if let Some(actual_old) =
+                                        crate::js_agent::shared_buffer_compare_exchange(shared_id, base, &old_raw, &new_raw)
+                                    {
+                                        if actual_old == old_raw {
+                                            return old_value;
+                                        }
+                                    } else {
+                                        return Value::Undefined;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Local buffer logic
+                        if is_bigint_ta {
+                            let Some(replacement_bi) = self.value_to_bigint(ctx, replacement_v) else {
+                                return Value::Undefined;
+                            };
+                            let old_bi = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::BigInt(b) => (*b).clone(),
+                                _ => num_bigint::BigInt::from(0),
+                            };
+                            let old_coerced = coerce_bigint_for_ta(&old_bi, &ta_name);
+                            let new_bi = match op {
+                                BUILTIN_ATOMICS_ADD => &old_coerced + &replacement_bi,
+                                BUILTIN_ATOMICS_SUB => &old_coerced - &replacement_bi,
+                                BUILTIN_ATOMICS_AND => &old_coerced & &replacement_bi,
+                                BUILTIN_ATOMICS_OR => &old_coerced | &replacement_bi,
+                                BUILTIN_ATOMICS_XOR => &old_coerced ^ &replacement_bi,
+                                BUILTIN_ATOMICS_EXCHANGE => replacement_bi.clone(),
+                                _ => old_coerced.clone(),
+                            };
+                            let new_coerced = coerce_bigint_for_ta(&new_bi, &ta_name);
+                            arr.borrow_mut(ctx).elements[idx] = Value::BigInt(Box::new(new_coerced));
+                            self.sync_ta_element_to_buffer(ctx, &arr, idx, 0.0, &ta_name);
+                            Value::BigInt(Box::new(old_coerced))
+                        } else {
+                            let replacement_i32 = to_int32(to_number(replacement_v));
+                            let replacement_f64 = replacement_i32 as f64;
+                            let old_num = match self.shared_or_local_ta_element(&arr, idx) {
+                                Value::Number(n) => n,
+                                v => to_number(&v),
+                            };
+                            let old_coerced = coerce_typed_array_value(old_num, &ta_name);
+                            let new_f64 = match op {
+                                BUILTIN_ATOMICS_ADD => old_coerced + replacement_f64,
+                                BUILTIN_ATOMICS_SUB => old_coerced - replacement_f64,
+                                BUILTIN_ATOMICS_AND => (to_int32(old_coerced) & replacement_i32) as f64,
+                                BUILTIN_ATOMICS_OR => (to_int32(old_coerced) | replacement_i32) as f64,
+                                BUILTIN_ATOMICS_XOR => (to_int32(old_coerced) ^ replacement_i32) as f64,
+                                BUILTIN_ATOMICS_EXCHANGE => replacement_f64,
+                                _ => old_coerced,
+                            };
+                            let new_coerced = coerce_typed_array_value(new_f64, &ta_name);
+                            arr.borrow_mut(ctx).elements[idx] = Value::Number(new_coerced);
+                            self.sync_ta_element_to_buffer(ctx, &arr, idx, new_coerced, &ta_name);
+                            Value::Number(old_coerced)
+                        }
                     }
-                    return Value::Number(old_num);
-                }
-                Value::Undefined
-            }
-            BUILTIN_ATOMICS_EXCHANGE => {
-                if let (Some(Value::Array(arr)), Some(Value::Number(idx)), Some(new_value)) = (args.first(), args.get(1), args.get(2)) {
-                    let i = (*idx as isize).max(0) as usize;
-                    let old = arr.borrow().elements.get(i).cloned().unwrap_or(Value::Undefined);
-                    if i < arr.borrow().elements.len() {
-                        arr.borrow_mut(ctx).elements[i] = new_value.clone();
+                    _ => {
+                        let mut err_map = IndexMap::new();
+                        err_map.insert("__type__".to_string(), Value::from("TypeError"));
+                        err_map.insert("message".to_string(), Value::from("Atomics operation requires typed array"));
+                        self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        Value::Undefined
                     }
-                    return old;
                 }
-                Value::Undefined
             }
             BUILTIN_ATOMICS_WAIT => {
                 if let (Some(Value::Array(arr)), Some(Value::Number(idx)), Some(expected)) = (args.first(), args.get(1), args.get(2)) {
@@ -24658,12 +25600,19 @@ impl<'gc> VM<'gc> {
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
-                        to_number(&prim)
+                        let timeout_num = to_number(&prim);
+                        if timeout_num.is_nan() {
+                            f64::INFINITY
+                        } else {
+                            timeout_num.max(0.0)
+                        }
                     } else {
                         f64::INFINITY
                     };
 
-                    let current = arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined);
+                    let current = self
+                        .shared_ta_read_element(arr, idx)
+                        .unwrap_or_else(|| arr.borrow().elements.get(idx).cloned().unwrap_or(Value::Undefined));
 
                     let mut result = IndexMap::new();
                     if !self.strict_equal(&current, &expected) {
@@ -24678,8 +25627,38 @@ impl<'gc> VM<'gc> {
                         return Value::Object(new_gc_cell_ptr(ctx, result));
                     }
 
+                    if !crate::js_agent::is_agent_thread() {
+                        let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, arr) else {
+                            result.insert("async".to_string(), Value::Boolean(false));
+                            result.insert("value".to_string(), Value::from("timed-out"));
+                            return Value::Object(new_gc_cell_ptr(ctx, result));
+                        };
+                        let promise = self.make_pending_promise(ctx);
+                        self.async_atomics_waits.push(AsyncAtomicsWait {
+                            shared_id,
+                            byte_index: byte_offset + idx * bpe,
+                            promise: promise.clone(),
+                            times_out: !timeout.is_infinite(),
+                        });
+                        result.insert("async".to_string(), Value::Boolean(true));
+                        result.insert("value".to_string(), promise);
+                        return Value::Object(new_gc_cell_ptr(ctx, result));
+                    }
+
+                    let outcome = if let Some((shared_id, byte_offset, bpe, _)) = self.ensure_shared_ta_info(ctx, arr) {
+                        let byte_index = byte_offset + idx * bpe;
+                        let woke =
+                            crate::js_agent::atomics_wait(shared_id, byte_index, if timeout.is_infinite() { None } else { Some(timeout) })
+                                .unwrap_or(false);
+                        if woke { Value::from("ok") } else { Value::from("timed-out") }
+                    } else {
+                        Value::from("timed-out")
+                    };
+
                     result.insert("async".to_string(), Value::Boolean(true));
-                    result.insert("value".to_string(), self.make_pending_promise(ctx));
+                    let promise = self.make_pending_promise(ctx);
+                    self.settle_promise(ctx, &promise, &outcome, false);
+                    result.insert("value".to_string(), promise);
                     return Value::Object(new_gc_cell_ptr(ctx, result));
                 }
 
@@ -29321,7 +30300,7 @@ impl<'gc> VM<'gc> {
                                     drop(borrow);
                                     if Self::is_valid_integer_index(arr, numeric_index) {
                                         let idx = numeric_index as usize;
-                                        let val = arr.borrow().elements[idx].clone();
+                                        let val = self.ta_get_element(ctx, arr, idx);
                                         self.make_data_descriptor_object(ctx, &val, true, true, true)
                                     } else {
                                         Value::Undefined
@@ -31037,6 +32016,10 @@ impl<'gc> VM<'gc> {
             | BUILTIN_ATOMICS_STORE
             | BUILTIN_ATOMICS_COMPAREEXCHANGE
             | BUILTIN_ATOMICS_ADD
+            | BUILTIN_ATOMICS_SUB
+            | BUILTIN_ATOMICS_AND
+            | BUILTIN_ATOMICS_OR
+            | BUILTIN_ATOMICS_XOR
             | BUILTIN_ATOMICS_EXCHANGE
             | BUILTIN_ATOMICS_WAIT
             | BUILTIN_ATOMICS_NOTIFY
@@ -45939,22 +46922,37 @@ impl<'gc> VM<'gc> {
     fn await_promise_sync(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Value<'gc>, JSError> {
         match value {
             Value::Object(obj) => {
-                let b = obj.borrow();
-                let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
-                if !is_promise {
+                let mut promise_state = {
+                    let b = obj.borrow();
+                    let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                    let has_value = b.contains_key("__promise_value__");
+                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                    let promise_value = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
+                    (is_promise, has_value, rejected, promise_value)
+                };
+                if !promise_state.0 {
                     return Ok(value.clone());
                 }
-                let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
-                let pv = b.get("__promise_value__").cloned().unwrap_or(Value::Undefined);
-                drop(b);
-                // Drain microtasks to ensure promise is settled
-                self.drain_microtasks(ctx);
-                if rejected {
-                    let msg = crate::core::value::value_to_string(&pv);
+                if !promise_state.1 {
+                    self.drain_microtasks(ctx);
+                    promise_state = {
+                        let b = obj.borrow();
+                        (
+                            true,
+                            b.contains_key("__promise_value__"),
+                            matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true))),
+                            b.get("__promise_value__").cloned().unwrap_or(Value::Undefined),
+                        )
+                    };
+                }
+                if !promise_state.1 {
+                    return Ok(value.clone());
+                }
+                if promise_state.2 {
+                    let msg = crate::core::value::value_to_string(&promise_state.3);
                     return Err(crate::raise_type_error!(msg));
                 }
-                // The resolved value might itself be a promise — unwrap recursively
-                self.await_promise_sync(ctx, &pv)
+                self.await_promise_sync(ctx, &promise_state.3)
             }
             _ => Ok(value.clone()),
         }
@@ -46046,6 +47044,8 @@ impl<'gc> VM<'gc> {
                 if self.is_value_callable(&timer.callback) {
                     let _ = self.vm_call_function_value(ctx, &timer.callback, &Value::Undefined, &cb_args)?;
                 }
+                self.flush_async_atomics_waits(ctx, true);
+                self.drain_microtasks(ctx);
                 // Re-queue intervals
                 if timer.is_interval && !self.cleared_timers.contains(&timer.id) {
                     self.pending_timers.push(PendingTimer {

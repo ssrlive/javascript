@@ -8,8 +8,15 @@ fn test_promise_async_resolution() {
             resolve("async result");
         })
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "\"async result\"");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "\"async result\"");
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]
@@ -47,8 +54,15 @@ fn test_promise_chaining_async() {
             return value + 5;
         })
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "25");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "25");
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]
@@ -61,11 +75,18 @@ fn test_promise_allsettled() {
             new Promise(function(resolve, reject) { resolve(3); console.log("executor 3 called"); })
         ])
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    assert_eq!(
-        result,
-        "[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":2},{\"status\":\"fulfilled\",\"value\":3}]"
-    );
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            assert_eq!(
+                result,
+                r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":2},{"status":"fulfilled","value":3}]"#
+            );
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]
@@ -77,11 +98,18 @@ fn test_main() {
             new Promise((resolve, reject) => { resolve(3); })
         ])
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    assert_eq!(
-        result,
-        "[{\"status\":\"fulfilled\",\"value\":1},{\"status\":\"rejected\",\"reason\":2},{\"status\":\"fulfilled\",\"value\":3}]"
-    );
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            assert_eq!(
+                result,
+                r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":2},{"status":"fulfilled","value":3}]"#
+            );
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 // --- New boundary tests for unhandled/handler timing and allSettled behavior ---
@@ -103,12 +131,18 @@ fn test_sync_catch_silences_non_error_rejection() {
         p.catch(function(reason) { result = 'caught ' + reason; });
         result
     "#;
-
-    let result = evaluate_script(script, false, None::<&std::path::Path>);
-    match result {
-        Ok(v) => assert_eq!(v, "\"caught 2\""),
-        Err(e) => panic!("Expected Ok, got Err: {:?}", e),
-    }
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            match result {
+                Ok(v) => assert_eq!(v, "\"caught 2\""),
+                Err(e) => panic!("Expected Ok, got Err: {:?}", e),
+            }
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 // Test: Non-Error rejections are not reported immediately.
@@ -124,9 +158,16 @@ fn test_sync_catch_silences_non_error_rejection() {
 fn test_unhandled_non_error_rejection_not_immediate() {
     // Non-Error rejections are not reported immediately; ensure they don't surface as Err here.
     let script = r#"new Promise(function(resolve, reject) { reject(2); })"#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    // The script should evaluate to the rejection reason being observable after microtask processing
-    assert_eq!(result, "2");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            // The script should evaluate to the rejection reason being observable after microtask processing
+            assert_eq!(result, "2");
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 // Test: Promise.allSettled should not treat inner rejections as unhandled.
@@ -146,11 +187,18 @@ fn test_allsettled_reject_does_not_report_unhandled() {
         result
     "#;
 
-    let result = evaluate_script(script, false, None::<&std::path::Path>);
-    match result {
-        Ok(v) => assert_eq!(v, "\"rejected:2\""),
-        Err(e) => panic!("Expected Ok, got Err: {:?}", e),
-    }
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            match result {
+                Ok(v) => assert_eq!(v, "\"rejected:2\""),
+                Err(e) => panic!("Expected Ok, got Err: {:?}", e),
+            }
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("test thread panicked");
 }
 
 // --- Error-like vs Non-Error boundary tests ---
@@ -163,13 +211,21 @@ fn test_error_rejection_reported_immediately() {
     // detectable by the unhandled-rejection tracker.  Therefore rejecting with
     // a plain object should NOT surface as an Err.
     let script = r#"new Promise(function(resolve, reject) { let e = {message: 'boom', __is_error: true}; reject(e); })"#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>);
-    // Plain-object rejection is non-error-like -> Ok (the rejected promise serialized)
-    assert!(
-        result.is_ok(),
-        "Expected Ok for non-Error-like rejection, got Err: {:?}",
-        result.err()
-    );
+
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            // Plain-object rejection is non-error-like -> Ok (the rejected promise serialized)
+            assert!(
+                result.is_ok(),
+                "Expected Ok for non-Error-like rejection, got Err: {:?}",
+                result.err()
+            );
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]
@@ -182,11 +238,18 @@ fn test_error_rejection_silenced_by_sync_catch() {
         p.catch(function(reason) { result = 'caught:' + reason.message; });
         result
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>);
-    match result {
-        Ok(v) => assert_eq!(v, "\"caught:boom\""),
-        Err(e) => panic!("Expected Ok, got Err: {:?}", e),
-    }
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            match result {
+                Ok(v) => assert_eq!(v, "\"caught:boom\""),
+                Err(e) => panic!("Expected Ok, got Err: {:?}", e),
+            }
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("thread panicked");
 }
 
 #[test]
@@ -211,11 +274,18 @@ fn test_allsettled_with_error_like_does_not_report_unhandled() {
         });
         result
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>);
-    match result {
-        Ok(v) => assert_eq!(v, "\"rejected:boom\""),
-        Err(e) => panic!("Expected Ok, got Err: {:?}", e),
-    }
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            match result {
+                Ok(v) => assert_eq!(v, "\"rejected:boom\""),
+                Err(e) => panic!("Expected Ok, got Err: {:?}", e),
+            }
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("test thread panicked");
 }
 
 // Executor throws a non-Error value: should not abort synchronous flow and should not be reported immediately
@@ -227,14 +297,28 @@ fn test_executor_throw_non_error_not_immediate() {
         after = 1;
         after
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    assert_eq!(result, "1");
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            assert_eq!(result, "1");
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("test thread panicked");
 }
 
 // Executor throws an Error object: constructor should still return a rejected Promise value.
 #[test]
 fn test_executor_throw_error_reported_immediately() {
     let script = r#"new Promise(function(resolve, reject) { throw new Error('boom'); })"#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
-    assert!(result.contains("Error: boom"));
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            assert!(result.contains("Error: boom"));
+        })
+        .expect("failed to spawn thread")
+        .join()
+        .expect("test thread panicked");
 }

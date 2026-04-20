@@ -3045,87 +3045,29 @@ impl<'gc> VM<'gc> {
                 .unwrap_or(1);
             (buffer, byte_offset, bpe)
         };
-        if let Some(Value::Object(buf_obj)) = buffer
-            && let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned()
-        {
+        if let Some(Value::Object(buf_obj)) = buffer {
             let base = byte_offset + idx * bpe;
-            let mut bb = buf_bytes.borrow_mut(ctx);
-            match ta_name {
-                "Uint8Array" | "Uint8ClampedArray" if base < bb.elements.len() => {
-                    let v = if ta_name == "Uint8ClampedArray" {
-                        Self::to_uint8_clamp(new_num)
-                    } else {
-                        Self::to_uint8(new_num)
-                    };
-                    bb.elements[base] = Value::Number(v as f64);
+            let mut raw_values = vec![Value::Number(0.0); bpe];
+            if ta_name == "BigInt64Array" || ta_name == "BigUint64Array" {
+                if let Some(Value::BigInt(bigint_val)) = arr.borrow().elements.get(idx).cloned() {
+                    Self::encode_typed_element_bigint(&mut raw_values, 0, ta_name, &bigint_val);
                 }
-                "Int8Array" if base < bb.elements.len() => {
-                    bb.elements[base] = Value::Number((Self::to_int8(new_num) as u8) as f64);
-                }
-                "Uint16Array" | "Int16Array" => {
-                    let bytes = if ta_name == "Int16Array" {
-                        Self::to_int16(new_num).to_ne_bytes()
-                    } else {
-                        Self::to_uint16(new_num).to_ne_bytes()
-                    };
-                    for (j, b) in bytes.iter().enumerate() {
-                        if base + j < bb.elements.len() {
-                            bb.elements[base + j] = Value::Number(*b as f64);
-                        }
+            } else {
+                Self::encode_typed_element(&mut raw_values, 0, bpe, ta_name, new_num);
+            }
+            let raw = raw_values.iter().map(|v| to_number(v) as u8).collect::<Vec<_>>();
+
+            if let Some(Value::Array(buf_bytes)) = buf_obj.borrow().get("__buffer_bytes__").cloned() {
+                let mut bb = buf_bytes.borrow_mut(ctx);
+                for (j, &b) in raw.iter().enumerate() {
+                    if base + j < bb.elements.len() {
+                        bb.elements[base + j] = Value::Number(b as f64);
                     }
                 }
-                "Uint32Array" | "Int32Array" => {
-                    let bytes = if ta_name == "Int32Array" {
-                        Self::to_int32_typed(new_num).to_ne_bytes()
-                    } else {
-                        Self::to_uint32_typed(new_num).to_ne_bytes()
-                    };
-                    for (j, b) in bytes.iter().enumerate() {
-                        if base + j < bb.elements.len() {
-                            bb.elements[base + j] = Value::Number(*b as f64);
-                        }
-                    }
-                }
-                "Float16Array" => {
-                    let bytes = f64_to_f16_bits(new_num).to_ne_bytes();
-                    for (j, b) in bytes.iter().enumerate() {
-                        if base + j < bb.elements.len() {
-                            bb.elements[base + j] = Value::Number(*b as f64);
-                        }
-                    }
-                }
-                "Float32Array" => {
-                    let bytes = (new_num as f32).to_ne_bytes();
-                    for (j, b) in bytes.iter().enumerate() {
-                        if base + j < bb.elements.len() {
-                            bb.elements[base + j] = Value::Number(*b as f64);
-                        }
-                    }
-                }
-                "Float64Array" => {
-                    let bytes = new_num.to_ne_bytes();
-                    for (j, b) in bytes.iter().enumerate() {
-                        if base + j < bb.elements.len() {
-                            bb.elements[base + j] = Value::Number(*b as f64);
-                        }
-                    }
-                }
-                "BigInt64Array" | "BigUint64Array" => {
-                    let bigint_val = arr.borrow().elements.get(idx).cloned();
-                    if let Some(Value::BigInt(bi)) = bigint_val {
-                        let raw_bytes = if ta_name == "BigInt64Array" {
-                            bigint_to_i64(&bi).to_ne_bytes()
-                        } else {
-                            bigint_to_u64(&bi).to_ne_bytes()
-                        };
-                        for (j, &b) in raw_bytes.iter().enumerate() {
-                            if base + j < bb.elements.len() {
-                                bb.elements[base + j] = Value::Number(b as f64);
-                            }
-                        }
-                    }
-                }
-                _ => {}
+            }
+
+            if let Some(shared_id) = self.shared_buffer_id_from_obj(&buf_obj) {
+                let _ = crate::js_agent::shared_buffer_write(shared_id, base, &raw);
             }
         }
     }
@@ -3142,7 +3084,20 @@ impl<'gc> VM<'gc> {
                 .unwrap_or(0);
             (buffer, byte_offset)
         };
-        // Extract buf_bytes in its own scope so buf_obj borrow is dropped
+        if let Some(Value::Object(buf_obj)) = &buffer
+            && let Some(shared_id) = self.shared_buffer_id_from_obj(buf_obj)
+        {
+            let mut a = arr.borrow_mut(ctx);
+            for i in 0..len {
+                let base = byte_offset + i * bpe;
+                if let Some(raw) = crate::js_agent::shared_buffer_read(shared_id, base, bpe) {
+                    let values: Vec<Value<'gc>> = raw.into_iter().map(|b| Value::Number(b as f64)).collect();
+                    a.elements[i] = Self::decode_typed_element(&values, 0, bpe, ta_name);
+                }
+            }
+            return;
+        }
+
         let buf_bytes = if let Some(Value::Object(buf_obj)) = &buffer {
             buf_obj.borrow().get("__buffer_bytes__").cloned()
         } else {
@@ -3258,10 +3213,14 @@ impl<'gc> VM<'gc> {
     /// Read element `index` from a TypedArray, syncing from buffer first if resizable.
     /// Returns Undefined when out of bounds (e.g. buffer was shrunk).
     pub(super) fn ta_get_element(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>, index: usize) -> Value<'gc> {
+        if Self::is_typed_array_buffer_detached(arr) {
+            return Value::Undefined;
+        }
         self.maybe_sync_resizable_ta(ctx, arr);
         let borrow = arr.borrow();
         if index < borrow.elements.len() {
-            borrow.elements[index].clone()
+            drop(borrow);
+            self.shared_or_local_ta_element(arr, index)
         } else {
             Value::Undefined
         }

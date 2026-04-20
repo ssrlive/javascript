@@ -75,6 +75,20 @@ function createModuleBootstrapTarget(testPath) {
 const realmFeatureName = 'cross-realm';
 const realmMarker = '// Inject: unified $262 shim - idempotent';
 
+function getAgentBootstrapLines() {
+  return [
+    'var __agentGlobal = typeof globalThis !== "undefined" ? globalThis : this;',
+    'if (!__agentGlobal.$262) { __agentGlobal.$262 = {}; }',
+    'var $262 = __agentGlobal.$262;',
+    'if (!$262.agent) { $262.agent = {}; }',
+    '$262.agent.receiveBroadcast = function(callback) { return __agent_receiveBroadcast(callback); };',
+    '$262.agent.report = function(value) { return __agent_report(String(value)); };',
+    '$262.agent.sleep = function(ms) { return __agent_sleep(ms); };',
+    '$262.agent.monotonicNow = function() { return __agent_monotonicNow(); };',
+    '$262.agent.leaving = function() { return __agent_leaving(); };',
+  ];
+}
+
 function get262StubLines() {
   // Minimal, idempotent $262 shim with createRealm support
   return [
@@ -418,9 +432,11 @@ function composeTest({ testPath, repoDir, harnessIndex, prependFiles = [], needS
   if (!skipInjects) {
     // Inject $262.agent shim BEFORE harness files
     if (needsAgent) {
+      const agentBootstrap = JSON.stringify(`${getAgentBootstrapLines().join('\n')}\n`);
       outLines.push('// Inject: $262.agent shim for multi-agent tests');
       outLines.push('if (!$262.agent) { $262.agent = {}; }');
-      outLines.push('$262.agent.start = function(script) { __agent_start(script); };');
+      outLines.push(`var __agentBootstrap = ${agentBootstrap};`);
+      outLines.push('$262.agent.start = function(script) { __agent_start(__agentBootstrap + String(script)); };');
       outLines.push('$262.agent.broadcast = function(sab) {');
       outLines.push('  if (sab && sab.buffer) { __agent_broadcast(sab.buffer); }');
       outLines.push('  else { __agent_broadcast(sab); }');

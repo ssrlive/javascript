@@ -224,30 +224,12 @@ pub fn wait_for_broadcast() -> Option<BroadcastInfo> {
     BROADCAST_DATA.lock().unwrap().clone()
 }
 
-fn wrap_agent_script(script: &str) -> String {
-    format!(
-        r#"
-var __agentGlobal = typeof globalThis !== "undefined" ? globalThis : this;
-if (!__agentGlobal.$262) {{ __agentGlobal.$262 = {{}}; }}
-var $262 = __agentGlobal.$262;
-if (!$262.agent) {{ $262.agent = {{}}; }}
-$262.agent.receiveBroadcast = function(callback) {{ return __agent_receiveBroadcast(callback); }};
-$262.agent.report = function(value) {{ return __agent_report(String(value)); }};
-$262.agent.sleep = function(ms) {{ return __agent_sleep(ms); }};
-$262.agent.monotonicNow = function() {{ return __agent_monotonicNow(); }};
-$262.agent.leaving = function() {{ return __agent_leaving(); }};
-{script}
-"#
-    )
-}
-
 pub fn start_agent(script: String) {
     AGENT_COUNT.fetch_add(1, Ordering::SeqCst);
-    let wrapped = wrap_agent_script(&script);
     let handle = thread::spawn(move || {
         IS_AGENT_THREAD.with(|c| c.set(true));
         LAST_BROADCAST_SEEN.with(|c| c.set(0));
-        let result = crate::core::evaluate_script_with_unwrap(wrapped, false, Option::<&std::path::Path>::None, false);
+        let result = crate::core::evaluate_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false);
         if let Err(err) = result {
             push_report(format!("__agent_error__:{err}"));
         }

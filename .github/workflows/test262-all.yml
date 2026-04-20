@@ -1,0 +1,191 @@
+name: test262-all
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  run-test262-subset:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cluster: 1
+          - cluster: 2
+          - cluster: 3
+          - cluster: 4
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --release --package js
+
+      - name: Run test262 subset ${{ matrix.cluster }}
+        if: ${{ !cancelled() }}
+        env:
+          FAIL_ON_FAILURE: 'true'
+        run: |
+          set -euo pipefail
+
+          FOCUS=""
+          TIMEOUT=""
+          RUN_TESTS=""
+          TITLE=""
+
+          case "${{ matrix.cluster }}" in
+            1)
+              TITLE='language'
+              FOCUS='language'
+              TIMEOUT='120'
+              RUN_TESTS='true'
+              ;;
+            2)
+              TITLE='built-ins'
+              FOCUS='built-ins'
+              RUN_TESTS='true'
+              ;;
+            3)
+              TITLE='intl402'
+              FOCUS='intl402'
+              RUN_TESTS='true'
+              ;;
+            4)
+              TITLE='annexB'
+              FOCUS='annexB'
+              RUN_TESTS='true'
+              ;;
+            *)
+              echo "Unknown subset: ${{ matrix.cluster }}" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "Running subset ${{ matrix.cluster }}: $TITLE"
+          RUN_ARGS=(--limit 100000 --focus "$FOCUS")
+          if [ -n "$TIMEOUT" ]; then
+            RUN_ARGS+=(--timeout "$TIMEOUT")
+          fi
+          if [ -n "$RUN_TESTS" ]; then
+            node ci/runner.js "${RUN_ARGS[@]}"
+          else
+            touch test262-results.log
+          fi
+
+      - name: Upload results
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: test262-results-${{ matrix.cluster }}
+          path: test262-results.log
+
+  summarize-test262-results:
+    if: ${{ always() }}
+    needs: [run-test262-subset]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all subset artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test262-results-*
+          path: test262-artifacts
+          merge-multiple: false
+
+      - name: Summarize pass/fail/skip totals
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pass_total=0
+          fail_total=0
+          skip_total=0
+          logs_found=0
+          unsupported_features_file=$(mktemp)
+
+          while IFS= read -r -d '' log_file; do
+            logs_found=$((logs_found + 1))
+
+            grep -Eo 'SKIP \(feature unsupported: [^)]+\)' "$log_file" \
+              | sed -E 's/^SKIP \(feature unsupported: (.+)\)$/\1/' \
+              >> "$unsupported_features_file" || true
+
+            summary_line=$(grep -E "Ran [0-9]+ candidates: pass=[0-9]+ fail=[0-9]+ skip=[0-9]+" "$log_file" | tail -n1 || true)
+            if [ -z "$summary_line" ]; then
+              continue
+            fi
+
+            pass=$(echo "$summary_line" | sed -E 's/.*pass=([0-9]+).*/\1/')
+            fail=$(echo "$summary_line" | sed -E 's/.*fail=([0-9]+).*/\1/')
+            skip=$(echo "$summary_line" | sed -E 's/.*skip=([0-9]+).*/\1/')
+
+            pass_total=$((pass_total + pass))
+            fail_total=$((fail_total + fail))
+            skip_total=$((skip_total + skip))
+          done < <(find test262-artifacts -type f -name 'test262-results.log' -print0)
+
+          total_cases=$((pass_total + fail_total + skip_total))
+          unsupported_features=$(sort -u "$unsupported_features_file" | sed '/^$/d' || true)
+          unsupported_features_ranked=$(sed '/^$/d' "$unsupported_features_file" | sort | uniq -c | sort -nr || true)
+
+          unsupported_features_count=0
+          if [ -n "$unsupported_features" ]; then
+            unsupported_features_count=$(printf '%s\n' "$unsupported_features" | wc -l | tr -d ' ')
+          fi
+
+          {
+            echo "## Test262 Summary"
+            echo
+            echo "- Artifacts parsed: $logs_found"
+            echo "- Total cases: $total_cases"
+            echo "- Pass: $pass_total"
+            echo "- Fail: $fail_total"
+            echo "- Skip: $skip_total"
+            echo "- Unsupported features detected: $unsupported_features_count"
+
+            if [ "$unsupported_features_count" -gt 0 ]; then
+              echo
+              echo "### Unsupported features by occurrence"
+              while IFS= read -r row; do
+                [ -n "$row" ] || continue
+                count=$(echo "$row" | awk '{print $1}')
+                feat=$(echo "$row" | sed -E 's/^ *[0-9]+ +//')
+                echo "- $feat ($count)"
+              done <<< "$unsupported_features_ranked"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Test262 Summary"
+          echo "- Artifacts parsed: $logs_found"
+          echo "- Total cases: $total_cases"
+          echo "- Pass: $pass_total"
+          echo "- Fail: $fail_total"
+          echo "- Skip: $skip_total"
+          echo "- Unsupported features detected: $unsupported_features_count"
+
+          if [ "$unsupported_features_count" -gt 0 ]; then
+            echo "Unsupported features by occurrence:"
+            while IFS= read -r row; do
+              [ -n "$row" ] || continue
+              count=$(echo "$row" | awk '{print $1}')
+              feat=$(echo "$row" | sed -E 's/^ *[0-9]+ +//')
+              echo "- $feat ($count)"
+            done <<< "$unsupported_features_ranked"
+
+            echo "Unsupported features:"
+            while IFS= read -r feat; do
+              [ -n "$feat" ] && echo "- $feat"
+            done <<< "$unsupported_features"
+          fi
+

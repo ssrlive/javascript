@@ -25,8 +25,8 @@ pub use property_descriptor::{PropAttrs, PropDesc};
 mod statement;
 pub use statement::*;
 
-mod token;
-pub use token::*;
+mod tokenizer;
+pub use tokenizer::*;
 
 /// Prefix for internal private field/method keys to separate them from public
 /// properties that happen to start with `#`.
@@ -91,9 +91,9 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
             // and hashbang lines, but emits LineTerminator tokens for newlines).
             let has_real_directive = tokens
                 .iter()
-                .find(|td| !matches!(td.token, crate::core::token::Token::LineTerminator))
+                .find(|td| !matches!(td.token, Token::LineTerminator))
                 .map(|td| {
-                    if let crate::core::token::Token::StringLit(ref s) = td.token {
+                    if let Token::StringLit(ref s) = td.token {
                         String::from_utf16_lossy(s) == "use strict"
                     } else {
                         false

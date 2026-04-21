@@ -1,6 +1,6 @@
 [package]
 name = "javascript"
-version = "0.1.14"
+version = "0.2.0"
 edition = "2024"
 authors = ["ssrlive"]
 license = "MIT"
@@ -9,7 +9,7 @@ repository = "https://github.com/ssrlive/javascript"
 homepage = "https://crates.io/crates/javascript"
 documentation = "https://docs.rs/javascript"
 readme = "README.md"
-keywords = ["javascript", "engine", "interpreter", "runtime"]
+keywords = ["javascript", "js", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
 [workspace]

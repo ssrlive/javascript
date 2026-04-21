@@ -44,12 +44,12 @@ node ci/runner.js --limit 1 --focus "language/literals/string"
 Source code flows through four stages:
 
 ```
-Source → Lexer (token.rs) → Parser (parser.rs) → Compiler (compiler.rs) → Chunk (bytecode) → VM (vm.rs)
+Source → Lexer (tokenizer.rs) → Parser (parser.rs) → Compiler (compiler.rs) → Chunk (bytecode) → VM (vm.rs)
 ```
 
 | File | Role |
 |---|---|
-| `src/core/token.rs` | Tokenizer; produces `Vec<TokenData>` |
+| `src/core/tokenizer.rs` | Tokenizer; produces `Vec<TokenData>` |
 | `src/core/parser.rs` | Recursive-descent parser; produces `Vec<Statement>` AST |
 | `src/core/statement.rs` | AST node definitions (`StatementKind`, `Expr` enums) |
 | `src/core/compiler.rs` | Compiles AST to stack-based bytecode (`Chunk`) |

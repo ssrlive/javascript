@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/crates/l/javascript.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%2B-blue.svg)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/rust.yml)](https://github.com/ssrlive/javascript/actions)
-[![Test262](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/test262.yml?label=test262)](https://github.com/ssrlive/javascript/actions/workflows/test262-all.yml)
+[![Test262](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/test262-all.yml?label=test262-all)](https://github.com/ssrlive/javascript/actions/workflows/test262-all.yml)
 [![Downloads](https://img.shields.io/crates/d/javascript.svg)](https://crates.io/crates/javascript)
 
 A JavaScript engine written in Rust, with a full pipeline from source text to bytecode execution:
@@ -51,7 +51,7 @@ This engine is intentionally not a legacy-web-quirk-compatible sloppy-mode runti
 
 Core source layout:
 
-- src/core/token.rs: lexer/tokenizer
+- src/core/tokenizer.rs: lexer/tokenizer
 - src/core/parser.rs: parser (AST construction)
 - src/core/statement.rs: AST node definitions
 - src/core/compiler.rs: AST to bytecode compilation

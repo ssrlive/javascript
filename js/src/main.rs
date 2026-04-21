@@ -1,4 +1,5 @@
 use javascript::*;
+use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 
 #[derive(clap::Parser)]
 #[command(name = "js", version, about = "JavaScript Rust Interpreter")]
@@ -31,6 +32,37 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         Ok(res) => res,
         Err(_) => Err(Box::new(std::io::Error::other("js runtime thread panicked"))),
     }
+}
+
+mod prompt_helper {
+    use rustyline::{completion::Completer, highlight::Highlighter, hint::Hinter, validate::Validator};
+
+    pub struct ReplPromptHelper;
+
+    impl Completer for ReplPromptHelper {
+        type Candidate = String;
+    }
+
+    impl Hinter for ReplPromptHelper {
+        type Hint = String;
+    }
+
+    impl Validator for ReplPromptHelper {}
+
+    impl Highlighter for ReplPromptHelper {
+        fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, default: bool) -> std::borrow::Cow<'b, str> {
+            let _ = default;
+            if prompt == "js> " {
+                std::borrow::Cow::Borrowed("\x1b[1;32mjs> \x1b[0m")
+            } else if prompt == "... " {
+                std::borrow::Cow::Borrowed("\x1b[1;33m... \x1b[0m")
+            } else {
+                std::borrow::Cow::Borrowed(prompt)
+            }
+        }
+    }
+
+    impl rustyline::Helper for ReplPromptHelper {}
 }
 
 fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
@@ -119,24 +151,23 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
 // Persistent rustyline-powered REPL loop extracted into a helper to keep `main()` small.
 #[allow(clippy::println_empty_string)]
 fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-    use rustyline::Editor;
-    use rustyline::error::ReadlineError;
-    use std::path::PathBuf;
-
     let ver = clap::crate_version!();
-    println!("JavaScript Interpreter REPL (VM mode) v{ver}. Type 'exit' or Ctrl-D to quit.");
+    println!("JavaScript Interpreter REPL (VM mode) v{ver}. Type '.exit' or Ctrl-D to quit.");
 
-    let mut rl = match Editor::<(), rustyline::history::FileHistory>::new() {
+    let mut rl = match Editor::<prompt_helper::ReplPromptHelper, FileHistory>::new() {
         Ok(e) => e,
         Err(err) => {
             eprintln!("Failed to initialize line editor: {err}");
             std::process::exit(1);
         }
     };
+    rl.set_helper(Some(prompt_helper::ReplPromptHelper));
 
     // Simple history file in the user's home directory
-    let history_path: Option<PathBuf> = std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".js_repl_history"));
-    if let Some(ref p) = history_path {
+    let history_path: Option<std::path::PathBuf> = dirs::home_dir().map(|p| p.join(".js_repl_history"));
+    if let Some(ref p) = history_path
+        && p.exists()
+    {
         rl.load_history(p)?;
     }
 
@@ -145,18 +176,12 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
     let mut buffer = String::new();
 
     loop {
-        // Use ANSI escape codes for color: \x1b[1;32m is bold green, \x1b[1;33m is bold yellow, \x1b[0m is reset
-        let prompt = if buffer.is_empty() {
-            "\x1b[1;32mjs> \x1b[0m"
-        } else {
-            "\x1b[1;33m... \x1b[0m"
-        };
-
+        let prompt = if buffer.is_empty() { "js> " } else { "... " };
         match rl.readline(prompt) {
             Ok(line) => {
                 // support quick exit from the REPL
                 let trimmed = line.trim();
-                if trimmed == "exit" || trimmed == ".exit" {
+                if trimmed == ".exit" {
                     break;
                 }
 
@@ -203,7 +228,6 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
                 continue;
             }
             Err(ReadlineError::Eof) => {
-                println!("Goodbye");
                 break;
             }
             Err(err) => {
@@ -212,6 +236,7 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
             }
         }
     }
+    println!("Goodbye");
 
     if let Some(ref p) = history_path {
         rl.save_history(p)?;

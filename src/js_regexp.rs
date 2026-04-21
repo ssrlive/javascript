@@ -1139,13 +1139,7 @@ fn to_length_primitive(val: &Value) -> usize {
                 _ => 0,
             }
         }
-        Value::Boolean(b) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
+        Value::Boolean(b) if *b => 1,
         Value::Undefined | Value::Null => 0,
         _ => 0,
     };

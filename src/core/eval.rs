@@ -4025,10 +4025,8 @@ fn eval_res<'gc>(
                             }
                         }
                     }
-                    StatementKind::FunctionDeclaration(name, ..) => {
-                        if env_get(env, name).is_some() {
-                            export_binding(mc, env, name, name)?;
-                        }
+                    StatementKind::FunctionDeclaration(name, ..) if env_get(env, name).is_some() => {
+                        export_binding(mc, env, name, name)?;
                     }
                     StatementKind::VarDestructuringArray(pattern, _)
                     | StatementKind::LetDestructuringArray(pattern, _)
@@ -8373,17 +8371,15 @@ fn evaluate_expr_assign<'gc>(
                 let mut precomputed_temp: Option<TargetTemp<'gc>> = None;
                 if let Some(elem_expr) = elem_opt {
                     match elem_expr {
-                        Expr::Assign(lhs, _) => {
-                            if !matches!(&**lhs, Expr::Array(_) | Expr::Object(_)) {
-                                precomputed_temp = match precompute_target(mc, env, lhs) {
-                                    Ok(t) => Some(t),
-                                    Err(e) => {
-                                        let closed = iterator_close_on_error(mc, env, &iter_obj, e);
-                                        clear_pending_iterator()?;
-                                        return Err(closed);
-                                    }
-                                };
-                            }
+                        Expr::Assign(lhs, _) if !matches!(&**lhs, Expr::Array(_) | Expr::Object(_)) => {
+                            precomputed_temp = match precompute_target(mc, env, lhs) {
+                                Ok(t) => Some(t),
+                                Err(e) => {
+                                    let closed = iterator_close_on_error(mc, env, &iter_obj, e);
+                                    clear_pending_iterator()?;
+                                    return Err(closed);
+                                }
+                            };
                         }
                         Expr::Var(..) | Expr::Property(..) | Expr::Index(..) => {
                             precomputed_temp = match precompute_target(mc, env, elem_expr) {
@@ -8726,10 +8722,8 @@ fn evaluate_expr_assign<'gc>(
 
             let mut precomputed_temp: Option<TargetTemp<'gc>> = None;
             match target_expr {
-                Expr::Assign(lhs, _) => {
-                    if !matches!(&**lhs, Expr::Array(_) | Expr::Object(_)) {
-                        precomputed_temp = Some(precompute_target(mc, env, lhs)?);
-                    }
+                Expr::Assign(lhs, _) if !matches!(&**lhs, Expr::Array(_) | Expr::Object(_)) => {
+                    precomputed_temp = Some(precompute_target(mc, env, lhs)?);
                 }
                 Expr::Var(..) | Expr::Property(..) | Expr::Index(..) | Expr::PrivateMember(..) => {
                     precomputed_temp = Some(precompute_target(mc, env, target_expr)?);
@@ -10588,8 +10582,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                 (l, r) => {
                     let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                    let new_val = Value::Number(((l << r) as i32) as f64);
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
+                    let new_val = Value::Number((l << r) as f64);
                     env_set_recursive(mc, env, name, &new_val)?;
                     Ok(new_val)
                 }
@@ -10610,8 +10604,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                     (l, r) => {
                         let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                        let new_val = Value::Number(((l << r) as i32) as f64);
+                        let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
+                        let new_val = Value::Number((l << r) as f64);
                         set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
                     }
@@ -10640,8 +10634,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                     (l, r) => {
                         let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                        let new_val = Value::Number(((l << r) as i32) as f64);
+                        let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
+                        let new_val = Value::Number((l << r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
                     }
@@ -10664,8 +10658,8 @@ fn evaluate_expr_leftshift_assign<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                 (l, r) => {
                     let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                    let new_val = Value::Number(((l << r) as i32) as f64);
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
+                    let new_val = Value::Number((l << r) as f64);
                     set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
                 }
@@ -10695,7 +10689,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                 (l, r) => {
                     let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     let new_val = Value::Number((l >> r) as f64);
                     env_set_recursive(mc, env, name, &new_val)?;
                     Ok(new_val)
@@ -10717,7 +10711,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                     (l, r) => {
                         let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                        let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                         let new_val = Value::Number((l >> r) as f64);
                         set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                         Ok(new_val)
@@ -10747,7 +10741,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                     (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                     (l, r) => {
                         let l = to_int32_value_with_env(mc, env, &l)?;
-                        let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                        let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                         let new_val = Value::Number((l >> r) as f64);
                         set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                         Ok(new_val)
@@ -10771,7 +10765,7 @@ fn evaluate_expr_rightshift_assign<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                 (l, r) => {
                     let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     let new_val = Value::Number((l >> r) as f64);
                     set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
@@ -10796,7 +10790,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Unsigned right shift").into()),
                 (l, r) => {
                     let l = to_uint32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     let new_val = Value::Number((l >> r) as f64);
                     env_set_recursive(mc, env, name, &new_val)?;
                     Ok(new_val)
@@ -10814,7 +10808,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 let (l, r) = (current, val);
                 {
                     let l = to_uint32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     let new_val = Value::Number((l >> r) as f64);
                     set_property_with_accessors(mc, env, &obj, key, &new_val, None)?;
                     Ok(new_val)
@@ -10839,7 +10833,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 let (l, r) = (current, val);
                 {
                     let l = to_uint32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     let new_val = Value::Number((l >> r) as f64);
                     set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
                     Ok(new_val)
@@ -10857,7 +10851,7 @@ fn evaluate_expr_urightshift_assign<'gc>(
             }
             let (l, r) = (current, val);
             let l = to_uint32_value_with_env(mc, env, &l)?;
-            let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+            let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
             let new_val = Value::Number((l >> r) as f64);
             set_property_with_accessors(mc, env, &obj, &key, &new_val, None)?;
             Ok(new_val)
@@ -11515,10 +11509,8 @@ fn check_global_code_declarations<'gc>(
                     }
                 }
             }
-            StatementKind::FunctionDeclaration(name, ..) => {
-                if !var_names.contains(name) {
-                    var_names.push(name.clone());
-                }
+            StatementKind::FunctionDeclaration(name, ..) if !var_names.contains(name) => {
+                var_names.push(name.clone());
             }
             _ => {}
         }
@@ -11594,10 +11586,8 @@ where
 
 fn walk_expr(e: &Expr, has_super_call: &mut bool, has_super_prop: &mut bool, has_new_target: &mut bool, has_arguments: &mut bool) {
     match e {
-        Expr::Var(name, _, _) => {
-            if name == "arguments" {
-                *has_arguments = true;
-            }
+        Expr::Var(name, _, _) if name == "arguments" => {
+            *has_arguments = true;
         }
         Expr::SuperCall(args) => {
             *has_super_call = true;
@@ -15529,8 +15519,8 @@ fn evaluate_expr_binary<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                 (l, r) => {
                     let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
-                    Ok(Value::Number(((l << r) as i32) as f64))
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
+                    Ok(Value::Number((l << r) as f64))
                 }
             }
         }
@@ -15557,7 +15547,7 @@ fn evaluate_expr_binary<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types").into()),
                 (l, r) => {
                     let l = to_int32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     Ok(Value::Number((l >> r) as f64))
                 }
             }
@@ -15569,7 +15559,7 @@ fn evaluate_expr_binary<'gc>(
                 (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("BigInt does not support >>>").into()),
                 (l, r) => {
                     let l = to_uint32_value_with_env(mc, env, &l)?;
-                    let r = (to_uint32_value_with_env(mc, env, &r)? & 0x1F) as u32;
+                    let r = to_uint32_value_with_env(mc, env, &r)? & 0x1F;
                     Ok(Value::Number((l >> r) as f64))
                 }
             }
@@ -21849,10 +21839,8 @@ pub fn call_closure<'gc>(
                 // object being called, assume this was a function declaration
                 // and skip creating the per-call name binding.
                 match &*existing_cell.borrow() {
-                    Value::Object(existing_obj_ptr) => {
-                        if Gc::as_ptr(*existing_obj_ptr) == Gc::as_ptr(fn_obj_ptr) {
-                            should_bind_name = false;
-                        }
+                    Value::Object(existing_obj_ptr) if Gc::as_ptr(*existing_obj_ptr) == Gc::as_ptr(fn_obj_ptr) => {
+                        should_bind_name = false;
                     }
                     Value::Property { value: Some(v), .. } => {
                         if let Value::Object(existing_obj_ptr) = &*v.borrow()
@@ -24454,10 +24442,8 @@ fn body_has_lexical(stmts: &[Statement]) -> bool {
             | StatementKind::Class(_) => {
                 return true;
             }
-            StatementKind::Block(inner) => {
-                if body_has_lexical(inner) {
-                    return true;
-                }
+            StatementKind::Block(inner) if body_has_lexical(inner) => {
+                return true;
             }
             StatementKind::If(if_stmt) => {
                 if body_has_lexical(&if_stmt.then_body) {
@@ -24469,15 +24455,11 @@ fn body_has_lexical(stmts: &[Statement]) -> bool {
                     return true;
                 }
             }
-            StatementKind::For(for_stmt) => {
-                if body_has_lexical(&for_stmt.body) {
-                    return true;
-                }
+            StatementKind::For(for_stmt) if body_has_lexical(&for_stmt.body) => {
+                return true;
             }
-            StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
-                if body_has_lexical(body) {
-                    return true;
-                }
+            StatementKind::While(_, body) | StatementKind::DoWhile(body, _) if body_has_lexical(body) => {
+                return true;
             }
             StatementKind::ForOf(_, _, _, body)
             | StatementKind::ForAwaitOf(_, _, _, body)
@@ -24487,10 +24469,10 @@ fn body_has_lexical(stmts: &[Statement]) -> bool {
             | StatementKind::ForAwaitOfDestructuringObject(_, _, _, body)
             | StatementKind::ForAwaitOfDestructuringArray(_, _, _, body)
             | StatementKind::ForInDestructuringObject(_, _, _, body)
-            | StatementKind::ForInDestructuringArray(_, _, _, body) => {
-                if body_has_lexical(body) {
-                    return true;
-                }
+            | StatementKind::ForInDestructuringArray(_, _, _, body)
+                if body_has_lexical(body) =>
+            {
+                return true;
             }
             StatementKind::TryCatch(tc) => {
                 if body_has_lexical(&tc.try_body) {

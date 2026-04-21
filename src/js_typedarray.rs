@@ -657,13 +657,7 @@ pub fn handle_atomics_method<'gc>(
                 }
             }
             Value::Undefined => 0,
-            Value::Boolean(b) => {
-                if *b {
-                    1
-                } else {
-                    0
-                }
-            }
+            Value::Boolean(b) if *b => 1,
             Value::String(_) | Value::Object(_) => {
                 let n = crate::core::to_number_with_env(mc, env, &size_val).unwrap_or(f64::NAN);
                 if n.is_nan() || n == 0.0 || n.is_infinite() {

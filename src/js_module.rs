@@ -850,13 +850,11 @@ fn resolve_export(module_path: &str, export_name: &str, resolve_set: &mut Vec<(S
                             return resolve_export(&resolved_path, import_name, resolve_set);
                         }
                     }
-                    ExportSpecifier::Namespace(name) => {
-                        if name == export_name {
-                            return Ok(ExportResolution::Found {
-                                module_path: module_path.to_string(),
-                                binding_name: "*namespace*".to_string(),
-                            });
-                        }
+                    ExportSpecifier::Namespace(name) if name == export_name => {
+                        return Ok(ExportResolution::Found {
+                            module_path: module_path.to_string(),
+                            binding_name: "*namespace*".to_string(),
+                        });
                     }
                     _ => {} // Star handled below
                 }
@@ -1047,10 +1045,8 @@ fn validate_module_declarations(statements: &[Statement]) -> Result<(), JSError>
             StatementKind::FunctionDeclaration(name, ..) => {
                 lex_names.insert(name.clone());
             }
-            StatementKind::Class(class_def) => {
-                if !class_def.name.is_empty() {
-                    lex_names.insert(class_def.name.clone());
-                }
+            StatementKind::Class(class_def) if !class_def.name.is_empty() => {
+                lex_names.insert(class_def.name.clone());
             }
             StatementKind::Let(decls) => {
                 for (name, _) in decls {
@@ -1735,25 +1731,17 @@ fn module_has_local_export_name(module_path: &str, export_name: &str) -> Result<
         {
             if let Some(inner) = inner_stmt {
                 match &*inner.kind {
-                    StatementKind::Var(decls) | StatementKind::Let(decls) => {
-                        if decls.iter().any(|(name, _)| name == export_name) {
-                            return Ok(true);
-                        }
+                    StatementKind::Var(decls) | StatementKind::Let(decls) if decls.iter().any(|(name, _)| name == export_name) => {
+                        return Ok(true);
                     }
-                    StatementKind::Const(decls) => {
-                        if decls.iter().any(|(name, _)| name == export_name) {
-                            return Ok(true);
-                        }
+                    StatementKind::Const(decls) if decls.iter().any(|(name, _)| name == export_name) => {
+                        return Ok(true);
                     }
-                    StatementKind::FunctionDeclaration(name, ..) => {
-                        if name == export_name {
-                            return Ok(true);
-                        }
+                    StatementKind::FunctionDeclaration(name, ..) if name == export_name => {
+                        return Ok(true);
                     }
-                    StatementKind::Class(class_def) => {
-                        if class_def.name == export_name {
-                            return Ok(true);
-                        }
+                    StatementKind::Class(class_def) if class_def.name == export_name => {
+                        return Ok(true);
                     }
                     _ => {}
                 }

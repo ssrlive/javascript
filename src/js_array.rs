@@ -3854,10 +3854,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             }
 
-            let mut item_index = actual_start;
-            for item in args.iter().skip(2) {
+            for (item_index, item) in (actual_start..).zip(args.iter().skip(2)) {
                 object_set_key_value(mc, object, item_index, item)?;
-                item_index += 1;
             }
 
             set_length_or_throw(new_len)?;

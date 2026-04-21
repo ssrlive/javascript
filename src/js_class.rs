@@ -103,10 +103,8 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Result<Opti
     // 3) Direct closure on the object
     if let Some(cl_val_rc) = obj.borrow().get_closure() {
         match &*cl_val_rc.borrow() {
-            Value::Closure(data) | Value::AsyncClosure(data) => {
-                if data.env.is_some() {
-                    return Ok(data.env.map(normalize_realm));
-                }
+            Value::Closure(data) | Value::AsyncClosure(data) if data.env.is_some() => {
+                return Ok(data.env.map(normalize_realm));
             }
             _ => {}
         }
@@ -120,10 +118,8 @@ pub(crate) fn get_function_realm<'gc>(obj: &JSObjectDataPtr<'gc>) -> Result<Opti
             && let Some(c_cl_val_rc) = ctor_obj.borrow().get_closure()
         {
             match &*c_cl_val_rc.borrow() {
-                Value::Closure(data) | Value::AsyncClosure(data) => {
-                    if data.env.is_some() {
-                        return Ok(data.env.map(normalize_realm));
-                    }
+                Value::Closure(data) | Value::AsyncClosure(data) if data.env.is_some() => {
+                    return Ok(data.env.map(normalize_realm));
                 }
                 _ => {}
             }
@@ -244,18 +240,18 @@ pub(crate) fn is_private_member_declared(class_def: &ClassDefinition, name: &str
             | ClassMember::PrivateStaticProperty(n, _)
             | ClassMember::PrivateStaticMethod(n, _, _)
             | ClassMember::PrivateStaticMethodAsync(n, _, _)
-            | ClassMember::PrivateStaticMethodGenerator(n, _, _) => {
-                if n == key {
-                    return true;
-                }
+            | ClassMember::PrivateStaticMethodGenerator(n, _, _)
+                if n == key =>
+            {
+                return true;
             }
             ClassMember::PrivateGetter(n, _)
             | ClassMember::PrivateSetter(n, _, _)
             | ClassMember::PrivateStaticGetter(n, _)
-            | ClassMember::PrivateStaticSetter(n, _, _) => {
-                if n == key {
-                    return true;
-                }
+            | ClassMember::PrivateStaticSetter(n, _, _)
+                if n == key =>
+            {
+                return true;
             }
             _ => {}
         }

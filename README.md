@@ -2,456 +2,221 @@
 
 [![Crates.io](https://img.shields.io/crates/v/javascript.svg)](https://crates.io/crates/javascript)
 [![Documentation](https://docs.rs/javascript/badge.svg)](https://docs.rs/javascript)
-[![License](https://img.shields.io/crates/l/javascript.svg)](https://github.com/ssrlive/javascript/blob/master/LICENSE)
-[![Rust](https://img.shields.io/badge/rust-2024+-blue.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/crates/l/javascript.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2024%2B-blue.svg)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/rust.yml)](https://github.com/ssrlive/javascript/actions)
-[![Test262](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/test262.yml?label=test262)](https://github.com/ssrlive/javascript/actions/workflows/test262.yml)
+[![Test262](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/test262.yml?label=test262)](https://github.com/ssrlive/javascript/actions/workflows/test262-all.yml)
 [![Downloads](https://img.shields.io/crates/d/javascript.svg)](https://crates.io/crates/javascript)
 
-A JavaScript engine written from scratch in Rust — lexer, parser, and **tree-walking interpreter** in
-~105 000 lines of Rust — supporting ECMAScript 2024+ features including ES modules, async/await,
-generators, Proxy/Reflect, TypedArray, SharedArrayBuffer, Atomics, WeakRef, FinalizationRegistry,
-ShadowRealm, Iterator Helpers, Explicit Resource Management (`using`/`await using`), and more.
+A JavaScript engine written in Rust, with a full pipeline from source text to bytecode execution:
 
-> **Strict mode only** — all scripts and `eval`'d code execute under ECMAScript strict semantics.
+Source -> Lexer -> Parser -> Compiler -> VM
 
----
+The repository contains:
 
-## Table of Contents
+- A library crate: javascript
+- A CLI binary crate: js
+- Rust integration tests and JavaScript self-tests
+- A Node-based Test262 runner under ci/runner.js
 
-- [Highlights](#highlights)
-- [Language Features](#language-features)
-- [Built-in Objects & APIs](#built-in-objects--apis)
-- [Architecture](#architecture)
-- [Project Layout](#project-layout)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Test262 Conformance](#test262-conformance)
-- [Testing](#testing)
-- [Performance Notes](#performance-notes)
-- [Limitations](#limitations)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
+## Current status
 
----
+This project is actively developed and already passes a large portion of Test262 in practice.
+
+Important: two well-known missing areas are still:
+
+- decorators
+- proper tail calls (tail call optimization)
+
+If you need either today, use transpilation (for decorators) or avoid relying on spec-level PTC behavior.
+
+## Language mode policy
+
+This engine is intentionally not a legacy-web-quirk-compatible sloppy-mode runtime.
+
+- This engine does not explicitly target full, historical sloppy-mode compatibility.
+- Legacy web quirks and edge-case loose-mode behaviors are not a primary compatibility goal.
+- In practice, strict and modern ECMAScript behavior is prioritized over preserving legacy oddities.
 
 ## Highlights
 
-| Aspect | Details |
-|---|---|
-| **Language** | Rust 2024 edition, safe & `Send`+`Sync` where needed |
-| **Architecture** | Tree-walking AST interpreter (no bytecode / JIT) |
-| **Memory** | GC-managed heap via [`gc-arena`](https://github.com/kyren/gc-arena) with reference-counted roots |
-| **Regex** | [`regress`](https://github.com/ridiculousfish/regress) (Rust-native, full ES2024 regex including `v` flag, lookbehind, named groups, Unicode properties) |
-| **Codebase** | ~105 K lines Rust source · ~11 K lines integration tests · 97 JS self-test scripts |
-| **Test262** | 41-shard parallel CI against the official ECMAScript conformance suite (74 000+ test files) with 178 feature probes |
-| **Platforms** | Linux, macOS, Windows (CI tested on all three) |
-| **License** | MIT |
-
----
-
-## Language Features
-
-### Core (ES5 – ES2020)
-
-- **Variables & Scoping** — `let`, `const`, `var` with block/function/module scoping, TDZ enforcement
-- **Data Types** — Number (IEEE-754), String (UTF-16 internally), Boolean, BigInt, Symbol, `null`, `undefined`
-- **Operators** — arithmetic, bitwise, logical, optional chaining (`?.`), nullish coalescing (`??`), logical assignments (`&&=`, `||=`, `??=`), exponentiation (`**`)
-- **Control Flow** — `if`/`else`, `for`, `for-in`, `for-of`, `for-await-of`, `while`, `do-while`, `switch`, `try`/`catch`/`finally`, labeled statements, `break`/`continue`
-- **Functions** — declarations, expressions, arrow (`=>`), default & rest parameters, spread, `new.target`
-- **Async** — `async`/`await`, `async function*`, `for-await-of`, top-level `await` in modules
-- **Generators** — `function*`, `yield`, `yield*`, full iterator protocol
-- **Classes** — `class` / `extends`, `constructor`, static members, private fields/methods (`#name`), computed property names, class static blocks
-- **Destructuring** — array and object patterns in declarations, assignments, function parameters; nested patterns, defaults, rest elements
-- **Template Literals** — string interpolation and tagged templates
-- **Modules** — `import`/`export`, `export default`, `import()` dynamic import, `import.meta`, `export * as ns`
-- **Iterators** — `Symbol.iterator`, `for...of`, spread in arrays/function calls
-
-### Modern (ES2021 – ES2024+)
-
-- **Explicit Resource Management** — `using` / `await using` declarations, `DisposableStack`, `AsyncDisposableStack`, `Symbol.dispose` / `Symbol.asyncDispose`, `SuppressedError`
-- **Iterator Helpers** — `Iterator.prototype.{map, filter, take, drop, flatMap, reduce, toArray, forEach, some, every, find}`, `Iterator.from`, `Iterator.concat`
-- **ShadowRealm** — `new ShadowRealm()`, `realm.evaluate()`, `realm.importValue()`
-- **WeakRef & FinalizationRegistry** — weak references and post-mortem cleanup callbacks
-- **Array** — `findLast`/`findLastIndex`, `toReversed`/`toSorted`/`toSpliced`/`with` (change-by-copy), `Array.fromAsync`, grouping (`Object.groupBy`, `Map.groupBy`)
-- **Hashbang** — `#!` scripts
-- **RegExp** — `v` flag (set notation), `d` flag (match indices), duplicate named groups, modifiers, `dotAll`, lookbehind
-- **`Error.cause`**, **`Error.isError`**
-- **Promise** — `Promise.any`, `Promise.allSettled`, `Promise.withResolvers`, `Promise.try`, `Promise.prototype.finally`
-- **Set methods** — `intersection`, `union`, `difference`, `symmetricDifference`, `isSubsetOf`, `isSupersetOf`, `isDisjointOf`
-- **Uint8Array Base64** — `Uint8Array.fromBase64`, `Uint8Array.prototype.toBase64`, `Uint8Array.fromHex`, `Uint8Array.prototype.toHex`
-- **JSON** — `JSON.parse` with source, well-formed `JSON.stringify`
-- **String** — `isWellFormed`, `toWellFormed`, `matchAll`, `replaceAll`, `at`, `trimStart`/`trimEnd`
-- **Symbols as WeakMap keys**
-- **`ArrayBuffer.prototype.transfer`**, resizable ArrayBuffers
-- **`Object.hasOwn`**, `Object.fromEntries`
-- **Numeric separator** (`1_000_000`), `globalThis`
-
----
-
-## Built-in Objects & APIs
-
-| Category | Objects / Constructors |
-|---|---|
-| **Primitives** | `Number`, `String`, `Boolean`, `BigInt`, `Symbol` |
-| **Collections** | `Array`, `Object`, `Map`, `Set`, `WeakMap`, `WeakSet` |
-| **Typed Data** | `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`, `Float64Array` |
-| **Async** | `Promise`, `AsyncFunction`, `AsyncGeneratorFunction` |
-| **Iterators** | `Generator`, `AsyncGenerator`, `Iterator` (with helpers) |
-| **Meta** | `Proxy`, `Reflect`, `ShadowRealm` |
-| **Lifecycle** | `WeakRef`, `FinalizationRegistry`, `DisposableStack`, `AsyncDisposableStack` |
-| **Concurrency** | `Atomics` (`load`, `store`, `add`, `sub`, `and`, `or`, `xor`, `exchange`, `compareExchange`, `wait`, `notify`, `waitAsync`, `isLockFree`) |
-| **Errors** | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, `AggregateError`, `SuppressedError` |
-| **Utilities** | `Math`, `Date`, `JSON`, `RegExp`, `console`, `eval` (direct & indirect) |
-| **Timers** | `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval` — backed by a dedicated timer thread; short-timer threshold configurable via `--timer-wait-ms` |
-| **Globals** | `globalThis`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURI`, `decodeURI`, `encodeURIComponent`, `decodeURIComponent` |
-| **I/O** (feature-gated) | `os` module: `open`, `close`, `read`, `write`, `seek`, `remove`, `mkdir`, `readdir`, `stat`, `lstat`, `symlink`, `readlink`, `getcwd`, `realpath`, `exec`, `pipe`, `waitpid`, `kill`, `isatty`, `getpid`, `getppid`, `utimes` |
-| | `os.path`: `join`, `dirname`, `basename`, `extname`, `resolve`, `normalize`, `relative` |
-| | `std` module: `sprintf`, `tmpfile`, `loadFile`, `open`, `popen`, `fdopen`, `gc` |
-
----
+- Bytecode VM architecture (not AST tree-walking execution)
+- ECMAScript parser and compiler implemented in Rust
+- Supports script and module execution
+- Includes async-related features (Promises, async/await, top-level await in module mode)
+- REPL with persistent command history
+- Cross-platform CLI (Linux, macOS, Windows)
 
 ## Architecture
 
-```plain
-Source Code
-   │
-   ▼
-┌──────────┐    ┌──────────┐    ┌──────────────────┐    ┌────────────┐
-│  Lexer   │───▸│  Parser  │───▸│  AST Evaluator   │───▸│   Value    │
-│ (token.rs│    │(parser.rs│    │   (eval.rs)      │    │  (value.rs)│
-│  2116 L) │    │  6598 L) │    │   (24 938 L)     │    │  (2592 L)  │
-└──────────┘    └──────────┘    └──────────────────┘    └────────────┘
-                                        │
-                              ┌─────────┼──────────┐
-                              ▼         ▼          ▼
-                         ┌────────┐ ┌────────┐ ┌────────────┐
-                         │ Event  │ │  GC    │ │  Built-in  │
-                         │  Loop  │ │ Arena  │ │  Modules   │
-                         │Promises│ │gc-arena│ │(40+ files) │
-                         │Timers  │ │        │ │            │
-                         └────────┘ └────────┘ └────────────┘
+Core source layout:
+
+- src/core/token.rs: lexer/tokenizer
+- src/core/parser.rs: parser (AST construction)
+- src/core/statement.rs: AST node definitions
+- src/core/compiler.rs: AST to bytecode compilation
+- src/core/opcode.rs: opcode definitions
+- src/core/vm.rs and src/core/vm/: VM runtime and builtins
+- src/core/value.rs: runtime value model
+- src/core/mod.rs: top-level compile/run pipeline and public core entry points
+- src/lib.rs: crate public API re-exports
+- js/src/main.rs: CLI entry point and REPL loop
+
+## Build and run
+
+### Build
+
+```bash
+cargo build --all-features --release
+cargo build -p js --release
 ```
 
-### Key Components
+### Run CLI
 
-| Component | File(s) | Lines | Description |
-|---|---|---|---|
-| **Lexer** | `src/core/token.rs` | 2 116 | Tokenizes source into `TokenData` stream; handles template literals, regex literals, hashbang, Unicode escapes |
-| **Parser** | `src/core/parser.rs` | 6 598 | Recursive-descent parser producing `Statement`/`Expr` AST nodes; supports full ES2024 grammar including classes, destructuring, async generators, `import`/`export` |
-| **Evaluator** | `src/core/eval.rs` | 24 938 | Tree-walking interpreter: expression evaluation, statement execution, hoisting, scope chains, prototype chain resolution, `eval()` handling, module linking |
-| **Value System** | `src/core/value.rs` | 2 592 | `Value<'gc>` enum with 30+ variants (Number, String, Object, Promise, Proxy, TypedArray, Generator, …); `JSObjectData` property map with descriptors |
-| **Property Descriptors** | `src/core/descriptor.rs` | 411 | `[[Configurable]]`, `[[Enumerable]]`, `[[Writable]]`, `[[Get]]`, `[[Set]]` per ES spec |
-| **GC Integration** | `src/core/gc.rs` | 187 | Manual `Trace` impls for AST nodes so the GC can walk live references |
-| **Scope / Environment** | `src/core/mod.rs` | 1 136 | `JsArenaVm` creation, `initialize_global_constructors`, entry points |
-| **Error System** | `src/error.rs` + `src/core/js_error.rs` | 854 | `JSError` / `EvalError` types with stack traces, line/column info |
-| **Timer Thread** | `src/timer_thread.rs` | 102 | Dedicated background thread with a min-heap scheduler for `setTimeout`/`setInterval` |
-| **REPL** | `src/repl.rs` | 342 | Persistent environment across evaluations; used by the CLI REPL |
-| **Agent ($262.agent)** | `src/js_agent.rs` | 205 | Multi-threaded agent support for `SharedArrayBuffer`/`Atomics` testing; each agent gets its own GC arena on a dedicated OS thread |
+```bash
+# Run a file
+cargo run -r -p js -- path/to/script.js
 
-### Memory Management
+# Run a module
+cargo run -r -p js -- --module path/to/module.js
+cargo run -r -p js -- path/to/module.mjs
 
-The engine uses [`gc-arena`](https://github.com/kyren/gc-arena) for garbage collection:
+# Evaluate inline code
+cargo run -r -p js -- -e "1 + 2"
 
-- All JS heap objects are `Gc<'gc, ...>` pointers rooted in a `JsArenaVm`
-- A `GcContext` scope provides safe mutability
-- Internal prototype chains use `Gc` pointers (no reference cycles thanks to tracing GC)
-- `SharedArrayBuffer` backing stores use `Arc<Mutex<Vec<u8>>>` for cross-thread sharing
+# Start REPL
+cargo run -r -p js
+```
 
----
+### CLI options
 
-## Installation
+```text
+Usage: js [OPTIONS] [FILE]
 
-### As a library
+Options:
+  -e, --eval <EVAL>
+      --timer-wait-ms <TIMER_WAIT_MS>
+      --module
+  -h, --help
+  -V, --version
+```
+
+## REPL behavior
+
+- Exit with .exit or Ctrl-D
+- Multiline input is supported for incomplete code
+- History is stored at ~/.js_repl_history (resolved via dirs::home_dir())
+
+## Library usage
+
+Add dependency:
 
 ```toml
 [dependencies]
 javascript = "0.1.14"
 ```
 
-Available Cargo features:
-
-| Feature | Default | Description |
-|---|---|---|
-| `std` | ✅ | `std` module (`sprintf`, `tmpfile`, `loadFile`, …) |
-| `os` | ✅ | `os` module (file I/O, process control, path utilities) |
-
-### CLI binary
-
-```bash
-# From Git
-cargo install js --git https://github.com/ssrlive/javascript.git
-
-# From local checkout
-cargo install js --path ./js
-```
-
----
-
-## Usage
-
-### Evaluate a script (library)
+Basic script evaluation:
 
 ```rust
 use javascript::evaluate_script;
 
-let result = evaluate_script(r#"
-    let x = 42n;
-    let y = x * 2n;
-    y + 10n
-"#, false, None::<&std::path::Path>).unwrap();
-
-assert_eq!(result, "94");
-```
-
-### Evaluate an ES module
-
-```rust,no_run
-use javascript::evaluate_script;
-
-let result = evaluate_script(r#"
-    const greet = (name) => `Hello, ${name}!`;
-    export default greet("world");
-"#, true, None::<&std::path::Path>).unwrap();
-```
-
-### Use the `os` module
-
-```rust
-#[cfg(feature = "os")]
-{
-    use javascript::evaluate_script;
-    let result = evaluate_script(r#"
-        import * as os from "os";
-        let cwd = os.getcwd();
-        cwd
-    "#, true, None::<&std::path::Path>).unwrap();
+fn main() {
+    let out = evaluate_script("1 + 2", false, Option::<&std::path::Path>::None).unwrap();
+    assert_eq!(out, "3");
 }
 ```
 
-### Promises & async/await
+Module evaluation:
 
 ```rust
 use javascript::evaluate_script;
 
-let result = evaluate_script(r#"
-    async function fetchData() {
-        return await Promise.resolve(42);
-    }
-    await fetchData()
-"#, false, None::<&std::path::Path>).unwrap();
-
-assert_eq!(result, "42");
+fn main() {
+    let src = "export const x = 1;\n x";
+    let out = evaluate_script(src, true, Option::<&std::path::Path>::None).unwrap();
+    println!("{out}");
+}
 ```
 
-### Timers
-
-```rust
-use javascript::evaluate_script;
-
-let result = evaluate_script(r#"
-    let id = setTimeout(() => console.log("fired"), 100);
-    clearTimeout(id);
-    undefined
-"#, false, None::<&std::path::Path>).unwrap();
-```
-
-### Persistent REPL (library)
+Persistent REPL API:
 
 ```rust
 use javascript::Repl;
 
-let mut repl = Repl::new();
-repl.eval("let x = 10;").unwrap();
-let result = repl.eval("x + 5").unwrap();
-assert_eq!(result, "15");
+fn main() {
+    let mut repl = Repl::new();
+    repl.eval("let a = 10;").unwrap();
+    let out = repl.eval("a + 5").unwrap();
+    assert_eq!(out, "15");
+}
 ```
 
-### Tokenizer / Parser (library)
+Other exported APIs include tokenize, parse_statement, parse_statements, read_script_file, and value/string helpers.
 
-```rust
-use javascript::{tokenize, parse_statements};
+## Testing and quality checks
 
-let tokens = tokenize("let x = 1 + 2;").unwrap();
-let mut tokens_vec = tokens;
-let mut index = 0;
-let ast = parse_statements(&mut tokens_vec, &mut index).unwrap();
-```
-
-### CLI
+### Rust tests
 
 ```bash
-# Run a script file
-js script.js
-
-# Run as ES module (auto-detected for .mjs files)
-js module.mjs
-js --module script.js
-
-# Evaluate an expression
-js -e "console.log(2 ** 10)"
-
-# Start interactive REPL
-js
-
-# Configure short-timer threshold (ms)
-js --timer-wait-ms 50 script.js
+cargo test -r --all-features --tests
 ```
 
----
-
-## Test262 Conformance
-
-The engine is continuously validated against
-[Test262](https://github.com/tc39/test262), the official ECMAScript conformance test suite
-(74 000+ test files).
-
-### CI Setup
-
-- **41 parallel shards** in GitHub Actions, each targeting a different slice of the test suite
-- **178 feature probe scripts** (`ci/feature_probes/`) — each tests whether the engine supports
-  a given ES feature; tests requiring unsupported features are automatically skipped
-- Results are aggregated into a summary with pass / fail / skip counts and a ranked
-  list of unsupported features
-
-### Running locally
+### Lint and format
 
 ```bash
-# Prerequisite: clone test262 alongside this repo
-# git clone https://github.com/tc39/test262.git ../test262
-
-# Build the engine in release mode
-cargo build -p js --release
-
-# Run a custom focus
-node ci/runner.js --limit 10000 --focus built-ins/Promise
-
-# Run with extended timeout
-node ci/runner.js --limit 10000 --focus language/literals --timeout 200
+cargo clippy -r --all-features --all-targets -- -D warnings
+cargo fmt --all
 ```
 
-### Feature probes
-
-Feature detection scripts live in `ci/feature_probes/`. They are tiny JS programs that
-print `OK` on success, allowing `runner.js` to skip tests requiring features the engine
-does not yet implement (e.g. `Temporal`, `decorators`, `tail-call-optimization`).
-
----
-
-## Testing
-
-### Rust unit & integration tests
+### JS self-test sweep
 
 ```bash
-# Full test suite
-cargo test --all-features
-
-# With logging
-RUST_LOG=debug cargo test
-
-# Run a specific test file
-cargo test --test async_await_tests
+# Uses bash + timeout logic and categorizes PASS/FAIL/SKIP/TIMEOUT
+bash ./test-vm.sh
 ```
 
-### JS self-test scripts
+Windows note: run through bash (for example Git Bash), not directly as a PowerShell script.
 
-97 standalone JavaScript files in `js-scripts/` exercise specific features end-to-end:
+## Test262 runner
+
+Node-based runner:
 
 ```bash
-# Run one script
-cargo run -p js -- js-scripts/promise_tests.js
+# Requires Node.js
+node ci/runner.js --limit 10000 --focus "language/expressions/addition"
 
-# Run an ES module
-cargo run -p js -- --module js-scripts/es6_module.mjs
+# Run one focused case
+node ci/runner.js --limit 1 --focus "language/literals/string/S7.8.4_A4.1_T1.js"
 ```
 
-These are also run in CI on all three platforms (Linux, macOS, Windows).
+Key runner options:
 
-### Benchmarks
+- --focus (required, supports multiple and comma-separated values)
+- --limit
+- --jobs
+- --timeout
+- --fail-on-failure
+- --keep-tmp
 
-```bash
-cargo bench                          # All benchmarks
-cargo bench --bench promise_benchmarks
-cargo bench --bench bigint_bench
-```
+The runner builds the engine, composes harness files, runs tests, and writes logs to test262-results.log.
 
----
+## Known gaps
 
-## Performance Notes
+As of current implementation:
 
-This is a **tree-walking interpreter** — each AST node is visited and evaluated at runtime
-with no bytecode compilation or JIT.
+- decorators: not implemented
+- tail-call-optimization: not implemented
+- full historical sloppy-mode quirks: intentionally not a compatibility target
 
-Typical overhead on a modern machine:
-
-| Operation | Approximate cost |
-|---|---|
-| Loop iteration | ~5 µs |
-| Method call (e.g. `Array.push`) | ~160 µs |
-| Property access | ~10 µs |
-
-This is perfectly adequate for test conformance, scripts, tooling, and embedding scenarios.
-Code-intensive loops with millions of iterations (e.g. RegExp Unicode property-escape
-generated tests that iterate over the full 0–0x10FFFF range) are intentionally skipped in CI.
-
----
-
-## Limitations
-
-- **No JIT / Bytecode** — interpretation only; hot loops are orders of magnitude slower than V8/SpiderMonkey
-- **Strict mode only** — sloppy-mode–specific semantics (`with`, non-strict `arguments`, etc.) are not supported
-- **No Web APIs** — no DOM, Fetch, WebSocket, `XMLHttpRequest`, or browser globals
-- **No WebAssembly** — no WASM support
-- **No Workers** — `SharedArrayBuffer` and `Atomics` work, but there is no `Worker` API; multi-agent support is limited to test262's `$262.agent` harness
-- **No TypeScript** — no type checking or transpilation
-- **No Source Maps** — no source-map-based debugging
-- **Temporal** — the TC39 Temporal proposal (stage 3, 4 493 test262 tests) is not implemented
-- **Decorators** — the decorators proposal is not implemented
-- **Tail Call Optimization** — proper tail calls (PTC) are not implemented
-
----
+These are common gaps across many real-world engines/runtimes as well, but they remain spec-visible differences.
 
 ## Contributing
 
-Contributions are welcome! Areas where help is especially useful:
-
-1. **Conformance** — fix failing test262 tests or implement missing built-in methods
-2. **Performance** — profiling, optimizing hot paths, or exploring bytecode compilation
-3. **Documentation** — API docs, tutorials, more examples
-4. **Tooling** — source maps, debugger, TypeScript transpilation
-5. **Fuzzing** — property-based / coverage-guided fuzz testing of the parser and evaluator
-
-### Development Setup
-
-```bash
-git clone https://github.com/ssrlive/javascript.git
-cd javascript
-
-# Build & test
-cargo test --all-features
-
-# Lint
-cargo clippy --all-features --all-targets -- -D warnings
-
-# Format
-cargo fmt --all
-
-# Build release CLI
-cargo build -p js --release
-```
-
----
+1. Run format, clippy, and tests before opening PRs.
+2. Keep parser/compiler/vm changes accompanied by tests (Rust and/or JS scripts).
+3. For conformance work, include focused Test262 repro paths in commit or PR notes.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-- Inspired by [QuickJS](https://bellard.org/quickjs/) — the `os` / `std` module API mirrors its design
-- Built on Rust's type system and memory safety guarantees
-- [`gc-arena`](https://github.com/kyren/gc-arena) by kyren for safe, performant tracing GC
-- [`regress`](https://github.com/ridiculousfish/regress) for full ES-specification regex support
-- The [Test262](https://github.com/tc39/test262) project for the definitive conformance test suite
-- Thanks to the Rust ecosystem: `chrono`, `num-bigint`, `serde_json`, `crossbeam`, `indexmap`, and many more
+MIT. See LICENSE.

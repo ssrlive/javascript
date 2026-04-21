@@ -14,6 +14,7 @@ let CAP_MULTIPLIER = 5;
 let JOBS = Number(process.env.TEST262_JOBS || 8);
 // FOCUS_LIST: array of focus tokens. Accepts multiple `--focus` flags and comma-separated tokens.
 let FOCUS_LIST = [];
+const DEFAULT_FOCUS_DIRS = ['annexB', 'built-ins', 'intl402', 'language'];
 let TIMEOUT_SECS = process.env.TEST_TIMEOUT || 60;
 const envKeep = process.env.TEST262_KEEP_TMP;
 // Default: delete composed temporary files (set TEST262_KEEP_TMP=1 to keep)
@@ -39,16 +40,11 @@ for (let i = 0; i < argv.length; i++) {
   } else if (a === '--keep-tmp') {
     KEEP_TMP = true;
   } else if (a === '--help') {
-    console.log('Usage: node ci/runner.js [--keep-tmp] [--jobs N] --limit N --focus name[,name2] (multiple --focus allowed)');
+    console.log('Usage: node ci/runner.js [--keep-tmp] [--jobs N] [--limit N] [--focus name[,name2]] (multiple --focus allowed)');
     console.log('  Append (filesonly) to a focus token to collect only top-level files, e.g. "a/(filesonly)",b/c');
+    console.log(`  If --focus is omitted, defaults to: ${DEFAULT_FOCUS_DIRS.join(', ')}`);
     process.exit(0);
   }
-}
-
-if (FOCUS_LIST.length === 0) {
-  console.error('ERROR: No --focus parameter provided. This runner requires at least one --focus token.');
-  console.error('Usage: node ci/runner.js [--keep-tmp] [--jobs N] [--limit N] --focus name[,name2]');
-  process.exit(1);
 }
 
 JOBS = Math.max(1, Number.isFinite(JOBS) ? Math.floor(JOBS) : 1);
@@ -147,11 +143,21 @@ if (!buildRes || buildRes.status !== 0) {
 
 // Locate binary
 let BIN = '';
-if (USE_RELEASE) {
-  if (fs.existsSync('target/release/js')) BIN = path.resolve('target/release/js');
+const binCandidates = USE_RELEASE ? ['target/release/js', 'target/release/js.exe'] : ['target/debug/js', 'target/debug/js.exe'];
+
+for (const candidate of binCandidates) {
+  if (fs.existsSync(candidate)) {
+    BIN = path.resolve(candidate);
+    break;
+  }
 }
+
 if (!BIN) {
-  if (fs.existsSync('target/debug/js')) BIN = path.resolve('target/debug/js');
+  console.error('ERROR: JS engine binary not found after build. Checked paths:');
+  for (const candidate of binCandidates) {
+    console.error(`  - ${path.resolve(candidate)}`);
+  }
+  process.exit(1);
 }
 console.log(`JS engine binary: ${BIN}`);
 
@@ -219,7 +225,14 @@ if (FOCUS_LIST.length) {
     }
   }
 } else {
-  SEARCH_DIRS.push({ path: path.join(TEST262_ROOT_DIR, 'test'), filesOnly: false });
+  for (const dir of DEFAULT_FOCUS_DIRS) {
+    const p = path.join(TEST262_ROOT_DIR, 'test', dir);
+    if (fs.existsSync(p)) {
+      SEARCH_DIRS.push({ path: p, filesOnly: false });
+    } else {
+      console.error(`WARNING: Default focus directory not found: ${p}`);
+    }
+  }
 }
 
 const CAP = LIMIT * CAP_MULTIPLIER;

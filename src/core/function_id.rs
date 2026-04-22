@@ -1,4 +1,4 @@
-use crate::core::{GcContext, ObjectHandle, Value};
+use crate::core::{ObjectHandle, Value};
 
 pub type FunctionID = usize;
 
@@ -8,12 +8,6 @@ pub fn get_function_id<'gc>(obj: ObjectHandle<'gc>) -> Option<FunctionID> {
         Value::Number(n) => Some(*n as FunctionID),
         _ => None,
     })
-}
-
-#[inline]
-#[allow(dead_code)]
-pub fn set_function_id<'gc>(ctx: &GcContext<'gc>, obj: ObjectHandle<'gc>, id: FunctionID) {
-    obj.borrow_mut(ctx).insert("__native_id__".to_string(), Value::Number(id as f64));
 }
 
 // Builtin function IDs
@@ -391,10 +385,8 @@ pub(crate) const BUILTIN_MATH_F16ROUND: FunctionID = 611;
 // ── Function.prototype[@@hasInstance] (600) ──────────────────────────
 pub(crate) const BUILTIN_FN_HASINSTANCE: FunctionID = 600;
 // ── ShadowRealm (620–629) ───────────────────────────────────────────
-#[allow(dead_code)]
-pub(crate) const BUILTIN_CTOR_SHADOWREALM: FunctionID = 620;
-pub(crate) const BUILTIN_SHADOWREALM_EVALUATE: FunctionID = 621;
-pub(crate) const BUILTIN_SHADOWREALM_IMPORTVALUE: FunctionID = 622;
+pub(crate) const BUILTIN_SHADOWREALM_EVALUATE: FunctionID = 620;
+pub(crate) const BUILTIN_SHADOWREALM_IMPORTVALUE: FunctionID = 621;
 // Next available group: 630
 // Test262 harness acceleration
 pub(crate) const BUILTIN_BUILD_STRING: FunctionID = 630;

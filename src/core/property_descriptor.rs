@@ -10,8 +10,6 @@
 //! Conversion helpers bridge between legacy hidden-key maps and the new
 //! model so both representations can coexist during the dual-track phase.
 
-#![allow(dead_code)]
-
 use crate::core::value::Value;
 use crate::core::{Collect, GcTrace};
 use bitflags::bitflags;
@@ -128,22 +126,6 @@ impl<'gc> PropDesc<'gc> {
         }
     }
 
-    /// Data property with default attributes (writable + enumerable + configurable).
-    pub fn data_default(value: Value<'gc>) -> Self {
-        Self::data(value, PropAttrs::WEC)
-    }
-
-    /// Data property that is writable + configurable but **not** enumerable.
-    /// Used for class prototype methods, built-in function properties, etc.
-    pub fn data_wc(value: Value<'gc>) -> Self {
-        Self::data(value, PropAttrs::WC)
-    }
-
-    /// Fully locked data property (none of W/E/C).
-    pub fn data_frozen(value: Value<'gc>) -> Self {
-        Self::data(value, PropAttrs::NONE)
-    }
-
     /// Accessor property with explicit attributes.
     pub fn accessor(get: Option<Value<'gc>>, set: Option<Value<'gc>>, attrs: PropAttrs) -> Self {
         Self {
@@ -152,84 +134,9 @@ impl<'gc> PropDesc<'gc> {
         }
     }
 
-    /// Accessor property with enumerable + configurable (user-defined default).
-    pub fn accessor_ec(get: Option<Value<'gc>>, set: Option<Value<'gc>>) -> Self {
-        Self::accessor(get, set, PropAttrs::EC)
-    }
-
-    /// Accessor property that is configurable only (not enumerable).
-    /// Common for class getter/setter definitions.
-    pub fn accessor_c(get: Option<Value<'gc>>, set: Option<Value<'gc>>) -> Self {
-        Self::accessor(get, set, PropAttrs::CONFIGURABLE)
-    }
-
-    // ── Queries ────────────────────────────────────────────────
-
-    #[inline]
-    pub fn is_data(&self) -> bool {
-        matches!(self.kind, PropKind::Data(_))
-    }
-
     #[inline]
     pub fn is_accessor(&self) -> bool {
         matches!(self.kind, PropKind::Accessor { .. })
-    }
-
-    #[inline]
-    pub fn is_writable(&self) -> bool {
-        self.attrs.contains(PropAttrs::WRITABLE)
-    }
-
-    #[inline]
-    pub fn is_enumerable(&self) -> bool {
-        self.attrs.contains(PropAttrs::ENUMERABLE)
-    }
-
-    #[inline]
-    pub fn is_configurable(&self) -> bool {
-        self.attrs.contains(PropAttrs::CONFIGURABLE)
-    }
-
-    /// Return the data value, or `None` if this is an accessor.
-    pub fn value(&self) -> Option<&Value<'gc>> {
-        match &self.kind {
-            PropKind::Data(v) => Some(v),
-            PropKind::Accessor { .. } => None,
-        }
-    }
-
-    /// Return the getter, or `None`.
-    pub fn getter(&self) -> Option<&Value<'gc>> {
-        match &self.kind {
-            PropKind::Accessor { get, .. } => get.as_ref(),
-            PropKind::Data(_) => None,
-        }
-    }
-
-    /// Return the setter, or `None`.
-    pub fn setter(&self) -> Option<&Value<'gc>> {
-        match &self.kind {
-            PropKind::Accessor { set, .. } => set.as_ref(),
-            PropKind::Data(_) => None,
-        }
-    }
-
-    // ── Mutations ──────────────────────────────────────────────
-
-    /// Set or clear an individual attribute bit.
-    pub fn set_attr(&mut self, flag: PropAttrs, on: bool) {
-        if on {
-            self.attrs.insert(flag);
-        } else {
-            self.attrs.remove(flag);
-        }
-    }
-
-    /// Replace the data value (no-op if this is an accessor).
-    pub fn set_value(&mut self, value: Value<'gc>) {
-        if let PropKind::Data(ref mut v) = self.kind {
-            *v = value;
-        }
     }
 }
 
@@ -258,43 +165,6 @@ impl<'gc> PropDesc<'gc> {
             Value::Boolean(self.attrs.contains(PropAttrs::CONFIGURABLE)),
         );
         map
-    }
-
-    /// Create a `PropDesc` from a JS descriptor `IndexMap`
-    /// (the output of `extract_property_descriptor`).
-    ///
-    /// Missing boolean fields default to `false` (per spec §6.2.6.1
-    /// "CompletePropertyDescriptor"). Missing `value` defaults to `Undefined`.
-    pub fn from_descriptor_map(map: &indexmap::IndexMap<String, Value<'gc>>) -> Self {
-        let has_get = map.contains_key("get");
-        let has_set = map.contains_key("set");
-        let is_accessor = has_get || has_set;
-
-        let kind = if is_accessor {
-            PropKind::Accessor {
-                get: map.get("get").cloned(),
-                set: map.get("set").cloned(),
-            }
-        } else {
-            PropKind::Data(map.get("value").cloned().unwrap_or(Value::Undefined))
-        };
-
-        let writable = matches!(map.get("writable"), Some(Value::Boolean(true)));
-        let enumerable = matches!(map.get("enumerable"), Some(Value::Boolean(true)));
-        let configurable = matches!(map.get("configurable"), Some(Value::Boolean(true)));
-
-        let mut attrs = PropAttrs::empty();
-        if writable {
-            attrs |= PropAttrs::WRITABLE;
-        }
-        if enumerable {
-            attrs |= PropAttrs::ENUMERABLE;
-        }
-        if configurable {
-            attrs |= PropAttrs::CONFIGURABLE;
-        }
-
-        Self { kind, attrs }
     }
 
     /// Write this descriptor into the object map.
@@ -422,12 +292,6 @@ pub fn own_data_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>
     }
 }
 
-/// Returns `true` if `key` is an internal hidden-key marker and should be
-/// skipped during user-visible enumeration.
-pub fn is_hidden_key(key: &str) -> bool {
-    key.starts_with(GETTER_PREFIX) || key.starts_with(SETTER_PREFIX)
-}
-
 #[inline]
 fn update_attrs_for_key<'gc, F>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, f: F)
 where
@@ -530,15 +394,6 @@ pub fn get_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key:
         return Some(g.as_ref());
     }
     map.get(&make_getter_key(key))
-}
-
-/// Get the setter function for `key`, if any.
-#[inline]
-pub fn get_setter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
-    if let Some(Value::Property { setter: Some(s), .. }) = map.get(key) {
-        return Some(s.as_ref());
-    }
-    map.get(&make_setter_key(key))
 }
 
 /// Returns `true` if `key` has a getter.

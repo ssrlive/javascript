@@ -2608,41 +2608,6 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
     (export_names, export_name_to_local, reexport_sources)
 }
 
-/// Extract external import/export-from sources from the AST.
-#[allow(dead_code)]
-pub(crate) fn collect_module_sources(statements: &[Statement], self_basename: &str) -> Vec<String> {
-    let mut sources = Vec::new();
-    let known_builtins = ["math", "console", "os", "std", "./es6_module_export.js"];
-
-    for stmt in statements {
-        match &*stmt.kind {
-            StatementKind::Import(_, source, import_type) => {
-                let import_base = source.strip_prefix("./").unwrap_or(source);
-                if import_type.is_none() && import_base == self_basename {
-                    continue;
-                }
-                if known_builtins.contains(&source.as_str()) {
-                    continue;
-                }
-                if !sources.contains(source) {
-                    sources.push(source.clone());
-                }
-            }
-            StatementKind::Export(_specs, _, Some(source)) => {
-                let import_base = source.strip_prefix("./").unwrap_or(source);
-                if import_base == self_basename {
-                    continue;
-                }
-                if !sources.contains(source) {
-                    sources.push(source.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    sources
-}
-
 pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &str) -> Vec<ModuleRequest> {
     let mut requests = Vec::new();
     let mut seen = std::collections::HashSet::new();

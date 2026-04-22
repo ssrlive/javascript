@@ -456,7 +456,6 @@ struct GeneratorState<'gc> {
     /// Instruction pointer to resume from.
     ip: usize,
     /// Base pointer of the generator's call frame.
-    #[allow(dead_code)]
     bp: usize,
     /// Saved local variables (snapshot of the stack from bp..bp+n).
     locals: Vec<Value<'gc>>,
@@ -4511,16 +4510,6 @@ impl<'gc> VM<'gc> {
         ctor_val
     }
 
-    #[allow(dead_code)]
-    fn property_attributes(map: &IndexMap<String, Value<'gc>>, key: &str) -> (bool, bool, bool) {
-        let a = attrs_from_legacy_map(map, key);
-        (
-            a.contains(PropAttrs::WRITABLE),
-            a.contains(PropAttrs::ENUMERABLE),
-            a.contains(PropAttrs::CONFIGURABLE),
-        )
-    }
-
     fn wrap_descriptor_object(&self, ctx: &GcContext<'gc>, mut desc: IndexMap<String, Value<'gc>>) -> Value<'gc> {
         if let Some(Value::Object(object_ctor)) = self.globals.get("Object")
             && let Some(proto) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
@@ -4581,23 +4570,6 @@ impl<'gc> VM<'gc> {
         self.wrap_descriptor_object(ctx, desc)
     }
 
-    #[allow(dead_code)]
-    fn make_accessor_descriptor_object(
-        &self,
-        ctx: &GcContext<'gc>,
-        getter: Option<&Value<'gc>>,
-        setter: Option<&Value<'gc>>,
-        enumerable: bool,
-        configurable: bool,
-    ) -> Value<'gc> {
-        let mut desc = IndexMap::new();
-        desc.insert("get".to_string(), getter.unwrap_or(&Value::Undefined).clone());
-        desc.insert("set".to_string(), setter.unwrap_or(&Value::Undefined).clone());
-        desc.insert("enumerable".to_string(), Value::Boolean(enumerable));
-        desc.insert("configurable".to_string(), Value::Boolean(configurable));
-        self.wrap_descriptor_object(ctx, desc)
-    }
-
     /// Create a JS-visible descriptor object from a `PropDesc`.
     ///
     /// This is the unified replacement for `make_data_descriptor_object` and
@@ -4614,24 +4586,6 @@ impl<'gc> VM<'gc> {
         realm_id: Option<usize>,
     ) -> Value<'gc> {
         self.wrap_descriptor_object_for_realm(ctx, prop_desc.to_descriptor_map(), realm_id)
-    }
-
-    /// Read the current own property descriptor for `key` from a Object's
-    /// legacy hidden-key storage.
-    ///
-    /// Returns `None` if the property does not exist on the object itself.
-    #[allow(dead_code)]
-    fn get_own_prop_desc_from_object(&self, obj: &ObjectHandle<'gc>, key: &str) -> Option<PropDesc<'gc>> {
-        let borrow = obj.borrow();
-        desc_from_legacy_map(&borrow, key)
-    }
-
-    /// Read the current own property descriptor for `key` from a Array's
-    /// named property storage (props map).
-    #[allow(dead_code)]
-    fn get_own_prop_desc_from_array(&self, arr: &ArrayHandle<'gc>, key: &str) -> Option<PropDesc<'gc>> {
-        let borrow = arr.borrow();
-        desc_from_legacy_map(&borrow.props, key)
     }
 
     fn is_constructor_value(&self, v: &Value<'gc>) -> bool {

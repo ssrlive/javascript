@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // Helper functions for UTF-16 string operations
 pub fn utf8_to_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -9,79 +7,12 @@ pub fn utf16_to_utf8(v: &[u16]) -> String {
     String::from_utf16_lossy(v)
 }
 
-use std::cmp::Ordering;
-
-/// Compare two UTF-16 code unit sequences lexicographically by their code units.
-/// This matches ECMAScript string relational comparison semantics which are
-/// based on UTF-16 code unit order and must not replace isolated surrogates.
-pub fn utf16_cmp(a: &[u16], b: &[u16]) -> Ordering {
-    let min_len = a.len().min(b.len());
-    for i in 0..min_len {
-        if a[i] < b[i] {
-            return Ordering::Less;
-        }
-        if a[i] > b[i] {
-            return Ordering::Greater;
-        }
-    }
-    a.len().cmp(&b.len())
-}
-
-pub fn utf16_len(v: &[u16]) -> usize {
-    v.len()
-}
-
 pub fn utf16_slice(v: &[u16], start: usize, end: usize) -> Vec<u16> {
     if start >= v.len() {
         Vec::new()
     } else {
         let end = end.min(v.len());
         v[start..end].to_vec()
-    }
-}
-
-pub fn utf16_char_at(v: &[u16], index: usize) -> Option<u16> {
-    v.get(index).copied()
-}
-
-pub fn utf16_to_uppercase(v: &[u16]) -> Vec<u16> {
-    let s = utf16_to_utf8(v);
-    utf8_to_utf16(&s.to_uppercase())
-}
-
-pub fn utf16_to_lowercase(v: &[u16]) -> Vec<u16> {
-    let s = utf16_to_utf8(v);
-    utf8_to_utf16(&s.to_lowercase())
-}
-
-pub fn utf16_find(v: &[u16], pattern: &[u16]) -> Option<usize> {
-    if pattern.is_empty() {
-        return Some(0);
-    }
-    if pattern.len() > v.len() {
-        return None;
-    }
-    (0..=v.len() - pattern.len()).find(|&i| v[i..i + pattern.len()] == *pattern)
-}
-
-pub fn utf16_rfind(v: &[u16], pattern: &[u16]) -> Option<usize> {
-    if pattern.is_empty() {
-        return Some(v.len());
-    }
-    if pattern.len() > v.len() {
-        return None;
-    }
-    (0..=v.len() - pattern.len()).rev().find(|&i| v[i..i + pattern.len()] == *pattern)
-}
-
-pub fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {
-    if let Some(pos) = utf16_find(v, search) {
-        let mut result = v[..pos].to_vec();
-        result.extend_from_slice(replace);
-        result.extend_from_slice(&v[pos + search.len()..]);
-        result
-    } else {
-        v.to_vec()
     }
 }
 

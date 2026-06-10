@@ -5,7 +5,7 @@ use std::hint::black_box;
 // cargo bench --profile dev
 
 // Initialize logger for benchmark so `RUST_LOG` is honored.
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn __init_bench_logger() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
 }

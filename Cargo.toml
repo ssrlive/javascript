@@ -24,14 +24,12 @@ std = []
 bitflags = { version = "2.11.1", default-features = false, features = [] }
 chrono = { version = "0.4.44", features = ["serde"] }
 crossbeam-channel = "0.5.15"
-gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae", features = [
-    "indexmap",
-] }
+gc-arena = { version = "0.6.0", features = ["indexmap"] }
 indexmap = "2.14.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-regress = { version = "0.11", git = "https://github.com/ridiculousfish/regress.git", rev = "ca8f885", features = [
+regress = { version = "0.11", git = "https://github.com/ridiculousfish/regress.git", rev = "e3dead4", features = [
     "utf16",
 ] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
@@ -51,7 +49,7 @@ windows-sys = { version = "0.61.2", optional = true, features = [
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-ctor = "0.10.0"
+ctor = "1.0.7"
 env_logger = { version = "0.11.10" }
 
 [[bench]]

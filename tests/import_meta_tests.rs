@@ -1,6 +1,6 @@
 use javascript::*;
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn __init_test_logger() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
 }

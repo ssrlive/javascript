@@ -3826,9 +3826,8 @@ impl<'gc> VM<'gc> {
 
                 // ToIndex(byteOffset)
                 let raw_offset = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let byte_offset: usize;
-                if matches!(&raw_offset, Value::Undefined) {
-                    byte_offset = 0;
+                let byte_offset: usize = if matches!(&raw_offset, Value::Undefined) {
+                    0
                 } else if raw_offset.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
@@ -3852,8 +3851,8 @@ impl<'gc> VM<'gc> {
                         self.throw_range_error_object(ctx, "Invalid typed array byte offset");
                         return Value::Undefined;
                     }
-                    byte_offset = int_n as usize;
-                }
+                    int_n as usize
+                };
 
                 // byteOffset must be a multiple of elementSize
                 if !byte_offset.is_multiple_of(bytes_per_element) {
@@ -3872,9 +3871,8 @@ impl<'gc> VM<'gc> {
 
                 // ToIndex(length) if provided
                 let raw_len = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let explicit_len: Option<usize>;
-                if matches!(&raw_len, Value::Undefined) {
-                    explicit_len = None;
+                let explicit_len: Option<usize> = if matches!(&raw_len, Value::Undefined) {
+                    None
                 } else if raw_len.is_symbol_value() {
                     self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
                     return Value::Undefined;
@@ -3898,8 +3896,8 @@ impl<'gc> VM<'gc> {
                         self.throw_range_error_object(ctx, "Invalid typed array length");
                         return Value::Undefined;
                     }
-                    explicit_len = Some(int_n as usize);
-                }
+                    Some(int_n as usize)
+                };
 
                 // Check for detached buffer after ToIndex(length)
                 if matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))) {

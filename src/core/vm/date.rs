@@ -1041,10 +1041,8 @@ impl<'gc> VM<'gc> {
         let defaults: [f64; 7] = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         let mut nums = Vec::with_capacity(args.len().min(7));
         for args_i in args.iter().take(args.len().min(7)) {
-            match self.extract_number_with_coercion(ctx, args_i) {
-                Some(n) => nums.push(n),
-                None => return None, // abrupt completion
-            }
+            let n = self.extract_number_with_coercion(ctx, args_i)?;
+            nums.push(n);
         }
         let yr = nums[0];
         let month = nums.get(1).copied().unwrap_or(defaults[1]);
@@ -1576,10 +1574,9 @@ impl<'gc> VM<'gc> {
         }
         let (sign, rest) = if let Some(stripped) = s.strip_prefix('+') {
             (1i64, stripped)
-        } else if let Some(stripped) = s.strip_prefix('-') {
-            (-1_i64, stripped)
         } else {
-            return None;
+            let stripped = s.strip_prefix('-')?;
+            (-1_i64, stripped)
         };
         let year_end = rest.find('-')?;
         if year_end < 4 {

@@ -1,6 +1,6 @@
 [package]
 name = "javascript"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["ssrlive"]
 license = "MIT"
@@ -21,24 +21,22 @@ os = ["libc", "windows-sys"]
 std = []
 
 [dependencies]
-bitflags = { version = "2.13.0", default-features = false, features = [] }
+bitflags = { version = "2.13.1", default-features = false, features = [] }
 chrono = { version = "0.4.45", features = ["serde"] }
-crossbeam-channel = "0.5.15"
-gc-arena = { version = "0.6.0", features = ["indexmap"] }
+crossbeam-channel = "0.5.16"
+gc-arena = { version = "0.7.0", features = ["indexmap"] }
 indexmap = "2.14.0"
-log = "0.4.33"
-num-bigint = "0.4.6"
+log = "0.4.34"
+num-bigint = "0.5.1"
 num-traits = "0.2.19"
-regress = { version = "0.11", git = "https://github.com/ssrlive/regress.git", rev = "79fc9f5", features = [
-    "utf16",
-] }
-serde_json = { version = "1.0.150", features = ["preserve_order"] }
-temporal_rs = "0.2.3"
-thiserror = "2.0.18"
+regress = { version = "0.12.0", features = ["utf16"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+temporal_rs = "0.2.6"
+thiserror = "2.0.20"
 unicode-normalization = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.186", optional = true }
+libc = { version = "0.2.189", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = [
@@ -49,8 +47,8 @@ windows-sys = { version = "0.61.2", optional = true, features = [
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-ctor = "1.0.7"
-env_logger = { version = "0.11.10" }
+ctor = "1.0.13"
+env_logger = { version = "0.11.11" }
 
 [[bench]]
 name = "promise_benchmarks"

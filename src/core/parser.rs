@@ -2596,6 +2596,17 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             return Err(raise_parse_error!(
                 "SyntaxError: 'import defer' must use namespace form 'import defer * as name'"
             ));
+        } else if token_matches_unescaped_identifier_name(&t[*index], "source")
+            && *index + 1 < t.len()
+            && !token_matches_unescaped_identifier_name(&t[*index + 1], "from")
+        {
+            *index += 1;
+            if let Some(name) = t[*index].token.as_identifier_string() {
+                specifiers.push(ImportSpecifier::Source(name));
+                *index += 1;
+            } else {
+                return Err(raise_parse_error!("Expected identifier after 'import source'"));
+            }
         } else if let Some(name) = t[*index].token.as_identifier_string() {
             specifiers.push(ImportSpecifier::Default(name));
             *index += 1;
@@ -2707,6 +2718,7 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
                 ImportSpecifier::Default(n) => n.clone(),
                 ImportSpecifier::Namespace(n) => n.clone(),
                 ImportSpecifier::DeferredNamespace(n) => n.clone(),
+                ImportSpecifier::Source(n) => n.clone(),
                 ImportSpecifier::Named(imported, alias) => alias.as_ref().cloned().unwrap_or_else(|| imported.clone()),
             };
             // Modules are strict mode: eval/arguments cannot be import bindings
@@ -5245,6 +5257,22 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
     *index += 1;
     Ok(members)
 }
+fn is_import_call_expression(expr: &Expr) -> bool {
+    match expr {
+        Expr::DynamicImport(..) | Expr::DeferredImport(..) | Expr::SourceImport(..) => true,
+        Expr::Property(base, _)
+        | Expr::OptionalProperty(base, _)
+        | Expr::PrivateMember(base, _)
+        | Expr::OptionalPrivateMember(base, _)
+        | Expr::Call(base, _)
+        | Expr::OptionalCall(base, _)
+        | Expr::New(base, _)
+        | Expr::TaggedTemplate(base, ..) => is_import_call_expression(base),
+        Expr::Index(base, key) | Expr::OptionalIndex(base, key) => is_import_call_expression(base) || is_import_call_expression(key),
+        _ => false,
+    }
+}
+
 fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> Result<Expr, JSError> {
     while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
         *index += 1;
@@ -5461,12 +5489,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 // `new import(...)` is a SyntaxError, but `new (import(...))` is valid
                 let bare_import = *index < tokens.len() && matches!(tokens[*index].token, Token::Import);
                 let constructor = parse_primary(tokens, index, false)?;
-                if bare_import
-                    && matches!(
-                        constructor,
-                        Expr::DynamicImport(..) | Expr::DeferredImport(..) | Expr::SourceImport(..)
-                    )
-                {
+                if bare_import && is_import_call_expression(&constructor) {
                     return Err(raise_parse_error!("Cannot use 'new' with import()"));
                 }
                 let args = if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {

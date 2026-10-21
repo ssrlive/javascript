@@ -290,13 +290,38 @@ impl<'gc> VM<'gc> {
                 .last()
                 .filter(|value| !matches!(value, Value::Undefined))
                 .cloned();
-            return match self.intl_construct_service_instance(ctx, kind, ctor_value.as_ref(), args) {
+            let constructed = match self.intl_construct_service_instance(ctx, kind, ctor_value.as_ref(), args) {
                 Ok(value) => value,
                 Err(err) => {
                     self.pending_throw = Some(err);
                     Value::Undefined
                 }
             };
+            if self.pending_throw.is_some() {
+                return Value::Undefined;
+            }
+            if ctor_value.is_none()
+                && matches!(kind, "DateTimeFormat" | "NumberFormat")
+                && let Some(Value::Object(receiver_obj)) = receiver
+                && self.intl_legacy_receiver_has_service_prototype(receiver_obj, kind)
+            {
+                let fallback_symbol_key = self.intl_fallback_symbol_key(ctx);
+                let already_has_fallback = receiver_obj.borrow().contains_key(&fallback_symbol_key);
+                if already_has_fallback {
+                    self.throw_type_error(ctx, "Cannot redefine IntlLegacyConstructedSymbol");
+                    return Value::Undefined;
+                }
+                Self::insert_property_with_attributes(
+                    &mut receiver_obj.borrow_mut(ctx),
+                    &fallback_symbol_key,
+                    &constructed,
+                    false,
+                    false,
+                    false,
+                );
+                return Value::Object(*receiver_obj);
+            }
+            return constructed;
         }
         if Self::intl_is_supported_locales_host(name) {
             return self.intl_supported_locales_of(ctx, args.first(), args.get(1));
@@ -406,6 +431,40 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
         }
+    }
+
+    fn intl_fallback_symbol_key(&mut self, ctx: &GcContext<'gc>) -> String {
+        let symbol = if let Some(symbol) = self.intl_fallback_symbol.clone() {
+            symbol
+        } else {
+            self.symbol_counter += 1;
+            let symbol = self.create_symbol(
+                ctx,
+                self.symbol_counter,
+                Some(crate::unicode::utf8_to_utf16("IntlLegacyConstructedSymbol")),
+                false,
+            );
+            self.intl_fallback_symbol = Some(symbol.clone());
+            symbol
+        };
+        self.symbol_key_string(&symbol).expect("Intl fallback key is a Symbol")
+    }
+
+    fn intl_legacy_receiver_has_service_prototype(&self, receiver: &GcPtr<'gc, IndexMap<String, Value<'gc>>>, kind: &str) -> bool {
+        let Some(Value::Object(constructor)) = self.intl_service_constructor_from_global(kind) else {
+            return false;
+        };
+        let Some(Value::Object(expected_prototype)) = own_data_from_legacy_map(&constructor.borrow(), "prototype") else {
+            return false;
+        };
+        let mut current = receiver.borrow().get("__proto__").cloned();
+        while let Some(Value::Object(prototype)) = current {
+            if Gc::ptr_eq(prototype, expected_prototype) {
+                return true;
+            }
+            current = prototype.borrow().get("__proto__").cloned();
+        }
+        false
     }
 
     pub(super) fn intl_construct_host_fn(
@@ -1036,6 +1095,9 @@ impl<'gc> VM<'gc> {
                 "notation".to_string(),
                 borrow.get("__intl_notation__").cloned().unwrap_or_else(|| Value::from("standard")),
             );
+            if let Some(compact_display) = borrow.get("__intl_compact_display__").cloned() {
+                result.insert("compactDisplay".to_string(), compact_display);
+            }
             result.insert(
                 "minimumIntegerDigits".to_string(),
                 borrow.get("__intl_minimum_integer_digits__").cloned().unwrap_or(Value::Number(1.0)),
@@ -1223,7 +1285,7 @@ impl<'gc> VM<'gc> {
         let mut calendar = locale_info
             .unicode_keywords
             .get("ca")
-            .and_then(|value| Self::intl_supported_calendar(value));
+            .map(|value| Self::intl_supported_calendar(value).unwrap_or_else(|| value.to_ascii_lowercase()));
         let mut collation = locale_info
             .unicode_keywords
             .get("co")
@@ -1240,10 +1302,13 @@ impl<'gc> VM<'gc> {
             .unicode_keywords
             .get("kn")
             .and_then(|value| Self::intl_collator_unicode_bool(value));
-        let mut numbering_system = locale_info
-            .unicode_keywords
-            .get("nu")
-            .and_then(|value| Self::intl_supported_numbering_system(value));
+        let mut numbering_system = locale_info.unicode_keywords.get("nu").map(|value| {
+            if value == "true" {
+                String::new()
+            } else {
+                value.to_ascii_lowercase()
+            }
+        });
         let mut first_day_of_week = locale_info
             .unicode_keywords
             .get("fw")
@@ -1316,6 +1381,9 @@ impl<'gc> VM<'gc> {
                     numbering_system = Self::intl_supported_numbering_system(&value).or_else(|| Some(value.to_ascii_lowercase()));
                 }
                 if let Some(value) = self.intl_string_option(ctx, &options, "firstDayOfWeek", &[], None)? {
+                    if value.is_empty() {
+                        return Err(self.make_range_error_object(ctx, "Invalid firstDayOfWeek"));
+                    }
                     let Some(normalized) = Self::intl_locale_first_day_of_week(&value) else {
                         return Err(self.make_range_error_object(ctx, "Invalid firstDayOfWeek"));
                     };
@@ -2468,17 +2536,62 @@ impl<'gc> VM<'gc> {
         locale.borrow().get(slot).cloned().unwrap_or(Value::Undefined)
     }
 
+    fn intl_locale_region_preference(locale: &str) -> String {
+        let info = Self::intl_locale_info(locale);
+        if let Some(region_override) = info.unicode_keywords.get("rg")
+            && let Some(region) = region_override.strip_suffix("zzzz")
+            && let Some(region) = Self::intl_locale_region_option(region)
+        {
+            return region;
+        }
+
+        let components = Self::intl_locale_base_components(&info.base);
+        if let Some(region) = components.region {
+            return region;
+        }
+
+        if let Some(subdivision) = info.unicode_keywords.get("sd") {
+            let region = if subdivision.len() >= 3 && subdivision[..3].chars().all(|c| c.is_ascii_digit()) {
+                &subdivision[..3]
+            } else if subdivision.len() >= 2 {
+                &subdivision[..2]
+            } else {
+                ""
+            };
+            if let Some(region) = Self::intl_locale_region_option(region) {
+                return region;
+            }
+        }
+
+        let maximized = Self::intl_locale_maximize_tag(locale);
+        let maximized_base = Self::intl_locale_info(&maximized).base;
+        Self::intl_locale_base_components(&maximized_base)
+            .region
+            .unwrap_or_else(|| "001".to_string())
+    }
+
     fn intl_locale_get_calendars(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
         let Some(locale) = self.intl_require_initialized_service(ctx, receiver, Some("Locale")) else {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
+        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "und".to_string());
         let calendar = own_data_from_legacy_map(&borrow, "__intl_calendar__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             })
-            .unwrap_or_else(|| "gregory".to_string());
+            .unwrap_or_else(|| match Self::intl_locale_region_preference(&locale_tag).as_str() {
+                "TH" => "buddhist".to_string(),
+                "IR" => "persian".to_string(),
+                "JP" => "japanese".to_string(),
+                _ => "gregory".to_string(),
+            });
         Self::intl_string_array(ctx, &[calendar.as_str()])
     }
 
@@ -2490,9 +2603,7 @@ impl<'gc> VM<'gc> {
         let mut values: Vec<String> = Vec::new();
         if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_collation__") {
             let value = crate::unicode::utf16_to_utf8(&text);
-            if value != "standard" && value != "search" && !value.is_empty() {
-                values.push(value);
-            }
+            values.push(value);
         }
         if values.is_empty() {
             let language = own_data_from_legacy_map(&borrow, "__intl_language__")
@@ -2504,8 +2615,10 @@ impl<'gc> VM<'gc> {
             values.extend(match language.as_str() {
                 "de" => ["phonebk"].into_iter().map(str::to_string).collect::<Vec<_>>(),
                 "zh" => ["pinyin", "stroke"].into_iter().map(str::to_string).collect::<Vec<_>>(),
-                _ => ["emoji"].into_iter().map(str::to_string).collect::<Vec<_>>(),
+                "ar" | "en" | "es" | "fr" | "ja" | "ko" | "ru" => ["emoji", "eor"].into_iter().map(str::to_string).collect::<Vec<_>>(),
+                _ => ["emoji", "eor"].into_iter().map(str::to_string).collect::<Vec<_>>(),
             });
+            values.sort();
         }
         let refs: Vec<&str> = values.iter().map(String::as_str).collect();
         Self::intl_string_array(ctx, &refs)
@@ -2516,15 +2629,25 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let values: Vec<String> = if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_hour_cycle__") {
+        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "und".to_string());
+        let values = if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_hour_cycle__") {
             vec![crate::unicode::utf16_to_utf8(&text)]
-        } else if matches!(
-            own_data_from_legacy_map(&borrow, "__intl_region__"),
-            Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == "US"
-        ) {
-            vec!["h12".to_string()]
         } else {
-            vec!["h23".to_string()]
+            let region = Self::intl_locale_region_preference(&locale_tag);
+            let locale_info = Self::intl_locale_info(&locale_tag);
+            let language = Self::intl_locale_base_components(&locale_info.base).language;
+            let cycle = match (language.as_str(), region.as_str()) {
+                ("fr", "CA") | ("ku", "SY") | ("de", "001") | ("fr", "001") => "h23",
+                ("en", "CA") | ("ar", "SY") | ("en", "001") | ("ar", "001") => "h12",
+                _ if matches!(region.as_str(), "US" | "CA" | "PH" | "PK") => "h12",
+                _ => "h23",
+            };
+            vec![cycle.to_string()]
         };
         let refs: Vec<&str> = values.iter().map(String::as_str).collect();
         Self::intl_string_array(ctx, &refs)
@@ -2549,17 +2672,14 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let language = own_data_from_legacy_map(&borrow, "__intl_language__")
+        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             })
-            .unwrap_or_else(|| "en".to_string());
-        let direction = if matches!(language.as_str(), "ar" | "fa" | "he" | "ur") {
-            "rtl"
-        } else {
-            "ltr"
-        };
+            .unwrap_or_else(|| "und".to_string());
+        let maximized = Self::intl_locale_maximize_tag(&locale_tag);
+        let script = Self::intl_locale_base_components(&Self::intl_locale_info(&maximized).base).script;
         let object_proto = self.globals.get("Object").and_then(|value| match value {
             Value::Object(object) => own_data_from_legacy_map(&object.borrow(), "prototype"),
             _ => None,
@@ -2568,7 +2688,40 @@ impl<'gc> VM<'gc> {
         if let Some(proto) = object_proto {
             object.insert("__proto__".to_string(), proto);
         }
-        object.insert("direction".to_string(), Value::from(direction));
+        if let Some(script) = script {
+            let direction = if matches!(
+                script.as_str(),
+                "Adlm"
+                    | "Arab"
+                    | "Armi"
+                    | "Avst"
+                    | "Hatr"
+                    | "Hebr"
+                    | "Khar"
+                    | "Lydi"
+                    | "Mand"
+                    | "Mend"
+                    | "Nkoo"
+                    | "Palm"
+                    | "Phlp"
+                    | "Samr"
+                    | "Syrc"
+                    | "Thaa"
+                    | "Yezi"
+            ) {
+                "rtl"
+            } else if matches!(
+                script.as_str(),
+                "Armn" | "Beng" | "Cyrl" | "Deva" | "Ethi" | "Geor" | "Grek" | "Guru" | "Hans" | "Hant" | "Jpan" | "Kore" | "Latn" | "Thai"
+            ) {
+                "ltr"
+            } else {
+                ""
+            };
+            if !direction.is_empty() {
+                object.insert("direction".to_string(), Value::from(direction));
+            }
+        }
         Value::Object(new_gc_cell_ptr(ctx, object))
     }
 
@@ -2598,17 +2751,31 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
+        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+            .and_then(|value| match value {
+                Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "und".to_string());
+        let region = Self::intl_locale_region_preference(&locale_tag);
         let first_day_value = own_data_from_legacy_map(&borrow, "__intl_first_day_of_week__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             })
-            .unwrap_or_else(|| match own_data_from_legacy_map(&borrow, "__intl_region__") {
-                Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == "US" => "sun".to_string(),
+            .unwrap_or_else(|| match region.as_str() {
+                "US" | "IN" => "sun".to_string(),
+                "IR" | "AF" => "sat".to_string(),
                 _ => "mon".to_string(),
             });
         let first_day = Self::intl_weekday_string_to_number(&first_day_value).unwrap_or(1) as f64;
-        let weekend = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::Number(6.0), Value::Number(7.0)])));
+        let weekend = match region.as_str() {
+            "IN" => vec![Value::Number(7.0)],
+            "IR" => vec![Value::Number(5.0)],
+            "AF" => vec![Value::Number(5.0), Value::Number(6.0)],
+            _ => vec![Value::Number(6.0), Value::Number(7.0)],
+        };
+        let weekend = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(weekend)));
         let object_proto = self.globals.get("Object").and_then(|value| match value {
             Value::Object(object) => own_data_from_legacy_map(&object.borrow(), "prototype"),
             _ => None,
@@ -4673,9 +4840,23 @@ impl<'gc> VM<'gc> {
         receiver: Option<&Value<'gc>>,
         expected_kind: Option<&str>,
     ) -> Option<GcPtr<'gc, IndexMap<String, Value<'gc>>>> {
-        let Some(Value::Object(obj)) = receiver else {
+        let Some(Value::Object(receiver_obj)) = receiver else {
             self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
             return None;
+        };
+        let obj = if receiver_obj.borrow().contains_key("__intl_kind__") {
+            *receiver_obj
+        } else {
+            let fallback_symbol_key = self.intl_fallback_symbol_key(ctx);
+            let fallback = self.read_named_property(ctx, receiver.unwrap(), &fallback_symbol_key);
+            if self.pending_throw.is_some() {
+                return None;
+            }
+            let Value::Object(fallback_obj) = fallback else {
+                self.pending_throw = Some(self.make_type_error_object(ctx, "Intl method called on incompatible receiver"));
+                return None;
+            };
+            fallback_obj
         };
         let borrow = obj.borrow();
         let Some(Value::String(kind)) = borrow.get("__intl_kind__") else {
@@ -4695,7 +4876,7 @@ impl<'gc> VM<'gc> {
             return None;
         }
         drop(borrow);
-        Some(*obj)
+        Some(obj)
     }
 
     fn intl_date_time_format_single_value(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Option<i64> {
@@ -5893,10 +6074,18 @@ impl<'gc> VM<'gc> {
         }
 
         if let Some(style) = weekday {
-            let names = match style.as_str() {
-                "narrow" => ["S", "M", "T", "W", "T", "F", "S"],
-                "short" => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
-                _ => ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+            let names = if locale.starts_with("de") {
+                match style.as_str() {
+                    "narrow" => ["S", "M", "D", "M", "D", "F", "S"],
+                    "short" => ["So.", "Mo.", "Di.", "Mi.", "Do.", "Fr.", "Sa."],
+                    _ => ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"],
+                }
+            } else {
+                match style.as_str() {
+                    "narrow" => ["S", "M", "T", "W", "T", "F", "S"],
+                    "short" => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+                    _ => ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+                }
             };
             parts.push((
                 "weekday".to_string(),
@@ -7566,6 +7755,7 @@ impl<'gc> VM<'gc> {
             "localeMatcher",
             "type",
             "notation",
+            "compactDisplay",
             "minimumIntegerDigits",
             "minimumFractionDigits",
             "maximumFractionDigits",
@@ -7594,6 +7784,14 @@ impl<'gc> VM<'gc> {
                 Some("standard"),
             )?
             .unwrap_or_else(|| "standard".to_string());
+        out.compact_display = if out.notation == "compact" {
+            Some(
+                self.intl_string_option_from_value(ctx, raw.get("compactDisplay"), &["short", "long"], Some("short"))?
+                    .unwrap_or_else(|| "short".to_string()),
+            )
+        } else {
+            None
+        };
         if let Some(value) = self.intl_default_u8_option_value(ctx, raw.get("minimumIntegerDigits"), "minimumIntegerDigits", 1, 21)? {
             out.minimum_integer_digits = value;
         }
@@ -7748,12 +7946,6 @@ impl<'gc> VM<'gc> {
         out.style = self
             .intl_string_option(ctx, &boxed_options, "style", &["long", "short", "narrow", "digital"], Some("short"))?
             .unwrap_or_else(|| "short".to_string());
-        let fractional_digits_value = self.read_named_property(ctx, &boxed_options, "fractionalDigits");
-        if let Some(thrown) = self.pending_throw.take() {
-            return Err(thrown);
-        }
-        out.fractional_digits = self.intl_default_u8_option_value(ctx, Some(&fractional_digits_value), "fractionalDigits", 0, 9)?;
-
         let mut prev_style = None::<String>;
         for (slot, allowed) in [
             ("years", &["long", "short", "narrow"][..]),
@@ -7786,6 +7978,11 @@ impl<'gc> VM<'gc> {
             out.set_unit(slot, style.clone(), display);
             prev_style = Some(style);
         }
+        let fractional_digits_value = self.read_named_property(ctx, &boxed_options, "fractionalDigits");
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(thrown);
+        }
+        out.fractional_digits = self.intl_default_u8_option_value(ctx, Some(&fractional_digits_value), "fractionalDigits", 0, 9)?;
         Ok(out)
     }
 
@@ -7953,6 +8150,9 @@ impl<'gc> VM<'gc> {
     fn intl_store_plural_rules_options(&self, obj: &mut IndexMap<String, Value<'gc>>, options: &IntlPluralRulesOptions) {
         obj.insert("__intl_type__".to_string(), Value::from(options.plural_type.as_str()));
         obj.insert("__intl_notation__".to_string(), Value::from(options.notation.as_str()));
+        if let Some(compact_display) = &options.compact_display {
+            obj.insert("__intl_compact_display__".to_string(), Value::from(compact_display.as_str()));
+        }
         obj.insert(
             "__intl_minimum_integer_digits__".to_string(),
             Value::Number(options.minimum_integer_digits as f64),
@@ -8384,7 +8584,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_canonicalize_unicode_keyword_value(key: &str, value: Vec<String>) -> Vec<String> {
-        let joined = value.join("-");
+        let joined = value.join("-").to_ascii_lowercase();
         let canonical = match (key, joined.as_str()) {
             ("ca", "ethiopic-amete-alem") => Some("ethioaa"),
             ("ca", "islamicc") => Some("islamic-civil"),
@@ -8540,7 +8740,8 @@ impl<'gc> VM<'gc> {
         }
         let language = locale_base.split('-').next().unwrap_or(locale_base).to_ascii_lowercase();
         match value.as_str() {
-            "phonebk" | "eor" => (language == "de").then_some(value),
+            "phonebk" => (language == "de").then_some(value),
+            "eor" => Some(value),
             "pinyin" | "stroke" | "unihan" | "zhuyin" => (language == "zh").then_some(value),
             _ => INTL_SUPPORTED_COLLATIONS.contains(&value.as_str()).then_some(value),
         }
@@ -8903,7 +9104,10 @@ impl<'gc> VM<'gc> {
     }
 
     fn intl_locale_collation_keyword(value: &str) -> Option<String> {
-        if value.is_empty() || !Self::intl_is_valid_unicode_type_identifier(value) {
+        if value.is_empty() {
+            return Some(String::new());
+        }
+        if !Self::intl_is_valid_unicode_type_identifier(value) {
             return None;
         }
         Some(value.to_ascii_lowercase())
@@ -8920,6 +9124,7 @@ impl<'gc> VM<'gc> {
     fn intl_locale_first_day_of_week(value: &str) -> Option<String> {
         let lower = value.to_ascii_lowercase();
         match lower.as_str() {
+            "" | "true" => Some(String::new()),
             "1" | "mon" => Some("mon".to_string()),
             "2" | "tue" => Some("tue".to_string()),
             "3" | "wed" => Some("wed".to_string()),
@@ -8927,7 +9132,6 @@ impl<'gc> VM<'gc> {
             "5" | "fri" => Some("fri".to_string()),
             "6" | "sat" => Some("sat".to_string()),
             "0" | "7" | "sun" => Some("sun".to_string()),
-            "true" => Some(String::new()),
             _ if Self::intl_is_valid_unicode_type_identifier(&lower) => Some(lower),
             _ => None,
         }
@@ -9009,7 +9213,7 @@ impl<'gc> VM<'gc> {
         let core_name = Self::intl_locale_base_name_string(&core);
         let maximal_core = match core_name.as_str() {
             "en" | "en-Latn" | "en-US" | "und" => "en-Latn-US",
-            "de" => "de-Latn-DE",
+            "de" | "de-DE" => "de-Latn-DE",
             "en-Shaw" => "en-Shaw-GB",
             "en-Arab" => "en-Arab-US",
             "en-GB" => "en-Latn-GB",
@@ -9019,6 +9223,22 @@ impl<'gc> VM<'gc> {
             "uz-UZ" => "uz-Latn-UZ",
             "it-Kana-CA" => "it-Kana-CA",
             "hi" => "hi-Deva-IN",
+            "am" | "am-ET" => "am-Ethi-ET",
+            "ar" => "ar-Arab-EG",
+            "ar-EG" => "ar-Arab-EG",
+            "bn" | "bn-BD" => "bn-Beng-BD",
+            "el" | "el-GR" => "el-Grek-GR",
+            "fa" | "fa-IR" => "fa-Arab-IR",
+            "fil" | "fil-PH" => "fil-Latn-PH",
+            "ja" | "ja-JP" => "ja-Jpan-JP",
+            "ko" | "ko-KR" => "ko-Kore-KR",
+            "ms" | "ms-MY" => "ms-Latn-MY",
+            "pa" | "pa-IN" => "pa-Guru-IN",
+            "pa-PK" => "pa-Arab-PK",
+            "ps" | "ps-AF" => "ps-Arab-AF",
+            "sa" | "sa-IN" => "sa-Deva-IN",
+            "th" | "th-TH" => "th-Thai-TH",
+            "ur" | "ur-PK" => "ur-Arab-PK",
             "und-Thai" => "th-Thai-TH",
             "und-419" => "es-Latn-419",
             "und-150" => "en-Latn-150",
@@ -9767,6 +9987,7 @@ struct IntlPluralRulesOptions {
     resolved_locale: String,
     plural_type: String,
     notation: String,
+    compact_display: Option<String>,
     minimum_integer_digits: u8,
     minimum_fraction_digits: u8,
     maximum_fraction_digits: u8,
@@ -9913,6 +10134,7 @@ impl IntlPluralRulesOptions {
             resolved_locale,
             plural_type: "cardinal".to_string(),
             notation: "standard".to_string(),
+            compact_display: None,
             minimum_integer_digits: 1,
             minimum_fraction_digits: 0,
             maximum_fraction_digits: 3,

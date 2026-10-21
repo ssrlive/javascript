@@ -49,6 +49,58 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_number_formatting_uses_ecmascript_exponent_boundaries() {
+        let script = "[1e-6, 1e-7, 1.5e300, 1e20].join('|')";
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"0.000001|1e-7|1.5e+300|100000000000000000000\"");
+
+        let script = "JSON.stringify([1e-7, 1.5e300])";
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"[1e-7,1.5e+300]\"");
+    }
+
+    #[test]
+    fn test_typed_array_from_array_like_reads_and_maps_each_element() {
+        let script = r#"
+            const source = { 0: 42, 2: 44, length: 4 };
+            const numbers = Float64Array.from(source);
+            const bigints = BigInt64Array.from({ 0: 42n, length: 1 }, value => value);
+
+            let getterThrew = false;
+            const getterSource = { length: 1 };
+            Object.defineProperty(getterSource, "0", {
+                get() { throw "getter failure"; }
+            });
+            try {
+                Float64Array.from(getterSource);
+            } catch (error) {
+                getterThrew = error === "getter failure";
+            }
+
+            let mapperThrew = false;
+            try {
+                BigInt64Array.from({ 0: 1n, length: 1 }, () => {
+                    throw "mapper failure";
+                });
+            } catch (error) {
+                mapperThrew = error === "mapper failure";
+            }
+
+            [
+                numbers[0],
+                Number.isNaN(numbers[1]),
+                numbers[2],
+                Number.isNaN(numbers[3]),
+                bigints[0] === 42n,
+                getterThrew,
+                mapperThrew
+            ].join("|")
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"42|true|44|true|true|true|true\"");
+    }
+
+    #[test]
     fn test_math_pow() {
         let script = "Math.pow(2, 3)";
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();

@@ -172,9 +172,13 @@ impl<'gc> VM<'gc> {
                         return Err("URI malformed".to_string());
                     };
 
-                    let mut utf8_bytes = vec![b0 as u8];
+                    let mut code_point = match n {
+                        2 => (b0 & 0x1F) as u32,
+                        3 => (b0 & 0x0F) as u32,
+                        _ => (b0 & 0x07) as u32,
+                    };
                     for _ in 1..n {
-                        if i + 2 > len || input[i] != 0x25 {
+                        if i + 2 >= len || input[i] != 0x25 {
                             return Err("URI malformed".to_string());
                         }
                         let h = Self::hex_value_u16(input[i + 1]).ok_or_else(|| "URI malformed".to_string())?;
@@ -183,14 +187,16 @@ impl<'gc> VM<'gc> {
                         if b & 0xC0 != 0x80 {
                             return Err("URI malformed".to_string());
                         }
-                        utf8_bytes.push(b as u8);
+                        code_point = (code_point << 6) | (b & 0x3F) as u32;
                         i += 3;
                     }
 
-                    let decoded = std::str::from_utf8(&utf8_bytes).map_err(|_| "URI malformed".to_string())?;
-                    let code_point = decoded.chars().next().ok_or_else(|| "URI malformed".to_string())? as u32;
-
-                    if (0xD800..=0xDFFF).contains(&code_point) {
+                    let minimum = match n {
+                        2 => 0x80,
+                        3 => 0x800,
+                        _ => 0x10000,
+                    };
+                    if code_point < minimum || code_point > 0x10FFFF || (0xD800..=0xDFFF).contains(&code_point) {
                         return Err("URI malformed".to_string());
                     }
 

@@ -184,6 +184,7 @@ pub(crate) enum ReexportSpec {
 pub(crate) enum ModuleRequestPhase {
     Evaluation,
     Defer,
+    Source,
 }
 
 #[derive(Clone, Debug)]
@@ -2408,7 +2409,7 @@ fn collect_module_declared_names(statements: &[Statement], names: &mut std::coll
                     names.insert(decl.0.clone());
                 }
             }
-            SK::Const(decls) => {
+            SK::Const(decls) | SK::Using(decls) | SK::AwaitUsing(decls) => {
                 for decl in decls {
                     names.insert(decl.0.clone());
                 }
@@ -2429,7 +2430,8 @@ fn collect_module_declared_names(statements: &[Statement], names: &mut std::coll
                             names.insert(alias.as_ref().unwrap_or(n).clone());
                         }
                         crate::core::statement::ImportSpecifier::Namespace(n)
-                        | crate::core::statement::ImportSpecifier::DeferredNamespace(n) => {
+                        | crate::core::statement::ImportSpecifier::DeferredNamespace(n)
+                        | crate::core::statement::ImportSpecifier::Source(n) => {
                             names.insert(n.clone());
                         }
                     }
@@ -2616,7 +2618,9 @@ pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &
     for stmt in statements {
         let maybe_request = match &*stmt.kind {
             StatementKind::Import(specifiers, source, import_type) => {
-                let phase = if specifiers.iter().any(|spec| matches!(spec, ImportSpecifier::DeferredNamespace(_))) {
+                let phase = if specifiers.iter().any(|spec| matches!(spec, ImportSpecifier::Source(_))) {
+                    ModuleRequestPhase::Source
+                } else if specifiers.iter().any(|spec| matches!(spec, ImportSpecifier::DeferredNamespace(_))) {
                     ModuleRequestPhase::Defer
                 } else {
                     ModuleRequestPhase::Evaluation
@@ -2768,9 +2772,8 @@ pub(crate) fn module_has_top_level_await(statements: &[Statement]) -> bool {
             StatementKind::Let(decls) | StatementKind::Var(decls) => {
                 decls.iter().any(|(_, init)| init.as_ref().is_some_and(expr_has_top_level_await))
             }
-            StatementKind::Const(decls) | StatementKind::Using(decls) | StatementKind::AwaitUsing(decls) => {
-                decls.iter().any(|(_, init)| expr_has_top_level_await(init))
-            }
+            StatementKind::AwaitUsing(_) => true,
+            StatementKind::Const(decls) | StatementKind::Using(decls) => decls.iter().any(|(_, init)| expr_has_top_level_await(init)),
             StatementKind::Return(expr) => expr.as_ref().is_some_and(expr_has_top_level_await),
             StatementKind::Throw(expr)
             | StatementKind::Assign(_, expr)

@@ -431,27 +431,50 @@ pub fn format_js_number(n: f64) -> String {
     if n == 0.0 {
         return "0".to_string();
     }
-    if n.to_bits() == 1 {
-        return "5e-324".to_string();
+    if n.is_nan() {
+        return "NaN".to_string();
     }
-    if n == f64::MAX {
-        return "1.7976931348623157e+308".to_string();
+    if n.is_infinite() {
+        return if n.is_sign_negative() { "-Infinity" } else { "Infinity" }.to_string();
     }
+
+    let negative = n.is_sign_negative();
     let abs = n.abs();
-    if !(1e-6..1e21).contains(&abs) {
-        let precision = if abs >= 1e21 { 16 } else { 15 };
-        let s = format!("{:.*e}", precision, n);
-        if let Some((mant, exp)) = s.split_once('e') {
-            let mant = mant.trim_end_matches('0').trim_end_matches('.');
-            if let Ok(exp_int) = exp.parse::<i32>() {
-                return format!("{}e{:+}", mant, exp_int);
-            }
+    let repr = format!("{abs:?}");
+    let (mantissa, exponent) = repr
+        .split_once('e')
+        .map(|(mantissa, exponent)| (mantissa, exponent.parse::<i32>().unwrap_or(0)))
+        .unwrap_or((&repr, 0));
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut digits = format!("{integer}{fraction}");
+    let mut decimal_position = integer.len() as i32 + exponent;
+
+    let leading_zeros = digits.bytes().take_while(|digit| *digit == b'0').count();
+    digits.drain(..leading_zeros);
+    decimal_position -= leading_zeros as i32;
+    while digits.ends_with('0') {
+        digits.pop();
+    }
+
+    let formatted = if (1e-6..1e21).contains(&abs) {
+        if decimal_position <= 0 {
+            format!("0.{}{}", "0".repeat((-decimal_position) as usize), digits)
+        } else if decimal_position as usize >= digits.len() {
+            format!("{}{}", digits, "0".repeat(decimal_position as usize - digits.len()))
+        } else {
+            let position = decimal_position as usize;
+            format!("{}.{}", &digits[..position], &digits[position..])
         }
-        return s;
-    }
-    let mut s = format!("{}", n);
-    if s.contains('.') {
-        s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    }
-    s
+    } else {
+        let exponent = decimal_position - 1;
+        let fraction = &digits[1..];
+        let mantissa = if fraction.is_empty() {
+            digits
+        } else {
+            format!("{}.{}", &digits[..1], fraction)
+        };
+        format!("{mantissa}e{exponent:+}")
+    };
+
+    if negative { format!("-{formatted}") } else { formatted }
 }

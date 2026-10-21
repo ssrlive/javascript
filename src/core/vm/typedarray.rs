@@ -133,7 +133,7 @@ pub(crate) fn f16_bits_to_f64(bits: u16) -> f64 {
     }
 
     // Normal: value = (-1)^sign × 2^(exp-15) × (1 + frac/1024)
-    let f64_exp = ((exp as u64) - 15 + 1023) & 0x7FF; // re-bias for f64
+    let f64_exp = ((exp as i32 - 15 + 1023) as u64) & 0x7FF; // re-bias for f64
     f64::from_bits(sign << 63 | f64_exp << 52 | frac << 42)
 }
 
@@ -643,7 +643,7 @@ impl<'gc> VM<'gc> {
             }
             "typedarray.set" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
-                if !self.validate_typed_array(ctx, &this_val, "set") {
+                if !self.validate_typed_array_write(ctx, &this_val, "set") {
                     return Value::Undefined;
                 }
                 if let Value::Array(arr) = &this_val {
@@ -673,7 +673,7 @@ impl<'gc> VM<'gc> {
                 };
 
                 // Re-validate after coercion (buffer may have been detached)
-                if !self.validate_typed_array(ctx, &this_val, "set") {
+                if !self.validate_typed_array_write(ctx, &this_val, "set") {
                     return Value::Undefined;
                 }
 
@@ -1085,8 +1085,8 @@ impl<'gc> VM<'gc> {
                 }
 
                 // Collect source items
-                let items: Vec<Value<'gc>> = match &source {
-                    Value::Array(src) => src.borrow().elements.clone(),
+                let (items, array_like_len): (Vec<Value<'gc>>, Option<usize>) = match &source {
+                    Value::Array(src) => (src.borrow().elements.clone(), None),
                     _ => {
                         // Try iterator protocol
                         let iterator_method = self.read_named_property(ctx, &source, "@@sym:1");
@@ -1108,15 +1108,15 @@ impl<'gc> VM<'gc> {
                                 self.throw_type_error(ctx, "iterator must return an object");
                                 return Value::Undefined;
                             }
+                            let next_method = self.read_named_property(ctx, &iterator, "next");
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
+                            if !self.is_value_callable(&next_method) {
+                                self.throw_type_error(ctx, "iterator.next is not callable");
+                                return Value::Undefined;
+                            }
                             loop {
-                                let next_method = self.read_named_property(ctx, &iterator, "next");
-                                if self.pending_throw.is_some() {
-                                    return Value::Undefined;
-                                }
-                                if !self.is_value_callable(&next_method) {
-                                    self.throw_type_error(ctx, "iterator.next is not callable");
-                                    return Value::Undefined;
-                                }
                                 let result = self.vm_call_function_value(ctx, &next_method, &iterator, &[]);
                                 if let Err(e) = result {
                                     self.set_pending_throw_from_error(&e);
@@ -1141,7 +1141,7 @@ impl<'gc> VM<'gc> {
                                 let value = self.read_named_property(ctx, &result, "value");
                                 items.push(value);
                             }
-                            items
+                            (items, None)
                         } else {
                             // array-like
                             let len_val = self.read_named_property(ctx, &source, "length");
@@ -1156,32 +1156,35 @@ impl<'gc> VM<'gc> {
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
-                            let mut items = Vec::with_capacity(len);
-                            for i in 0..len {
-                                let v = self.read_named_property(ctx, &source, &i.to_string());
-                                if self.pending_throw.is_some() {
-                                    return Value::Undefined;
-                                }
-                                items.push(v);
-                            }
-                            items
+                            (Vec::new(), Some(len))
                         }
                     }
                 };
                 // Construct TypedArray first, then interleave mapfn+Set per element (spec step 6e/8f)
                 let has_mapping = matches!(&map_fn, Some(mf) if !matches!(mf, Value::Undefined));
-                let result = self.construct_value(ctx, &ctor, &[Value::Number(items.len() as f64)], None);
+                let result_len = array_like_len.unwrap_or(items.len());
+                let result = self.construct_value(ctx, &ctor, &[Value::Number(result_len as f64)], None);
                 match result {
                     Ok(ta @ Value::Array(_)) => {
-                        if !self.validate_typed_array(ctx, &ta, "from") {
+                        if !self.validate_typed_array_write(ctx, &ta, "from") {
                             return Value::Undefined;
                         }
                         let ta_len = if let Value::Array(a) = &ta { a.borrow().elements.len() } else { 0 };
-                        if ta_len < items.len() {
+                        if ta_len < result_len {
                             self.throw_type_error(ctx, "TypedArray is too small");
                             return Value::Undefined;
                         }
-                        for (i, item) in items.into_iter().enumerate() {
+                        let mut items = items.into_iter();
+                        for i in 0..result_len {
+                            let item = if array_like_len.is_some() {
+                                let value = self.read_named_property(ctx, &source, &i.to_string());
+                                if self.pending_throw.is_some() {
+                                    return Value::Undefined;
+                                }
+                                value
+                            } else {
+                                items.next().expect("iterator item count defines result length")
+                            };
                             let mapped_value = if has_mapping {
                                 let mf = map_fn.as_ref().unwrap();
                                 match self.vm_call_function_value(ctx, mf, &this_arg, &[item, Value::Number(i as f64)]) {
@@ -1228,7 +1231,7 @@ impl<'gc> VM<'gc> {
                 let result = self.construct_value(ctx, &ctor, &[Value::Number(len as f64)], None);
                 match result {
                     Ok(ta @ Value::Array(_)) => {
-                        if !self.validate_typed_array(ctx, &ta, "of") {
+                        if !self.validate_typed_array_write(ctx, &ta, "of") {
                             return Value::Undefined;
                         }
                         // TypedArrayCreate: verify length >= required
@@ -1411,7 +1414,7 @@ impl<'gc> VM<'gc> {
             }
             "typedarray.fill" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
-                if !self.validate_typed_array(ctx, &this_val, "fill") {
+                if !self.validate_typed_array_write(ctx, &this_val, "fill") {
                     return Value::Undefined;
                 }
                 let Value::Array(arr) = &this_val else {
@@ -1454,7 +1457,7 @@ impl<'gc> VM<'gc> {
                 }
 
                 // Re-validate after coercion (buffer may have been detached)
-                if !self.validate_typed_array(ctx, &this_val, "fill") {
+                if !self.validate_typed_array_write(ctx, &this_val, "fill") {
                     return Value::Undefined;
                 }
 
@@ -1549,7 +1552,7 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
 
-                if !self.validate_typed_array(ctx, &this_val, "sort") {
+                if !self.validate_typed_array_write(ctx, &this_val, "sort") {
                     return Value::Undefined;
                 }
                 let Value::Array(arr) = &this_val else {
@@ -1753,7 +1756,7 @@ impl<'gc> VM<'gc> {
             }
             "typedarray.reverse" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
-                if !self.validate_typed_array(ctx, &this_val, "reverse") {
+                if !self.validate_typed_array_write(ctx, &this_val, "reverse") {
                     return Value::Undefined;
                 }
                 let Value::Array(arr) = &this_val else {
@@ -1907,7 +1910,10 @@ impl<'gc> VM<'gc> {
                         for (i, v) in elements.iter().enumerate() {
                             let bi = match v {
                                 Value::BigInt(b) => (**b).clone(),
-                                _ => num_bigint::BigInt::from(0),
+                                _ => match self.value_to_bigint(ctx, v) {
+                                    Some(value) => value,
+                                    None => return Value::Undefined,
+                                },
                             };
                             let coerced = coerce_bigint_for_ta(&bi, &ta_name);
                             if i < res_arr.borrow().elements.len() {
@@ -2141,7 +2147,7 @@ impl<'gc> VM<'gc> {
             }
             "typedarray.copyWithin" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined).clone();
-                if !self.validate_typed_array(ctx, &this_val, "copyWithin") {
+                if !self.validate_typed_array_write(ctx, &this_val, "copyWithin") {
                     return Value::Undefined;
                 }
                 let Value::Array(arr) = &this_val else {
@@ -2344,7 +2350,10 @@ impl<'gc> VM<'gc> {
                         if is_bigint_typed_array(&res_ta_name) {
                             let bi = match &from_value {
                                 Value::BigInt(b) => (**b).clone(),
-                                _ => num_bigint::BigInt::from(0),
+                                _ => match self.value_to_bigint(ctx, &from_value) {
+                                    Some(value) => value,
+                                    None => return Value::Undefined,
+                                },
                             };
                             let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
                             res_arr.borrow_mut(ctx).elements[k] = Value::BigInt(Box::new(coerced));
@@ -2666,10 +2675,13 @@ impl<'gc> VM<'gc> {
                     };
                     if k < res_arr.borrow().elements.len() {
                         if is_bigint_typed_array(&res_ta_name) {
-                            let bi = match &from_value {
-                                Value::BigInt(b) => (**b).clone(),
-                                _ => num_bigint::BigInt::from(0),
+                            let bi = match self.value_to_bigint(ctx, &from_value) {
+                                Some(bi) => bi,
+                                None => return Value::Undefined,
                             };
+                            if self.pending_throw.is_some() {
+                                return Value::Undefined;
+                            }
                             let coerced = coerce_bigint_for_ta(&bi, &res_ta_name);
                             res_arr.borrow_mut(ctx).elements[k] = Value::BigInt(Box::new(coerced));
                             self.sync_ta_element_to_buffer(ctx, res_arr, k, 0.0, &res_ta_name);
@@ -2752,6 +2764,29 @@ impl<'gc> VM<'gc> {
                 false
             }
         }
+    }
+
+    fn validate_typed_array_write(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>, method: &str) -> bool {
+        if !self.validate_typed_array(ctx, val, method) {
+            return false;
+        }
+        let immutable = if let Value::Array(arr) = val {
+            let buffer = arr.borrow().props.get("__typedarray_buffer__").cloned();
+            matches!(
+                buffer,
+                Some(Value::Object(ref buf)) if matches!(buf.borrow().get("__immutable__"), Some(Value::Boolean(true)))
+            )
+        } else {
+            false
+        };
+        if immutable {
+            self.throw_type_error(
+                ctx,
+                &format!("%TypedArray%.prototype.{} called on an immutable ArrayBuffer", method),
+            );
+            return false;
+        }
+        true
     }
 
     /// Implements SpeciesConstructor(O, defaultConstructor) for TypedArrays.
@@ -2856,7 +2891,12 @@ impl<'gc> VM<'gc> {
             }
         };
 
-        if !self.validate_typed_array(ctx, &result, "species constructor") {
+        let valid = if args.len() > 1 {
+            self.validate_typed_array(ctx, &result, "species constructor")
+        } else {
+            self.validate_typed_array_write(ctx, &result, "species constructor")
+        };
+        if !valid {
             return None;
         }
 
@@ -3305,7 +3345,7 @@ impl<'gc> VM<'gc> {
         Value::Object(new_gc_cell_ptr(ctx, buf_map))
     }
 
-    fn create_immutable_array_buffer(&mut self, ctx: &GcContext<'gc>, bytes: Vec<Value<'gc>>) -> Value<'gc> {
+    pub(super) fn create_immutable_array_buffer(&mut self, ctx: &GcContext<'gc>, bytes: Vec<Value<'gc>>) -> Value<'gc> {
         let mut buf_map = IndexMap::new();
         buf_map.insert("__type__".to_string(), Value::from("ArrayBuffer"));
         buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
@@ -3335,6 +3375,59 @@ impl<'gc> VM<'gc> {
         if needs_sync {
             self.sync_resizable_ta_elements(ctx, arr);
         }
+    }
+
+    /// Refresh the dynamic length and out-of-bounds state without copying
+    /// every element from the backing buffer.
+    pub(super) fn sync_resizable_ta_length(&self, ctx: &GcContext<'gc>, arr: &ArrayHandle<'gc>) -> Option<usize> {
+        let a = arr.borrow();
+        let buf = match a.props.get("__typedarray_buffer__") {
+            Some(Value::Object(buf)) => *buf,
+            _ => return None,
+        };
+        if !matches!(buf.borrow().get("__resizable__"), Some(Value::Boolean(true))) {
+            return None;
+        }
+        let bpe = match a.props.get("__bytes_per_element__") {
+            Some(Value::Number(n)) => (*n as usize).max(1),
+            _ => 1,
+        };
+        let byte_offset = match a.props.get("__byte_offset__") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 0,
+        };
+        let buf_byte_len = match buf.borrow().get("byteLength") {
+            Some(Value::Number(n)) => *n as usize,
+            _ => 0,
+        };
+        let is_auto = matches!(a.props.get("__length_tracking__"), Some(Value::Boolean(true)));
+        let (new_len, is_oob) = if is_auto {
+            if byte_offset > buf_byte_len {
+                (0, true)
+            } else {
+                ((buf_byte_len - byte_offset) / bpe, false)
+            }
+        } else {
+            let fixed_len = match a.props.get("__fixed_length__") {
+                Some(Value::Number(n)) => *n as usize,
+                _ => a.elements.len(),
+            };
+            if byte_offset + fixed_len * bpe > buf_byte_len {
+                (0, true)
+            } else {
+                (fixed_len, false)
+            }
+        };
+        drop(a);
+
+        let mut a = arr.borrow_mut(ctx);
+        a.elements.resize(new_len, Value::Number(0.0));
+        if is_oob {
+            a.props.insert("__out_of_bounds__".to_string(), Value::Boolean(true));
+        } else {
+            a.props.shift_remove("__out_of_bounds__");
+        }
+        Some(new_len)
     }
 
     /// Check if a Array is a TypedArray backed by a resizable buffer.
@@ -3391,7 +3484,7 @@ impl<'gc> VM<'gc> {
         if Self::is_typed_array_buffer_detached(arr) {
             return Value::Undefined;
         }
-        self.maybe_sync_resizable_ta(ctx, arr);
+        self.sync_resizable_ta_length(ctx, arr);
         let borrow = arr.borrow();
         if index < borrow.elements.len() {
             drop(borrow);
@@ -5188,7 +5281,9 @@ impl<'gc> VM<'gc> {
 
     fn uint8array_set_from_base64(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         let this = receiver.unwrap_or(&Value::Undefined);
-        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.setFromBase64") {
+        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.setFromBase64")
+            || !self.validate_typed_array_write(ctx, this, "setFromBase64")
+        {
             return Value::Undefined;
         }
         let input = args.first().cloned().unwrap_or(Value::Undefined);
@@ -5229,7 +5324,9 @@ impl<'gc> VM<'gc> {
 
     fn uint8array_set_from_hex(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         let this = receiver.unwrap_or(&Value::Undefined);
-        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.setFromHex") {
+        if !self.validate_uint8array(ctx, this, "Uint8Array.prototype.setFromHex")
+            || !self.validate_typed_array_write(ctx, this, "setFromHex")
+        {
             return Value::Undefined;
         }
         let input = args.first().cloned().unwrap_or(Value::Undefined);

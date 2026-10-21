@@ -223,6 +223,15 @@ impl<'gc> Compiler<'gc> {
             self.collect_module_export_names(statements);
             self.collect_self_import_aliases(statements);
         }
+        let has_root_disposables = statements
+            .iter()
+            .any(|stmt| matches!(*stmt.kind, StatementKind::Using(_) | StatementKind::AwaitUsing(_)));
+        let root_dispose_exc_name = if has_root_disposables {
+            self.dispose_stack.push(Vec::new());
+            Some(format!("__rootDisposeExc_{}__", self.forin_counter))
+        } else {
+            None
+        };
         self.emit_hoisted_global_lexicals(statements);
         // Hoist top-level `var` declarations to `undefined` before execution.
         // Function declarations are still emitted first right below, so they override
@@ -310,6 +319,18 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
+        let root_try_catch_placeholder = if let Some(exc_name) = &root_dispose_exc_name {
+            self.chunk.write_opcode(Opcode::SetupTry);
+            let placeholder = self.chunk.code.len();
+            self.chunk.write_u32(0xffff_ffff);
+            let binding_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(exc_name)));
+            self.chunk.write_u16(binding_idx);
+            self.chunk.write_byte(0);
+            Some(placeholder)
+        } else {
+            None
+        };
+
         for stmt in statements.iter() {
             if matches!(*stmt.kind, StatementKind::FunctionDeclaration(..)) || is_exported_fn_decl(stmt) || is_export_default_fn(stmt) {
                 continue;
@@ -317,6 +338,40 @@ impl<'gc> Compiler<'gc> {
             remaining_non_function = remaining_non_function.saturating_sub(1);
             let is_last = remaining_non_function == 0;
             self.compile_statement(stmt, is_last)?;
+        }
+
+        if let (Some(exc_name), Some(try_catch_placeholder)) = (root_dispose_exc_name, root_try_catch_placeholder) {
+            let dispose_frame = self.dispose_stack.pop().unwrap_or_default();
+            self.chunk.write_opcode(Opcode::TeardownTry);
+            let normal_err_var = self.emit_dispose_resources(&dispose_frame, false, None)?;
+            if let Some(ref err_var) = normal_err_var {
+                self.emit_helper_get(err_var);
+                let undef_idx = self.chunk.add_constant(Value::Undefined);
+                self.chunk.write_opcode(Opcode::Constant);
+                self.chunk.write_u16(undef_idx);
+                self.chunk.write_opcode(Opcode::StrictNotEqual);
+                let jump_no_err = self.emit_jump(Opcode::JumpIfFalse);
+                self.emit_helper_get(err_var);
+                self.chunk.write_opcode(Opcode::Throw);
+                self.patch_jump(jump_no_err);
+            }
+            let jump_over_catch = self.emit_jump(Opcode::Jump);
+
+            let catch_ip = self.chunk.code.len();
+            self.chunk.code[try_catch_placeholder] = (catch_ip & 0xff) as u8;
+            self.chunk.code[try_catch_placeholder + 1] = ((catch_ip >> 8) & 0xff) as u8;
+            self.chunk.code[try_catch_placeholder + 2] = ((catch_ip >> 16) & 0xff) as u8;
+            self.chunk.code[try_catch_placeholder + 3] = ((catch_ip >> 24) & 0xff) as u8;
+            let catch_err_var = self.emit_dispose_resources(&dispose_frame, true, Some(&exc_name))?;
+            if let Some(ref err_var) = catch_err_var {
+                self.emit_helper_get(err_var);
+            } else {
+                let exc_idx = self.chunk.add_constant(Value::String(crate::unicode::utf8_to_utf16(&exc_name)));
+                self.chunk.write_opcode(Opcode::GetGlobal);
+                self.chunk.write_u16(exc_idx);
+            }
+            self.chunk.write_opcode(Opcode::Throw);
+            self.patch_jump(jump_over_catch);
         }
 
         // Ensure returning at the end
@@ -745,6 +800,12 @@ impl<'gc> Compiler<'gc> {
         }
     }
 
+    fn resolve_source_import_path(&self, source: &str, import_type: Option<&str>) -> Option<String> {
+        self.script_filename
+            .as_ref()
+            .map(|fname| crate::core::resolve_module_request_key(source, std::path::Path::new(fname), import_type))
+    }
+
     /// Pre-scan statements to collect all exported binding names from this module.
     fn collect_module_export_names(&mut self, statements: &[Statement]) {
         use crate::core::statement::ExportSpecifier;
@@ -956,6 +1017,14 @@ impl<'gc> Compiler<'gc> {
                             }
 
                             self.chunk.self_deferred_namespace_imports.push((local.clone(), entries));
+                            self.chunk.const_import_bindings.insert(local.clone());
+                        }
+                        ImportSpecifier::Source(local) => {
+                            if let Some(resolved) = self.resolve_source_import_path(source, None) {
+                                self.chunk
+                                    .loaded_module_vars
+                                    .insert(local.clone(), (resolved, "__source__".to_string()));
+                            }
                             self.chunk.const_import_bindings.insert(local.clone());
                         }
                     }
@@ -4487,6 +4556,19 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.const_import_bindings.insert(local.clone());
                                 continue;
                             }
+                            ImportSpecifier::Source(local) => {
+                                if let Some(resolved) = self.resolve_source_import_path(source, import_type.as_deref()) {
+                                    self.chunk
+                                        .loaded_module_vars
+                                        .insert(local.clone(), (resolved, "__source__".to_string()));
+                                    self.chunk.const_import_bindings.insert(local.clone());
+                                }
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                                define_binding(self, local);
+                                continue;
+                            }
                         }
                     }
                     match (source.as_str(), spec) {
@@ -4638,6 +4720,22 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_u16(idx);
                             }
                             define_binding(self, &local);
+                        }
+                        (_, ImportSpecifier::Source(local)) => {
+                            if let Some(resolved) = self.resolve_source_import_path(source, import_type.as_deref()) {
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                                self.chunk
+                                    .loaded_module_vars
+                                    .insert(local.clone(), (resolved, "__source__".to_string()));
+                                self.chunk.const_import_bindings.insert(local.clone());
+                            } else {
+                                let idx = self.chunk.add_constant(Value::Undefined);
+                                self.chunk.write_opcode(Opcode::Constant);
+                                self.chunk.write_u16(idx);
+                            }
+                            define_binding(self, local);
                         }
                     }
                 }

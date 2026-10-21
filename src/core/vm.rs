@@ -97,8 +97,7 @@ fn to_number<'gc>(val: &Value<'gc>) -> f64 {
             }
         }
         Value::String(s) => {
-            let s = crate::unicode::utf16_to_utf8(s);
-            let trimmed = s.trim();
+            let trimmed = String::from_utf16_lossy(js_trim_both(s));
             if trimmed.is_empty() {
                 return 0.0;
             }
@@ -758,7 +757,8 @@ pub struct VM<'gc> {
     symbol_counter: u64,
     symbol_registry: HashMap<String, Value<'gc>>,         // Symbol.for() registry
     symbol_values: HashMap<u64, VmSymbolWeakHandle<'gc>>, // symbol_id → Symbol primitive (weak cache)
-    pending_throw: Option<Value<'gc>>,                    // deferred throw from call_builtin
+    intl_fallback_symbol: Option<Value<'gc>>,
+    pending_throw: Option<Value<'gc>>, // deferred throw from call_builtin
     preserved_throw_value: Option<Value<'gc>>,
     preserved_throw_message: Option<String>,
     direct_eval: bool, // true when current eval is a direct call
@@ -861,6 +861,7 @@ pub struct VM<'gc> {
     /// Loaded external module exports: resolved_path -> (exports IndexMap, module_locals IndexMap).
     /// Used by multi-file module loading to resolve cross-module imports.
     pub(crate) loaded_modules: std::collections::HashMap<String, IndexMap<String, Value<'gc>>>,
+    module_sources: std::collections::HashMap<String, Value<'gc>>,
     module_load_errors: std::collections::HashMap<String, Value<'gc>>,
     /// Export origin tracking: module_path -> export_name -> (origin_module_path, origin_binding_name).
     /// Used for spec-compliant ambiguous star-export detection (ResolveExport §15.2.1.16.3).
@@ -1157,6 +1158,7 @@ impl<'gc> VM<'gc> {
             symbol_counter: 0,
             symbol_registry: HashMap::new(),
             symbol_values: HashMap::new(),
+            intl_fallback_symbol: None,
             pending_throw: None,
             preserved_throw_value: None,
             preserved_throw_message: None,
@@ -1205,6 +1207,7 @@ impl<'gc> VM<'gc> {
             is_module_mode: false,
             module_locals: IndexMap::new(),
             loaded_modules: std::collections::HashMap::new(),
+            module_sources: std::collections::HashMap::new(),
             module_load_errors: std::collections::HashMap::new(),
             export_origins: std::collections::HashMap::new(),
             reexport_deps: std::collections::HashMap::new(),
@@ -1993,6 +1996,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn lookup_module_binding_value(&self, module_key: Option<&str>, local_name: &str) -> Value<'gc> {
+        if local_name == "__source__"
+            && let Some(module_key) = module_key
+        {
+            return self.module_sources.get(module_key).cloned().unwrap_or(Value::Undefined);
+        }
         if let Some((target_module, target_local)) = Self::decode_live_binding_target(local_name) {
             return self.lookup_module_binding_value(Some(target_module), target_local);
         }
@@ -2147,9 +2155,36 @@ impl<'gc> VM<'gc> {
         requests: &[crate::core::ModuleRequest],
     ) {
         for request in requests {
+            let resolved_key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
+            if request.phase == crate::core::ModuleRequestPhase::Source {
+                if request.specifier != "<module source>" {
+                    let resolved = crate::core::resolve_module_path(&request.specifier, entry_path);
+                    self.load_single_module(ctx, &resolved, request.import_type.as_deref());
+                }
+                if !self.module_load_errors.contains_key(&resolved_key) {
+                    let source = self.create_abstract_module_source(ctx);
+                    self.module_sources.entry(resolved_key).or_insert(source);
+                }
+                continue;
+            }
             let resolved = crate::core::resolve_module_path(&request.specifier, entry_path);
             self.load_single_module(ctx, &resolved, request.import_type.as_deref());
         }
+    }
+
+    fn create_abstract_module_source(&self, ctx: &GcContext<'gc>) -> Value<'gc> {
+        let prototype = self
+            .globals
+            .get("AbstractModuleSource")
+            .and_then(|value| match value {
+                Value::Object(constructor) => constructor.borrow().get("prototype").cloned(),
+                _ => None,
+            })
+            .unwrap_or(Value::Null);
+        let mut object = IndexMap::new();
+        object.insert("__proto__".to_string(), prototype);
+        object.insert("__module_source__".to_string(), Value::Boolean(true));
+        Value::Object(new_gc_cell_ptr(ctx, object))
     }
 
     fn load_single_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, import_type: Option<&str>) {
@@ -2448,6 +2483,9 @@ impl<'gc> VM<'gc> {
                             }
                             ImportSpecifier::Namespace(local_name) | ImportSpecifier::DeferredNamespace(local_name) => {
                                 map.insert(local_name.clone(), (resolved.clone(), "\x00namespace".to_string()));
+                            }
+                            ImportSpecifier::Source(local_name) => {
+                                map.insert(local_name.clone(), (resolved.clone(), "__source__".to_string()));
                             }
                         }
                     }
@@ -2835,6 +2873,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 }
+                crate::core::ModuleRequestPhase::Source => {}
             }
         }
 
@@ -3017,6 +3056,9 @@ impl<'gc> VM<'gc> {
                                 // import * as foo → namespace import; use sentinel
                                 map.insert(local_name.clone(), (resolved.clone(), "\x00namespace".to_string()));
                             }
+                            ImportSpecifier::Source(local_name) => {
+                                map.insert(local_name.clone(), (resolved.clone(), "__source__".to_string()));
+                            }
                         }
                     }
                 }
@@ -3133,7 +3175,7 @@ impl<'gc> VM<'gc> {
             let binding_name = match spec {
                 ImportSpecifier::Named(name, _) => Some(name.as_str()),
                 ImportSpecifier::Default(_) => Some("default"),
-                ImportSpecifier::Namespace(_) | ImportSpecifier::DeferredNamespace(_) => None,
+                ImportSpecifier::Namespace(_) | ImportSpecifier::DeferredNamespace(_) | ImportSpecifier::Source(_) => None,
             };
             if let Some(name) = binding_name {
                 let mut visited = std::collections::HashSet::new();
@@ -3186,6 +3228,9 @@ impl<'gc> VM<'gc> {
                 if import_name == "\x00namespace" {
                     // import * as foo; export { foo } → namespace re-export
                     return ResolveExportResult::Found(src_mod.clone(), "\x00namespace".to_string());
+                }
+                if import_name == "__source__" {
+                    return ResolveExportResult::Found(src_mod.clone(), "__source__".to_string());
                 }
                 return Self::resolve_export_static(src_mod, import_name, ctx, visited);
             }
@@ -3271,6 +3316,16 @@ impl<'gc> VM<'gc> {
         // for pre-created self-namespace shells (identity across modules).
         let mut ns_cache: std::collections::HashMap<String, Value<'gc>> = std::collections::HashMap::new();
         for (local, mod_path, export_name) in &vars {
+            if export_name == "__source__" {
+                if let Some(source) = self.module_sources.get(mod_path).cloned() {
+                    self.module_locals.insert(local.clone(), source);
+                } else {
+                    self.pending_throw =
+                        Some(self.make_syntax_error_object(ctx, &format!("Module source '{}' is not available", mod_path)));
+                    return;
+                }
+                continue;
+            }
             if let Some(error) = self.module_load_errors.get(mod_path).cloned() {
                 self.pending_throw = Some(error);
                 return;
@@ -3755,7 +3810,7 @@ impl<'gc> VM<'gc> {
         }
         function makeFulfilled(index) {
             var alreadyCalled = false;
-            return function(value) {
+            return {"": (value) => {
                 if (alreadyCalled) {
                     return;
                 }
@@ -3765,7 +3820,7 @@ impl<'gc> VM<'gc> {
                 if (remaining === 0) {
                     finish();
                 }
-            };
+            }}[""];
         }
         for (var k = 0; k < allKeys.length; k += 1) {
             var key = allKeys[k];
@@ -3802,7 +3857,7 @@ impl<'gc> VM<'gc> {
         function makeHandlers(index) {
             var alreadyCalled = false;
             return {
-                onFulfilled: function(value) {
+                onFulfilled: {"": (value) => {
                     var entry;
                     if (alreadyCalled) {
                         return;
@@ -3816,8 +3871,8 @@ impl<'gc> VM<'gc> {
                     if (remaining === 0) {
                         finish();
                     }
-                },
-                onRejected: function(reason) {
+                }}[""],
+                onRejected: {"": (reason) => {
                     var entry;
                     if (alreadyCalled) {
                         return;
@@ -3831,7 +3886,7 @@ impl<'gc> VM<'gc> {
                     if (remaining === 0) {
                         finish();
                     }
-                }
+                }}[""]
             };
         }
         for (var k = 0; k < allKeys.length; k += 1) {
@@ -5206,6 +5261,30 @@ impl<'gc> VM<'gc> {
         if name.starts_with("intl.") {
             return self.intl_handle_host_fn(ctx, name, receiver, args);
         }
+        if matches!(
+            name,
+            "atomics.store"
+                | "atomics.compareExchange"
+                | "atomics.and"
+                | "atomics.add"
+                | "atomics.exchange"
+                | "atomics.sub"
+                | "atomics.or"
+                | "atomics.xor"
+        ) && let Some(Value::Array(arr)) = args.first()
+        {
+            let immutable = {
+                let borrow = arr.borrow();
+                matches!(
+                    borrow.props.get("__typedarray_buffer__"),
+                    Some(Value::Object(buf)) if matches!(buf.borrow().get("__immutable__"), Some(Value::Boolean(true)))
+                )
+            };
+            if immutable {
+                self.throw_type_error(ctx, "Atomics operation on an immutable ArrayBuffer");
+                return Value::Undefined;
+            }
+        }
         match name {
             "Function.prototype.restrictedThrow" => {
                 self.throw_type_error(
@@ -5409,12 +5488,12 @@ impl<'gc> VM<'gc> {
                 eval_map.insert("length".to_string(), Value::Number(1.0));
                 write_attrs_to_legacy_map(&mut eval_map, "name", PropAttrs::CONFIGURABLE);
                 write_attrs_to_legacy_map(&mut eval_map, "length", PropAttrs::CONFIGURABLE);
-                child_global_this
-                    .borrow_mut(ctx)
-                    .insert("eval".to_string(), Value::Object(new_gc_cell_ptr(ctx, eval_map)));
+                let eval_fn = Value::Object(new_gc_cell_ptr(ctx, eval_map));
+                child_global_this.borrow_mut(ctx).insert("eval".to_string(), eval_fn.clone());
 
                 let mut out = IndexMap::new();
                 out.insert("global".to_string(), Value::Object(child_global_this));
+                out.insert("evalScript".to_string(), eval_fn);
                 Value::Object(new_gc_cell_ptr(ctx, out))
             }
             "__realm_eval__" => {
@@ -5992,15 +6071,16 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    if n.is_nan() || n < 0.0 {
+                    let integer = if n.is_nan() || n == 0.0 { 0.0 } else { n.trunc() };
+                    if integer < 0.0 {
                         self.throw_range_error_object(ctx, "Invalid array buffer length");
                         return Value::Undefined;
                     }
-                    if n.is_infinite() || n > 9007199254740991.0 {
+                    if !integer.is_finite() || integer > 9_007_199_254_740_991.0 {
                         self.throw_range_error_object(ctx, "Invalid array buffer length");
                         return Value::Undefined;
                     }
-                    n as usize
+                    integer as usize
                 };
 
                 // Step 5: IsDetachedBuffer check (after argument coercion)
@@ -6370,14 +6450,19 @@ impl<'gc> VM<'gc> {
 
                 new_buffer
             }
-            "arrayBuffer.slice" => {
+            "arrayBuffer.slice" | "arrayBuffer.sliceToImmutable" => {
+                let slice_to_immutable = name == "arrayBuffer.sliceToImmutable";
                 let this_val = receiver.unwrap_or(&Value::Undefined);
                 let Value::Object(buf_obj) = this_val else {
                     let mut err_map = IndexMap::new();
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
                     err_map.insert(
                         "message".to_string(),
-                        Value::from("ArrayBuffer.prototype.slice called on incompatible receiver"),
+                        Value::from(if slice_to_immutable {
+                            "ArrayBuffer.prototype.sliceToImmutable called on incompatible receiver"
+                        } else {
+                            "ArrayBuffer.prototype.slice called on incompatible receiver"
+                        }),
                     );
                     self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                     return Value::Undefined;
@@ -6392,7 +6477,11 @@ impl<'gc> VM<'gc> {
                     err_map.insert("__type__".to_string(), Value::from("TypeError"));
                     err_map.insert(
                         "message".to_string(),
-                        Value::from("ArrayBuffer.prototype.slice called on incompatible receiver"),
+                        Value::from(if slice_to_immutable {
+                            "ArrayBuffer.prototype.sliceToImmutable called on incompatible receiver"
+                        } else {
+                            "ArrayBuffer.prototype.slice called on incompatible receiver"
+                        }),
                     );
                     self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                     return Value::Undefined;
@@ -6480,6 +6569,10 @@ impl<'gc> VM<'gc> {
                         vm.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
                         return None;
                     }
+                    if matches!(prim, Value::BigInt(_)) {
+                        vm.throw_type_error(ctx, "Cannot convert a BigInt value to a number");
+                        return None;
+                    }
                     Some(to_number(&prim))
                 };
 
@@ -6496,6 +6589,11 @@ impl<'gc> VM<'gc> {
                     len as f64
                 };
 
+                if matches!(buf_obj.borrow().get("__detached__"), Some(Value::Boolean(true))) {
+                    self.throw_type_error(ctx, "Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer");
+                    return Value::Undefined;
+                }
+
                 let relative_start = to_integer_index(start_n);
                 let first = if relative_start < 0 {
                     (len as isize + relative_start).max(0) as usize
@@ -6509,6 +6607,23 @@ impl<'gc> VM<'gc> {
                     (relative_end as usize).min(len)
                 };
                 let new_len = final_idx.saturating_sub(first);
+
+                if slice_to_immutable {
+                    let current_len = buf_obj.borrow().get("byteLength").map(to_number).unwrap_or(0.0).max(0.0) as usize;
+                    if current_len < final_idx {
+                        self.throw_range_error_object(ctx, "ArrayBuffer was resized below the requested end");
+                        return Value::Undefined;
+                    }
+                    let Some(Value::Array(src_arr)) = bytes_arr else {
+                        self.throw_type_error(ctx, "ArrayBuffer data is unavailable");
+                        return Value::Undefined;
+                    };
+                    let src = src_arr.borrow();
+                    let copied_bytes = (first..first + new_len)
+                        .map(|index| src.elements.get(index).cloned().unwrap_or(Value::Number(0.0)))
+                        .collect();
+                    return self.create_immutable_array_buffer(ctx, copied_bytes);
+                }
 
                 let Some(species_ctor) = self.array_buffer_species_constructor(ctx, &Value::Object(*buf_obj)) else {
                     return Value::Undefined;
@@ -6533,6 +6648,11 @@ impl<'gc> VM<'gc> {
                 );
                 if !is_new_array_buffer {
                     self.throw_type_error(ctx, "ArrayBuffer species constructor must return an ArrayBuffer");
+                    return Value::Undefined;
+                }
+
+                if matches!(new_buf_obj.borrow().get("__immutable__"), Some(Value::Boolean(true))) {
+                    self.throw_type_error(ctx, "ArrayBuffer species constructor returned an immutable ArrayBuffer");
                     return Value::Undefined;
                 }
 
@@ -11156,7 +11276,7 @@ impl<'gc> VM<'gc> {
                     && arr.borrow().props.contains_key("__typedarray_name__")
                     && let Some(numeric_index) = Self::canonical_numeric_index_string(&key)
                 {
-                    self.maybe_sync_resizable_ta(ctx, arr);
+                    self.sync_resizable_ta_length(ctx, arr);
                     let arr_len = arr.borrow().elements.len();
                     let is_valid = numeric_index >= 0.0
                         && numeric_index.fract() == 0.0
@@ -15488,7 +15608,7 @@ impl<'gc> VM<'gc> {
             // TypedArray [[Set]] internal method per spec 10.4.5.5:
             // If key is a canonical numeric index, check receiver identity.
             if is_ta && let Some(numeric_index) = Self::canonical_numeric_index_string(key) {
-                self.maybe_sync_resizable_ta(ctx, arr);
+                self.sync_resizable_ta_length(ctx, arr);
                 let is_valid_integer_index = Self::is_valid_integer_index(arr, numeric_index);
 
                 // Check if SameValue(O, Receiver) — i.e., receiver is the target itself
@@ -15527,7 +15647,7 @@ impl<'gc> VM<'gc> {
                         return Ok(val.clone());
                     }
                     // Re-check bounds after coercion (valueOf may have resized buffer)
-                    self.maybe_sync_resizable_ta(ctx, arr);
+                    self.sync_resizable_ta_length(ctx, arr);
                     let valid_after_coerce = Self::is_valid_integer_index(arr, numeric_index);
                     if !valid_after_coerce {
                         return Ok(val.clone());
@@ -15551,7 +15671,7 @@ impl<'gc> VM<'gc> {
                     return Ok(val.clone());
                 }
                 // Re-check bounds after coercion (valueOf may have resized buffer)
-                self.maybe_sync_resizable_ta(ctx, arr);
+                self.sync_resizable_ta_length(ctx, arr);
                 let valid_after_coerce = Self::is_valid_integer_index(arr, numeric_index);
                 if !valid_after_coerce {
                     return Ok(val.clone());
@@ -16481,6 +16601,13 @@ impl<'gc> VM<'gc> {
         key: &str,
         receiver: &Value<'gc>,
     ) -> Value<'gc> {
+        if let Value::Array(arr) = obj
+            && arr.borrow().props.contains_key("__typedarray_name__")
+            && Self::canonical_numeric_index_string(key).is_some()
+        {
+            self.sync_resizable_ta_length(ctx, arr);
+        }
+
         if matches!(obj, Value::Object(map) if map.borrow().contains_key("__proxy_target__")) {
             match self.try_proxy_get(ctx, obj, key, Some(receiver)) {
                 Ok(Some(value)) => return value,
@@ -18432,6 +18559,11 @@ impl<'gc> VM<'gc> {
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.slice", "slice", 2.0, false),
         );
         mark_nonenumerable(&mut array_buffer_proto, "slice");
+        array_buffer_proto.insert(
+            "sliceToImmutable".to_string(),
+            Self::make_host_fn_with_name_len(ctx, "arrayBuffer.sliceToImmutable", "sliceToImmutable", 2.0, false),
+        );
+        mark_nonenumerable(&mut array_buffer_proto, "sliceToImmutable");
         set_getter(
             &mut array_buffer_proto,
             "detached",
@@ -31671,35 +31803,39 @@ impl<'gc> VM<'gc> {
                 let callback = args.first().cloned().unwrap_or(Value::Undefined);
                 let cb_args = if args.len() > 1 { &args[1..] } else { &[] };
 
-                let (promise_obj, resolve_fn, reject_fn) = match self.new_promise_capability(ctx, receiver) {
-                    Ok(cap) => cap,
-                    Err(e) => {
-                        self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
-                        return Value::Undefined;
-                    }
-                };
-                if self.pending_throw.is_some() {
-                    return Value::Undefined;
-                }
-
                 if !self.is_value_callable(&callback) {
+                    let (promise_obj, _, reject_fn) = match self.new_promise_capability(ctx, receiver) {
+                        Ok(cap) => cap,
+                        Err(e) => {
+                            self.pending_throw = Some(self.vm_value_from_error(ctx, &e));
+                            return Value::Undefined;
+                        }
+                    };
                     let err_obj = self.make_type_error_object(ctx, "callbackfn is not a function");
                     let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_obj]);
+                    return promise_obj;
                 } else {
                     let saved_try_stack = std::mem::take(&mut self.try_stack);
                     let call_result = self.vm_call_function_value(ctx, &callback, &Value::Undefined, cb_args);
                     self.try_stack = saved_try_stack;
                     match call_result {
                         Ok(value) => {
-                            let _ = self.vm_call_function_value(ctx, &resolve_fn, &Value::Undefined, &[value]);
+                            return self.call_host_fn(ctx, "promise.resolve", Some(receiver), &[value]);
                         }
                         Err(err) => {
+                            let (promise_obj, _, reject_fn) = match self.new_promise_capability(ctx, receiver) {
+                                Ok(cap) => cap,
+                                Err(capability_error) => {
+                                    self.pending_throw = Some(self.vm_value_from_error(ctx, &capability_error));
+                                    return Value::Undefined;
+                                }
+                            };
                             let err_val = self.vm_value_from_error(ctx, &err);
                             let _ = self.vm_call_function_value(ctx, &reject_fn, &Value::Undefined, &[err_val]);
+                            return promise_obj;
                         }
                     }
                 }
-                return promise_obj;
             }
             BUILTIN_JSON_STRINGIFY
             | BUILTIN_JSON_PARSE
@@ -39101,6 +39237,9 @@ impl<'gc> VM<'gc> {
         if integer_limit < 0.0 {
             return Err(self.make_range_error_object(ctx, "Invalid iterator helper limit"));
         }
+        if integer_limit.is_finite() && integer_limit > 9_007_199_254_740_991.0 {
+            return Err(self.make_range_error_object(ctx, "Invalid iterator helper limit"));
+        }
         Ok(integer_limit)
     }
 
@@ -45559,10 +45698,8 @@ impl<'gc> VM<'gc> {
             Value::Number(n) => {
                 if n.is_nan() || n.is_infinite() {
                     Some("null".to_string())
-                } else if *n == (*n as i64) as f64 {
-                    Some(format!("{}", *n as i64))
                 } else {
-                    Some(format!("{}", n))
+                    Some(crate::core::value::format_js_number(*n))
                 }
             }
             Value::BigInt(_) => {

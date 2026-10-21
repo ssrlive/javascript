@@ -8946,6 +8946,102 @@ impl<'gc> VM<'gc> {
                 }
                 Value::from(&result)
             }
+            "error.stack.get" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Error.prototype.stack getter called on non-object");
+                    return Value::Undefined;
+                }
+                match &recv {
+                    Value::Object(object) => {
+                        let (error_name, message, stack) = {
+                            let borrow = object.borrow();
+                            let error_name = borrow.get("__type__").and_then(|value| match value {
+                                Value::String(name) => Some(crate::unicode::utf16_to_utf8(name)),
+                                _ => None,
+                            });
+                            let message = own_data_from_legacy_map(&borrow, "message")
+                                .as_ref()
+                                .map(value_to_string)
+                                .unwrap_or_default();
+                            (error_name, message, borrow.get("__error_stack__").cloned())
+                        };
+                        let Some(error_name) = error_name.filter(|name| name.ends_with("Error")) else {
+                            return Value::Undefined;
+                        };
+                        let is_error_prototype = [
+                            "Error",
+                            "TypeError",
+                            "SyntaxError",
+                            "RangeError",
+                            "ReferenceError",
+                            "EvalError",
+                            "URIError",
+                            "SuppressedError",
+                        ]
+                        .iter()
+                        .any(|name| {
+                            let constructor = self.globals.get(*name).cloned().unwrap_or(Value::Undefined);
+                            let prototype = self.read_named_property(ctx, &constructor, "prototype");
+                            self.values_same(&recv, &prototype)
+                        });
+                        if is_error_prototype {
+                            return Value::Undefined;
+                        }
+                        match stack {
+                            Some(Value::String(stack)) => Value::String(stack),
+                            _ => {
+                                let (_, lines) = self.build_error_stack(&error_name, &message);
+                                Value::String(crate::unicode::utf8_to_utf16(&lines.join("\n")))
+                            }
+                        }
+                    }
+                    _ => Value::Undefined,
+                }
+            }
+            "error.stack.set" => {
+                let recv = receiver.cloned().unwrap_or(Value::Undefined);
+                if !Self::is_iterator_object_like(&recv) {
+                    self.throw_type_error(ctx, "Error.prototype.stack setter called on non-object");
+                    return Value::Undefined;
+                }
+                let Some(Value::String(_)) = args.first() else {
+                    self.throw_type_error(ctx, "Error.prototype.stack setter requires a String");
+                    return Value::Undefined;
+                };
+                let home = self.read_named_property(ctx, &self.globals.get("Error").cloned().unwrap_or(Value::Undefined), "prototype");
+                if self.values_same(&recv, &home) {
+                    self.throw_type_error(ctx, "Cannot set Error.prototype.stack on Error.prototype");
+                    return Value::Undefined;
+                }
+                let key = Value::from("stack");
+                let descriptor = self.call_builtin(ctx, BUILTIN_OBJECT_GETOWNPROPDESC, &[recv.clone(), key.clone()]);
+                if self.pending_throw.is_some() {
+                    return Value::Undefined;
+                }
+                if matches!(descriptor, Value::Undefined) {
+                    let mut data_descriptor = IndexMap::new();
+                    data_descriptor.insert("value".to_string(), args[0].clone());
+                    data_descriptor.insert("writable".to_string(), Value::Boolean(true));
+                    data_descriptor.insert("enumerable".to_string(), Value::Boolean(true));
+                    data_descriptor.insert("configurable".to_string(), Value::Boolean(true));
+                    let descriptor = Value::Object(new_gc_cell_ptr(ctx, data_descriptor));
+                    let _ = self.call_builtin(ctx, BUILTIN_OBJECT_DEFINEPROP, &[recv, key, descriptor]);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                } else {
+                    let result = self.call_host_fn(ctx, "reflect.set", None, &[recv.clone(), key, args[0].clone(), recv]);
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    if !result.to_truthy() {
+                        self.throw_type_error(ctx, "Cannot set Error.prototype.stack");
+                        return Value::Undefined;
+                    }
+                }
+                Value::Undefined
+            }
             "global.unescape" => {
                 // B.2.1.2 unescape(string): 1. Let string be ? ToString(string).
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
@@ -9028,6 +9124,9 @@ impl<'gc> VM<'gc> {
                 self.iterator_setter_ignoring_prototype(ctx, &recv, "@@sym:4", value);
                 Value::Undefined
             }
+            "iterator.chunks" | "iterator.windows" => self.iterator_create_chunking_helper(ctx, name, receiver, args),
+            "iterator.includes" => self.iterator_includes(ctx, receiver, args),
+            "iterator.join" => self.iterator_join(ctx, receiver, args),
             "iterator.from" => {
                 let source = args.first().cloned().unwrap_or(Value::Undefined);
                 if !Self::is_iterator_object_like(&source) && !matches!(source, Value::String(_)) {
@@ -18520,6 +18619,20 @@ impl<'gc> VM<'gc> {
                     p.borrow_mut(ctx).insert("__proto__".to_string(), error_proto.clone());
                 }
             }
+            if let Value::Object(proto) = &error_proto {
+                let mut borrow = proto.borrow_mut(ctx);
+                set_getter(
+                    &mut borrow,
+                    "stack",
+                    Self::make_host_fn_with_name_len(ctx, "error.stack.get", "get stack", 0.0, false),
+                );
+                set_setter(
+                    &mut borrow,
+                    "stack",
+                    Self::make_host_fn_with_name_len(ctx, "error.stack.set", "set stack", 1.0, false),
+                );
+                mark_nonenumerable(&mut borrow, "stack");
+            }
             // Add Error.isError static method to Error constructor only
             if let Some(Value::Object(error_ctor)) = self.globals.get("Error") {
                 let is_error_fn = Self::make_native_fn(ctx, BUILTIN_ERROR_ISERROR, "isError", 1.0);
@@ -19383,6 +19496,8 @@ impl<'gc> VM<'gc> {
             ("filter", "iterator.filter", 1.0),
             ("take", "iterator.take", 1.0),
             ("drop", "iterator.drop", 1.0),
+            ("chunks", "iterator.chunks", 1.0),
+            ("windows", "iterator.windows", 1.0),
             ("flatMap", "iterator.flatMap", 1.0),
             ("reduce", "iterator.reduce", 1.0),
             ("toArray", "iterator.toArray", 0.0),
@@ -19390,6 +19505,8 @@ impl<'gc> VM<'gc> {
             ("some", "iterator.some", 1.0),
             ("every", "iterator.every", 1.0),
             ("find", "iterator.find", 1.0),
+            ("includes", "iterator.includes", 1.0),
+            ("join", "iterator.join", 1.0),
         ] {
             iterator_proto.insert(
                 name.to_string(),
@@ -22543,6 +22660,21 @@ impl<'gc> VM<'gc> {
 
     fn current_script_file(&self) -> &str {
         self.script_path.as_deref().unwrap_or("<anonymous>")
+    }
+
+    fn initialize_error_data(&mut self, ctx: &GcContext<'gc>, map: &ObjectHandle<'gc>, error_name: &str) {
+        let message = {
+            let borrow = map.borrow();
+            own_data_from_legacy_map(&borrow, "message")
+                .as_ref()
+                .map(value_to_string)
+                .unwrap_or_default()
+        };
+        let (_, stack_lines) = self.build_error_stack(error_name, &message);
+        let stack = crate::unicode::utf8_to_utf16(&stack_lines.join("\n"));
+        let mut borrow = map.borrow_mut(ctx);
+        Self::insert_property_with_attributes(&mut borrow, "__error_data__", &Value::Boolean(true), false, false, false);
+        Self::insert_property_with_attributes(&mut borrow, "__error_stack__", &Value::String(stack), false, false, false);
     }
 
     fn current_named_frames(&self) -> Vec<(usize, String)> {
@@ -28482,7 +28614,9 @@ impl<'gc> VM<'gc> {
                         map.insert("__proto__".to_string(), proto);
                     }
                 }
-                Value::Object(new_gc_cell_ptr(ctx, map))
+                let object = new_gc_cell_ptr(ctx, map);
+                self.initialize_error_data(ctx, &object, &type_name);
+                Value::Object(object)
             }
             // Object.keys(obj) → array of own enumerable string keys
             BUILTIN_OBJECT_KEYS => {
@@ -39243,6 +39377,181 @@ impl<'gc> VM<'gc> {
         Ok(integer_limit)
     }
 
+    fn iterator_create_chunking_helper(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        name: &str,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
+        let iterator = receiver.cloned().unwrap_or(Value::Undefined);
+        if !Self::is_iterator_object_like(&iterator) {
+            self.throw_type_error(ctx, "Iterator chunking method called on non-object");
+            return Value::Undefined;
+        }
+
+        let chunk_size = match args.first() {
+            Some(Value::Number(size)) if size.is_finite() && size.fract() == 0.0 => {
+                if *size < 1.0 || *size > 4_294_967_295.0 {
+                    let error = self.make_range_error_object(ctx, "Invalid iterator chunk size");
+                    self.iterator_close_preserving_error(ctx, &iterator, error);
+                    return Value::Undefined;
+                }
+                *size as usize
+            }
+            _ => {
+                let error = self.make_type_error_object(ctx, "Iterator chunk size must be an integer Number");
+                self.iterator_close_preserving_error(ctx, &iterator, error);
+                return Value::Undefined;
+            }
+        };
+
+        let is_windows = name == "iterator.windows";
+        let undersized = if is_windows {
+            match args.get(1) {
+                None | Some(Value::Undefined) => "only-full",
+                Some(Value::String(value)) if crate::unicode::utf16_to_utf8(value) == "only-full" => "only-full",
+                Some(Value::String(value)) if crate::unicode::utf16_to_utf8(value) == "allow-partial" => "allow-partial",
+                _ => {
+                    let error = self.make_type_error_object(ctx, "Invalid windows undersized option");
+                    self.iterator_close_preserving_error(ctx, &iterator, error);
+                    return Value::Undefined;
+                }
+            }
+        } else {
+            "only-full"
+        };
+
+        let kind = if is_windows { "windows" } else { "chunks" };
+        let Some(Value::Object(helper)) = self.create_lazy_iterator_helper(ctx, &iterator, kind, None, None) else {
+            return Value::Undefined;
+        };
+        let mut borrow = helper.borrow_mut(ctx);
+        borrow.insert("__helper_chunk_size__".to_string(), Value::Number(chunk_size as f64));
+        borrow.insert(
+            "__helper_buffer__".to_string(),
+            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new()))),
+        );
+        borrow.insert("__helper_undersized__".to_string(), Value::from(undersized));
+        drop(borrow);
+        Value::Object(helper)
+    }
+
+    fn iterator_includes(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let iterator = receiver.cloned().unwrap_or(Value::Undefined);
+        if !Self::is_iterator_object_like(&iterator) {
+            self.throw_type_error(ctx, "Iterator.prototype.includes called on non-object");
+            return Value::Undefined;
+        }
+
+        let skipped_elements = match args.get(1) {
+            None | Some(Value::Undefined) => 0.0,
+            Some(Value::Number(value)) if value.is_nan() || (value.is_finite() && value.fract() != 0.0) => {
+                let error = self.make_type_error_object(ctx, "skippedElements must be an integer Number");
+                self.iterator_close_preserving_error(ctx, &iterator, error);
+                return Value::Undefined;
+            }
+            Some(Value::Number(value)) if *value < 0.0 || (value.is_finite() && *value > 9_007_199_254_740_991.0) => {
+                let error = self.make_range_error_object(ctx, "skippedElements is out of range");
+                self.iterator_close_preserving_error(ctx, &iterator, error);
+                return Value::Undefined;
+            }
+            Some(Value::Number(value)) => *value,
+            _ => {
+                let error = self.make_type_error_object(ctx, "skippedElements must be a Number");
+                self.iterator_close_preserving_error(ctx, &iterator, error);
+                return Value::Undefined;
+            }
+        };
+
+        let next_method = self.read_named_property(ctx, &iterator, "next");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        if !self.is_value_callable(&next_method) {
+            self.throw_type_error(ctx, "iterator.next is not callable");
+            return Value::Undefined;
+        }
+
+        let mut skipped = 0.0;
+        while skipped < skipped_elements {
+            match self.iterator_step_value(ctx, &iterator, &next_method) {
+                Some(Some(_)) => skipped += 1.0,
+                Some(None) => return Value::Boolean(false),
+                None => return Value::Undefined,
+            }
+        }
+
+        let search_element = args.first().cloned().unwrap_or(Value::Undefined);
+        loop {
+            match self.iterator_step_value(ctx, &iterator, &next_method) {
+                Some(Some(value)) if self.values_same_zero(&value, &search_element) => {
+                    if !self.iterator_close_normal(ctx, &iterator) {
+                        return Value::Undefined;
+                    }
+                    return Value::Boolean(true);
+                }
+                Some(Some(_)) => {}
+                Some(None) => return Value::Boolean(false),
+                None => return Value::Undefined,
+            }
+        }
+    }
+
+    fn iterator_join(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        let iterator = receiver.cloned().unwrap_or(Value::Undefined);
+        if !Self::is_iterator_object_like(&iterator) {
+            self.throw_type_error(ctx, "Iterator.prototype.join called on non-object");
+            return Value::Undefined;
+        }
+
+        let separator = match args.first() {
+            None | Some(Value::Undefined) => ",".to_string(),
+            Some(value) => match self.vm_to_string_like_spec(ctx, value) {
+                Ok(separator) => separator,
+                Err(error) => {
+                    let original = self.vm_value_from_error(ctx, &error);
+                    self.iterator_close_preserving_error(ctx, &iterator, original);
+                    return Value::Undefined;
+                }
+            },
+        };
+
+        let next_method = self.read_named_property(ctx, &iterator, "next");
+        if self.pending_throw.is_some() {
+            return Value::Undefined;
+        }
+        if !self.is_value_callable(&next_method) {
+            self.throw_type_error(ctx, "iterator.next is not callable");
+            return Value::Undefined;
+        }
+
+        let mut result = String::new();
+        let mut first = true;
+        loop {
+            match self.iterator_step_value(ctx, &iterator, &next_method) {
+                Some(Some(value)) => {
+                    if !first {
+                        result.push_str(&separator);
+                    }
+                    first = false;
+                    if !matches!(value, Value::Undefined | Value::Null) {
+                        match self.vm_to_string_like_spec(ctx, &value) {
+                            Ok(string) => result.push_str(&string),
+                            Err(error) => {
+                                let original = self.vm_value_from_error(ctx, &error);
+                                self.iterator_close_preserving_error(ctx, &iterator, original);
+                                return Value::Undefined;
+                            }
+                        }
+                    }
+                }
+                Some(None) => return Value::from(&result),
+                None => return Value::Undefined,
+            }
+        }
+    }
+
     fn create_lazy_iterator_helper(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -39259,6 +39568,7 @@ impl<'gc> VM<'gc> {
         obj.insert("__helper_kind__".to_string(), Value::from(kind));
         obj.insert("__helper_iterator__".to_string(), receiver.clone());
         obj.insert("__helper_next__".to_string(), next_method);
+        obj.insert("__helper_next_deferred__".to_string(), Value::Boolean(true));
         obj.insert("__helper_done__".to_string(), Value::Boolean(false));
         obj.insert("__helper_executing__".to_string(), Value::Boolean(false));
         obj.insert("__helper_counter__".to_string(), Value::Number(0.0));
@@ -39498,6 +39808,21 @@ impl<'gc> VM<'gc> {
         obj.borrow_mut(ctx).insert("__helper_executing__".to_string(), Value::Boolean(true));
         obj.borrow_mut(ctx).insert("__helper_started__".to_string(), Value::Boolean(true));
 
+        let next_is_deferred = matches!(obj.borrow().get("__helper_next_deferred__"), Some(Value::Boolean(true)));
+        if next_is_deferred {
+            let next_method = obj.borrow().get("__helper_next__").cloned().unwrap_or(Value::Undefined);
+            if !self.is_value_callable(&next_method) {
+                self.throw_type_error(ctx, "iterator.next is not callable");
+                obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                obj.borrow_mut(ctx)
+                    .insert("__helper_executing__".to_string(), Value::Boolean(false));
+                return Value::Undefined;
+            }
+            let mut borrow = obj.borrow_mut(ctx);
+            borrow.insert("__helper_next__".to_string(), next_method);
+            borrow.insert("__helper_next_deferred__".to_string(), Value::Boolean(false));
+        }
+
         let result = (|| match kind.as_str() {
             "drop" => {
                 loop {
@@ -39577,6 +39902,98 @@ impl<'gc> VM<'gc> {
                         self.create_iterator_result_object(ctx, Value::Undefined, true)
                     }
                     None => Value::Undefined,
+                }
+            }
+            "chunks" => {
+                let (iterator, next_method, chunk_size) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__helper_chunk_size__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                            .unwrap_or(1),
+                    )
+                };
+                let mut chunk = Vec::with_capacity(chunk_size.min(1024));
+                while chunk.len() < chunk_size {
+                    match self.iterator_step_value(ctx, &iterator, &next_method) {
+                        Some(Some(value)) => chunk.push(value),
+                        Some(None) => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            if chunk.is_empty() {
+                                return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                            }
+                            return self.create_iterator_result_object(
+                                ctx,
+                                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(chunk))),
+                                false,
+                            );
+                        }
+                        None => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            return Value::Undefined;
+                        }
+                    }
+                }
+                self.create_iterator_result_object(ctx, Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(chunk))), false)
+            }
+            "windows" => {
+                let (iterator, next_method, window_size, undersized, buffer) = {
+                    let borrow = obj.borrow();
+                    (
+                        borrow.get("__helper_iterator__").cloned().unwrap_or(Value::Undefined),
+                        borrow.get("__helper_next__").cloned().unwrap_or(Value::Undefined),
+                        borrow
+                            .get("__helper_chunk_size__")
+                            .and_then(|v| if let Value::Number(n) = v { Some(*n as usize) } else { None })
+                            .unwrap_or(1),
+                        borrow
+                            .get("__helper_undersized__")
+                            .map(value_to_string)
+                            .unwrap_or_else(|| "only-full".to_string()),
+                        borrow.get("__helper_buffer__").cloned().unwrap_or(Value::Undefined),
+                    )
+                };
+                let Value::Array(buffer) = buffer else {
+                    self.throw_type_error(ctx, "Invalid Iterator windows helper state");
+                    return Value::Undefined;
+                };
+                let mut values = buffer.borrow().elements.clone();
+                loop {
+                    match self.iterator_step_value(ctx, &iterator, &next_method) {
+                        Some(Some(value)) => {
+                            values.push(value);
+                            if values.len() == window_size {
+                                let window = values.clone();
+                                values.remove(0);
+                                buffer.borrow_mut(ctx).elements = values;
+                                return self.create_iterator_result_object(
+                                    ctx,
+                                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(window))),
+                                    false,
+                                );
+                            }
+                            buffer.borrow_mut(ctx).elements = values.clone();
+                        }
+                        Some(None) => {
+                            if undersized == "allow-partial" && !values.is_empty() {
+                                obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                                return self.create_iterator_result_object(
+                                    ctx,
+                                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values))),
+                                    false,
+                                );
+                            }
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            return self.create_iterator_result_object(ctx, Value::Undefined, true);
+                        }
+                        None => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            return Value::Undefined;
+                        }
+                    }
                 }
             }
             "map" => {
@@ -43794,6 +44211,8 @@ impl<'gc> VM<'gc> {
                         if let Some(proto) = instance_proto {
                             borrow.insert("__proto__".to_string(), proto);
                         }
+                        drop(borrow);
+                        self.initialize_error_data(ctx, obj, &type_name);
                     }
                     result
                 } else {

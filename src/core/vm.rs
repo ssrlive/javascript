@@ -15095,6 +15095,35 @@ impl<'gc> VM<'gc> {
             self.handle_throw(ctx, &err)?;
             return Ok(val.clone());
         }
+        if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+            let has_private_member = match obj {
+                Value::Object(map) => {
+                    let borrow = map.borrow();
+                    borrow.contains_key(key) || has_getter(&borrow, key) || has_setter(&borrow, key)
+                }
+                Value::Array(array) => {
+                    let borrow = array.borrow();
+                    borrow.props.contains_key(key) || has_getter(&borrow.props, key) || has_setter(&borrow.props, key)
+                }
+                Value::Function(ip, arity) | Value::Closure(ip, arity, _) => {
+                    let overlay = self.get_closure_overlay(obj);
+                    let shared = self.get_fn_props(ctx, *ip, *arity);
+                    let has_in = |properties: &IndexMap<String, Value<'gc>>| {
+                        properties.contains_key(key) || has_getter(properties, key) || has_setter(properties, key)
+                    };
+                    overlay.is_some_and(|properties| has_in(&properties.borrow())) || has_in(&shared.borrow())
+                }
+                _ => false,
+            };
+            if !has_private_member {
+                let err = self.make_type_error_object(
+                    ctx,
+                    &format!("Cannot access private member {} from an object whose class did not declare it", key),
+                );
+                self.handle_throw(ctx, &err)?;
+                return Ok(val.clone());
+            }
+        }
         // Module namespace exotic objects: [[Set]] always returns false → TypeError in strict mode
         if let Value::Object(map) = obj
             && map.borrow().contains_key("__module_namespace__")
@@ -16227,30 +16256,19 @@ impl<'gc> VM<'gc> {
                 return Ok(val.clone());
             }
             if !own_is_data {
-                let mut proto = overlay
+                let proto = overlay
                     .as_ref()
                     .and_then(|o| o.borrow().get("__proto__").cloned())
                     .or_else(|| props.borrow().get("__proto__").cloned());
-                while let Some(ref proto_val) = proto {
-                    if let Value::Object(proto_obj) = proto_val {
-                        let borrow = proto_obj.borrow();
-                        if let Some(sf) = lookup_setter(&borrow, key).cloned() {
-                            drop(borrow);
-                            let _ = self.vm_call_function_value(ctx, &sf, &setter_receiver, std::slice::from_ref(val))?;
-                            return Ok(val.clone());
-                        }
-                        if let Some(Value::Property { setter: Some(sf), .. }) = borrow.get(key)
-                            && !matches!(&**sf, Value::Undefined)
-                        {
-                            let sf_clone = (**sf).clone();
-                            drop(borrow);
-                            let _ = self.vm_call_function_value(ctx, &sf_clone, &setter_receiver, std::slice::from_ref(val))?;
-                            return Ok(val.clone());
-                        }
-                        proto = borrow.get("__proto__").cloned();
-                    } else {
-                        break;
+                let inherited_setter = self.lookup_proto_chain(proto.as_ref(), &make_setter_key(key)).or_else(|| {
+                    match self.lookup_proto_chain(proto.as_ref(), key) {
+                        Some(Value::Property { setter: Some(setter), .. }) if !matches!(&*setter, Value::Undefined) => Some(*setter),
+                        _ => None,
                     }
+                });
+                if let Some(setter) = inherited_setter {
+                    let _ = self.vm_call_function_value(ctx, &setter, &setter_receiver, std::slice::from_ref(val))?;
+                    return Ok(val.clone());
                 }
             }
             // Check for readonly

@@ -395,4 +395,97 @@ mod class_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "true");
     }
+
+    #[test]
+    fn test_class_decorators_apply_in_reverse_and_replace_class() {
+        let script = r#"
+            let calls = [];
+            function outer(value, context) {
+              calls.push(context.kind + ":" + context.name + ":outer");
+              context.addInitializer(function() { this.initialized = true; });
+              return class extends value {};
+            }
+            function inner(value, context) {
+              calls.push(context.kind + ":" + context.name + ":inner");
+            }
+            @outer
+            @inner
+            class Decorated {}
+            calls.join(",") + "|" + (new Decorated() instanceof Decorated) + "|" + Decorated.initialized
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"class:Decorated:inner,class:Decorated:outer|true|true\"");
+    }
+
+    #[test]
+    fn test_decorated_class_expression_returns_replacement() {
+        let script = r#"
+            function replace(value) { return class extends value {}; }
+            let Decorated = @replace class {};
+            new Decorated() instanceof Decorated
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_method_decorator_replacement_and_access_context() {
+        let script = r#"
+            function decorate(value, context) {
+              if (context.kind === "method" &&
+                  context.name === "method" &&
+                  context.static === false &&
+                  context.access.has({ method: value }) &&
+                  context.access.get({ method: value }) === value) {
+                context.addInitializer(function() { this.initialized = true; });
+                return function() { return value.call(this) + 1; };
+              }
+              throw new Error("invalid method decorator context");
+            }
+            class C {
+              @decorate
+              method() { return 41; }
+            }
+            let instance = new C();
+            instance.method() === 42 && instance.initialized === true
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_field_decorator_initializers() {
+        let script = r#"
+            function decorate(value, context) {
+              if (context.kind !== "field") throw new Error("invalid field decorator context");
+              return function(initialValue) { return initialValue * 2; };
+            }
+            class C {
+              @decorate
+              value = 21;
+              @decorate
+              static base = 21;
+            }
+            new C().value + C.base
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "84");
+    }
+
+    #[test]
+    fn test_class_private_static_accessors_and_setter_brand_check() {
+        let script = r#"
+            class C {
+              static #value = 42;
+              static set value(value) { this.#value = value; }
+              static read() { return C.#value; }
+            }
+            class D extends C {}
+            let threw = false;
+            try { D.value = 1; } catch (error) { threw = error instanceof TypeError; }
+            C.read() === 42 && threw
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
+    }
 }

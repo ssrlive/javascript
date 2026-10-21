@@ -310,11 +310,15 @@ pub enum ClassMember {
     StaticSetterComputed(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, parameter, body
 }
 
+pub type ClassMemberDecorators = Vec<(usize, Vec<Expr>)>;
+
 #[derive(Debug, Clone, Collect)]
 #[collect(require_static)]
 pub struct ClassDefinition {
     pub name: String,
     pub extends: Option<Expr>,
+    pub decorators: Vec<Expr>,
+    pub member_decorators: ClassMemberDecorators,
     pub members: Vec<ClassMember>,
 }
 

@@ -30,10 +30,11 @@ pub struct Compiler<'gc> {
     current_class_parent: Option<String>,                 // parent class name for super resolution
     current_class_bindings: Vec<String>,                  // active class binding names for super()
     current_class_instance_fields: Vec<Vec<ClassMember>>, // instance fields to init after super()
-    current_class_expr_refs: Vec<String>,                 // temp bindings for class expressions
-    current_class_expr_names: Vec<String>,                // names of in-flight class expressions (for Var resolution)
-    allow_super_call: bool,                               // whether direct super() calls are allowed in current function body
-    allow_super_in_arrow_iife: bool,                      // temporary flag for immediate arrow invocation contexts
+    current_class_instance_initializer_queues: Vec<Option<String>>,
+    current_class_expr_refs: Vec<String>,  // temp bindings for class expressions
+    current_class_expr_names: Vec<String>, // names of in-flight class expressions (for Var resolution)
+    allow_super_call: bool,                // whether direct super() calls are allowed in current function body
+    allow_super_in_arrow_iife: bool,       // temporary flag for immediate arrow invocation contexts
     // Module self-import support: maps imported local name -> exported binding name
     self_import_aliases: std::collections::HashMap<String, String>,
     // Track module's own exported names for self-import resolution
@@ -5280,6 +5281,9 @@ impl<'gc> Compiler<'gc> {
                     // After super() returns, stamp brand and initialise instance fields for derived classes
                     if let Some(&Some((_, brand_class_id))) = self.current_class_brand_info.last() {
                         self.emit_brand_stamp(brand_class_id)?;
+                    }
+                    if let Some(Some(queue)) = self.current_class_instance_initializer_queues.last().cloned() {
+                        self.compile_run_class_initializers(&queue, Expr::This)?;
                     }
                     if let Some(fields) = self.current_class_instance_fields.last().cloned() {
                         for field in &fields {
@@ -10835,6 +10839,84 @@ impl<'gc> Compiler<'gc> {
     #[allow(clippy::type_complexity)]
     fn compile_class_definition(&mut self, class_def: &crate::core::statement::ClassDefinition, is_expr: bool) -> Result<(), JSError> {
         let name = &class_def.name;
+        let mut decorator_temps = Vec::with_capacity(class_def.decorators.len());
+        for (index, decorator) in class_def.decorators.iter().enumerate() {
+            let temp_name = format!("__class_decorator_{}_{}__", self.chunk.code.len(), index);
+            self.emit_define_helper_slot(&temp_name);
+            self.compile_expr(decorator)?;
+            self.emit_helper_set(&temp_name);
+            self.chunk.write_opcode(Opcode::Pop);
+            decorator_temps.push(temp_name);
+        }
+        let mut member_decorator_temps = Vec::with_capacity(class_def.member_decorators.len());
+        for (member_index, decorators) in &class_def.member_decorators {
+            let mut temps = Vec::with_capacity(decorators.len());
+            for (decorator_index, decorator) in decorators.iter().enumerate() {
+                let temp_name = format!(
+                    "__member_decorator_{}_{}_{}__",
+                    self.chunk.code.len(),
+                    member_index,
+                    decorator_index
+                );
+                self.emit_define_helper_slot(&temp_name);
+                self.compile_expr(decorator)?;
+                self.emit_helper_set(&temp_name);
+                self.chunk.write_opcode(Opcode::Pop);
+                temps.push(temp_name);
+            }
+            member_decorator_temps.push((*member_index, temps));
+        }
+        let (instance_initializer_queue, static_initializer_queue) = if member_decorator_temps.is_empty() {
+            (None, None)
+        } else {
+            let instance_queue = format!("__instance_initializers_{}__", self.chunk.code.len());
+            let static_queue = format!("__static_initializers_{}__", self.chunk.code.len());
+            for queue in [&instance_queue, &static_queue] {
+                self.emit_define_helper_slot(queue);
+                self.compile_expr(&Expr::Array(Vec::new()))?;
+                self.emit_helper_set(queue);
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+            (Some(instance_queue), Some(static_queue))
+        };
+        let mut field_initializer_temps = Vec::new();
+        for (member_index, decorator_names) in &member_decorator_temps {
+            let Some(member) = class_def.members.get(*member_index) else {
+                continue;
+            };
+            let (member_name, is_static) = match member {
+                ClassMember::Property(name, _) => (name.as_str(), false),
+                ClassMember::StaticProperty(name, _) => (name.as_str(), true),
+                _ => continue,
+            };
+            let mut initializer_temps = Vec::with_capacity(decorator_names.len());
+            for decorator_name in decorator_names.iter().rev() {
+                let result_temp = format!("__field_decorator_result_{}__", self.chunk.code.len());
+                self.emit_define_helper_slot(&result_temp);
+                let call = Expr::Call(
+                    Box::new(Expr::Var(decorator_name.clone(), None, None)),
+                    vec![
+                        Expr::Undefined,
+                        Self::make_decorator_context(
+                            "field",
+                            member_name,
+                            is_static,
+                            false,
+                            if is_static {
+                                static_initializer_queue.as_deref()
+                            } else {
+                                instance_initializer_queue.as_deref()
+                            },
+                        ),
+                    ],
+                );
+                self.compile_expr(&call)?;
+                self.emit_helper_set(&result_temp);
+                self.chunk.write_opcode(Opcode::Pop);
+                initializer_temps.push(result_temp);
+            }
+            field_initializer_temps.push((*member_index, initializer_temps));
+        }
 
         // TDZ for class name in heritage position: `class X extends X {}` must
         // throw ReferenceError (not resolve an outer/hoisted binding).
@@ -10867,11 +10949,11 @@ impl<'gc> Compiler<'gc> {
             None
         };
 
-        // For class declarations at top-level, set up the inner immutable binding
-        // BEFORE the heritage expression, so closures in the heritage capture the
-        // inner binding (per spec §14.6 step 4 before step 6).
+        // Set up the inner immutable binding before the heritage expression so
+        // methods and accessors can resolve the class's own name independently
+        // of the surrounding declaration binding.
         let mut class_expr_temp: Option<String> = None;
-        if !is_expr && self.scope_depth == 0 && !name.is_empty() && !self.force_local_let {
+        if !is_expr && !name.is_empty() {
             let temp_name = format!("__cls_expr_{}__", self.forin_counter);
             self.forin_counter += 1;
             self.current_class_expr_refs.push(temp_name.clone());
@@ -10967,6 +11049,33 @@ impl<'gc> Compiler<'gc> {
         let mut computed_key_counter = 0usize;
         let computed_keys_use_hidden_globals = self.function_depth == 0;
         let mut cloned_members: Vec<crate::core::statement::ClassMember> = class_def.members.clone();
+        for (member_index, initializer_temps) in &field_initializer_temps {
+            let Some(member) = cloned_members.get_mut(*member_index) else {
+                continue;
+            };
+            let initializer = match member {
+                ClassMember::Property(_, initializer) | ClassMember::StaticProperty(_, initializer) => initializer,
+                _ => continue,
+            };
+            let mut decorated_initializer = initializer.clone();
+            for initializer_temp in initializer_temps {
+                let is_undefined = Expr::Binary(
+                    Box::new(Expr::Var(initializer_temp.clone(), None, None)),
+                    crate::core::BinaryOp::StrictEqual,
+                    Box::new(Expr::Undefined),
+                );
+                let apply_initializer = Expr::Call(
+                    Box::new(Expr::Property(
+                        Box::new(Expr::Var(initializer_temp.clone(), None, None)),
+                        "call".to_string(),
+                    )),
+                    vec![Expr::This, decorated_initializer.clone()],
+                );
+                decorated_initializer =
+                    Expr::Conditional(Box::new(is_undefined), Box::new(decorated_initializer), Box::new(apply_initializer));
+            }
+            *initializer = decorated_initializer;
+        }
         for member in &mut cloned_members {
             match member {
                 ClassMember::PropertyComputed(key_expr, _)
@@ -11044,6 +11153,8 @@ impl<'gc> Compiler<'gc> {
 
         // Push instance fields onto stack for super() initialisation in derived classes
         self.current_class_instance_fields.push(cloned_instance_fields.clone());
+        self.current_class_instance_initializer_queues
+            .push(instance_initializer_queue.clone());
 
         // Extract constructor; if none and has parent, generate default forwarding ctor
         let mut ctor_params = Vec::new();
@@ -11261,6 +11372,9 @@ impl<'gc> Compiler<'gc> {
             if has_private {
                 self.emit_brand_stamp(class_id)?;
             }
+            if let Some(queue) = &instance_initializer_queue {
+                self.compile_run_class_initializers(queue, Expr::This)?;
+            }
             for field in &cloned_instance_fields {
                 self.compile_class_instance_field(field)?;
             }
@@ -11367,6 +11481,13 @@ impl<'gc> Compiler<'gc> {
                 }
             } else if self.scope_depth == 0 && self.force_local_let {
                 // Block-scoped class at top level: use pre-declared local slot
+                if let Some(temp_name) = class_expr_temp.as_ref() {
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let temp_u16 = crate::unicode::utf8_to_utf16(temp_name);
+                    let temp_idx = self.chunk.add_constant(Value::String(temp_u16));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(temp_idx);
+                }
                 if let Some(pos) = self.locals.iter().rposition(|l| l == name) {
                     self.chunk.write_opcode(Opcode::SetLocal);
                     self.chunk.write_byte(pos as u8);
@@ -11377,6 +11498,13 @@ impl<'gc> Compiler<'gc> {
                 self.const_locals.insert(name.to_string());
             } else if class_name_pre_slot.is_some() {
                 // Update existing pre-registered slot with actual constructor value
+                if let Some(temp_name) = class_expr_temp.as_ref() {
+                    self.chunk.write_opcode(Opcode::Dup);
+                    let temp_u16 = crate::unicode::utf8_to_utf16(temp_name);
+                    let temp_idx = self.chunk.add_constant(Value::String(temp_u16));
+                    self.chunk.write_opcode(Opcode::DefineGlobal);
+                    self.chunk.write_u16(temp_idx);
+                }
                 self.emit_define_var(name);
                 // const_locals already contains name from pre-registration
             } else {
@@ -11851,6 +11979,7 @@ impl<'gc> Compiler<'gc> {
 
         // Pop instance fields stack
         self.current_class_instance_fields.pop();
+        self.current_class_instance_initializer_queues.pop();
 
         // Clean up pre-computed key locals.
         // At function scope the computed-key values sit below other class-related
@@ -11938,11 +12067,332 @@ impl<'gc> Compiler<'gc> {
             }
         }
 
+        self.compile_member_decorators(
+            class_def,
+            name,
+            is_expr,
+            &member_decorator_temps,
+            instance_initializer_queue.as_deref(),
+            static_initializer_queue.as_deref(),
+        )?;
+        self.compile_class_decorators(name, is_expr, &decorator_temps)?;
+
         // Restore previous class context
         self.class_privns_stack.pop();
         self.current_class_brand_info.pop();
         self.current_class_bindings.pop();
         self.current_class_parent = prev_parent;
+        Ok(())
+    }
+
+    fn compile_member_decorators(
+        &mut self,
+        class_def: &crate::core::statement::ClassDefinition,
+        class_name: &str,
+        is_expr: bool,
+        decorator_temps: &[(usize, Vec<String>)],
+        instance_initializer_queue: Option<&str>,
+        static_initializer_queue: Option<&str>,
+    ) -> Result<(), JSError> {
+        if decorator_temps.is_empty() {
+            return Ok(());
+        }
+
+        let class_temp = format!("__member_decorated_class_{}__", self.chunk.code.len());
+        let result_temp = format!("__member_decorator_result_{}__", self.chunk.code.len());
+        self.emit_define_helper_slot(&class_temp);
+        self.emit_define_helper_slot(&result_temp);
+        if is_expr {
+            self.chunk.write_opcode(Opcode::Dup);
+        } else {
+            self.emit_get_class_ref(class_name, false)?;
+        }
+        self.emit_helper_set(&class_temp);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        for (member_index, decorator_names) in decorator_temps {
+            let Some(member) = class_def.members.get(*member_index) else {
+                continue;
+            };
+            let (member_name, is_static, kind) = match member {
+                ClassMember::Method(name, ..)
+                | ClassMember::MethodGenerator(name, ..)
+                | ClassMember::MethodAsync(name, ..)
+                | ClassMember::MethodAsyncGenerator(name, ..) => (name.as_str(), false, "method"),
+                ClassMember::StaticMethod(name, ..)
+                | ClassMember::StaticMethodGenerator(name, ..)
+                | ClassMember::StaticMethodAsync(name, ..)
+                | ClassMember::StaticMethodAsyncGenerator(name, ..) => (name.as_str(), true, "method"),
+                _ => continue,
+            };
+            let class_ref = Expr::Var(class_temp.clone(), None, None);
+            let target = if is_static {
+                class_ref
+            } else {
+                Expr::Property(Box::new(class_ref), "prototype".to_string())
+            };
+            let property = Expr::Property(Box::new(target.clone()), member_name.to_string());
+
+            for decorator_name in decorator_names.iter().rev() {
+                let context = Self::make_decorator_context(
+                    kind,
+                    member_name,
+                    is_static,
+                    false,
+                    if is_static {
+                        static_initializer_queue
+                    } else {
+                        instance_initializer_queue
+                    },
+                );
+                let call = Expr::Call(
+                    Box::new(Expr::Var(decorator_name.clone(), None, None)),
+                    vec![property.clone(), context],
+                );
+                self.compile_expr(&call)?;
+                self.emit_helper_set(&result_temp);
+                self.chunk.write_opcode(Opcode::Pop);
+
+                let is_undefined = Expr::Binary(
+                    Box::new(Expr::Var(result_temp.clone(), None, None)),
+                    crate::core::BinaryOp::StrictEqual,
+                    Box::new(Expr::Undefined),
+                );
+                let replacement = Expr::Conditional(
+                    Box::new(is_undefined),
+                    Box::new(property.clone()),
+                    Box::new(Expr::Var(result_temp.clone(), None, None)),
+                );
+                let assignment = Expr::Assign(Box::new(property.clone()), Box::new(replacement));
+                self.compile_expr(&assignment)?;
+                self.chunk.write_opcode(Opcode::Pop);
+            }
+        }
+        if let Some(queue) = static_initializer_queue {
+            self.compile_run_class_initializers(queue, Expr::Var(class_temp, None, None))?;
+        }
+        Ok(())
+    }
+
+    fn make_decorator_context(kind: &str, name: &str, is_static: bool, is_private: bool, initializer_queue: Option<&str>) -> Expr {
+        let string_property = |key: &str, value: &str| {
+            (
+                Expr::StringLit(crate::unicode::utf8_to_utf16(key)),
+                Expr::StringLit(crate::unicode::utf8_to_utf16(value)),
+                false,
+                true,
+            )
+        };
+        let boolean_property = |key: &str, value: bool| {
+            (
+                Expr::StringLit(crate::unicode::utf8_to_utf16(key)),
+                Expr::Boolean(value),
+                false,
+                true,
+            )
+        };
+        let add_initializer_body = initializer_queue
+            .map(|queue| {
+                vec![Statement::from(StatementKind::Expr(Expr::Call(
+                    Box::new(Expr::Property(
+                        Box::new(Expr::Var(queue.to_string(), None, None)),
+                        "push".to_string(),
+                    )),
+                    vec![Expr::Var("initializer".to_string(), None, None)],
+                )))]
+            })
+            .unwrap_or_default();
+        let mut properties = vec![
+            string_property("kind", kind),
+            string_property("name", name),
+            (
+                Expr::StringLit(crate::unicode::utf8_to_utf16("addInitializer")),
+                Expr::Function(
+                    None,
+                    vec![DestructuringElement::Variable("initializer".to_string(), None)],
+                    add_initializer_body,
+                    None,
+                ),
+                false,
+                true,
+            ),
+        ];
+        if kind != "class" {
+            let target = Expr::Var("target".to_string(), None, None);
+            let property = Expr::Property(Box::new(target.clone()), name.to_string());
+            let return_body = |value| vec![Statement::from(StatementKind::Return(Some(value)))];
+            let access = Expr::Object(vec![
+                (
+                    Expr::StringLit(crate::unicode::utf8_to_utf16("has")),
+                    Expr::Function(
+                        None,
+                        vec![DestructuringElement::Variable("target".to_string(), None)],
+                        return_body(Expr::Binary(
+                            Box::new(Expr::StringLit(crate::unicode::utf8_to_utf16(name))),
+                            crate::core::BinaryOp::In,
+                            Box::new(target.clone()),
+                        )),
+                        None,
+                    ),
+                    false,
+                    true,
+                ),
+                (
+                    Expr::StringLit(crate::unicode::utf8_to_utf16("get")),
+                    Expr::Function(
+                        None,
+                        vec![DestructuringElement::Variable("target".to_string(), None)],
+                        return_body(property.clone()),
+                        None,
+                    ),
+                    false,
+                    true,
+                ),
+                (
+                    Expr::StringLit(crate::unicode::utf8_to_utf16("set")),
+                    Expr::Function(
+                        None,
+                        vec![
+                            DestructuringElement::Variable("target".to_string(), None),
+                            DestructuringElement::Variable("value".to_string(), None),
+                        ],
+                        return_body(Expr::Assign(
+                            Box::new(property),
+                            Box::new(Expr::Var("value".to_string(), None, None)),
+                        )),
+                        None,
+                    ),
+                    false,
+                    true,
+                ),
+            ]);
+            properties.extend([
+                boolean_property("static", is_static),
+                boolean_property("private", is_private),
+                (Expr::StringLit(crate::unicode::utf8_to_utf16("access")), access, false, true),
+            ]);
+        }
+        Expr::Object(properties)
+    }
+
+    fn compile_run_class_initializers(&mut self, queue: &str, receiver: Expr) -> Result<(), JSError> {
+        let callback = Expr::ArrowFunction(
+            vec![DestructuringElement::Variable("initializer".to_string(), None)],
+            vec![Statement::from(StatementKind::Expr(Expr::Call(
+                Box::new(Expr::Property(
+                    Box::new(Expr::Var("initializer".to_string(), None, None)),
+                    "call".to_string(),
+                )),
+                vec![receiver],
+            )))],
+        );
+        let run = Expr::Call(
+            Box::new(Expr::Property(
+                Box::new(Expr::Var(queue.to_string(), None, None)),
+                "forEach".to_string(),
+            )),
+            vec![callback],
+        );
+        self.compile_expr(&run)?;
+        self.chunk.write_opcode(Opcode::Pop);
+        Ok(())
+    }
+
+    fn compile_class_decorators(&mut self, name: &str, is_expr: bool, decorator_temps: &[String]) -> Result<(), JSError> {
+        if decorator_temps.is_empty() {
+            return Ok(());
+        }
+
+        let class_temp = format!("__decorated_class_{}__", self.chunk.code.len());
+        let result_temp = format!("__decorator_result_{}__", self.chunk.code.len());
+        let initializer_queue = format!("__class_initializers_{}__", self.chunk.code.len());
+        self.emit_define_helper_slot(&class_temp);
+        self.emit_define_helper_slot(&result_temp);
+        self.emit_define_helper_slot(&initializer_queue);
+        self.compile_expr(&Expr::Array(Vec::new()))?;
+        self.emit_helper_set(&initializer_queue);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        if is_expr {
+            self.chunk.write_opcode(Opcode::Dup);
+        } else {
+            self.emit_get_class_ref(name, false)?;
+        }
+        self.emit_helper_set(&class_temp);
+        self.chunk.write_opcode(Opcode::Pop);
+
+        for decorator_temp in decorator_temps.iter().rev() {
+            let context = Self::make_decorator_context("class", name, false, false, Some(&initializer_queue));
+            let decorator_call = Expr::Call(
+                Box::new(Expr::Var(decorator_temp.clone(), None, None)),
+                vec![Expr::Var(class_temp.clone(), None, None), context],
+            );
+            self.compile_expr(&decorator_call)?;
+            self.emit_helper_set(&result_temp);
+            self.chunk.write_opcode(Opcode::Pop);
+
+            let has_replacement = Expr::Binary(
+                Box::new(Expr::Var(result_temp.clone(), None, None)),
+                crate::core::BinaryOp::StrictNotEqual,
+                Box::new(Expr::Undefined),
+            );
+            self.compile_expr(&has_replacement)?;
+            let no_replacement = self.emit_jump(Opcode::JumpIfFalse);
+            self.emit_helper_get(&result_temp);
+            self.chunk.write_opcode(Opcode::ThrowIfNotConstructor);
+            self.chunk.write_byte(0);
+            self.patch_jump(no_replacement);
+
+            let undefined = Expr::Undefined;
+            let is_undefined = Expr::Binary(
+                Box::new(Expr::Var(result_temp.clone(), None, None)),
+                crate::core::BinaryOp::StrictEqual,
+                Box::new(undefined),
+            );
+            let replacement = Expr::Conditional(
+                Box::new(is_undefined),
+                Box::new(Expr::Var(class_temp.clone(), None, None)),
+                Box::new(Expr::Var(result_temp.clone(), None, None)),
+            );
+            self.compile_expr(&replacement)?;
+            self.emit_helper_set(&class_temp);
+            self.chunk.write_opcode(Opcode::Pop);
+        }
+
+        let initializer_callback = Expr::ArrowFunction(
+            vec![DestructuringElement::Variable("initializer".to_string(), None)],
+            vec![Statement::from(StatementKind::Expr(Expr::Call(
+                Box::new(Expr::Property(
+                    Box::new(Expr::Var("initializer".to_string(), None, None)),
+                    "call".to_string(),
+                )),
+                vec![Expr::Var(class_temp.clone(), None, None)],
+            )))],
+        );
+        let run_initializers = Expr::Call(
+            Box::new(Expr::Property(
+                Box::new(Expr::Var(initializer_queue, None, None)),
+                "forEach".to_string(),
+            )),
+            vec![initializer_callback],
+        );
+        self.compile_expr(&run_initializers)?;
+        self.chunk.write_opcode(Opcode::Pop);
+
+        if is_expr {
+            self.emit_helper_get(&class_temp);
+        } else {
+            self.emit_helper_get(&class_temp);
+            if self.scope_depth == 0 && !self.force_local_let {
+                self.emit_set_global_binding(name);
+            } else if let Some(slot) = self.locals.iter().rposition(|local| local == name) {
+                self.chunk.write_opcode(Opcode::SetLocal);
+                self.chunk.write_byte(slot as u8);
+            } else {
+                self.emit_helper_set(name);
+            }
+            self.chunk.write_opcode(Opcode::Pop);
+        }
         Ok(())
     }
 

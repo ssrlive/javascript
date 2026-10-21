@@ -1,7 +1,7 @@
 use crate::JSError;
 use crate::core::statement::{
-    CatchParamPattern, ExportSpecifier, ForOfPattern, ForStatement, IfStatement, ImportSpecifier, Statement, StatementKind,
-    SwitchStatement, TryCatchStatement,
+    CatchParamPattern, ClassMemberDecorators, ExportSpecifier, ForOfPattern, ForStatement, IfStatement, ImportSpecifier, Statement,
+    StatementKind, SwitchStatement, TryCatchStatement,
 };
 use crate::core::{BinaryOp, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, TemplatePart, Token, TokenData};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -116,7 +116,8 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             parse_export_statement(t, index)
         }
         Token::Function | Token::FunctionStar => parse_function_declaration(t, index),
-        Token::Class => parse_class_declaration(t, index),
+        Token::Class => parse_class_declaration(t, index, Vec::new()),
+        Token::At => parse_decorated_class_declaration(t, index),
         Token::If => parse_if_statement(t, index),
         Token::Return => parse_return_statement(t, index),
         Token::Throw => parse_throw_statement(t, index),
@@ -744,7 +745,190 @@ fn with_cleared_await_context<T, F: FnOnce() -> T>(f: F) -> T {
         out
     })
 }
-fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+
+fn skip_decorator_group(tokens: &[TokenData], index: &mut usize) -> Result<(), JSError> {
+    let Some(open) = tokens.get(*index).map(|token| &token.token) else {
+        return Err(raise_parse_error_at!(tokens.get(*index)));
+    };
+    let (first_open, first_close) = match open {
+        Token::LParen => (Token::LParen, Token::RParen),
+        Token::LBracket => (Token::LBracket, Token::RBracket),
+        Token::LBrace => (Token::LBrace, Token::RBrace),
+        _ => return Err(raise_parse_error_at!(tokens.get(*index))),
+    };
+    let mut stack = vec![(first_open, first_close)];
+    *index += 1;
+    while let Some(token) = tokens.get(*index) {
+        match token.token {
+            Token::LParen => stack.push((Token::LParen, Token::RParen)),
+            Token::LBracket => stack.push((Token::LBracket, Token::RBracket)),
+            Token::LBrace => stack.push((Token::LBrace, Token::RBrace)),
+            Token::RParen | Token::RBracket | Token::RBrace => {
+                let Some((_, expected)) = stack.pop() else {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                };
+                if token.token != expected {
+                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                }
+                *index += 1;
+                if stack.is_empty() {
+                    return Ok(());
+                }
+                continue;
+            }
+            Token::EOF => break,
+            _ => {}
+        }
+        *index += 1;
+    }
+    Err(raise_parse_error_at!(tokens.get(*index)))
+}
+
+fn skip_decorator_list(tokens: &[TokenData], index: &mut usize) -> Result<(), JSError> {
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::At) {
+        *index += 1;
+        if *index >= tokens.len() || matches!(tokens[*index].token, Token::LineTerminator) {
+            return Err(raise_parse_error_at!(tokens.get(*index)));
+        }
+        match tokens[*index].token {
+            Token::LParen => skip_decorator_group(tokens, index)?,
+            Token::Identifier(_) | Token::PrivateIdentifier(_) | Token::Await | Token::Yield | Token::Async => {
+                *index += 1;
+                while *index + 1 < tokens.len()
+                    && matches!(tokens[*index].token, Token::Dot)
+                    && matches!(
+                        tokens[*index + 1].token,
+                        Token::Identifier(_) | Token::PrivateIdentifier(_) | Token::Await | Token::Yield | Token::Async
+                    )
+                {
+                    *index += 2;
+                }
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                    skip_decorator_group(tokens, index)?;
+                }
+            }
+            _ => return Err(raise_parse_error_at!(tokens.get(*index))),
+        }
+        let mut lookahead = *index;
+        while lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LineTerminator) {
+            lookahead += 1;
+        }
+        if lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::At) {
+            *index = lookahead;
+        }
+    }
+    Ok(())
+}
+
+fn parse_decorator_list(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Expr>, JSError> {
+    let mut decorators = Vec::new();
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::At) {
+        *index += 1;
+        if *index >= tokens.len() || matches!(tokens[*index].token, Token::LineTerminator) {
+            return Err(raise_parse_error_at!(tokens.get(*index)));
+        }
+        let expr = if matches!(tokens[*index].token, Token::Await | Token::Yield | Token::Async) {
+            let mut decorator_tokens = tokens.to_vec();
+            decorator_tokens[*index].token = Token::Identifier(
+                match tokens[*index].token {
+                    Token::Await => "await",
+                    Token::Yield => "yield",
+                    _ => "async",
+                }
+                .to_string(),
+            );
+            parse_assignment(&decorator_tokens, index)?
+        } else {
+            parse_assignment(tokens, index)?
+        };
+        decorators.push(expr);
+        let mut lookahead = *index;
+        while lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LineTerminator) {
+            lookahead += 1;
+        }
+        if lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::At) {
+            *index = lookahead;
+        }
+    }
+    Ok(decorators)
+}
+
+fn parse_decorated_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let decorators = parse_decorator_list(t, index)?;
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+    if *index >= t.len() || !matches!(t[*index].token, Token::Class) {
+        return Err(raise_parse_error_at!(t.get(*index)));
+    }
+    parse_class_declaration(t, index, decorators)
+}
+
+fn auto_accessor_members(
+    backing_name: &str,
+    property_name: &str,
+    is_static: bool,
+    is_private: bool,
+    computed_key: Option<Expr>,
+    initializer: Expr,
+) -> Vec<ClassMember> {
+    let mut members = Vec::with_capacity(3);
+    members.push(if is_static {
+        ClassMember::PrivateStaticProperty(backing_name.to_string(), initializer)
+    } else {
+        ClassMember::PrivateProperty(backing_name.to_string(), initializer)
+    });
+
+    let backing_read = || Expr::PrivateMember(Box::new(Expr::This), super::make_private_key(backing_name));
+    let getter_body = vec![Statement {
+        kind: Box::new(StatementKind::Return(Some(backing_read()))),
+        line: 0,
+        column: 0,
+    }];
+    let setter_body = vec![Statement::from(StatementKind::Expr(Expr::Assign(
+        Box::new(backing_read()),
+        Box::new(Expr::Var("value".to_string(), None, None)),
+    )))];
+    let setter_params = vec![DestructuringElement::Variable("value".to_string(), None)];
+
+    if is_private {
+        members.push(if is_static {
+            ClassMember::PrivateStaticGetter(property_name.to_string(), getter_body)
+        } else {
+            ClassMember::PrivateGetter(property_name.to_string(), getter_body)
+        });
+        members.push(if is_static {
+            ClassMember::PrivateStaticSetter(property_name.to_string(), setter_params, setter_body)
+        } else {
+            ClassMember::PrivateSetter(property_name.to_string(), setter_params, setter_body)
+        });
+    } else if let Some(key) = computed_key {
+        members.push(if is_static {
+            ClassMember::StaticGetterComputed(key.clone(), getter_body)
+        } else {
+            ClassMember::GetterComputed(key.clone(), getter_body)
+        });
+        members.push(if is_static {
+            ClassMember::StaticSetterComputed(key, setter_params, setter_body)
+        } else {
+            ClassMember::SetterComputed(key, setter_params, setter_body)
+        });
+    } else {
+        members.push(if is_static {
+            ClassMember::StaticGetter(property_name.to_string(), getter_body)
+        } else {
+            ClassMember::Getter(property_name.to_string(), getter_body)
+        });
+        members.push(if is_static {
+            ClassMember::StaticSetter(property_name.to_string(), setter_params, setter_body)
+        } else {
+            ClassMember::Setter(property_name.to_string(), setter_params, setter_body)
+        });
+    }
+    members
+}
+
+fn parse_class_declaration(t: &[TokenData], index: &mut usize, decorators: Vec<Expr>) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1;
     let name = if *index < t.len() {
@@ -790,9 +974,15 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
         None
     };
     push_class_heritage(extends.is_some());
-    let members = with_strict_binding_checks(|| parse_class_body(t, index))?;
+    let (members, member_decorators) = with_strict_binding_checks(|| parse_class_body(t, index))?;
     pop_class_heritage();
-    let class_def = crate::core::ClassDefinition { name, extends, members };
+    let class_def = crate::core::ClassDefinition {
+        name,
+        extends,
+        decorators,
+        member_decorators,
+        members,
+    };
     Ok(Statement {
         kind: Box::new(StatementKind::Class(Box::new(class_def))),
         line: t[start].line,
@@ -3073,7 +3263,8 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             Token::Let => parse_let_statement(t, index)?,
             Token::Const => parse_const_statement(t, index)?,
             Token::Function | Token::FunctionStar | Token::Async => parse_function_declaration(t, index)?,
-            Token::Class => parse_class_declaration(t, index)?,
+            Token::Class => parse_class_declaration(t, index, Vec::new())?,
+            Token::At => parse_decorated_class_declaration(t, index)?,
             _ => return Err(raise_parse_error!("Unexpected token in export statement")),
         };
         inner_stmt = Some(Box::new(stmt));
@@ -4579,13 +4770,16 @@ impl Drop for ClassPrivateNamesGuard {
         });
     }
 }
-pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassMember>, JSError> {
+pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<(Vec<ClassMember>, ClassMemberDecorators), JSError> {
     let _guard = ClassContextGuard::new();
     if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }
     *index += 1;
     let mut members = Vec::new();
+    let mut member_decorators = Vec::new();
+    let mut auto_accessor_index = 0usize;
+    let mut private_auto_accessor_names = std::collections::HashSet::new();
     let mut declared_private_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let current_private_names = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
     let _private_guard = ClassPrivateNamesGuard::new(current_private_names.clone());
@@ -4597,6 +4791,10 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             if matches!(t[pos].token, Token::Semicolon | Token::LineTerminator) {
                 pos += 1;
+                continue;
+            }
+            if matches!(t[pos].token, Token::At) {
+                skip_decorator_list(t, &mut pos)?;
                 continue;
             }
             // Skip computed property brackets — names inside are usages, not declarations
@@ -4760,6 +4958,14 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         if *index >= t.len() || matches!(t[*index].token, Token::RBrace) {
             break;
         }
+        if matches!(t[*index].token, Token::At) {
+            let first_member = members.len();
+            let decorators = parse_decorator_list(t, index)?;
+            member_decorators.push((first_member, decorators));
+            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
+        }
         let is_static = if *index < t.len() && matches!(t[*index].token, Token::Static) {
             if let Some(next) = t.get(*index + 1) {
                 #[allow(clippy::if_same_then_else)]
@@ -4809,6 +5015,108 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             FUNCTION_CONTEXT.with(|c| *c.borrow_mut() = saved_fn);
             GENERATOR_CONTEXT.with(|c| *c.borrow_mut() = saved_gen);
             members.push(ClassMember::StaticBlock(body));
+            continue;
+        }
+        let is_auto_accessor = matches!(
+            t.get(*index).map(|token| &token.token),
+            Some(Token::Identifier(name)) if name == "accessor"
+        ) && t.get(*index + 1).is_some_and(|next| {
+            next.line == t[*index].line
+                && matches!(
+                    next.token,
+                    Token::Identifier(_)
+                        | Token::PrivateIdentifier(_)
+                        | Token::StringLit(_)
+                        | Token::Number(_)
+                        | Token::BigInt(_)
+                        | Token::LBracket
+                        | Token::Await
+                        | Token::Yield
+                        | Token::Async
+                )
+        });
+        if is_auto_accessor {
+            *index += 1;
+            let mut is_private = false;
+            let mut property_name = None;
+            let mut computed_key = None;
+            match &t[*index].token {
+                Token::Identifier(name) | Token::PrivateIdentifier(name) => {
+                    is_private = matches!(t[*index].token, Token::PrivateIdentifier(_));
+                    property_name = Some(name.clone());
+                    *index += 1;
+                }
+                Token::StringLit(value) => {
+                    property_name = Some(utf16_to_utf8(value));
+                    *index += 1;
+                }
+                Token::Number(value) => {
+                    property_name = Some(crate::core::value_to_string(&crate::core::Value::Number(*value)));
+                    *index += 1;
+                }
+                Token::BigInt(value) => {
+                    property_name = Some(value.clone());
+                    *index += 1;
+                }
+                Token::LBracket => {
+                    *index += 1;
+                    let key = with_allowed_in(|| parse_assignment(t, index))?;
+                    if *index >= t.len() || !matches!(t[*index].token, Token::RBracket) {
+                        return Err(raise_parse_error_at!(t.get(*index)));
+                    }
+                    *index += 1;
+                    computed_key = Some(key);
+                }
+                _ => {
+                    property_name = t[*index].token.as_identifier_string();
+                    if property_name.is_none() {
+                        return Err(raise_parse_error_at!(t.get(*index)));
+                    }
+                    *index += 1;
+                }
+            }
+            if is_private {
+                let Some(name) = property_name.as_ref() else {
+                    return Err(raise_parse_error_at!(t.get(*index)));
+                };
+                if declared_private_names.contains(name) {
+                    return Err(raise_parse_error_with_token!(
+                        &t[*index - 1],
+                        format!("Duplicate private name: #{}", name)
+                    ));
+                }
+                declared_private_names.insert(name.clone());
+                private_auto_accessor_names.insert(name.clone());
+                current_private_names.borrow_mut().insert(name.clone());
+            }
+            let initializer = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                *index += 1;
+                push_method_context();
+                let value = parse_expression(t, index);
+                pop_method_context();
+                value?
+            } else {
+                Expr::Undefined
+            };
+            if *index < t.len() {
+                match t[*index].token {
+                    Token::Semicolon | Token::LineTerminator => *index += 1,
+                    Token::RBrace => {}
+                    _ => return Err(raise_parse_error_at!(t.get(*index))),
+                }
+            }
+            let backing_name = format!("__auto_accessor_backing_{}", auto_accessor_index);
+            auto_accessor_index += 1;
+            declared_private_names.insert(backing_name.clone());
+            current_private_names.borrow_mut().insert(backing_name.clone());
+            members.extend(auto_accessor_members(
+                &backing_name,
+                property_name.as_deref().unwrap_or(""),
+                is_static,
+                is_private,
+                computed_key,
+                initializer,
+            ));
             continue;
         }
         let mut is_accessor = false;
@@ -4903,6 +5211,15 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                         return Err(raise_parse_error_at!(t.get(*index)));
                     }
                 }
+            }
+            if is_private
+                && let Some(name) = prop_name_str.as_ref()
+                && private_auto_accessor_names.contains(name)
+            {
+                return Err(raise_parse_error_with_token!(
+                    &t[*index],
+                    format!("Duplicate private name: #{}", name)
+                ));
             }
             if *index >= t.len() || !matches!(t[*index].token, Token::LParen) {
                 return Err(raise_parse_error_at!(t.get(*index)));
@@ -5255,7 +5572,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         }
     }
     *index += 1;
-    Ok(members)
+    Ok((members, member_decorators))
 }
 fn is_import_call_expression(expr: &Expr) -> bool {
     match expr {
@@ -5396,6 +5713,23 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             let inner = parse_primary(tokens, index, true)?;
             Expr::LogicalNot(Box::new(inner))
         }
+        Token::At => {
+            *index -= 1;
+            let decorators = parse_decorator_list(tokens, index)?;
+            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
+            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::Class) {
+                return Err(raise_parse_error_at!(tokens.get(*index)));
+            }
+            match parse_primary(tokens, index, allow_call)? {
+                Expr::Class(mut class_def) => {
+                    class_def.decorators = decorators;
+                    Expr::Class(class_def)
+                }
+                _ => return Err(raise_parse_error_at!(tokens.get(*index))),
+            }
+        }
         Token::Class => {
             let name = if *index < tokens.len() {
                 match &tokens[*index].token {
@@ -5438,9 +5772,15 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 None
             };
             push_class_heritage(extends.is_some());
-            let members = with_strict_binding_checks(|| parse_class_body(tokens, index))?;
+            let (members, member_decorators) = with_strict_binding_checks(|| parse_class_body(tokens, index))?;
             pop_class_heritage();
-            let class_def = crate::core::ClassDefinition { name, extends, members };
+            let class_def = crate::core::ClassDefinition {
+                name,
+                extends,
+                decorators: Vec::new(),
+                member_decorators,
+                members,
+            };
             Expr::Class(Box::new(class_def))
         }
         Token::New => {

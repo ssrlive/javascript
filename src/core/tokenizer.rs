@@ -79,6 +79,7 @@ pub enum Token {
     RBrace,
     Colon,
     Dot,
+    At,
     Comma,
     Let,
     Var,
@@ -856,6 +857,16 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
             '(' => {
                 tokens.push(TokenData {
                     token: Token::LParen,
+                    line,
+                    column: start_col,
+                    byte_offset: start_byte,
+                });
+                i += 1;
+                column += 1;
+            }
+            '@' => {
+                tokens.push(TokenData {
+                    token: Token::At,
                     line,
                     column: start_col,
                     byte_offset: start_byte,

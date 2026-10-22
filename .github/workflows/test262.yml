@@ -69,12 +69,12 @@ jobs:
 
       - name: Build JavaScript engine
         run: |
-          cargo build --all-features --release --package js
+          cargo build --all-features --release --example js-rs
 
       - name: Run test262 subset ${{ matrix.cluster }}
         if: ${{ !cancelled() }}
         env:
-          FAIL_ON_FAILURE: 'true'
+          FAIL_ON_FAILURE: "true"
         run: |
           set -euo pipefail
 
@@ -314,7 +314,6 @@ jobs:
           else
             touch test262-results.log
           fi
-
       - name: Upload results
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v6
@@ -419,4 +418,3 @@ jobs:
               [ -n "$feat" ] && echo "- $feat"
             done <<< "$unsupported_features"
           fi
-

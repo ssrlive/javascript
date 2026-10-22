@@ -133,7 +133,7 @@ if (!fs.existsSync(TEST262_ROOT_DIR)) {
 // Build engine
 console.log('Building engine interpreter...');
 const USE_RELEASE = process.env.TEST262_RELEASE !== '0';
-const buildArgs = ['build', '-p', 'js', '--all-features'];
+const buildArgs = ['build', '--example', 'js-rs', '--all-features'];
 if (USE_RELEASE) buildArgs.push('--release');
 const buildRes = spawnSync('cargo', buildArgs, { stdio: 'inherit' });
 if (!buildRes || buildRes.status !== 0) {
@@ -143,7 +143,9 @@ if (!buildRes || buildRes.status !== 0) {
 
 // Locate binary
 let BIN = '';
-const binCandidates = USE_RELEASE ? ['target/release/js', 'target/release/js.exe'] : ['target/debug/js', 'target/debug/js.exe'];
+const binCandidates = USE_RELEASE
+  ? ['target/release/examples/js-rs', 'target/release/examples/js-rs.exe']
+  : ['target/debug/examples/js-rs', 'target/debug/examples/js-rs.exe'];
 
 for (const candidate of binCandidates) {
   if (fs.existsSync(candidate)) {
@@ -389,7 +391,7 @@ async function runAll() {
         binArgs.push(tmpPath);
         res = await runCommandAsync(BIN, binArgs, { timeout: TIMEOUT_SECS * 1000, cwd: testCwd });
       } else {
-        const cargoArgs = ['run', '--all-features', '--package', 'js', '--'];
+        const cargoArgs = ['run', '--all-features', '--example', 'js-rs', '--'];
         if (isModule) cargoArgs.push('--module');
         cargoArgs.push(tmpPath);
         res = await runCommandAsync('cargo', cargoArgs, { timeout: TIMEOUT_SECS * 1000, cwd: testCwd });

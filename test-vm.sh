@@ -38,7 +38,7 @@ cargo clippy -r --all-features --all-targets -- -D warnings
 # echo "🔍 Running Rust unit tests..."
 # cargo test --all-features 2>&1 | tail -1
 
-cargo b -r -p js
+cargo b -r --example js-rs
 
 # ── JS test scripts ──────────────────────────────────────────────────
 examples=(js-scripts/*.js js-scripts/*.mjs)
@@ -53,9 +53,9 @@ fail_details=()
 for f in "${examples[@]}"; do
   name=$(basename "$f")
   if [[ "$f" == *.mjs ]] || [[ "$f" == *es6_module*.js ]]; then
-    cmd=(./target/release/js --module "$f")
+    cmd=(./target/release/examples/js-rs --module "$f")
   else
-    cmd=(./target/release/js "$f")
+    cmd=(./target/release/examples/js-rs "$f")
   fi
 
   echo "testing $f"

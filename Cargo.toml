@@ -12,9 +12,6 @@ readme = "README.md"
 keywords = ["javascript", "js", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
-[workspace]
-members = ["js"]
-
 [features]
 default = ["os", "std"]
 os = ["libc", "windows-sys"]
@@ -46,9 +43,17 @@ windows-sys = { version = "0.61.2", optional = true, features = [
 ] }
 
 [dev-dependencies]
+clap = { version = "4.6.7", features = ["derive", "cargo", "wrap_help"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 ctor = "1.0.13"
+dirs = "7.0.0"
 env_logger = { version = "0.11.11" }
+rustyline = "19.0.0"
+
+[[example]]
+name = "js-rs"
+path = "js/main.rs"
+required-features = ["os", "std"]
 
 [[bench]]
 name = "promise_benchmarks"

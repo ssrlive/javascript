@@ -31,7 +31,7 @@ jobs:
 
       - name: Build JavaScript engine
         run: |
-          cargo build --all-features --release --package js
+          cargo build --all-features --release --example js-rs
 
       - name: Run test262 subset ${{ matrix.cluster }}
         if: ${{ !cancelled() }}

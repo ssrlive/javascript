@@ -15,7 +15,7 @@ Source -> Lexer -> Parser -> Compiler -> VM
 The repository contains:
 
 - A library crate: javascript
-- A CLI binary crate: js
+- A CLI example target: js-rs
 - Rust integration tests and JavaScript self-tests
 - A Node-based Test262 runner under ci/runner.js
 
@@ -57,7 +57,7 @@ Core source layout:
 - src/core/value.rs: runtime value model
 - src/core/mod.rs: top-level compile/run pipeline and public core entry points
 - src/lib.rs: crate public API re-exports
-- js/src/main.rs: CLI entry point and REPL loop
+- js/main.rs: CLI entry point and REPL loop
 
 ## Build and run
 
@@ -65,27 +65,27 @@ Core source layout:
 
 ```bash
 cargo build --all-features --release
-cargo build -p js --release
+cargo build --example js-rs --release
 ```
 
 ### Run CLI
 
 ```bash
 # Run a file
-cargo run -r -p js -- path/to/script.js
+cargo run -r --example js-rs -- path/to/script.js
 
 # Run a module
-cargo run -r -p js -- --module path/to/module.js
-cargo run -r -p js -- path/to/module.mjs
+cargo run -r --example js-rs -- --module path/to/module.js
+cargo run -r --example js-rs -- path/to/module.mjs
 
 # Evaluate inline code
-cargo run -r -p js -- -e "1 + 2"
+cargo run -r --example js-rs -- -e "1 + 2"
 
 # Tune GC safe-point frequency (positive opcode count; default: 4096)
-cargo run -r -p js -- --gc-opcode-budget 1024 path/to/script.js
+cargo run -r --example js-rs -- --gc-opcode-budget 1024 path/to/script.js
 
 # Start REPL
-cargo run -r -p js
+cargo run -r --example js-rs
 ```
 
 ### CLI options
@@ -106,7 +106,7 @@ Options:
 
 - Exit with .exit or Ctrl-D
 - Multiline input is supported for incomplete code
-- History is stored at ~/.js_repl_history (resolved via dirs::home_dir())
+- History is stored at ~/.js_rs_history (resolved via dirs::home_dir())
 
 ## Library usage
 

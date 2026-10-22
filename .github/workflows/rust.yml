@@ -10,7 +10,6 @@ env:
 
 jobs:
   build:
-
     strategy:
       fail-fast: false
       matrix:
@@ -19,48 +18,48 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy, rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
-    - name: rustfmt
-      if: ${{ !cancelled() }}
-      run: cargo fmt -- --check
-    - name: clippy
-      if: ${{ !cancelled() }}
-      run: cargo clippy --all-targets --all-features -- -D warnings
-    - name: build
-      if: ${{ !cancelled() }}
-      run: cargo build --verbose --all-features --all-targets --tests --examples
-    - name: test
-      if: ${{ !cancelled() }}
-      run: |
-        cargo test --verbose --all-features
-        cargo test --verbose
+      - name: rustfmt
+        if: ${{ !cancelled() }}
+        run: cargo fmt -- --check
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: build
+        if: ${{ !cancelled() }}
+        run: cargo build --verbose --all-features --all-targets --tests --examples
+      - name: test
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --verbose --all-features
+          cargo test --verbose
 
-    - name: run js scripts tests
-      if: ${{ !cancelled() }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        shopt -s nullglob
+      - name: run js scripts tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
 
-        # Run every JS test in js-scripts/ with cargo. Stops on first failure due to set -e.
-        examples=(js-scripts/*.js js-scripts/*.mjs)
-        if [[ ${#examples[@]} -eq 0 ]]; then
-          echo "No tests found in js-scripts/" >&2
-          exit 1
-        fi
-
-        for f in "${examples[@]}"; do
-          printf '\n🔧 Running %s\n' "$f"
-          if [[ "$f" == *.mjs ]] || [[ "$f" == *es6_module*.js ]]; then
-            cargo run --all-features --package js -- --module "$f"
-          else
-            cargo run --all-features --package js -- "$f"
+          # Run every JS test in js-scripts/ with cargo. Stops on first failure due to set -e.
+          examples=(js-scripts/*.js js-scripts/*.mjs)
+          if [[ ${#examples[@]} -eq 0 ]]; then
+            echo "No tests found in js-scripts/" >&2
+            exit 1
           fi
-        done
 
-        printf '\n✅ All tests passed\n'
+          for f in "${examples[@]}"; do
+            printf '\n🔧 Running %s\n' "$f"
+            if [[ "$f" == *.mjs ]] || [[ "$f" == *es6_module*.js ]]; then
+              cargo run --all-features --example js-rs -- --module "$f"
+            else
+              cargo run --all-features --example js-rs -- "$f"
+            fi
+          done
+
+          printf '\n✅ All tests passed\n'

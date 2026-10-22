@@ -9,7 +9,7 @@ A complete JavaScript engine written in Rust — a tree-walking bytecode interpr
 ```bash
 # Build
 cargo build --all-features
-cargo build -p js --release
+cargo build --example js-rs --release
 
 # Full test suite
 cargo test --all-features --tests
@@ -28,8 +28,8 @@ cargo bench --bench promise_benchmarks
 cargo bench --bench bigint_bench
 
 # Run a single JS script
-cargo run -p js -- js-scripts/promise_tests.js
-cargo run -p js -- --module js-scripts/es6_module.mjs
+cargo run --example js-rs -- js-scripts/promise_tests.js
+cargo run --example js-rs -- --module js-scripts/es6_module.mjs
 
 # Run all JS self-tests, categorized PASS/FAIL/SKIP/TIMEOUT
 bash ./test-vm.sh
@@ -47,23 +47,23 @@ Source code flows through four stages:
 Source → Lexer (tokenizer.rs) → Parser (parser.rs) → Compiler (compiler.rs) → Chunk (bytecode) → VM (vm.rs)
 ```
 
-| File | Role |
-|---|---|
-| `src/core/tokenizer.rs` | Tokenizer; produces `Vec<TokenData>` |
-| `src/core/parser.rs` | Recursive-descent parser; produces `Vec<Statement>` AST |
-| `src/core/statement.rs` | AST node definitions (`StatementKind`, `Expr` enums) |
-| `src/core/compiler.rs` | Compiles AST to stack-based bytecode (`Chunk`) |
-| `src/core/opcode.rs` | 90 opcode definitions |
-| `src/core/vm.rs` | Executes bytecode; ~35k lines; contains all builtins |
-| `src/core/value.rs` | `Value<'gc>` enum — all JS value types |
-| `src/core/mod.rs` | Module wiring + public entry points |
-| `src/lib.rs` | Crate public API (`evaluate_script`, `Repl`, etc.) |
-| `src/error.rs` | `JSError` / `EvalError` types |
-| `src/repl.rs` | Persistent REPL environment |
-| `src/js_bigint.rs` | BigInt implementation |
-| `src/js_regexp.rs` | RegExp engine (uses `regress` crate) |
-| `src/unicode.rs` | UTF-8 ↔ UTF-16 conversion |
-| `js/src/main.rs` | CLI binary: file execution, eval, REPL |
+| File                    | Role                                                    |
+| ----------------------- | ------------------------------------------------------- |
+| `src/core/tokenizer.rs` | Tokenizer; produces `Vec<TokenData>`                    |
+| `src/core/parser.rs`    | Recursive-descent parser; produces `Vec<Statement>` AST |
+| `src/core/statement.rs` | AST node definitions (`StatementKind`, `Expr` enums)    |
+| `src/core/compiler.rs`  | Compiles AST to stack-based bytecode (`Chunk`)          |
+| `src/core/opcode.rs`    | 90 opcode definitions                                   |
+| `src/core/vm.rs`        | Executes bytecode; ~35k lines; contains all builtins    |
+| `src/core/value.rs`     | `Value<'gc>` enum — all JS value types                  |
+| `src/core/mod.rs`       | Module wiring + public entry points                     |
+| `src/lib.rs`            | Crate public API (`evaluate_script`, `Repl`, etc.)      |
+| `src/error.rs`          | `JSError` / `EvalError` types                           |
+| `src/repl.rs`           | Persistent REPL environment                             |
+| `src/js_bigint.rs`      | BigInt implementation                                   |
+| `src/js_regexp.rs`      | RegExp engine (uses `regress` crate)                    |
+| `src/unicode.rs`        | UTF-8 ↔ UTF-16 conversion                               |
+| `js/main.rs`            | CLI example: file execution, eval, REPL                 |
 
 ### Entry Point
 
@@ -122,6 +122,7 @@ Most handlers pop operands from `self.stack`, compute a result, push it back, an
 ### Builtin Functions
 
 Builtins are identified by `FunctionID` (a `usize` constant, e.g., `BUILTIN_CONSOLE_LOG = 0`). All builtins are dispatched in `call_native_function` inside `vm.rs`. New builtins require:
+
 1. A new `const BUILTIN_*: FunctionID` constant
 2. A `Value::NativeFunction(BUILTIN_*)` entry set in `initialize_global_constructors`
 3. A match arm in `call_native_function`
@@ -148,5 +149,5 @@ All fallible operations return `Result<_, JSError>`. `JSError` carries kind (`JS
 ### Test Conventions
 
 - **Rust integration tests** live in `tests/*.rs`; use the `assert_eval_eq!(js_source, expected)` macro which calls `evaluate_script` and compares the string result.
-- **JS self-tests** live in `js-scripts/*.js`; they `throw` on failure or rely on exit code. Run one with `cargo run -p js -- js-scripts/<file>.js`.
+- **JS self-tests** live in `js-scripts/*.js`; they `throw` on failure or rely on exit code. Run one with `cargo run --example js-rs -- js-scripts/<file>.js`.
 - **Test262** is run via `node ci/runner.js`; feature probes in `ci/feature_probes/` auto-skip tests for unsupported features.

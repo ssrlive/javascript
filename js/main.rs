@@ -11,7 +11,7 @@ fn parse_budget(value: &str) -> std::io::Result<usize> {
 }
 
 #[derive(clap::Parser)]
-#[command(name = "js", version, about = "JavaScript Rust Interpreter")]
+#[command(name = "js-rs", version, about = "JavaScript Rust Interpreter")]
 struct Cli {
     /// Execute script
     #[arg(short, long)]
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let handler = builder.spawn(run_main)?;
     match handler.join() {
         Ok(res) => res,
-        Err(_) => Err(Box::new(std::io::Error::other("js runtime thread panicked"))),
+        Err(_) => Err(Box::new(std::io::Error::other("js-rs runtime thread panicked"))),
     }
 }
 
@@ -71,8 +71,8 @@ mod prompt_helper {
     impl Highlighter for ReplPromptHelper {
         fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, default: bool) -> std::borrow::Cow<'b, str> {
             let _ = default;
-            if prompt == "js> " {
-                std::borrow::Cow::Borrowed("\x1b[1;32mjs> \x1b[0m")
+            if prompt == "js-rs> " {
+                std::borrow::Cow::Borrowed("\x1b[1;32mjs-rs> \x1b[0m")
             } else if prompt == "... " {
                 std::borrow::Cow::Borrowed("\x1b[1;33m... \x1b[0m")
             } else {
@@ -108,7 +108,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         }
     } else {
         // No script argument -> start the interactive REPL (VM-backed)
-        return Ok(run_persistent_repl()?);
+        return run_persistent_repl();
     };
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
@@ -183,7 +183,7 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
     rl.set_helper(Some(prompt_helper::ReplPromptHelper));
 
     // Simple history file in the user's home directory
-    let history_path: Option<std::path::PathBuf> = dirs::home_dir().map(|p| p.join(".js_repl_history"));
+    let history_path: Option<std::path::PathBuf> = dirs::home_dir().map(|p| p.join(".js_rs_history"));
     if let Some(ref p) = history_path
         && p.exists()
     {
@@ -195,7 +195,7 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
     let mut buffer = String::new();
 
     loop {
-        let prompt = if buffer.is_empty() { "js> " } else { "... " };
+        let prompt = if buffer.is_empty() { "js-rs> " } else { "... " };
         match rl.readline(prompt) {
             Ok(line) => {
                 // support quick exit from the REPL

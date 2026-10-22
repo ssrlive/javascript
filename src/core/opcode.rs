@@ -121,6 +121,8 @@ pub enum Opcode {
     DisposeResources = 115, // dispose resources: operand u8 = count, pops count values, calls Symbol.dispose on each (reverse order)
     DisposeResourcesAsync = 116, // async dispose resources: like DisposeResources but uses Symbol.asyncDispose + await
     SetArguments = 117,     // assign current function's special `arguments` binding
+    TailCall = 118,         // proper tail call: like Call, reusing current frame when eligible
+    TailCallSpread = 119,   // proper tail call with spread arguments
 }
 
 impl TryFrom<u8> for Opcode {
@@ -246,6 +248,8 @@ impl TryFrom<u8> for Opcode {
             115 => Opcode::DisposeResources,
             116 => Opcode::DisposeResourcesAsync,
             117 => Opcode::SetArguments,
+            118 => Opcode::TailCall,
+            119 => Opcode::TailCallSpread,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -555,8 +559,8 @@ impl<'gc> Chunk<'gc> {
                     i += 1;
                 }
 
-                // Call (15): u8 flags, conditionally +u16 arg count
-                15 => {
+                // Call (15) / TailCall (118): u8 flags, conditionally +u16 arg count
+                15 | 118 => {
                     let flags = code[i];
                     i += 1;
                     if (flags & 0x3f) == 0x3f {
@@ -569,8 +573,8 @@ impl<'gc> Chunk<'gc> {
                     i += 1;
                 }
 
-                // CallSpread (66): u8 flags
-                66 => {
+                // CallSpread (66) / TailCallSpread (119): u8 flags
+                66 | 119 => {
                     i += 1;
                 }
 

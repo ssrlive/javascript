@@ -23,11 +23,9 @@ The repository contains:
 
 This project is actively developed and already passes a large portion of Test262 in practice.
 
-Important: decorators are implemented for classes, methods, and fields, while support for advanced decorator semantics continues to expand. 
+Important: decorators are implemented for classes, methods, and fields, while support for advanced decorator semantics continues to expand.
 
-Important: Proper tail calls (tail call optimization) are not implemented.
-
-If you rely on spec-level proper tail calls, avoid depending on that behavior in this engine.
+Important: Proper tail calls (tail call optimization) are supported for strict-mode functions.
 
 ## Language mode policy
 
@@ -209,7 +207,6 @@ The runner builds the engine, composes harness files, runs tests, and writes log
 As of current implementation:
 
 - decorators: class, method, and field decorators are supported; advanced semantics may still be incomplete
-- tail-call-optimization: not implemented
 - full historical sloppy-mode quirks: intentionally not a compatibility target
 
 These are common gaps across many real-world engines/runtimes as well, but they remain spec-visible differences.

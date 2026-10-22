@@ -92,6 +92,8 @@ pub struct Compiler<'gc> {
     /// True when compiling a function body that has using/await using declarations
     /// so that Return statements emit disposal code before returning.
     fn_body_has_disposables: bool,
+    /// True when compiling the returned expression of a strict non-generator function.
+    in_tail_position: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +429,36 @@ impl<'gc> Compiler<'gc> {
     fn emit_call_opcode(&mut self, arg_count: usize, flags: u8) {
         self.chunk.write_opcode(Opcode::Call);
         self.write_call_operand(arg_count, flags);
+    }
+
+    fn emit_tail_or_regular_call_opcode(&mut self, arg_count: usize, flags: u8, is_tail: bool) {
+        self.chunk.write_opcode(if is_tail { Opcode::TailCall } else { Opcode::Call });
+        self.write_call_operand(arg_count, flags);
+    }
+
+    fn emit_tail_or_regular_call_spread_opcode(&mut self, flags: u8, is_tail: bool) {
+        self.chunk
+            .write_opcode(if is_tail { Opcode::TailCallSpread } else { Opcode::CallSpread });
+        self.chunk.write_byte(flags);
+    }
+
+    fn compile_expr_in_tail_position(&mut self, expr: &Expr, in_tail: bool) -> Result<(), JSError> {
+        let saved_tail = self.in_tail_position;
+        self.in_tail_position = in_tail;
+        let res = self.compile_expr_dispatch(expr);
+        self.in_tail_position = saved_tail;
+        res
+    }
+
+    fn can_emit_tail_position_return(&self) -> bool {
+        self.current_strict
+            && self.function_depth > 0
+            && self.try_finally_stack.is_empty()
+            && self.async_generator_items_stack.is_empty()
+            && self.generator_items_stack.is_empty()
+            && !self.fn_body_has_disposables
+            && self.dispose_stack.iter().all(Vec::is_empty)
+            && self.loop_stack.iter().all(|ctx| ctx.for_of_iter_var.is_none())
     }
 
     fn function_is_strict(&self, body: &[Statement], force_strict: bool) -> bool {
@@ -1987,7 +2019,8 @@ impl<'gc> Compiler<'gc> {
                     let patch = self.emit_jump(Opcode::Jump);
                     self.try_finally_stack.last_mut().unwrap().finally_jump_patches.push(patch);
                 } else if let Some(expr) = expr_opt {
-                    self.compile_expr(expr)?;
+                    let tail_candidate = self.can_emit_tail_position_return();
+                    self.compile_expr_in_tail_position(expr, tail_candidate)?;
                 } else {
                     let idx = self.chunk.add_constant(Value::Undefined);
                     self.chunk.write_opcode(Opcode::Constant);
@@ -3214,6 +3247,10 @@ impl<'gc> Compiler<'gc> {
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
                 let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
+                let old_fn_body_has_disposables = self.fn_body_has_disposables;
+                let old_try_finally_stack = std::mem::take(&mut self.try_finally_stack);
+                let old_dispose_stack = std::mem::take(&mut self.dispose_stack);
+                self.fn_body_has_disposables = false;
                 self.parent_locals = old_locals.clone();
                 self.parent_upvalues = old_upvalues.clone();
                 self.parent_const_locals = old_const_locals.clone();
@@ -3385,6 +3422,9 @@ impl<'gc> Compiler<'gc> {
                 self.hoisting_fn_decl = old_hoisting_fn_decl;
                 self.parent_const_locals = old_parent_const_locals;
                 self.function_depth = old_function_depth;
+                self.fn_body_has_disposables = old_fn_body_has_disposables;
+                self.try_finally_stack = old_try_finally_stack;
+                self.dispose_stack = old_dispose_stack;
 
                 // Push the function value (closure if captures needed)
                 let arity = if fn_has_rest { non_rest_count } else { params.len() as u8 };
@@ -4917,6 +4957,12 @@ impl<'gc> Compiler<'gc> {
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<(), JSError> {
+        self.compile_expr_in_tail_position(expr, false)
+    }
+
+    fn compile_expr_dispatch(&mut self, expr: &Expr) -> Result<(), JSError> {
+        let is_tail_position = self.in_tail_position;
+        self.in_tail_position = false;
         match expr {
             Expr::Number(n) => {
                 let constant_index = self.chunk.add_constant(Value::Number(*n));
@@ -5047,13 +5093,12 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x80); // method call flag
+                        self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position); // method call flag
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.emit_call_opcode(args.len(), 0x80);
+                        self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     }
                 } else if let Expr::Index(obj, index_expr) = &**callee {
                     self.compile_expr(obj)?;
@@ -5072,13 +5117,12 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x80);
+                        self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position);
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.emit_call_opcode(args.len(), 0x80);
+                        self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     }
                 } else if let Expr::OptionalProperty(obj, method_name) = &**callee {
                     // Method call through optional property reference: (obj?.method)(...)
@@ -5115,13 +5159,12 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x80);
+                        self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position);
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.emit_call_opcode(args.len(), 0x80);
+                        self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     }
                     let end_jump = self.emit_jump(Opcode::Jump);
 
@@ -5152,13 +5195,12 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x80);
+                        self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position);
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.emit_call_opcode(args.len(), 0x80);
+                        self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     }
                 } else {
                     // Regular function call
@@ -5183,14 +5225,13 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(eval_flag); // regular call + possible eval flag
+                        self.emit_tail_or_regular_call_spread_opcode(eval_flag, is_tail_position); // regular call + possible eval flag
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
                         let call_ip = self.chunk.code.len();
-                        self.emit_call_opcode(args.len(), eval_flag);
+                        self.emit_tail_or_regular_call_opcode(args.len(), eval_flag, is_tail_position);
                         // Record callee name for error messages
                         if let Expr::Var(name, ..) = &**callee {
                             self.chunk.call_callee_names.insert(call_ip, name.clone());
@@ -5315,13 +5356,12 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::ArrayPush);
                         }
                     }
-                    self.chunk.write_opcode(Opcode::CallSpread);
-                    self.chunk.write_byte(0x80);
+                    self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position);
                 } else {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.emit_call_opcode(args.len(), 0x80);
+                    self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                 }
             }
             Expr::SuperProperty(prop_name) => {
@@ -5357,13 +5397,12 @@ impl<'gc> Compiler<'gc> {
                             self.chunk.write_opcode(Opcode::ArrayPush);
                         }
                     }
-                    self.chunk.write_opcode(Opcode::CallSpread);
-                    self.chunk.write_byte(0x80);
+                    self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position);
                 } else {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.emit_call_opcode(args.len(), 0x80);
+                    self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                 }
             }
             Expr::Super => {
@@ -5433,7 +5472,7 @@ impl<'gc> Compiler<'gc> {
                 let end_jump = self.emit_jump(Opcode::JumpIfFalse);
                 // Left was truthy: discard it, evaluate right
                 self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(right)?;
+                self.compile_expr_in_tail_position(right, is_tail_position)?;
                 self.patch_jump(end_jump);
                 // If left was falsy, the dup'd left value remains on stack
             }
@@ -5444,7 +5483,7 @@ impl<'gc> Compiler<'gc> {
                 let end_jump = self.emit_jump(Opcode::JumpIfTrue);
                 // Left was falsy: discard it, evaluate right
                 self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(right)?;
+                self.compile_expr_in_tail_position(right, is_tail_position)?;
                 self.patch_jump(end_jump);
             }
             // Array literal: [a, b, c] or [a, ...b, c]
@@ -5913,6 +5952,10 @@ impl<'gc> Compiler<'gc> {
                 let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
                 let old_function_depth = self.function_depth;
                 let old_allow_super = self.allow_super_call;
+                let old_fn_body_has_disposables = self.fn_body_has_disposables;
+                let old_try_finally_stack = std::mem::take(&mut self.try_finally_stack);
+                let old_dispose_stack = std::mem::take(&mut self.dispose_stack);
+                self.fn_body_has_disposables = false;
                 self.parent_locals = old_locals.clone();
                 self.parent_upvalues = old_upvalues.clone();
                 self.parent_const_locals = old_const_locals.clone();
@@ -5988,7 +6031,8 @@ impl<'gc> Compiler<'gc> {
                             );
                             self.compile_expr(&wrapped)?;
                         } else {
-                            self.compile_expr(&ret_val)?;
+                            let tail_candidate = self.can_emit_tail_position_return();
+                            self.compile_expr_in_tail_position(&ret_val, tail_candidate)?;
                         }
                         self.chunk.write_opcode(Opcode::Return);
                     } else if is_async_arrow {
@@ -6066,6 +6110,9 @@ impl<'gc> Compiler<'gc> {
                 self.hoisting_fn_decl = old_hoisting_fn_decl;
                 self.parent_const_locals = old_parent_const_locals;
                 self.function_depth = old_function_depth;
+                self.fn_body_has_disposables = old_fn_body_has_disposables;
+                self.try_finally_stack = old_try_finally_stack;
+                self.dispose_stack = old_dispose_stack;
 
                 let arrow_arity = if arrow_has_rest { arrow_non_rest } else { params.len() as u8 };
                 let func_val = Value::Function(func_ip, arrow_arity);
@@ -6660,17 +6707,17 @@ impl<'gc> Compiler<'gc> {
             Expr::Conditional(cond, then_expr, else_expr) => {
                 self.compile_expr(cond)?;
                 let else_jump = self.emit_jump(Opcode::JumpIfFalse);
-                self.compile_expr(then_expr)?;
+                self.compile_expr_in_tail_position(then_expr, is_tail_position)?;
                 let end_jump = self.emit_jump(Opcode::Jump);
                 self.patch_jump(else_jump);
-                self.compile_expr(else_expr)?;
+                self.compile_expr_in_tail_position(else_expr, is_tail_position)?;
                 self.patch_jump(end_jump);
             }
             // Comma: (a, b) → evaluate a (discard), evaluate b (keep)
             Expr::Comma(left, right) => {
                 self.compile_expr(left)?;
                 self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(right)?;
+                self.compile_expr_in_tail_position(right, is_tail_position)?;
             }
             // Delete operator
             Expr::Delete(inner) => {
@@ -6755,7 +6802,7 @@ impl<'gc> Compiler<'gc> {
                 self.patch_jump(is_null);
                 self.patch_jump(is_undef);
                 self.chunk.write_opcode(Opcode::Pop);
-                self.compile_expr(right)?;
+                self.compile_expr_in_tail_position(right, is_tail_position)?;
                 self.patch_jump(end_jump);
             }
             // Optional chaining: obj?.prop
@@ -6852,13 +6899,12 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0x80);
+                        self.emit_tail_or_regular_call_spread_opcode(0x80, is_tail_position);
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.emit_call_opcode(args.len(), 0x80);
+                        self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     }
                     let end_jump = self.emit_jump(Opcode::Jump);
 
@@ -6891,7 +6937,7 @@ impl<'gc> Compiler<'gc> {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.emit_call_opcode(args.len(), 0x80);
+                    self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     let end_jump = self.emit_jump(Opcode::Jump);
 
                     self.patch_jump(recv_is_null);
@@ -6940,7 +6986,7 @@ impl<'gc> Compiler<'gc> {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.emit_call_opcode(args.len(), 0x80);
+                    self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     let end_jump = self.emit_jump(Opcode::Jump);
 
                     self.patch_jump(callee_is_null);
@@ -6984,7 +7030,7 @@ impl<'gc> Compiler<'gc> {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.emit_call_opcode(args.len(), 0x80);
+                    self.emit_tail_or_regular_call_opcode(args.len(), 0x80, is_tail_position);
                     let end_jump = self.emit_jump(Opcode::Jump);
                     // Nullish — short-circuit
                     self.patch_jump(is_null);
@@ -7022,13 +7068,12 @@ impl<'gc> Compiler<'gc> {
                                 self.chunk.write_opcode(Opcode::ArrayPush);
                             }
                         }
-                        self.chunk.write_opcode(Opcode::CallSpread);
-                        self.chunk.write_byte(0);
+                        self.emit_tail_or_regular_call_spread_opcode(0, is_tail_position);
                     } else {
                         for arg in args {
                             self.compile_expr(arg)?;
                         }
-                        self.emit_call_opcode(args.len(), 0);
+                        self.emit_tail_or_regular_call_opcode(args.len(), 0, is_tail_position);
                     }
                     let end_jump = self.emit_jump(Opcode::Jump);
                     self.patch_jump(is_null);
@@ -7135,7 +7180,7 @@ impl<'gc> Compiler<'gc> {
                 }
                 let argc = 1 + expressions.len();
                 let flag = if is_method_call { 0x80 } else { 0 };
-                self.emit_call_opcode(argc, flag);
+                self.emit_tail_or_regular_call_opcode(argc, flag, is_tail_position);
             }
             Expr::Class(class_def) => {
                 self.compile_class_definition(class_def, true)?;
@@ -9447,6 +9492,8 @@ impl<'gc> Compiler<'gc> {
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
         let old_fn_body_has_disposables = self.fn_body_has_disposables;
+        let old_try_finally_stack = std::mem::take(&mut self.try_finally_stack);
+        let old_dispose_stack = std::mem::take(&mut self.dispose_stack);
         self.fn_body_has_disposables = false;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
@@ -9647,6 +9694,8 @@ impl<'gc> Compiler<'gc> {
         self.current_strict = old_ctx;
         self.allow_super_call = old_allow_super;
         self.fn_body_has_disposables = old_fn_body_has_disposables;
+        self.try_finally_stack = old_try_finally_stack;
+        self.dispose_stack = old_dispose_stack;
 
         // Arity = non-rest params only (call site pushes all args, function collects rest)
         let arity = if has_rest { non_rest_count } else { params.len() as u8 };
@@ -11316,6 +11365,10 @@ impl<'gc> Compiler<'gc> {
         let old_parent_const_locals = std::mem::take(&mut self.parent_const_locals);
         let old_function_depth = self.function_depth;
         let old_allow_super = self.allow_super_call;
+        let old_fn_body_has_disposables = self.fn_body_has_disposables;
+        let old_try_finally_stack = std::mem::take(&mut self.try_finally_stack);
+        let old_dispose_stack = std::mem::take(&mut self.dispose_stack);
+        self.fn_body_has_disposables = false;
         self.parent_locals = old_locals.clone();
         self.parent_upvalues = old_upvalues.clone();
         self.parent_const_locals = old_const_locals.clone();
@@ -11420,6 +11473,9 @@ impl<'gc> Compiler<'gc> {
         self.hoisting_fn_decl = old_hoisting_fn_decl;
         self.parent_const_locals = old_parent_const_locals;
         self.function_depth = old_function_depth;
+        self.fn_body_has_disposables = old_fn_body_has_disposables;
+        self.try_finally_stack = old_try_finally_stack;
+        self.dispose_stack = old_dispose_stack;
 
         // Register constructor name
         if !name.is_empty() {

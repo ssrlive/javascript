@@ -107,7 +107,8 @@ impl<'gc> VM<'gc> {
                 Opcode::Await => self.run_opcode_await(ctx)?,
                 Opcode::GetLocal => self.run_opcode_get_local(ctx)?,
                 Opcode::SetLocal => self.run_opcode_set_local(ctx)?,
-                Opcode::Call => self.run_opcode_call(ctx)?,
+                Opcode::Call => self.run_opcode_call(ctx, false)?,
+                Opcode::TailCall => self.run_opcode_call(ctx, true)?,
                 Opcode::Constant => self.run_opcode_constant(ctx)?,
                 Opcode::Pop => self.run_opcode_pop(ctx)?,
                 Opcode::DefineGlobal => self.run_opcode_define_global(ctx)?,
@@ -144,7 +145,8 @@ impl<'gc> VM<'gc> {
                 Opcode::ArrayPush => self.run_opcode_array_push(ctx)?,
                 Opcode::ArrayHole => self.run_opcode_array_hole(ctx)?,
                 Opcode::ArraySpread => self.run_opcode_array_spread(ctx)?,
-                Opcode::CallSpread => self.run_opcode_call_spread(ctx)?,
+                Opcode::CallSpread => self.run_opcode_call_spread(ctx, false)?,
+                Opcode::TailCallSpread => self.run_opcode_call_spread(ctx, true)?,
                 Opcode::NewCallSpread => self.run_opcode_new_call_spread(ctx)?,
                 Opcode::ObjectSpread => self.run_opcode_object_spread(ctx)?,
                 Opcode::ObjectSpreadExcluding => self.run_opcode_object_spread_excluding(ctx)?,
@@ -472,8 +474,133 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::Call
-    fn run_opcode_call(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+    fn can_prepare_for_tail_call(&self) -> bool {
+        let current_depth = self.frames.len();
+        let Some(frame) = self.frames.last() else {
+            return false;
+        };
+        if self.try_stack.iter().any(|tf| tf.frame_depth >= current_depth) {
+            return false;
+        }
+        if frame.this_tdz.is_some()
+            || self.chunk.class_constructor_ips.contains(&frame.func_ip)
+            || self.chunk.async_function_ips.contains(&frame.func_ip)
+            || self.chunk.generator_function_ips.contains(&frame.func_ip)
+        {
+            return false;
+        }
+        self.chunk.fn_strictness.get(&frame.func_ip).copied().unwrap_or(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_or_replace_call_frame_for_function(
+        &mut self,
+        is_tail_call: bool,
+        callee_idx: usize,
+        arg_count: usize,
+        arity: u8,
+        target_ip: usize,
+        upvalues: Vec<VmUpvalueCell<'gc>>,
+        is_method: bool,
+        receiver_or_this: Option<Value<'gc>>,
+        derived_tdz: Option<bool>,
+    ) {
+        if (arg_count as u8) < arity {
+            for _ in 0..(arity as usize - arg_count) {
+                self.stack.push(Value::Undefined);
+            }
+        }
+        let saved_args = if arg_count > 0 {
+            let first_arg_idx = callee_idx + 1;
+            Some(self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec())
+        } else {
+            None
+        };
+        if arg_count > arity as usize {
+            let first_arg_idx = callee_idx + 1;
+            let drain_start = first_arg_idx + arity as usize;
+            let drain_end = first_arg_idx + arg_count;
+            self.stack.drain(drain_start..drain_end);
+        }
+
+        if is_tail_call && self.can_prepare_for_tail_call() {
+            let arity_len = arity as usize;
+            let first_arg_idx = callee_idx + 1;
+            let prepared_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arity_len].to_vec();
+            let callee = self.stack[callee_idx].clone();
+            let old_frame = self.pop_call_frame_with_context().expect("checked frame existence");
+            if old_frame.is_method {
+                self.this_stack.pop();
+            }
+            let current_depth = self.frames.len();
+            while self.try_stack.last().is_some_and(|tf| tf.frame_depth > current_depth) {
+                self.try_stack.pop();
+            }
+            self.stack.truncate(old_frame.bp - 1);
+            self.stack.push(callee);
+            let new_bp = self.stack.len();
+            self.stack.extend(prepared_args);
+            let push_this = if let Some(this_val) = receiver_or_this {
+                self.this_stack.push(this_val);
+                true
+            } else {
+                false
+            };
+            self.push_call_frame_for_function(CallFrame {
+                return_ip: old_frame.return_ip,
+                bp: new_bp,
+                is_method: push_this,
+                arg_count,
+                func_ip: target_ip,
+                arguments_obj: None,
+                upvalues,
+                saved_args,
+                local_cells: HashMap::new(),
+                this_tdz: derived_tdz,
+            });
+            return;
+        }
+
+        if is_method {
+            let receiver = self.stack.remove(callee_idx - 1);
+            self.this_stack.push(receiver);
+            let callee_idx = callee_idx - 1;
+            self.push_call_frame_for_function(CallFrame {
+                return_ip: self.ip,
+                bp: callee_idx + 1,
+                is_method: true,
+                arg_count,
+                func_ip: target_ip,
+                arguments_obj: None,
+                upvalues,
+                saved_args,
+                local_cells: HashMap::new(),
+                this_tdz: derived_tdz,
+            });
+        } else {
+            let push_this = if let Some(this_val) = receiver_or_this {
+                self.this_stack.push(this_val);
+                true
+            } else {
+                false
+            };
+            self.push_call_frame_for_function(CallFrame {
+                return_ip: self.ip,
+                bp: callee_idx + 1,
+                is_method: push_this,
+                arg_count,
+                func_ip: target_ip,
+                arguments_obj: None,
+                upvalues,
+                saved_args,
+                local_cells: HashMap::new(),
+                this_tdz: derived_tdz,
+            });
+        }
+    }
+
+    // Opcode::Call / Opcode::TailCall
+    fn run_opcode_call(&mut self, ctx: &GcContext<'gc>, is_tail_call: bool) -> Result<OpcodeAction<'gc>, JSError> {
         let raw_arg_byte = self.read_byte();
         let is_method = (raw_arg_byte & 0x80) != 0;
         let is_direct_eval = (raw_arg_byte & 0x40) != 0;
@@ -627,77 +754,31 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
                 }
-                // Pad missing args with Undefined
-                if (arg_count as u8) < arity {
-                    for _ in 0..(arity as usize - arg_count) {
-                        self.stack.push(Value::Undefined);
-                    }
-                }
-                // Preserve full argument list for Arguments object semantics.
-                let saved_args = if arg_count > 0 {
-                    let first_arg_idx = callee_idx + 1;
-                    Some(self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec())
+                let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
+                    Some(true)
                 } else {
                     None
                 };
-                // Keep full args for `arguments`, but trim stack to declared arity
-                // so function-local slots remain aligned.
-                if arg_count > arity as usize {
-                    let first_arg_idx = callee_idx + 1;
-                    let drain_start = first_arg_idx + arity as usize;
-                    let drain_end = first_arg_idx + arg_count;
-                    self.stack.drain(drain_start..drain_end);
-                }
-                // For method calls, pop receiver from under callee and bind as this
-                if is_method {
-                    // Remove receiver (one slot below callee)
-                    let receiver = self.stack.remove(callee_idx - 1);
-                    self.this_stack.push(receiver);
-                    let callee_idx = callee_idx - 1;
-                    let derived_tdz = if self.chunk.derived_constructor_ips.contains(&target_ip) {
-                        Some(true)
-                    } else {
-                        None
-                    };
-                    let frame = CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: true,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: Vec::new(),
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: derived_tdz,
-                    };
-                    self.push_call_frame_for_function(frame);
+                let receiver_or_this = if is_method {
+                    Some(self.stack[callee_idx - 1].clone())
+                } else if self.chunk.arrow_function_ips.contains(&target_ip) {
+                    None
+                } else if self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false) {
+                    Some(Value::Undefined)
                 } else {
-                    // In strict mode, non-method calls get `this = undefined`
-                    let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
-                    let is_arrow = self.chunk.arrow_function_ips.contains(&target_ip);
-                    let push_this = !is_arrow;
-                    if push_this {
-                        if fn_strict {
-                            self.this_stack.push(Value::Undefined);
-                        } else {
-                            self.this_stack.push(Value::Object(self.global_this));
-                        }
-                    }
-                    let frame = CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: push_this,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: Vec::new(),
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: None,
-                    };
-                    self.push_call_frame_for_function(frame);
-                }
+                    Some(Value::Object(self.global_this))
+                };
+                self.push_or_replace_call_frame_for_function(
+                    is_tail_call,
+                    callee_idx,
+                    arg_count,
+                    arity,
+                    target_ip,
+                    Vec::new(),
+                    is_method,
+                    receiver_or_this,
+                    derived_tdz,
+                );
                 if self.chunk.named_fn_self_ips.contains(&target_ip) {
                     self.named_fn_callee_stack.push(callee.clone());
                 }
@@ -840,74 +921,32 @@ impl<'gc> VM<'gc> {
                         return Ok(OpcodeAction::Continue);
                     }
                 }
-                if (arg_count as u8) < arity {
-                    for _ in 0..(arity as usize - arg_count) {
-                        self.stack.push(Value::Undefined);
-                    }
-                }
-                // Preserve full argument list for Arguments object semantics.
-                let saved_args = if arg_count > 0 {
-                    let first_arg_idx = callee_idx + 1;
-                    Some(self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec())
+                let closure_upvalues = (**upvals).clone();
+                let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
+                    Some(true)
                 } else {
                     None
                 };
-                // Keep full args for `arguments`, but trim stack to declared arity
-                // so function-local slots remain aligned.
-                if arg_count > arity as usize {
-                    let first_arg_idx = callee_idx + 1;
-                    let drain_start = first_arg_idx + arity as usize;
-                    let drain_end = first_arg_idx + arg_count;
-                    self.stack.drain(drain_start..drain_end);
-                }
-                let closure_upvalues = (**upvals).clone();
-                if is_method {
-                    let receiver = self.stack.remove(callee_idx - 1);
-                    self.this_stack.push(receiver);
-                    let callee_idx = callee_idx - 1;
-                    let derived_tdz = if self.chunk.derived_constructor_ips.contains(&target_ip) {
-                        Some(true)
-                    } else {
-                        None
-                    };
-                    let frame = CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: true,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: closure_upvalues,
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: derived_tdz,
-                    };
-                    self.push_call_frame_for_function(frame);
+                let receiver_or_this = if is_method {
+                    Some(self.stack[callee_idx - 1].clone())
+                } else if self.chunk.arrow_function_ips.contains(&target_ip) {
+                    None
+                } else if self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false) {
+                    Some(Value::Undefined)
                 } else {
-                    let fn_strict = self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false);
-                    let is_arrow = self.chunk.arrow_function_ips.contains(&target_ip);
-                    let push_this = !is_arrow;
-                    if push_this {
-                        if fn_strict {
-                            self.this_stack.push(Value::Undefined);
-                        } else {
-                            self.this_stack.push(Value::Object(self.global_this));
-                        }
-                    }
-                    let frame = CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: push_this,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: closure_upvalues,
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: None,
-                    };
-                    self.push_call_frame_for_function(frame);
-                }
+                    Some(Value::Object(self.global_this))
+                };
+                self.push_or_replace_call_frame_for_function(
+                    is_tail_call,
+                    callee_idx,
+                    arg_count,
+                    arity,
+                    target_ip,
+                    closure_upvalues,
+                    is_method,
+                    receiver_or_this,
+                    derived_tdz,
+                );
                 if self.chunk.named_fn_self_ips.contains(&target_ip) {
                     self.named_fn_callee_stack.push(callee.clone());
                 }
@@ -3058,8 +3097,8 @@ impl<'gc> VM<'gc> {
         Ok(OpcodeAction::Continue)
     }
 
-    // Opcode::CallSpread
-    fn run_opcode_call_spread(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
+    // Opcode::CallSpread / Opcode::TailCallSpread
+    fn run_opcode_call_spread(&mut self, ctx: &GcContext<'gc>, is_tail_call: bool) -> Result<OpcodeAction<'gc>, JSError> {
         // Stack: [..., callee, argsArray] (regular) or [..., receiver, callee, argsArray] (method)
         let flags = self.read_byte();
         let is_method = (flags & 0x80) != 0;
@@ -3080,109 +3119,65 @@ impl<'gc> VM<'gc> {
         let callee = self.stack[callee_idx].clone();
         match callee {
             Value::Function(target_ip, arity) => {
-                if (arg_count as u8) < arity {
-                    for _ in 0..(arity as usize - arg_count) {
-                        self.stack.push(Value::Undefined);
-                    }
-                }
-                let saved_args = if arg_count > arity as usize {
-                    let first_arg_idx = callee_idx + 1;
-                    let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
-                    let drain_start = first_arg_idx + arity as usize;
-                    let drain_end = first_arg_idx + arg_count;
-                    self.stack.drain(drain_start..drain_end);
-                    Some(all_args)
-                } else {
-                    None
-                };
-                let derived_tdz = if self.chunk.derived_constructor_ips.contains(&target_ip) {
+                let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
                     Some(true)
                 } else {
                     None
                 };
-                if is_method {
-                    let receiver = self.stack.remove(callee_idx - 1);
-                    self.this_stack.push(receiver);
-                    let callee_idx = callee_idx - 1;
-                    self.push_call_frame_for_function(CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: true,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: Vec::new(),
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: derived_tdz,
-                    });
+                let receiver_or_this = if is_method {
+                    Some(self.stack[callee_idx - 1].clone())
+                } else if self.chunk.arrow_function_ips.contains(&target_ip) {
+                    None
+                } else if self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false) {
+                    Some(Value::Undefined)
                 } else {
-                    self.push_call_frame_for_function(CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: false,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: Vec::new(),
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: derived_tdz,
-                    });
+                    Some(Value::Object(self.global_this))
+                };
+                self.push_or_replace_call_frame_for_function(
+                    is_tail_call,
+                    callee_idx,
+                    arg_count,
+                    arity,
+                    target_ip,
+                    Vec::new(),
+                    is_method,
+                    receiver_or_this,
+                    derived_tdz,
+                );
+                if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    self.named_fn_callee_stack.push(callee.clone());
                 }
                 self.ip = target_ip;
             }
             Value::Closure(target_ip, arity, ref upvals) => {
-                if (arg_count as u8) < arity {
-                    for _ in 0..(arity as usize - arg_count) {
-                        self.stack.push(Value::Undefined);
-                    }
-                }
-                let saved_args = if arg_count > arity as usize {
-                    let first_arg_idx = callee_idx + 1;
-                    let all_args: Vec<Value<'gc>> = self.stack[first_arg_idx..first_arg_idx + arg_count].to_vec();
-                    let drain_start = first_arg_idx + arity as usize;
-                    let drain_end = first_arg_idx + arg_count;
-                    self.stack.drain(drain_start..drain_end);
-                    Some(all_args)
-                } else {
-                    None
-                };
                 let closure_upvalues = (**upvals).clone();
-                let derived_tdz = if self.chunk.derived_constructor_ips.contains(&target_ip) {
+                let derived_tdz = if is_method && self.chunk.derived_constructor_ips.contains(&target_ip) {
                     Some(true)
                 } else {
                     None
                 };
-                if is_method {
-                    let receiver = self.stack.remove(callee_idx - 1);
-                    self.this_stack.push(receiver);
-                    let callee_idx = callee_idx - 1;
-                    self.push_call_frame_for_function(CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: true,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: closure_upvalues,
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: derived_tdz,
-                    });
+                let receiver_or_this = if is_method {
+                    Some(self.stack[callee_idx - 1].clone())
+                } else if self.chunk.arrow_function_ips.contains(&target_ip) {
+                    None
+                } else if self.chunk.fn_strictness.get(&target_ip).copied().unwrap_or(false) {
+                    Some(Value::Undefined)
                 } else {
-                    self.push_call_frame_for_function(CallFrame {
-                        return_ip: self.ip,
-                        bp: callee_idx + 1,
-                        is_method: false,
-                        arg_count,
-                        func_ip: target_ip,
-                        arguments_obj: None,
-                        upvalues: closure_upvalues,
-                        saved_args,
-                        local_cells: HashMap::new(),
-                        this_tdz: derived_tdz,
-                    });
+                    Some(Value::Object(self.global_this))
+                };
+                self.push_or_replace_call_frame_for_function(
+                    is_tail_call,
+                    callee_idx,
+                    arg_count,
+                    arity,
+                    target_ip,
+                    closure_upvalues,
+                    is_method,
+                    receiver_or_this,
+                    derived_tdz,
+                );
+                if self.chunk.named_fn_self_ips.contains(&target_ip) {
+                    self.named_fn_callee_stack.push(callee.clone());
                 }
                 self.ip = target_ip;
             }

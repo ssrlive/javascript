@@ -812,4 +812,77 @@ mod function_tests {
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "15");
     }
+
+    #[test]
+    fn test_proper_tail_call_reuses_frame_and_omits_replaced_frame_from_stack() {
+        let script = r#"
+            "use strict";
+            function leaf() {
+                throw new Error("boom");
+            }
+            function middle() {
+                return leaf();
+            }
+            function outer() {
+                let res = middle();
+                return res;
+            }
+            function loop(n, acc) {
+                if (n === 0) return acc;
+                return null ?? (true && (false || (0, loop(n - 1, acc + 1))));
+            }
+            let stack = "";
+            try {
+                outer();
+            } catch (e) {
+                stack = String(e.stack);
+            }
+            let count = loop(5000, 0);
+            stack.includes("leaf") && stack.includes("outer") && !stack.includes("middle") && count === 5000
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_tail_call_does_not_bypass_active_try_catch() {
+        let script = r#"
+            "use strict";
+            function fail() {
+                throw new Error("boom");
+            }
+            function guarded() {
+                try {
+                    return fail();
+                } catch (e) {
+                    return "caught:" + e.message;
+                }
+            }
+            guarded()
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "\"caught:boom\"");
+    }
+
+    #[test]
+    fn test_tail_call_with_shadowed_eval_identifier_reuses_frame() {
+        let script = r#"
+            var callCount = 0;
+            (function() {
+                function f(n) {
+                    "use strict";
+                    if (n === 0) {
+                        callCount += 1;
+                        return;
+                    }
+                    return eval(n - 1);
+                }
+                var eval = f;
+                f(5000);
+            })();
+            callCount === 1
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "true");
+    }
 }

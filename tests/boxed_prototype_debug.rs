@@ -12,6 +12,6 @@ fn debug_boxed_prototype_identity() {
         protoMarker + '|' + ctorMarker + '|' + (eq ? 'EQ' : 'NEQ');
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "\"NUM_PROTO_MARKER|NUM_PROTO_MARKER|EQ\"");
 }

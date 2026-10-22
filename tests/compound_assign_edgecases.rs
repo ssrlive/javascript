@@ -9,39 +9,45 @@ fn __init_test_logger() {
 
 #[test]
 fn test_add_assign_with_nan() {
-    let res = evaluate_script("let i = NaN; i += 5; i", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = NaN; i += 5; i";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "NaN");
 }
 
 #[test]
 fn test_add_assign_with_infinity() {
     // Use exponent literal that overflows to +Infinity
-    let res = evaluate_script("let i = 1e309; i += 1; i", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 1e309; i += 1; i";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "Infinity");
 }
 
 #[test]
 fn test_exponent_literal_parsing() {
     // Check that exponent notation is recognized and parsed
-    let res = evaluate_script("let a = 1e3; a", false, None::<&std::path::Path>).unwrap();
+    let script = "let a = 1e3; a";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "1000");
 }
 
 #[test]
 fn test_div_assign_by_zero_error() {
-    let res = evaluate_script("let i = 5; i /= 0", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 5; i /= 0";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "Infinity");
 }
 
 #[test]
 fn test_mod_assign_by_zero_error() {
-    let res = evaluate_script("let i = 5; i %= 0", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 5; i %= 0";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "NaN");
 }
 
 #[test]
 fn test_assign_to_const_error() {
-    let res = evaluate_script("const x = 1; x += 2", false, None::<&std::path::Path>);
+    let script = "const x = 1; x += 2";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     match res {
         Err(err) => match err.kind() {
             JSErrorKind::TypeError { message, .. } => assert!(message.contains("Assignment to constant") || message.contains("constant")),
@@ -53,12 +59,14 @@ fn test_assign_to_const_error() {
 
 #[test]
 fn test_sub_assign_non_number_error() {
-    let res = evaluate_script("let s = 'a'; s -= 1", false, None::<&std::path::Path>).unwrap();
+    let script = "let s = 'a'; s -= 1";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "NaN");
 }
 
 #[test]
 fn test_mul_assign_non_number_error() {
-    let res = evaluate_script("let s = 'a'; s *= 2", false, None::<&std::path::Path>).unwrap();
+    let script = "let s = 'a'; s *= 2";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "NaN");
 }

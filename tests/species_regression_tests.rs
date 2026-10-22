@@ -28,7 +28,7 @@ mod species_regression_tests {
             });
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[true,true,true,true,true]");
     }
 
@@ -70,7 +70,7 @@ mod species_regression_tests {
             ];
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[true,true,true,true]");
     }
 
@@ -138,7 +138,7 @@ mod species_regression_tests {
             ];
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[true,true,true,true,true,true]");
     }
 
@@ -170,7 +170,7 @@ mod species_regression_tests {
             ];
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[true,true,true,true]");
     }
 
@@ -198,7 +198,7 @@ mod species_regression_tests {
             [threw, callCount === 0];
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[true,true]");
     }
 }

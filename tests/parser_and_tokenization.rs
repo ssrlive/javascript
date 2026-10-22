@@ -8,21 +8,21 @@ fn __init_test_logger() {
 #[test]
 fn multiple_var_declarations_without_initializers() {
     let script = "var a, b; a = 1; b = 2; a + b";
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "3");
 }
 
 #[test]
 fn skip_empty_semicolons_and_let() {
     let script = ";; let x = 5; ; x";
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "5");
 }
 
 #[test]
 fn single_line_and_block_comments_ignored() {
     let script = "// leading comment\n/* block comment */ let x = 7; x";
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "7");
 }
 
@@ -60,18 +60,21 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
 #[test]
 fn exponentiation_and_numeric_separators_supported() {
     // Exponentiation for numbers
-    let res = evaluate_script("2 ** 3;", false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script("2 ** 3;", false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "8");
 
-    let res2 = evaluate_script("2 ** 3 ** 2;", false, None::<&std::path::Path>).unwrap();
+    let script = "2 ** 3 ** 2;";
+    let res2 = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res2, "512");
 
     // Numeric separators
-    let res3 = evaluate_script("1_000_000 + 2000;", false, None::<&std::path::Path>).unwrap();
+    let script = "1_000_000 + 2000;";
+    let res3 = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res3, "1002000");
 
     // BigInt with separators and exponentiation
-    let res4 = evaluate_script("1_000n ** 2n;", false, None::<&std::path::Path>).unwrap();
+    let script = "1_000n ** 2n;";
+    let res4 = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res4, "1000000");
 }
 
@@ -107,7 +110,7 @@ fn eval_throws_at_runtime_and_is_catchable() {
         }
     }
     "#;
-    let res = evaluate_script(script, false, None::<&std::path::Path>);
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(
         res.is_ok(),
         "Expected script to run and catch SyntaxError at runtime, got: {:?}",
@@ -129,7 +132,7 @@ fn parse_rejects_outside_private_access() {
 
 #[test]
 fn parse_rejects_same_line_expression_statements_without_semicolon() {
-    let res = evaluate_script("{ 1 2 } 3", false, None::<&std::path::Path>);
+    let res = evaluate_script("{ 1 2 } 3", false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected parse to fail for missing statement boundary");
     let err = res.unwrap_err();
     assert!(
@@ -141,7 +144,8 @@ fn parse_rejects_same_line_expression_statements_without_semicolon() {
 
 #[test]
 fn parse_rejects_block_lexical_var_redeclaration() {
-    let res = evaluate_script("{ let f; var f; }", false, None::<&std::path::Path>);
+    let script = "{ let f; var f; }";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected parse to fail for block redeclaration");
     let err = res.unwrap_err();
     assert!(
@@ -153,7 +157,8 @@ fn parse_rejects_block_lexical_var_redeclaration() {
 
 #[test]
 fn parse_rejects_function_declaration_in_single_statement_position() {
-    let res = evaluate_script("while (false) function g() {}", false, None::<&std::path::Path>);
+    let script = "while (false) function g() {}";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(
         res.is_err(),
         "Expected parse to fail for function declaration in statement position"
@@ -173,7 +178,7 @@ fn module_parse_rejects_escaped_export_keywords() {
         "export {} \\u0066rom './mod.js';",
         "export var a = 0; export {a \\u0061s b} from './mod.js';",
     ] {
-        let res = evaluate_script(script, true, None::<&std::path::Path>);
+        let res = evaluate_script(script, true, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected module parse to fail for escaped export keyword: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -186,7 +191,8 @@ fn module_parse_rejects_escaped_export_keywords() {
 
 #[test]
 fn parse_rejects_duplicate_arrow_parameters_with_default() {
-    let res = evaluate_script("(a, a = 0) => {}", false, None::<&std::path::Path>);
+    let script = "(a, a = 0) => {}";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected parse to fail for duplicate arrow parameters");
     let err = res.unwrap_err();
     assert!(
@@ -198,7 +204,8 @@ fn parse_rejects_duplicate_arrow_parameters_with_default() {
 
 #[test]
 fn parse_rejects_reserved_word_in_arrow_destructuring_parameter() {
-    let res = evaluate_script("({ cl\\u0061ss }) => {}", false, None::<&std::path::Path>);
+    let script = "({ cl\\u0061ss }) => {}";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(
         res.is_err(),
         "Expected parse to fail for reserved word in arrow destructuring parameter"
@@ -214,7 +221,7 @@ fn parse_rejects_reserved_word_in_arrow_destructuring_parameter() {
 #[test]
 fn parse_rejects_invalid_assignment_pattern_rest_targets() {
     for script in ["([ ...x = 1 ] = [])", "({ default } = {})"] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for invalid assignment pattern: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -232,7 +239,7 @@ fn parse_rejects_escaped_async_keyword_positions() {
         "void \\u0061sync function f(){}",
         "void \\u0061sync function* f(){}",
     ] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for escaped async keyword: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -250,7 +257,7 @@ fn parse_rejects_async_function_await_and_super_early_errors() {
         "(async function foo(a = super.prop) {})",
         "(async function await() {})",
     ] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for async early error: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -263,7 +270,8 @@ fn parse_rejects_async_function_await_and_super_early_errors() {
 
 #[test]
 fn parse_rejects_import_meta_assignment_target() {
-    let res = evaluate_script("import.meta = 1", false, None::<&std::path::Path>);
+    let script = "import.meta = 1";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected parse to fail for import.meta assignment");
     let err = res.unwrap_err();
     assert!(
@@ -275,7 +283,7 @@ fn parse_rejects_import_meta_assignment_target() {
 
 #[test]
 fn parse_rejects_import_meta_in_script_goal() {
-    let res = evaluate_script("import.meta", false, None::<&std::path::Path>);
+    let res = evaluate_script("import.meta", false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected parse to fail for import.meta in script goal");
     let err = res.unwrap_err();
     assert!(
@@ -287,7 +295,8 @@ fn parse_rejects_import_meta_in_script_goal() {
 
 #[test]
 fn module_parse_rejects_escaped_import_meta() {
-    let res = evaluate_script("import.m\\u0065ta", true, None::<&std::path::Path>);
+    let script = "import.m\\u0065ta";
+    let res = evaluate_script(script, true, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected module parse to fail for escaped import.meta");
     let err = res.unwrap_err();
     assert!(
@@ -304,7 +313,7 @@ fn module_parse_rejects_import_meta_for_in_of_targets() {
         "for (import.meta of null) ;",
         "async function* f() { for await (import.meta of null) ; }",
     ] {
-        let res = evaluate_script(script, true, None::<&std::path::Path>);
+        let res = evaluate_script(script, true, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(
             res.is_err(),
             "Expected module parse to fail for invalid import.meta target: {script}"
@@ -321,7 +330,7 @@ fn module_parse_rejects_import_meta_for_in_of_targets() {
 #[test]
 fn parse_rejects_empty_object_assignment_targets() {
     for script in ["({}) = 1", "() => ({}) = 1", "async () => ({}) = 1"] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for invalid assignment target: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -334,7 +343,8 @@ fn parse_rejects_empty_object_assignment_targets() {
 
 #[test]
 fn parse_rejects_void_yield_without_parentheses() {
-    let res = evaluate_script("(async function*(){ void yield; })", false, None::<&std::path::Path>);
+    let script = "(async function*(){ void yield; })";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err(), "Expected parse to fail for void yield");
     let err = res.unwrap_err();
     assert!(
@@ -391,17 +401,14 @@ fn parse_inner_object_plus_function_expr_alone() {
 #[test]
 fn bigint_in_object_and_class_and_destructuring() {
     // Object literal method using BigInt property name
-    let res_obj = evaluate_script("let o = { 1n() { return 'bar'; } }; o['1']();", false, None::<&std::path::Path>).unwrap();
+    let script = "let o = { 1n() { return 'bar'; } }; o['1']();";
+    let res_obj = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     // evaluate_script returns JS values using JS's string representation (with quotes)
     assert_eq!(res_obj, "\"bar\"");
 
     // Class method using BigInt property name
-    let res_class = evaluate_script(
-        "class C { 1n() { return 'baz'; } } let c = new C(); c['1']();",
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    let script = "class C { 1n() { return 'baz'; } } let c = new C(); c['1']();";
+    let res_class = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res_class, "\"baz\"");
 
     // Destructuring with BigInt property name
@@ -433,7 +440,7 @@ fn parse_rejects_class_fields_without_separator() {
         "class C { x = 1 y() {} }",
         "class C { static x static y() {} }",
     ] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for missing class field separator: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -451,7 +458,7 @@ fn parse_rejects_invalid_class_field_names() {
         "class C { static constructor; }",
         "class C { static prototype; }",
     ] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for invalid class field name: {script}");
         let err = res.unwrap_err();
         assert!(
@@ -469,7 +476,7 @@ fn parse_rejects_class_field_arguments_and_async_private_method_await() {
         "class C extends B { x = super(); }",
         "class C { async #m() { var await; } }",
     ] {
-        let res = evaluate_script(script, false, None::<&std::path::Path>);
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected parse to fail for class early error: {script}");
         let err = res.unwrap_err();
         assert!(

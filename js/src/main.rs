@@ -1,6 +1,15 @@
 use javascript::*;
 use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 
+fn parse_budget(value: &str) -> std::io::Result<usize> {
+    use std::io::{Error, ErrorKind::InvalidInput};
+    let budget = value.parse::<usize>().map_err(|err| Error::new(InvalidInput, err))?;
+    if budget == 0 {
+        return Err(Error::new(InvalidInput, "must be greater than zero"));
+    }
+    Ok(budget)
+}
+
 #[derive(clap::Parser)]
 #[command(name = "js", version, about = "JavaScript Rust Interpreter")]
 struct Cli {
@@ -12,8 +21,18 @@ struct Cli {
     file: Option<std::path::PathBuf>,
 
     /// Milliseconds threshold for short timers which `evaluate_script` will wait for
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, value_name = "MILLISECONDS", default_value_t = 20)]
     timer_wait_ms: u64,
+
+    /// VM opcodes between incremental GC safe points while executing a script
+    #[arg(
+        short = 'b',
+        long,
+        value_name = "NUMBER",
+        default_value_t = DEFAULT_GC_OPCODE_BUDGET,
+        value_parser = parse_budget
+    )]
+    gc_opcode_budget: usize,
 
     /// Execute as an ES module (enables import/export handling)
     #[arg(long, default_value_t = false)]
@@ -104,7 +123,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
         .unwrap_or(false);
     let run_as_module = cli.module || file_ext_is_mjs;
 
-    let result = evaluate_script(&script_content, run_as_module, script_path.as_ref());
+    let result = evaluate_script(&script_content, run_as_module, script_path.as_ref(), cli.gc_opcode_budget);
 
     match result {
         Ok(result) => {

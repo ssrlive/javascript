@@ -15,7 +15,7 @@ fn object_literal_named_function_has_name() {
             return o.x.name;
         })()
     "#;
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "\"foo\"");
 }
 
@@ -31,7 +31,7 @@ fn assigned_generator_named_function_has_name() {
             return o.x.name;
         })()
     "#;
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "\"foo\"");
 }
 
@@ -46,6 +46,6 @@ fn assigned_async_named_function_has_name() {
           return o.x.name;
         })();
     "#;
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert!(res.contains("\"foo\""));
 }

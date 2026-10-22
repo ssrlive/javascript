@@ -83,6 +83,9 @@ cargo run -r -p js -- path/to/module.mjs
 # Evaluate inline code
 cargo run -r -p js -- -e "1 + 2"
 
+# Tune GC safe-point frequency (positive opcode count; default: 4096)
+cargo run -r -p js -- --gc-opcode-budget 1024 path/to/script.js
+
 # Start REPL
 cargo run -r -p js
 ```
@@ -95,6 +98,7 @@ Usage: js [OPTIONS] [FILE]
 Options:
   -e, --eval <EVAL>
       --timer-wait-ms <TIMER_WAIT_MS>
+      --gc-opcode-budget <GC_OPCODE_BUDGET>
       --module
   -h, --help
   -V, --version
@@ -118,10 +122,10 @@ javascript = "0.1.14"
 Basic script evaluation:
 
 ```rust
-use javascript::evaluate_script;
+use javascript::{DEFAULT_GC_OPCODE_BUDGET, evaluate_script};
 
 fn main() {
-    let out = evaluate_script("1 + 2", false, Option::<&std::path::Path>::None).unwrap();
+    let out = evaluate_script("1 + 2", false, Option::<&std::path::Path>::None, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(out, "3");
 }
 ```
@@ -129,11 +133,11 @@ fn main() {
 Module evaluation:
 
 ```rust
-use javascript::evaluate_script;
+use javascript::{DEFAULT_GC_OPCODE_BUDGET, evaluate_script};
 
 fn main() {
     let src = "export const x = 1;\n x";
-    let out = evaluate_script(src, true, Option::<&std::path::Path>::None).unwrap();
+    let out = evaluate_script(src, true, Option::<&std::path::Path>::None, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     println!("{out}");
 }
 ```

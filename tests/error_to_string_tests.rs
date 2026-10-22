@@ -16,7 +16,7 @@ mod error_to_string_tests {
         let script = r#"
             try { nonExistent(); } catch(e) { String(e) }
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"ReferenceError: nonExistent is not defined\"");
     }
 }

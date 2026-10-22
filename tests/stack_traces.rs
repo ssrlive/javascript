@@ -17,7 +17,7 @@ fn nested_method_stack_contains_frames() {
         try { obj.a(); } catch (e) { String(e.stack) }
     "#;
 
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert!(result.contains("Error: boom"));
     println!("STACK:\n{result}");
 }
@@ -31,7 +31,8 @@ fn throw_stack_includes_decl_site() {
         try { doThirdThing(); } catch (e) { String(e.stack) }
     "#;
 
-    let result = evaluate_script(script, false, Some(std::path::Path::new("some.js"))).unwrap();
+    let script_path = Some(std::path::Path::new("some.js"));
+    let result = evaluate_script(script, false, script_path, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(
         result,
         "\"Error: boom\\n    at doThirdThing (some.js:2:35)\\n    at <anonymous> (some.js:3:15)\""
@@ -47,7 +48,7 @@ fn async_unhandled_rejection_points_to_throw_site() {
         new Promise(function(resolve, reject) { resolve(1); }).then(function() { boom(); });
     "#;
 
-    let result = evaluate_script(script, false, None::<&std::path::Path>);
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     match result {
         Err(e) => {
             // The surfaced unhandled rejection should carry the thrown message
@@ -77,7 +78,8 @@ fn assert_throw_shows_thrown_site_and_stack_shows_callsite() {
         assert(false, 'boom');
     "#;
 
-    let result = evaluate_script(script, false, Some(std::path::Path::new("file.js")));
+    let script_path = Some(std::path::Path::new("file.js"));
+    let result = evaluate_script(script, false, script_path, javascript::DEFAULT_GC_OPCODE_BUDGET);
     match result {
         Err(e) => {
             // Compute expected thrown-site and call-site lines from the script

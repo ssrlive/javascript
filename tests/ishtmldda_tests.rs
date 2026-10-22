@@ -9,7 +9,7 @@ fn test_ishtmldda_probe_semantics() {
                 !__isHTMLDDA__;
         })()
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
@@ -29,7 +29,7 @@ fn test_ishtmldda_equality_semantics() {
                 Object.is(x, x);
         })()
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
@@ -47,6 +47,6 @@ fn test_ishtmldda_still_counts_as_method() {
             }
         })()
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }

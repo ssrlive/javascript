@@ -10,8 +10,7 @@ fn __init_test_logger() {
 #[test]
 fn test_proxy_basic() {
     // Test basic Proxy creation
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         var target = { foo: 42 };
         var handler = {
             get: function(target, prop) {
@@ -23,19 +22,15 @@ fn test_proxy_basic() {
         };
         var proxy = new Proxy(target, handler);
         proxy.foo
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "84");
 }
 
 #[test]
 fn test_proxy_revocable() {
     // Test Proxy.revocable
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         var target = { foo: 42 };
         var handler = {
             get: function(target, prop) {
@@ -47,10 +42,7 @@ fn test_proxy_revocable() {
         var result = proxy.foo;
         revocable.revoke();
         result
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "42");
 }

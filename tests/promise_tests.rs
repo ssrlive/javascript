@@ -33,7 +33,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "200");
             })
             .expect("failed to spawn thread")
@@ -60,7 +60,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "30");
             })
             .expect("failed to spawn thread")
@@ -89,7 +89,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "6");
             })
             .expect("failed to spawn thread")
@@ -115,7 +115,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "1");
             })
             .expect("failed to spawn thread")
@@ -138,7 +138,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "[\"sync\",\"async result\"]");
             })
             .expect("failed to spawn thread")
@@ -158,7 +158,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "42");
             })
             .expect("failed to spawn thread")
@@ -186,7 +186,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(
                     result,
                     r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":"error"},{"status":"fulfilled","value":3}]"#
@@ -225,7 +225,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "[true,true,true,true,1,2,3,true]");
             })
             .expect("failed to spawn thread")
@@ -250,7 +250,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "\"boom\"");
             })
             .expect("failed to spawn thread")
@@ -282,7 +282,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, r#"[true,"first","second","fulfilled",1,"rejected","boom"]"#);
             })
             .expect("failed to spawn thread")
@@ -306,7 +306,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "7");
             })
             .expect("failed to spawn thread")
@@ -329,7 +329,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "[\"AggregateError\",\"All promises were rejected\",\"e1\",\"e2\"]");
             })
             .expect("failed to spawn thread")
@@ -351,7 +351,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert!(result.contains("pending"), "expected pending promise, got: {result}");
             })
             .expect("failed to spawn thread")
@@ -379,7 +379,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "\"from-thenable\"");
             })
             .expect("failed to spawn thread")
@@ -407,7 +407,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"thenable-reject\"]");
             })
             .expect("failed to spawn thread")
@@ -435,7 +435,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 // assert_eq!(result, "[\"AggregateError\",\"p-reject\",\"then-throw\"]");
                 assert!(
                     result.contains("p-reject") && result.contains("then-throw") && result.contains("AggregateError"),
@@ -468,7 +468,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert!(
                     result.contains("p-reject") && result.contains("getter-throw") && result.contains("AggregateError"),
                     "unexpected result: {result}"
@@ -490,7 +490,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "[\"AggregateError\",\"boom\",\"x\",\"y\"]");
             })
             .expect("failed to spawn thread")
@@ -513,7 +513,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "\"direct test\"");
             })
             .expect("failed to spawn thread")
@@ -537,7 +537,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "84");
             })
             .expect("failed to spawn thread")
@@ -561,7 +561,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "\"caught: test error\"");
             })
             .expect("failed to spawn thread")
@@ -584,7 +584,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "\"cleanup done\"");
             })
             .expect("failed to spawn thread")
@@ -612,7 +612,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "[\"resolved\",\"rejected\"]");
             })
             .expect("failed to spawn thread")
@@ -633,7 +633,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let result = evaluate_script(code, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(code, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "84");
             })
             .expect("failed to spawn thread")
@@ -660,7 +660,7 @@ mod promise_tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(move || {
-                let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+                let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(res, "\"Done!\"");
             })
             .expect("failed to spawn thread")

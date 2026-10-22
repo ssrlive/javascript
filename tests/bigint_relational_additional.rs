@@ -15,7 +15,7 @@ fn bigint_nan_infinite_and_sign_edgecases() {
     ];
 
     for (expr, expected) in cases {
-        let res = evaluate_script(expr, false, None::<&std::path::Path>).expect("eval failed");
+        let res = evaluate_script(expr, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).expect("eval failed");
         let b = res == "true";
         assert_eq!(b, expected, "{} should be {}", expr, expected);
     }
@@ -37,7 +37,7 @@ fn bigint_relational_le_ge_and_negative_fractional() {
     ];
 
     for (expr, expected) in cases {
-        let res = evaluate_script(expr, false, None::<&std::path::Path>).expect("eval failed");
+        let res = evaluate_script(expr, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).expect("eval failed");
         let b = res == "true";
         assert_eq!(b, expected, "{} should be {}", expr, expected);
     }
@@ -73,7 +73,7 @@ fn bigint_relational_small_fuzz_returns_boolean() {
         for n in &numbers {
             for op in &ops {
                 let expr = format!("{} {} {}", bi, op, n);
-                let res = evaluate_script(&expr, false, None::<&std::path::Path>);
+                let res = evaluate_script(&expr, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
                 match res {
                     Ok(s) if s == "true" || s == "false" => {} // good
                     Ok(other) => panic!("Expected boolean for '{}', got {:?}", expr, other),

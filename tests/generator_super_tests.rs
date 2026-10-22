@@ -8,6 +8,6 @@ fn test_generator_method_super_property() {
         obj.toString = null;
         obj.foo().next().value === Object.prototype.toString;
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }

@@ -8,11 +8,11 @@ const TEST_STACK_SIZE: usize = if cfg!(debug_assertions) {
 };
 
 fn eval_vm(script: &str) -> String {
-    evaluate_script(script, false, None::<&std::path::Path>).unwrap()
+    evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap()
 }
 
 fn eval_vm_result(script: &str) -> Result<String, JSError> {
-    evaluate_script(script, false, None::<&std::path::Path>)
+    evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET)
 }
 
 fn eval_vm_async_iife(body: &str) -> String {

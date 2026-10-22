@@ -8,12 +8,8 @@ fn __init_test_logger() {
 #[test]
 fn import_meta_returns_stable_module_object() {
     let module_path = std::env::temp_dir().join(format!("import_meta_same_{}.mjs", std::process::id()));
-    let result = evaluate_script(
-        "typeof import.meta === 'object' && import.meta !== null && import.meta === import.meta",
-        true,
-        Some(&module_path),
-    )
-    .unwrap();
+    let script = "typeof import.meta === 'object' && import.meta !== null && import.meta === import.meta";
+    let result = evaluate_script(script, true, Some(&module_path), javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
@@ -37,7 +33,7 @@ fn import_meta_is_distinct_per_module() {
     .unwrap();
 
     let main_source = std::fs::read_to_string(&main_path).unwrap();
-    let result = evaluate_script(&main_source, true, Some(&main_path)).unwrap();
+    let result = evaluate_script(&main_source, true, Some(&main_path), javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     std::fs::remove_file(dep_path).ok();
@@ -48,11 +44,7 @@ fn import_meta_is_distinct_per_module() {
 #[test]
 fn direct_eval_cannot_access_import_meta() {
     let module_path = std::env::temp_dir().join(format!("import_meta_eval_{}.mjs", std::process::id()));
-    let result = evaluate_script(
-        "try { eval('import.meta'); false; } catch (e) { e && e.name === 'SyntaxError'; }",
-        true,
-        Some(&module_path),
-    )
-    .unwrap();
+    let script = "try { eval('import.meta'); false; } catch (e) { e && e.name === 'SyntaxError'; }";
+    let result = evaluate_script(script, true, Some(&module_path), javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }

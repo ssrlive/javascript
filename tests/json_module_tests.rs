@@ -20,7 +20,7 @@ fn json_module_static_default_import_works() {
     .unwrap();
 
     let main_source = std::fs::read_to_string(&main_path).unwrap();
-    let result = evaluate_script(&main_source, true, Some(&main_path)).unwrap();
+    let result = evaluate_script(&main_source, true, Some(&main_path), javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     std::fs::remove_file(json_path).ok();
@@ -43,7 +43,7 @@ fn json_module_dynamic_import_returns_namespace() {
     .unwrap();
 
     let main_source = std::fs::read_to_string(&main_path).unwrap();
-    let result = evaluate_script(&main_source, true, Some(&main_path)).unwrap();
+    let result = evaluate_script(&main_source, true, Some(&main_path), javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     std::fs::remove_file(json_path).ok();

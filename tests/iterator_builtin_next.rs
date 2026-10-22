@@ -24,7 +24,7 @@ fn builtin_next_function_iterator() {
     "#;
 
     // Return a JSON string so we can assert easily from Rust test harness
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "\"[1,2,3]\"");
 }
 
@@ -43,7 +43,7 @@ fn map_iterator_next_throws_on_primitive_receivers() {
         })
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -62,7 +62,7 @@ fn set_iterator_next_throws_on_primitive_receivers() {
         })
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -88,7 +88,7 @@ fn map_iterator_prototype_exposes_next_and_tostringtag() {
         !Object.prototype.hasOwnProperty.call(iterator, "next")
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -114,7 +114,7 @@ fn set_iterator_prototype_exposes_next_and_tostringtag() {
         !Object.prototype.hasOwnProperty.call(iterator, "next")
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -136,7 +136,7 @@ fn map_iterator_stays_done_after_mutation() {
         repeated.done === true
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -158,7 +158,7 @@ fn set_iterator_stays_done_after_mutation() {
         repeated.done === true
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -175,7 +175,7 @@ fn iterator_prototype_symbol_iterator_returns_this_value() {
         })
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -193,7 +193,7 @@ fn iterator_prototype_symbol_iterator_has_standard_metadata() {
         descriptor.configurable === true
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }
 
@@ -241,6 +241,6 @@ fn iterator_helpers_are_exposed_and_smoke_test_basic_behavior() {
         concat.toArray().join(",") === "4,5"
     "#;
 
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "true");
 }

@@ -14,28 +14,28 @@ mod function_tests {
     #[test]
     fn test_function_definition() {
         let script = "function add(a, b) { return a + b; } add(3, 4)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "7");
     }
 
     #[test]
     fn test_function_call() {
         let script = "function square(x) { return x * x; } square(5)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "25");
     }
 
     #[test]
     fn test_function_with_multiple_statements() {
         let script = "function test() { let x = 10; let y = 20; return x + y; } test()";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "30");
     }
 
     #[test]
     fn test_function_without_return() {
         let script = "function noReturn() { let x = 42; } noReturn()";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "undefined");
     }
 
@@ -47,7 +47,7 @@ mod function_tests {
             var d = Object.getOwnPropertyDescriptor(xFn, 'name');
             [d.value === "xFn", d.writable, d.enumerable, d.configurable].toString();
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"true,false,false,true\"");
     }
 
@@ -64,7 +64,7 @@ mod function_tests {
                 }
             })();
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"THROW TypeError\"");
     }
 
@@ -76,7 +76,7 @@ mod function_tests {
             var d = Object.getOwnPropertyDescriptor(arrow, 'name');
             [d.value === "arrow", d.writable, d.enumerable, d.configurable].toString();
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"true,false,false,true\"");
     }
 
@@ -89,7 +89,7 @@ mod function_tests {
             d.enumerable === false &&
             d.configurable === false
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -99,7 +99,7 @@ mod function_tests {
             let f = new Function('return (function(){ "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee").get; })()');
             typeof f() === "function"
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -112,7 +112,7 @@ mod function_tests {
             descs.length.writable === false &&
             descs.name.value === ""
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -121,7 +121,7 @@ mod function_tests {
         let script = r#"
             !Object.getOwnPropertyNames(Function).includes("__origin_global")
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -133,7 +133,7 @@ mod function_tests {
             let key = method.toString();
             typeof ({ [method](){ } })[key] === "function"
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -143,7 +143,7 @@ mod function_tests {
             let f = new Function({ toString() { return "return 1;"; } });
             f() === 1
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -154,7 +154,7 @@ mod function_tests {
             let f = new Function(param, "return a1;");
             f(42) === 42
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -168,7 +168,7 @@ mod function_tests {
                 e === 7
             }
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -182,7 +182,7 @@ mod function_tests {
                 e instanceof SyntaxError
             }
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -198,7 +198,7 @@ mod function_tests {
             f instanceof Function &&
             f() === 1
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -214,7 +214,7 @@ mod function_tests {
             f instanceof Function &&
             f() === 1
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -229,7 +229,7 @@ mod function_tests {
             iter.next().value === 1 &&
             iter.next().done === true
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -243,7 +243,7 @@ mod function_tests {
                 return f.apply(null, arguments) === "abc";
             })("a", "b", "c")
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -257,7 +257,7 @@ mod function_tests {
                 e instanceof TypeError
             }
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -283,7 +283,7 @@ mod function_tests {
             }
             otherApply !== Function.prototype.apply && protoOk && callWorks && thisNotCallable && badArgArray
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -304,7 +304,7 @@ mod function_tests {
             func.call('') instanceof other.String &&
             func.call(obj) === obj
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -322,7 +322,7 @@ mod function_tests {
             new fn() instanceof realmA.Object &&
             realmA.calls === 1
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -343,7 +343,7 @@ mod function_tests {
             }
             callThrows && bindThrows
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -366,7 +366,7 @@ mod function_tests {
             props.indexOf("length") >= 0 &&
             props.indexOf("name") === props.indexOf("length") + 1
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -424,7 +424,7 @@ mod function_tests {
             restoreArgumentsThrow &&
             restoreCallerThrow
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -453,7 +453,7 @@ mod function_tests {
                     data === "data";
             })()
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -469,7 +469,7 @@ mod function_tests {
             typeof Function.prototype.call.call(Date, null, 0, 0, 0) === "string" &&
             typeof Function.prototype.apply.call(Date, null, [0, 0, 0]) === "string"
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -502,7 +502,7 @@ mod function_tests {
             callerThrows &&
             argumentsThrows
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -521,7 +521,7 @@ mod function_tests {
             }
             threw
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -533,7 +533,7 @@ mod function_tests {
             delete bar.length;
             Function.prototype.bind.call(bar, null, 1).length === 0
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -548,7 +548,7 @@ mod function_tests {
             Object.getPrototypeOf(out) === Boolean.prototype &&
             out.valueOf() === true
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -564,63 +564,63 @@ mod function_tests {
             Object.getPrototypeOf(out) === DerivedBoolean.prototype &&
             out.valueOf() === true
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
     #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "14"); // (3*2) + (4*2) = 6 + 8 = 14
     }
 
     #[test]
     fn test_function_with_console_log() {
         let script = "function greet(name) { console.log('Hello', name); return 'done'; } greet('World')";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"done\"");
     }
 
     #[test]
     fn test_intentionally_failing_function() {
         let script = "function add(a, b) { return a + b; } add(3, 4)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "7");
     }
 
     #[test]
     fn test_arrow_function_single_param() {
         let script = "let square = x => x * x; square(5)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "25");
     }
 
     #[test]
     fn test_arrow_function_multiple_params() {
         let script = "let add = (a, b) => a + b; add(3, 4)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "7");
     }
 
     #[test]
     fn test_arrow_function_no_params() {
         let script = "let get_five = () => 5; get_five()";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "5");
     }
 
     #[test]
     fn test_arrow_function_block_body() {
         let script = "let test = x => { let y = x + 1; return y * 2; }; test(3)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "8");
     }
 
     #[test]
     fn test_array_spread() {
         let script = "let arr1 = [1, 2, 3]; let arr2 = [4, 5, 6]; let combined = [...arr1, ...arr2]; combined[0] + combined[1] + combined[2] + combined[3] + combined[4] + combined[5]";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "21");
     }
 
@@ -628,28 +628,28 @@ mod function_tests {
     fn test_object_spread() {
         let script =
             "let obj1 = {a: 1, b: 2}; let obj2 = {c: 3, d: 4}; let merged = {...obj1, ...obj2}; merged.a + merged.b + merged.c + merged.d";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "10");
     }
 
     #[test]
     fn test_function_call_spread() {
         let script = "function sum(a, b, c) { return a + b + c; } let nums = [1, 2, 3]; sum(...nums)";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "6");
     }
 
     #[test]
     fn test_default_param_comma_operator() {
         let script = "function g(a = (1,2), b = 4) { return a + b; } g()";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "6");
     }
 
     #[test]
     fn test_function_declaration_hoisting() {
         let script = "hoistedFunction(); function hoistedFunction() { return 42; }";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "42");
     }
 
@@ -671,7 +671,7 @@ mod function_tests {
             .name("named_function_expression".into())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "40320"); // 8! = 40320
             })
             .unwrap();
@@ -707,7 +707,7 @@ mod function_tests {
                 "Higher-order function map is not working correctly"
             );
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "undefined");
     }
 
@@ -725,7 +725,7 @@ mod function_tests {
             myFunc(car);
             car.make;
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"Toyota\"");
     }
 
@@ -747,7 +747,7 @@ mod function_tests {
 
             getScore(); // "Chamakh scored 5"
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"Chamakh scored 5\"");
     }
 
@@ -789,7 +789,7 @@ mod function_tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+                let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
                 assert_eq!(result, "undefined");
             })
             .expect("failed to spawn thread")
@@ -809,7 +809,7 @@ mod function_tests {
             }
             sum(1, 2, 3, 4, 5)
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "15");
     }
 }

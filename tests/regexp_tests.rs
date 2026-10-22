@@ -13,31 +13,36 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_constructor() {
-        let result = evaluate_script("new RegExp('hello')", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('hello')";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[object RegExp]");
     }
 
     #[test]
     fn test_regexp_constructor_with_flags() {
-        let result = evaluate_script("new RegExp('hello', 'gi')", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('hello', 'gi')";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[object RegExp]");
     }
 
     #[test]
     fn test_regexp_test_method() {
-        let result = evaluate_script("new RegExp('hello').test('hello world')", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('hello').test('hello world')";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
     #[test]
     fn test_regexp_test_method_case_insensitive() {
-        let result = evaluate_script("new RegExp('hello', 'i').test('HELLO world')", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('hello', 'i').test('HELLO world')";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
     #[test]
     fn test_regexp_exec_method() {
-        let result = evaluate_script("new RegExp('hello').exec('hello world')[0]", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('hello').exec('hello world')[0]";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"hello\"");
     }
 
@@ -45,7 +50,8 @@ mod regexp_tests {
     fn test_regexp_extract_emails() {
         // Test RegExp with a simple pattern
         // This demonstrates RegExp's ability to handle basic patterns
-        let result = evaluate_script("new RegExp('test').test('test string')", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('test').test('test string')";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -54,7 +60,7 @@ mod regexp_tests {
         // Translated StackOverflow-style email regex into a Rust-regex-compatible pattern.
         // This keeps the validation strict while avoiding PCRE-only constructs.
         let script = r#"new RegExp('^([A-Za-z0-9!#$%&\'\*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&\'\*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z]{2,})+)$','i').test('john.doe@example.com')"#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -73,7 +79,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
 
         assert_eq!(result, "[\"hello@world.com\",\"test123@abc.org.cn\"]");
     }
@@ -90,7 +96,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"123\""); // "123"
     }
 
@@ -108,13 +114,14 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"SyntaxError\"");
     }
 
     #[test]
     fn test_regexp_to_string() {
-        let result = evaluate_script("new RegExp('ab+c').toString()", false, None::<&std::path::Path>).unwrap();
+        let script = "new RegExp('ab+c').toString()";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"/ab+c/\""); // "/ab+c/"
     }
 
@@ -137,20 +144,22 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         println!("DEBUG: regexp unicode lastindex result: {}", result);
         assert_eq!(result, "\"[\\\"a\\\",1,\\\"😀\\\",3,\\\"b\\\",4]\"");
     }
 
     #[test]
     fn test_string_match_global_behavior() {
-        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/g)[0]"#, false, None::<&std::path::Path>).unwrap();
+        let script = r#"'cdbbdbsbz'.match(/d(b+)d/g)[0]"#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"dbbd\""); // "dbbd"
     }
 
     #[test]
     fn test_string_match_non_global_captures() {
-        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/)[1]"#, false, None::<&std::path::Path>).unwrap();
+        let script = r#"'cdbbdbsbz'.match(/d(b+)d/)[1]"#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"bb\""); // "bb"
     }
 
@@ -166,7 +175,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"a111b\"");
     }
 
@@ -183,7 +192,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"abcccx\"");
     }
 
@@ -195,7 +204,7 @@ mod regexp_tests {
             typeof /abc/[Symbol.match]("abc") === "object" &&
             typeof /./[Symbol.matchAll]("") === "object"
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -213,7 +222,7 @@ mod regexp_tests {
                 ];
             })()
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[\"function\",\"function\",\"function\",true]");
     }
 
@@ -225,7 +234,7 @@ mod regexp_tests {
                 return [RegExp.$1, RegExp.lastMatch, RegExp.leftContext, RegExp.rightContext, RegExp.lastParen];
             })()
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[\"b\",\"abc\",\"zz\",\"qq\",\"b\"]");
     }
 
@@ -243,7 +252,7 @@ mod regexp_tests {
                 }
             })()
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "[\"123\",\"TypeError\"]");
     }
 }

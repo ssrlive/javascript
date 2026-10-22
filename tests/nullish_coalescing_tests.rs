@@ -14,39 +14,49 @@ mod nullish_coalescing_tests {
     #[test]
     fn test_nullish_coalescing() {
         // Test undefined ?? default
-        let result = evaluate_script("undefined ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "undefined ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"default\"");
 
         // Test null ?? default
-        let result = evaluate_script("null ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "null ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"default\"");
 
         // Test falsy values ?? default (should return the falsy value)
-        let result = evaluate_script("0 ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "0 ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "0");
 
-        let result = evaluate_script("false ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "false ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "false");
 
-        let result = evaluate_script("'' ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "'' ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"\"");
 
         // Test truthy values ?? default (should return the truthy value)
-        let result = evaluate_script("'hello' ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "'hello' ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"hello\"");
 
-        let result = evaluate_script("42 ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "42 ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "42");
 
         // Test chained nullish coalescing
-        let result = evaluate_script("undefined ?? null ?? 'fallback'", false, None::<&std::path::Path>).unwrap();
+        let script = "undefined ?? null ?? 'fallback'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"fallback\"");
 
         // Test with variables
-        let result = evaluate_script("let x = undefined; x ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "let x = undefined; x ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"default\"");
 
-        let result = evaluate_script("let x = 'value'; x ?? 'default'", false, None::<&std::path::Path>).unwrap();
+        let script = "let x = 'value'; x ?? 'default'";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"value\"");
     }
 }

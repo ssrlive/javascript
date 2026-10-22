@@ -18,7 +18,7 @@ fn test_promise_async_resolution() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert_eq!(result, "\"async result\"");
         })
         .expect("failed to spawn thread")
@@ -41,7 +41,7 @@ fn test_await_async_function() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert_eq!(result, "42");
         })
         .expect("failed to spawn thread")
@@ -64,7 +64,7 @@ fn test_promise_chaining_async() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert_eq!(result, "25");
         })
         .expect("failed to spawn thread")
@@ -85,7 +85,7 @@ fn test_promise_allsettled() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert_eq!(
                 result,
                 r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":2},{"status":"fulfilled","value":3}]"#
@@ -108,7 +108,7 @@ fn test_main() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert_eq!(
                 result,
                 r#"[{"status":"fulfilled","value":1},{"status":"rejected","reason":2},{"status":"fulfilled","value":3}]"#
@@ -141,7 +141,7 @@ fn test_sync_catch_silences_non_error_rejection() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
             match result {
                 Ok(v) => assert_eq!(v, "\"caught 2\""),
                 Err(e) => panic!("Expected Ok, got Err: {:?}", e),
@@ -168,7 +168,7 @@ fn test_unhandled_non_error_rejection_not_immediate() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             // The script should evaluate to the rejection reason being observable after microtask processing
             assert_eq!(result, "2");
         })
@@ -197,7 +197,7 @@ fn test_allsettled_reject_does_not_report_unhandled() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
             match result {
                 Ok(v) => assert_eq!(v, "\"rejected:2\""),
                 Err(e) => panic!("Expected Ok, got Err: {:?}", e),
@@ -222,7 +222,7 @@ fn test_error_rejection_reported_immediately() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
             // Plain-object rejection is non-error-like -> Ok (the rejected promise serialized)
             assert!(
                 result.is_ok(),
@@ -248,7 +248,7 @@ fn test_error_rejection_silenced_by_sync_catch() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
             match result {
                 Ok(v) => assert_eq!(v, "\"caught:boom\""),
                 Err(e) => panic!("Expected Ok, got Err: {:?}", e),
@@ -284,7 +284,7 @@ fn test_allsettled_with_error_like_does_not_report_unhandled() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>);
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
             match result {
                 Ok(v) => assert_eq!(v, "\"rejected:boom\""),
                 Err(e) => panic!("Expected Ok, got Err: {:?}", e),
@@ -307,7 +307,7 @@ fn test_executor_throw_non_error_not_immediate() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert_eq!(result, "1");
         })
         .expect("failed to spawn thread")
@@ -322,7 +322,7 @@ fn test_executor_throw_error_reported_immediately() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(move || {
-            let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+            let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
             assert!(result.contains("Error: boom"));
         })
         .expect("failed to spawn thread")

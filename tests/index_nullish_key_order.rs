@@ -20,7 +20,7 @@ mod index_nullish_tests {
             base[prop];
         "#;
 
-        let res = evaluate_script(src, false, None::<&std::path::Path>);
+        let res = evaluate_script(src, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(res.is_err(), "Expected an error when accessing property on null");
         let err = res.unwrap_err();
         assert!(err.message().contains("TypeError: Cannot read properties of null or undefined"));
@@ -35,7 +35,7 @@ mod index_nullish_tests {
             base[prop];
         "#;
 
-        let res = evaluate_script(src, false, None::<&std::path::Path>);
+        let res = evaluate_script(src, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         match res {
             Err(err) => assert!(
                 err.message().contains("Error: key-evaluated"),

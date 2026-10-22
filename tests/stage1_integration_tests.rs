@@ -9,144 +9,107 @@ use javascript::*;
 #[test]
 fn stage1_map_comprehensive() {
     // Test Map constructor and basic operations
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set('key1', 'value1');
         map.set('key2', 42);
         map.set({}, 'object_key');
         map.size
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "3");
 
     // Test Map iteration
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map([['a', 1], ['b', 2]]);
         let sum = 0;
         for (let [key, value] of map) {
             sum += value;
         }
         sum
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "3");
 
     // Test Map methods
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map([['x', 10], ['y', 20]]);
         map.has('x') && map.get('x') === 10 && map.delete('x') && !map.has('x') && map.size === 1
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn stage1_set_comprehensive() {
     // Test Set constructor and basic operations
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set([1, 2, 3, 2, 1]);
         set.size
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "3");
 
     // Test Set iteration
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set([1, 2, 3]);
         let sum = 0;
         for (let value of set) {
             sum += value;
         }
         sum
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "6");
 
     // Test Set methods
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set([1, 2, 3]);
         set.has(2) && set.delete(2) && !set.has(2) && set.size === 2
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn stage1_weakmap_weakset() {
     // Test WeakMap with object keys
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let wm = new WeakMap();
         let key = {};
         wm.set(key, 'value');
         wm.has(key) && wm.get(key) === 'value'
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     // Test WeakSet
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let ws = new WeakSet();
         let obj = {};
         ws.add(obj);
         ws.has(obj)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn stage1_generator_functions() {
     // Test basic generator function - copy from working test
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         function* gen() {
             yield 42;
         }
         var g = gen();
         var result = g.next();
         result.value;
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "42");
 
     // Test generator done flag
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         function* gen() {
             yield 42;
         }
@@ -154,96 +117,72 @@ fn stage1_generator_functions() {
         g.next(); // first call
         var result = g.next(); // second call should be done
         result.done;
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     // Test generator functions - basic functionality (implementation incomplete)
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         function* gen() {
             yield 1;
         }
         typeof gen;
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"function\"");
 
     // Test generator object creation
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         function* gen() {
             yield 1;
         }
         var g = gen();
         typeof g;
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"object\"");
 }
 
 #[test]
 fn stage1_iterator_protocol() {
     // Test for...of with arrays
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let arr = [10, 20, 30];
         let sum = 0;
         for (let num of arr) {
             sum += num;
         }
         sum
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "60");
 
     // Test for...of with Map
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map([['a', 1], ['b', 2], ['c', 3]]);
         let sum = 0;
         for (let [key, value] of map) {
             sum += value;
         }
         sum
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "6");
 
     // Test for...of with Set
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set([1, 2, 3, 2, 1]);
         let sum = 0;
         for (let value of set) {
             sum += value;
         }
         sum
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "6");
 
     // Test custom iterator
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let customIterable = {
             iterator: function() {
                 let count = 0;
@@ -266,19 +205,15 @@ fn stage1_iterator_protocol() {
             sum += result.value;
         }
         sum
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "60");
 }
 
 #[test]
 fn stage1_proxy_basic() {
     // Test basic Proxy creation and get trap
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let target = { foo: 42 };
         let handler = {
             get: function(target, prop) {
@@ -290,16 +225,12 @@ fn stage1_proxy_basic() {
         };
         let proxy = new Proxy(target, handler);
         proxy.foo
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "84");
 
     // Test Proxy set trap
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let target = {};
         let handler = {
             set: function(target, prop, value) {
@@ -310,19 +241,15 @@ fn stage1_proxy_basic() {
         let proxy = new Proxy(target, handler);
         proxy.x = 5;
         proxy.x
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "10");
 }
 
 #[test]
 fn stage1_proxy_revocable() {
     // Test Proxy.revocable
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let target = { foo: 42 };
         let handler = {
             get: function(target, prop) {
@@ -335,11 +262,8 @@ fn stage1_proxy_revocable() {
         revocable.revoke();
         let result2 = 'revoked';
         result1
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "42");
 }
 
@@ -348,8 +272,7 @@ fn stage1_proxy_delete_trap() {
     // Test Proxy deleteProperty trap
     // Note: this engine runs in strict mode, so `delete proxy.foo` throws
     // TypeError when the trap returns false. We use try/catch to verify.
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         "use strict";
         let target = { foo: 42, bar: 24 };
         let handler = {
@@ -371,19 +294,15 @@ fn stage1_proxy_delete_trap() {
         }
         let still_has_foo = 'foo' in proxy;
         deleted_bar && still_has_foo && threw
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn stage1_integration_all_features() {
     // Comprehensive test combining multiple Phase 1 features
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         // Test Map operations
         let map = new Map();
         map.set('a', 1);
@@ -422,11 +341,8 @@ fn stage1_integration_all_features() {
 
         // Combine results
         mapSize === 2 && setSum === 6 && genType === 'object' && canCallNext && proxyValue === 84
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
@@ -434,44 +350,32 @@ fn stage1_integration_all_features() {
 fn stage1_error_handling() {
     // Test error handling in Phase 1 features
     // Test Proxy with invalid handler - should not throw in current implementation
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let proxy = new Proxy({}, {});
         proxy.foo === undefined
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     // Test revoked proxy access - simplified test
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let revocable = Proxy.revocable({foo: 42}, {});
         let proxy = revocable.proxy;
         let value = proxy.foo; // Get value before revoke
         revocable.revoke();
         value === 42
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
     // Test basic try/catch with throw
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         try {
             throw 42;
         } catch (e) {
             e === 42
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }

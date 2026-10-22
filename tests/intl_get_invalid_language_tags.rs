@@ -43,6 +43,6 @@ fn test_get_invalid_language_tags_array_parsing() {
         getInvalidLanguageTags.length
     "#;
 
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "13");
 }

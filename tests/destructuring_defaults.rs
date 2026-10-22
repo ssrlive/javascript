@@ -13,7 +13,7 @@ fn test_object_destructuring_with_defaults() {
         let { a = 3, b = 4 } = d;
         a + b
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "7");
 }
 
@@ -24,7 +24,7 @@ fn test_array_destructuring_with_defaults() {
         let [ a = 2, b = 5 ] = d;
         a * b
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "10");
 }
 
@@ -36,7 +36,7 @@ fn test_object_parameter_destructuring_with_defaults() {
         }
         f({ largestUnit: "years" })
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"nanoseconds|years|halfExpand|1\"");
 }
 
@@ -48,7 +48,7 @@ fn test_array_parameter_destructuring_with_defaults() {
         }
         f([10])
     "#;
-    let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "22");
 }
 

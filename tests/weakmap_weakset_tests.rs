@@ -9,61 +9,48 @@ fn __init_test_logger() {
 
 #[test]
 fn test_weakmap_constructor() {
-    let result = evaluate_script("new WeakMap()", false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script("new WeakMap()", false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "[object WeakMap]");
 
-    let result = evaluate_script("new WeakMap([])", false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script("new WeakMap([])", false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "[object WeakMap]");
 }
 
 #[test]
 fn test_weakmap_set_get_has_delete() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let wm = new WeakMap();
         let key = {};
         wm.set(key, 'value');
         wm.get(key)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"value\"");
 
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let wm = new WeakMap();
         let key = {};
         wm.set(key, 'value');
         wm.has(key)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let wm = new WeakMap();
         let key = {};
         wm.set(key, 'value');
         let deleted = wm.delete(key);
         let hasAfter = wm.has(key);
         [deleted, hasAfter]
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "[true,false]");
 }
 
 #[test]
 fn test_weakmap_non_object_key() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let wm = new WeakMap();
         try {
             wm.set('string', 'value');
@@ -71,59 +58,47 @@ fn test_weakmap_non_object_key() {
         } catch (e) {
             'error'
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"error\"");
 }
 
 #[test]
 fn test_weakset_constructor() {
-    let result = evaluate_script("new WeakSet()", false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script("new WeakSet()", false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "[object WeakSet]");
 
-    let result = evaluate_script("new WeakSet([])", false, None::<&std::path::Path>).unwrap();
+    let result = evaluate_script("new WeakSet([])", false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "[object WeakSet]");
 }
 
 #[test]
 fn test_weakset_add_has_delete() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let ws = new WeakSet();
         let obj = {};
         ws.add(obj);
         ws.has(obj)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let ws = new WeakSet();
         let obj = {};
         ws.add(obj);
         let deleted = ws.delete(obj);
         let hasAfter = ws.has(obj);
         [deleted, hasAfter]
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
 
     assert_eq!(result, "[true,false]");
 }
 
 #[test]
 fn test_weakset_non_object_value() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let ws = new WeakSet();
         try {
             ws.add('string');
@@ -131,20 +106,19 @@ fn test_weakset_non_object_value() {
         } catch (e) {
             'error'
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
 
     assert_eq!(result, "\"error\"");
 }
 
 #[test]
 fn test_weakmap_weakset_to_string() {
-    let result = evaluate_script("new WeakMap().toString()", false, None::<&std::path::Path>).unwrap();
+    let script = "new WeakMap().toString()";
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[object WeakMap]\"");
 
-    let result = evaluate_script("new WeakSet().toString()", false, None::<&std::path::Path>).unwrap();
+    let script = "new WeakSet().toString()";
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[object WeakSet]\"");
 }

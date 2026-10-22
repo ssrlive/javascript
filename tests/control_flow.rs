@@ -16,91 +16,111 @@ mod control_flow_tests {
     #[test]
     fn test_if_statement_true() {
         let script = "let x = 5; if (x > 3) { x = x + 1; } x";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "6");
     }
 
     #[test]
     fn test_if_statement_false() {
         let script = "let x = 2; if (x > 3) { x = x + 1; } x";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "2");
     }
 
     #[test]
     fn test_if_else_statement() {
         let script = "let x = 2; if (x > 3) { x = 10; } else { x = 20; } x";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "20");
     }
 
     #[test]
     fn test_variable_assignment_in_if() {
         let script = "let result = 0; if (1) { result = 42; } result";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "42");
     }
 
     #[test]
     fn test_for_loop() {
         let script = "let sum = 0; for (let i = 1; i <= 5; i = i + 1) { sum = sum + i; } sum";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "15");
     }
 
     #[test]
     fn test_for_of_loop() {
         let script = "let arr = []; arr.push(1); arr.push(2); arr.push(3); let sum = 0; for (let x of arr) { sum = sum + x; } sum";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "6");
     }
 
     #[test]
     fn test_for_of_loop_empty_array() {
         let script = "let arr = []; let count = 0; for (let x of arr) { count = count + 1; } count";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "0");
     }
 
     #[test]
     fn test_while_loop() {
         let script = "let sum = 0; let i = 1; while (i <= 5) { sum = sum + i; i = i + 1; } sum";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "15");
+    }
+
+    #[test]
+    fn test_long_allocation_loop_crosses_gc_safepoints() {
+        let script = "let kept = []; for (let i = 0; i < 20000; i = i + 1) { let item = { value: [i, i + 1] }; if (i === 0 || i === 5000 || i === 10000 || i === 15000) kept.push(item); } kept.length + kept[3].value[1]";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "15005");
+    }
+
+    #[test]
+    fn test_custom_gc_opcode_budget() {
+        let script = "let values = []; for (let i = 0; i < 20; i = i + 1) { values.push({ value: i }); } values[19].value";
+        let result = evaluate_script(script, false, None::<&std::path::Path>, 1).unwrap();
+        assert_eq!(result, "19");
+    }
+
+    #[test]
+    fn test_gc_opcode_budget_must_be_nonzero() {
+        let result = evaluate_script("1", false, None::<&std::path::Path>, 0);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_while_loop_zero_iterations() {
         let script = "let count = 0; let i = 5; while (i < 5) { count = count + 1; i = i + 1; } count";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "0");
     }
 
     #[test]
     fn test_while_loop_reinitializes_block_scoped_bindings() {
         let script = r#"const s = "a b"; let i = 0; let out = ""; while (i < s.length) { const c = s[i]; if (c === " ") { i = i + 1; continue; } out = out + c; i = i + 1; } out"#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"ab\"");
     }
 
     #[test]
     fn test_do_while_loop() {
         let script = "let sum = 0; let i = 1; do { sum = sum + i; i = i + 1; } while (i <= 5); sum";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "15");
     }
 
     #[test]
     fn test_do_while_loop_executes_once() {
         let script = "let count = 0; let i = 5; do { count = count + 1; i = i + 1; } while (i < 5); count";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "1");
     }
 
     #[test]
     fn test_do_while_loop_reinitializes_block_scoped_bindings() {
         let script = r#"const s = "ab "; let i = 0; let out = ""; do { let c = s[i]; if (c === " ") { i = i + 1; continue; } out = out + c; i = i + 1; } while (i < s.length); out"#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"ab\"");
     }
 
@@ -127,42 +147,42 @@ mod control_flow_tests {
             };
             validate("function")
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "0");
     }
 
     #[test]
     fn test_switch_statement() {
         let script = "let result = 0; switch (2) { case 1: result = 10; case 2: result = 20; case 3: result = 30; } result";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "30");
     }
 
     #[test]
     fn test_switch_statement_with_default() {
         let script = "let result = 0; switch (5) { case 1: result = 10; case 2: result = 20; default: result = 99; } result";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "99");
     }
 
     #[test]
     fn test_switch_statement_no_match() {
         let script = "let result = 0; switch (5) { case 1: result = 10; case 2: result = 20; } result";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "0");
     }
 
     #[test]
     fn test_switch_break_statement_match() {
         let script = "let result = 0; switch (1) { case 1: result = 10; break; case 2: result = 20; } result";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "10");
     }
 
     #[test]
     fn test_break_error() {
         let script = "break;";
-        let result = evaluate_script(script, false, None::<&std::path::Path>);
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         match result {
             Err(err) => match err.kind() {
                 JSErrorKind::SyntaxError { message, .. } => {
@@ -177,14 +197,14 @@ mod control_flow_tests {
     #[test]
     fn test_break_with_loop() {
         let script = "let sum = 0; for (let i = 1; i <= 5; i = i + 1) { if (i == 3) { break; } sum = sum + i; } sum";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "3");
     }
 
     #[test]
     fn test_continue_error() {
         let script = "continue;";
-        let result = evaluate_script(script, false, None::<&std::path::Path>);
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         match result {
             Err(err) => match err.kind() {
                 JSErrorKind::SyntaxError { message, .. } => {
@@ -199,14 +219,14 @@ mod control_flow_tests {
     #[test]
     fn test_continue_statment() {
         let script = "let sum = 0; for (let i = 1; i <= 5; i = i + 1) { if (i % 2 == 0) { continue; } sum = sum + i; } sum";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "9");
     }
 
     #[test]
     fn test_for_of_loop_single_element() {
         let script = "let arr = []; arr.push(42); let result = 0; for (let x of arr) { result = x; } result";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "42");
     }
 
@@ -221,35 +241,35 @@ mod control_flow_tests {
             }
             sum
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "30");
     }
 
     #[test]
     fn test_var_hoisting() {
         let script = "function f() { a = 10; return a; var a; } f()";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "10");
     }
 
     #[test]
     fn test_var_in_block_scope() {
         let script = "function f() { if (true) { var a = 5; } return a; } f()";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "5");
     }
 
     #[test]
     fn test_var_redeclaration() {
         let script = "var a = 1; var a = 2; a";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "2");
     }
 
     #[test]
     fn test_var_in_for_loop() {
         let script = "for (var i = 0; i < 3; i++) {} i";
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "3");
     }
 
@@ -263,7 +283,7 @@ mod control_flow_tests {
             }
             sum
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "60");
     }
 
@@ -277,7 +297,7 @@ mod control_flow_tests {
             }
             sum
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "6");
     }
 
@@ -291,7 +311,7 @@ mod control_flow_tests {
             }
             count
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "0");
     }
 
@@ -306,7 +326,7 @@ mod control_flow_tests {
             }
             count
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "1");
     }
 
@@ -320,7 +340,7 @@ mod control_flow_tests {
             }
             count
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "2");
     }
 
@@ -336,7 +356,7 @@ mod control_flow_tests {
             }
             collectKeys({a: 1, b: 2, c: 3})
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"a,b,c\"");
     }
 
@@ -352,7 +372,7 @@ mod control_flow_tests {
             }
             collectValues([1, 2, 3])
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"1,2,3\"");
     }
 }

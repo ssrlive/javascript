@@ -17,10 +17,26 @@ enum OpcodeAction<'gc> {
     Exit(Value<'gc>),
 }
 
+enum RunInnerStatus<'gc> {
+    Yielded,
+    Complete(Value<'gc>),
+}
+
 impl<'gc> VM<'gc> {
     /// Core execution loop of the VM (Fetch-Decode-Execute)
     pub fn run(&mut self, ctx: &GcContext<'gc>) -> Result<Value<'gc>, JSError> {
         let result = self.run_inner(ctx, 0)?;
+        self.finish_run(ctx, result)
+    }
+
+    pub(crate) fn run_slice(&mut self, ctx: &GcContext<'gc>, opcode_budget: usize) -> Result<Option<Value<'gc>>, JSError> {
+        match self.run_inner_slice(ctx, 0, Some(opcode_budget))? {
+            RunInnerStatus::Yielded => Ok(None),
+            RunInnerStatus::Complete(result) => self.finish_run(ctx, result).map(Some),
+        }
+    }
+
+    fn finish_run(&mut self, ctx: &GcContext<'gc>, result: Value<'gc>) -> Result<Value<'gc>, JSError> {
         self.flush_async_atomics_waits(ctx, true);
         self.drain_microtasks(ctx);
         if let Some(thrown) = self.pending_throw.take() {
@@ -38,6 +54,19 @@ impl<'gc> VM<'gc> {
 
     /// Execute VM until frames drop below `min_depth` or top-level returns
     pub(crate) fn run_inner(&mut self, ctx: &GcContext<'gc>, min_depth: usize) -> Result<Value<'gc>, JSError> {
+        match self.run_inner_slice(ctx, min_depth, None)? {
+            RunInnerStatus::Complete(value) => Ok(value),
+            RunInnerStatus::Yielded => unreachable!("unbounded VM execution cannot yield"),
+        }
+    }
+
+    fn run_inner_slice(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        min_depth: usize,
+        opcode_budget: Option<usize>,
+    ) -> Result<RunInnerStatus<'gc>, JSError> {
+        let mut executed_opcodes = 0;
         loop {
             // Check for pending throw (e.g. from generator .throw())
             if let Some(thrown) = self.pending_throw.take() {
@@ -46,6 +75,9 @@ impl<'gc> VM<'gc> {
                 // follows, so clear the depth marker immediately.
                 self.throw_caught_stack_depth = None;
                 continue;
+            }
+            if opcode_budget.is_some_and(|budget| executed_opcodes >= budget) {
+                return Ok(RunInnerStatus::Yielded);
             }
             // Fetch instruction
             self.current_opcode_ip = self.ip;
@@ -185,6 +217,7 @@ impl<'gc> VM<'gc> {
                     OpcodeAction::Continue
                 }
             };
+            executed_opcodes += 1;
             // If a throw was caught by handle_throw during this opcode, the
             // handler may have pushed extra values onto the stack afterwards.
             // Re-truncate to the depth recorded by handle_throw so the catch
@@ -194,7 +227,7 @@ impl<'gc> VM<'gc> {
                 continue;
             }
             if let OpcodeAction::Exit(val) = action {
-                return Ok(val);
+                return Ok(RunInnerStatus::Complete(val));
             }
         }
     }

@@ -9,171 +9,136 @@ fn __init_test_logger() {
 
 #[test]
 fn test_map_constructor() {
-    let result = evaluate_script("Object.prototype.toString.call(new Map())", false, None::<&std::path::Path>).unwrap();
+    let script = "Object.prototype.toString.call(new Map())";
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[object Map]\"");
 }
 
 #[test]
 fn test_map_set_and_get() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set("key1", "value1");
         map.set("key2", "value2");
         map.get("key1")
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"value1\"");
 }
 
 #[test]
 fn test_map_has() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set("key", "value");
         map.has("key")
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_size() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set("a", 1);
         map.set("b", 2);
         map.size
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "2");
 }
 
 #[test]
 fn test_map_delete() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set("key", "value");
         let deleted = map.delete("key");
         let has = map.has("key");
         console.log(JSON.stringify([deleted, has]));
         [deleted, has]
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     // This should return an array [true, false]
     assert_eq!(result, "[true,false]");
 }
 
 #[test]
 fn test_map_clear() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set("a", 1);
         map.set("b", 2);
         map.clear();
         map.size
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "0");
 }
 
 #[test]
 fn test_set_constructor() {
-    let result = evaluate_script("Object.prototype.toString.call(new Set())", false, None::<&std::path::Path>).unwrap();
+    let script = "Object.prototype.toString.call(new Set())";
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[object Set]\"");
 }
 
 #[test]
 fn test_set_add_and_has() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set();
         set.add("item1");
         set.add("item2");
         set.has("item1")
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_size() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set();
         set.add(1);
         set.add(2);
         set.add(2); // duplicate
         set.size
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "2");
 }
 
 #[test]
 fn test_set_delete() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set();
         set.add("item");
         let deleted = set.delete("item");
         let has = set.has("item");
         JSON.stringify([deleted, has])
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     // This should return an array [true, false]
     assert_eq!(result, "\"[true,false]\"");
 }
 
 #[test]
 fn test_set_clear() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set();
         set.add(1);
         set.add(2);
         set.clear();
         set.size
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "0");
 }
 
 #[test]
 fn test_map_keys_values_entries() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let map = new Map();
         map.set("a", 1);
         map.set("b", 2);
@@ -181,37 +146,29 @@ fn test_map_keys_values_entries() {
         let v = []; for (let x of map.values()) v.push(x);
         let e = []; for (let x of map.entries()) e.push(x);
         JSON.stringify([k.length, v.length, e.length])
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     // Should return [2, 2, 2]
     assert_eq!(result, "\"[2,2,2]\"");
 }
 
 #[test]
 fn test_set_values() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let set = new Set();
         set.add(1);
         set.add(2);
         let vals = [];
         for (let x of set.values()) vals.push(x);
         JSON.stringify(vals.length)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"2\"");
 }
 
 #[test]
 fn test_set_add_rejects_invalid_receivers() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const values = [undefined, null, true, 1, "x", {}];
         values.every(function(value) {
             try {
@@ -221,24 +178,21 @@ fn test_set_add_rejects_invalid_receivers() {
                 return err instanceof TypeError;
             }
         })
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_add_has_standard_name() {
-    let result = evaluate_script("Set.prototype.add.name", false, None::<&std::path::Path>).unwrap();
+    let script = "Set.prototype.add.name";
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"add\"");
 }
 
 #[test]
 fn test_set_methods_probe_surface() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const a = new Set([1, 2, 3]);
         const b = new Set([2, 3, 4]);
         const u = a.union(b);
@@ -259,18 +213,14 @@ fn test_set_methods_probe_surface() {
         a.isSubsetOf(new Set([1, 2, 3, 4])) &&
         a.isSupersetOf(new Set([1, 2])) &&
         a.isDisjointFrom(new Set([4, 5]))
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_union_allows_set_like_object() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const s1 = new Set([1, 2]);
         const s2 = {
           size: 2,
@@ -281,18 +231,14 @@ fn test_set_union_allows_set_like_object() {
           }
         };
         JSON.stringify([...s1.union(s2)])
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[1,2,3]\"");
 }
 
 #[test]
 fn test_set_other_builtin_methods_reject_invalid_receivers() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const cases = [
           () => Set.prototype.clear.call({}),
           () => Set.prototype.delete.call({}, 1),
@@ -313,18 +259,14 @@ fn test_set_other_builtin_methods_reject_invalid_receivers() {
             return err instanceof TypeError;
           }
         })
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_builtin_method_metadata() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Set.prototype.has.name === "has" &&
         Set.prototype.delete.name === "delete" &&
         Set.prototype.values.name === "values" &&
@@ -333,47 +275,35 @@ fn test_set_builtin_method_metadata() {
         Set.prototype.values.length === 0 &&
         Set.prototype.entries.length === 0 &&
         Set.prototype.clear.length === 0
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_has_uses_same_value_zero_for_nan() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const set = new Set();
         set.add(NaN);
         set.has(NaN)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_symbol_iterator_is_values_alias() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Set.prototype[Symbol.iterator] === Set.prototype.values &&
         typeof Set.prototype[Symbol.iterator] === "function"
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_prototype_methods_reject_weakset_receivers() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const weak = new WeakSet();
         const cases = [
           () => Set.prototype.add.call(weak, {}),
@@ -391,18 +321,14 @@ fn test_set_prototype_methods_reject_weakset_receivers() {
             return err instanceof TypeError;
           }
         })
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_size_descriptor_uses_getter() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const descriptor = Object.getOwnPropertyDescriptor(Set.prototype, "size");
         typeof descriptor.get === "function" &&
         descriptor.get.name === "get size" &&
@@ -410,18 +336,14 @@ fn test_set_size_descriptor_uses_getter() {
         descriptor.set === undefined &&
         descriptor.enumerable === false &&
         descriptor.configurable === true
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_for_each_requires_callable_callback() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const set = new Set([1]);
         [undefined, null, true, 1, "x", Symbol("x")].every(value => {
           try {
@@ -431,18 +353,14 @@ fn test_set_for_each_requires_callable_callback() {
             return err instanceof TypeError;
           }
         })
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_for_each_visits_values_added_during_iteration() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const set = new Set([1]);
         const seen = [];
         set.forEach(function(value) {
@@ -451,18 +369,14 @@ fn test_set_for_each_visits_values_added_during_iteration() {
           if (value === 2) set.add(3);
         });
         JSON.stringify(seen)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[1,2,3]\"");
 }
 
 #[test]
 fn test_set_for_each_revisits_delete_readd() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const set = new Set([1, 2, 3]);
         const seen = [];
         set.forEach(function(value) {
@@ -471,18 +385,14 @@ fn test_set_for_each_revisits_delete_readd() {
           if (value === 3) set.add(1);
         });
         JSON.stringify(seen)
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "\"[1,2,3,1]\"");
 }
 
 #[test]
 fn test_set_for_each_propagates_callback_errors() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const set = new Set([1]);
         let counter = 0;
         try {
@@ -494,18 +404,14 @@ fn test_set_for_each_propagates_callback_errors() {
         } catch (err) {
           counter === 1 && err instanceof Error
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_constructor_metadata_matches_spec() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const globalDesc = Object.getOwnPropertyDescriptor(this, "Set");
         const speciesDesc = Object.getOwnPropertyDescriptor(Set, Symbol.species);
         Set.name === "Set" &&
@@ -523,18 +429,14 @@ fn test_set_constructor_metadata_matches_spec() {
         speciesDesc.enumerable === false &&
         speciesDesc.configurable === true &&
         Set[Symbol.species] === Set
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_constructor_metadata_matches_spec() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const globalDesc = Object.getOwnPropertyDescriptor(this, "Map");
         const speciesDesc = Object.getOwnPropertyDescriptor(Map, Symbol.species);
         Map.name === "Map" &&
@@ -552,49 +454,37 @@ fn test_map_constructor_metadata_matches_spec() {
         speciesDesc.enumerable === false &&
         speciesDesc.configurable === true &&
         Map[Symbol.species] === Map
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_constructor_requires_new() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         try {
           Map();
           false
         } catch (err) {
           err instanceof TypeError
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_new_map_uses_map_prototype() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Object.getPrototypeOf(new Map()) === Map.prototype
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_constructor_uses_set_for_iterables() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const originalSet = Map.prototype.set;
         let counter = 0;
         Map.prototype.set = function(key, value) {
@@ -603,18 +493,14 @@ fn test_map_constructor_uses_set_for_iterables() {
         };
         new Map([["a", 1], ["b", 2]]);
         counter === 2
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_constructor_closes_iterator_when_set_throws() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let closed = 0;
         const iterable = {
           [Symbol.iterator]() {
@@ -631,46 +517,34 @@ fn test_map_constructor_closes_iterator_when_set_throws() {
         } catch (err) {
           closed === 1 && err instanceof Error
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_symbol_iterator_aliases_entries() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Map.prototype[Symbol.iterator] === Map.prototype.entries
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_groupby_metadata_matches_spec() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Map.groupBy.name === "groupBy" &&
         Map.groupBy.length === 2 &&
         Object.prototype.propertyIsEnumerable.call(Map, "groupBy") === false
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_groupby_returns_map_with_arbitrary_keys() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const obj = { toString() { return "nope"; } };
         const map = Map.groupBy([1, "1", obj], (value) => value);
         map instanceof Map &&
@@ -678,34 +552,26 @@ fn test_map_groupby_returns_map_with_arbitrary_keys() {
         map.get(1).length === 1 &&
         map.get("1").length === 1 &&
         map.get(obj).length === 1
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_groupby_normalizes_negative_zero_keys() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const map = Map.groupBy([-0, 0], (value) => value);
         map.size === 1 &&
         1 / Array.from(map.keys())[0] === Infinity &&
         map.get(0).length === 2
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_prototype_methods_have_expected_metadata() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const sizeDesc = Object.getOwnPropertyDescriptor(Map.prototype, "size");
         Map.prototype.get.name === "get" &&
         Map.prototype.get.length === 1 &&
@@ -716,18 +582,14 @@ fn test_map_prototype_methods_have_expected_metadata() {
         typeof sizeDesc.get === "function" &&
         sizeDesc.get.name === "get size" &&
         sizeDesc.get.length === 0
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_methods_reject_weakmap_receiver_and_use_same_value_zero() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const map = new Map();
         map.set(NaN, 1);
         let weakMapRejected = false;
@@ -737,18 +599,14 @@ fn test_map_methods_reject_weakmap_receiver_and_use_same_value_zero() {
           weakMapRejected = err instanceof TypeError;
         }
         weakMapRejected && map.get(NaN) === 1 && map.has(NaN) === true
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_for_each_validates_callback_and_propagates_errors() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const map = new Map([[1, 2]]);
         let invalidRejected = false;
         try {
@@ -765,18 +623,14 @@ fn test_map_for_each_validates_callback_and_propagates_errors() {
         }
 
         invalidRejected && abruptRejected
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_map_for_each_tracks_live_mutations() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const map = new Map();
         map.set("foo", 0);
         map.set("bar", 1);
@@ -793,18 +647,14 @@ fn test_map_for_each_tracks_live_mutations() {
           count++;
         });
         seen.join("|") === "foo:0|bar:1|foo:baz"
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_constructor_uses_add_for_iterables() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         const originalAdd = Set.prototype.add;
         let counter = 0;
         Set.prototype.add = function(value) {
@@ -813,18 +663,14 @@ fn test_set_constructor_uses_add_for_iterables() {
         };
         new Set([1, 2]);
         counter
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "2");
 }
 
 #[test]
 fn test_set_constructor_rejects_non_callable_add() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Set.prototype.add = null;
         try {
           new Set([1, 2]);
@@ -832,18 +678,14 @@ fn test_set_constructor_rejects_non_callable_add() {
         } catch (err) {
           err instanceof TypeError
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_constructor_propagates_iterator_value_errors() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         function MyError() {}
         const iterable = {
           [Symbol.iterator]() {
@@ -863,18 +705,14 @@ fn test_set_constructor_propagates_iterator_value_errors() {
         } catch (err) {
           err instanceof MyError
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_constructor_closes_iterator_when_add_throws() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         let closed = 0;
         const iterable = {
           [Symbol.iterator]() {
@@ -891,41 +729,30 @@ fn test_set_constructor_closes_iterator_when_add_throws() {
         } catch (err) {
           closed === 1 && err instanceof Error
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_set_constructor_requires_new() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         try {
           Set();
           false
         } catch (err) {
           err instanceof TypeError
         }
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }
 
 #[test]
 fn test_new_set_uses_set_prototype() {
-    let result = evaluate_script(
-        r#"
+    let script = r#"
         Object.getPrototypeOf(new Set()) === Set.prototype
-    "#,
-        false,
-        None::<&std::path::Path>,
-    )
-    .unwrap();
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "true");
 }

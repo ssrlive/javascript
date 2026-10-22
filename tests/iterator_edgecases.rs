@@ -3,7 +3,8 @@ use javascript::evaluate_script;
 #[test]
 fn for_of_missing_iterator_throws() {
     // Plain object without iterator should not be iterable for 'for..of'
-    let res = evaluate_script("for (var x of {}) { }; 1", false, None::<&std::path::Path>);
+    let script = "for (var x of {}) { }; 1";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err());
 }
 
@@ -20,7 +21,7 @@ fn iterator_next_returns_non_object_throws() {
         for (let x of o) { }
         1
     "#;
-    let res = evaluate_script(script, false, None::<&std::path::Path>);
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
     assert!(res.is_err());
 }
 
@@ -35,7 +36,7 @@ fn string_iteration_surrogate_pair_behaviour() {
         for (let ch of s) { acc = acc + ch; }
         acc
     "#;
-    let res = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     let rust_str = res.trim_start_matches('"').trim_end_matches('"');
     assert!(rust_str.starts_with("a"));
     assert!(rust_str.ends_with("b"));

@@ -9,36 +9,42 @@ fn __init_test_logger() {
 
 #[test]
 fn test_prefix_increment_variable() {
-    let res = evaluate_script("let i = 1; ++i; i", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 1; ++i; i";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "2");
 }
 
 #[test]
 fn test_prefix_decrement_variable() {
-    let res = evaluate_script("let i = 3; --i; i", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 3; --i; i";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "2");
 }
 
 #[test]
 fn test_postfix_increment_variable() {
-    let res = evaluate_script("let i = 4; i++; i", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 4; i++; i";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "5");
 }
 
 #[test]
 fn test_postfix_decrement_variable() {
-    let res = evaluate_script("let i = 5; i--; i", false, None::<&std::path::Path>).unwrap();
+    let script = "let i = 5; i--; i";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "4");
 }
 
 #[test]
 fn test_increment_property() {
-    let res = evaluate_script("let obj = {x: 10}; ++obj.x; obj.x", false, None::<&std::path::Path>).unwrap();
+    let script = "let obj = {x: 10}; ++obj.x; obj.x";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "11");
 }
 
 #[test]
 fn test_postfix_increment_array_index() {
-    let res = evaluate_script("let a = [1,2,3]; a[0]++; a[0]", false, None::<&std::path::Path>).unwrap();
+    let script = "let a = [1,2,3]; a[0]++; a[0]";
+    let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(res, "2");
 }

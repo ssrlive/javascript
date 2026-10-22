@@ -8,7 +8,7 @@ fn __init_test_logger() {
 }
 
 fn eval(script: &str) -> Result<String, JSError> {
-    evaluate_script(script, false, None::<&std::path::Path>)
+    evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET)
 }
 
 #[test]

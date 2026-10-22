@@ -18,7 +18,7 @@ mod symbol_static_tests {
             let sym2 = Symbol.for("test");
             sym1 === sym2
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -29,7 +29,7 @@ mod symbol_static_tests {
             let sym2 = Symbol.for("test2");
             sym1 !== sym2
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -39,7 +39,7 @@ mod symbol_static_tests {
             let sym = Symbol.for("myKey");
             Symbol.keyFor(sym)
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"myKey\"");
     }
 
@@ -49,7 +49,7 @@ mod symbol_static_tests {
             let sym = Symbol("not registered");
             Symbol.keyFor(sym)
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "undefined");
     }
 
@@ -60,7 +60,7 @@ mod symbol_static_tests {
             let sym2 = Symbol.for("123");
             sym1 === sym2
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 
@@ -71,7 +71,7 @@ mod symbol_static_tests {
             var s = Symbol.for();
             Symbol.keyFor(s)
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"undefined\"");
     }
 
@@ -84,7 +84,7 @@ mod symbol_static_tests {
                 "error"
             }
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "\"error\"");
     }
 
@@ -94,7 +94,7 @@ mod symbol_static_tests {
             typeof Symbol.match === "symbol" &&
             typeof Symbol.matchAll === "symbol"
         "#;
-        let result = evaluate_script(script, false, None::<&std::path::Path>).unwrap();
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");
     }
 }

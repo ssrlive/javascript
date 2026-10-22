@@ -8,6 +8,8 @@ pub(crate) use gc_arena::{Collect, Gc};
 use std::collections::HashMap;
 pub(crate) type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 
+pub const DEFAULT_GC_OPCODE_BUDGET: usize = 4096;
+
 #[inline]
 pub fn new_gc_cell_ptr<'gc, T: 'gc + Collect<'gc>>(ctx: &GcContext<'gc>, value: T) -> GcPtr<'gc, T> {
     Gc::new(ctx, GcCell::new(value))
@@ -2919,9 +2921,10 @@ pub fn evaluate_script<T: AsRef<str>, P: AsRef<std::path::Path>>(
     script: T,
     run_as_module: bool,
     script_path: Option<P>,
+    gc_opcode_budget: usize,
 ) -> Result<String, JSError> {
     let unwrap_top_level_promise = script_path.is_none();
-    evaluate_script_with_unwrap(script, run_as_module, script_path, unwrap_top_level_promise)
+    evaluate_script_with_unwrap(script, run_as_module, script_path, unwrap_top_level_promise, gc_opcode_budget)
 }
 
 pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
@@ -2929,264 +2932,289 @@ pub fn evaluate_script_with_unwrap<T: AsRef<str>, P: AsRef<std::path::Path>>(
     run_as_module: bool,
     script_path: Option<P>,
     unwrap_top_level_promise: bool,
+    gc_opcode_budget: usize,
 ) -> Result<String, JSError> {
+    if gc_opcode_budget == 0 {
+        return Err(raise_eval_error!("GC opcode budget must be greater than zero"));
+    }
+
     let script_str = script.as_ref();
     let statements = parse_program_statements(script_str, run_as_module)?;
     let script_path_buf = script_path.as_ref().map(|p| p.as_ref().to_path_buf());
 
     let mut arena = JsArenaVm::new(|ctx| VM::new(Chunk::new(), ctx));
+    let mut initialized = false;
+    let mut module_to_finalize: Option<(String, Vec<String>)> = None;
 
-    let result = arena.mutate_root(|ctx, vm| {
-        if !crate::js_agent::is_agent_thread() {
-            crate::js_agent::reset_agent_state();
-        }
-
-        let script_path_buf = if let Some(p) = script_path_buf.as_ref() {
-            let mut p_str = p.to_string_lossy().to_string();
-            if run_as_module && let Some(injected_path) = extract_injected_module_filepath(script_str) {
-                p_str = injected_path;
-            }
-
-            Some(std::path::PathBuf::from(p_str))
-        } else {
-            None
-        };
-
-        let mut compiler = Compiler::new();
-        compiler.set_source_text(script_str.to_string());
-        if run_as_module && let Some(ref p) = script_path_buf {
-            compiler.set_script_filename(p.to_string_lossy().to_string());
-        }
-        let mut main_hoisted_local_defs: Option<HashMap<String, (usize, u8)>> = None;
-        let mut main_hoisted_export_defs: Option<HashMap<String, (usize, u8)>> = None;
-        let mut main_code_offset: Option<usize> = None;
-
-        // Multi-file module loading: load dependency graphs before compiling the main
-        // module so import/re-export metadata is available during compilation.
-        let mut main_module_record: Option<MainModuleRecord> = None;
-        if run_as_module && let Some(ref entry_path) = script_path_buf {
-            let main_key = entry_path.to_string_lossy().to_string();
-            let (main_export_names, main_export_name_to_local, main_reexport_sources) = collect_exports_from_ast(&statements);
-            vm.pre_create_module_namespace(ctx, &main_key);
-            vm.seed_module_record(&main_key, &main_export_names, &main_export_name_to_local);
-            vm.seed_module_export_metadata(&main_key, &main_export_name_to_local, &main_reexport_sources, entry_path);
-            let main_has_tla = module_has_top_level_await(&statements);
-
-            let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let requests = collect_module_requests(&statements, self_basename);
-            main_module_record = Some((
-                main_key,
-                main_export_names,
-                main_export_name_to_local,
-                main_reexport_sources,
-                requests.clone(),
-                main_has_tla,
-                entry_path.clone(),
-            ));
-            if let Some((
-                main_key,
-                main_export_names,
-                main_export_name_to_local,
-                main_reexport_sources,
-                main_requests,
-                main_has_tla,
-                entry_path,
-            )) = &main_module_record
-            {
-                vm.seed_pending_module_record(
-                    ctx,
-                    main_key,
-                    script_str,
-                    entry_path,
-                    &statements,
-                    main_export_names,
-                    main_export_name_to_local,
-                    main_reexport_sources,
-                    main_requests,
-                    *main_has_tla,
-                );
-                vm.mark_module_record_evaluating(main_key);
-            }
-            if !requests.is_empty() {
-                vm.load_module_graph(ctx, entry_path, &requests);
-                // Propagate load errors (e.g. SyntaxError) for all dependencies,
-                // including deferred modules whose evaluation is skipped.
-                vm.check_module_load_health(ctx, entry_path, &requests)?;
-                // Fixup circular re-exports
-                vm.fixup_circular_reexports();
-                // Validate module resolution: check that all re-exports and
-                // import bindings resolve to actual exports in source modules.
-                if let Some((ref mk, _, ref metl, ref mrs, _, _, ref ep)) = main_module_record {
-                    vm.validate_module_resolution(mk, &statements, metl, mrs, ep)?;
+    let result = loop {
+        let step = arena.mutate_root(|ctx, vm| -> Result<Option<String>, JSError> {
+            if !initialized {
+                if !crate::js_agent::is_agent_thread() {
+                    crate::js_agent::reset_agent_state();
                 }
-                // Pass loaded module info to the main compiler
-                for (path, exports) in &vm.loaded_modules {
-                    let mut info = HashMap::new();
-                    for k in exports.keys() {
-                        info.insert(k.clone(), path.clone());
+
+                let script_path_buf = if let Some(p) = script_path_buf.as_ref() {
+                    let mut p_str = p.to_string_lossy().to_string();
+                    if run_as_module && let Some(injected_path) = extract_injected_module_filepath(script_str) {
+                        p_str = injected_path;
                     }
-                    compiler.set_loaded_module_exports(path.clone(), info);
-                }
-            }
-        }
 
-        let chunk = compiler.compile(&statements)?;
-        if let Some((_, _, main_export_name_to_local, _, _, _, _)) = &main_module_record {
-            let hoisted_locals = collect_hoisted_function_names(&statements);
-            if !hoisted_locals.is_empty() {
-                let hoisted_defs = collect_hoisted_function_defs(&chunk, &hoisted_locals);
-                main_hoisted_export_defs = Some(collect_hoisted_export_function_defs(&hoisted_defs, main_export_name_to_local));
-                main_hoisted_local_defs = Some(hoisted_defs);
-            }
-        }
-
-        // If dependency code was already merged into vm.chunk, merge the main
-        // module's chunk too so all code shares one unified bytecode buffer.
-        if run_as_module && vm.chunk.code.is_empty() {
-            main_code_offset = Some(0);
-            vm.chunk = chunk;
-            vm.main_module_ip_start = Some(0);
-        } else if run_as_module && !vm.chunk.code.is_empty() {
-            // Save module-specific metadata before merge consumes the chunk
-            let main_loaded_module_vars = chunk.loaded_module_vars.clone();
-            let main_self_namespace_imports = chunk.self_namespace_imports.clone();
-            let main_self_deferred_namespace_imports = chunk.self_deferred_namespace_imports.clone();
-            let main_self_import_aliases = chunk.self_import_aliases.clone();
-            let main_const_import_bindings = chunk.const_import_bindings.clone();
-
-            let main_ip = vm.chunk.merge_dependency_chunk(chunk);
-            main_code_offset = Some(main_ip);
-            vm.ip = main_ip;
-            vm.main_module_ip_start = Some(main_ip);
-
-            // Restore main module's module-specific metadata on the merged chunk
-            vm.chunk.loaded_module_vars = main_loaded_module_vars;
-            vm.chunk.self_namespace_imports = main_self_namespace_imports;
-            vm.chunk.self_deferred_namespace_imports = main_self_deferred_namespace_imports;
-            vm.chunk.self_import_aliases = main_self_import_aliases;
-            vm.chunk.const_import_bindings = main_const_import_bindings;
-        } else {
-            vm.chunk = chunk;
-        }
-
-        // In module mode, top-level `this` is undefined (not globalThis)
-        if run_as_module {
-            vm.set_module_this();
-        }
-
-        if let Some((
-            main_key,
-            main_export_names,
-            main_export_name_to_local,
-            main_reexport_sources,
-            main_requests,
-            main_has_tla,
-            entry_path,
-        )) = &main_module_record
-        {
-            vm.register_current_module_record(
-                ctx,
-                main_key,
-                script_str,
-                entry_path,
-                &statements,
-                main_export_names,
-                main_export_name_to_local,
-                main_reexport_sources,
-                main_requests,
-                *main_has_tla,
-            );
-            vm.mark_module_record_evaluating(main_key);
-            if let Some(defs) = &main_hoisted_local_defs
-                && !defs.is_empty()
-            {
-                let code_offset = main_code_offset.unwrap_or(0);
-                let seeded_locals = defs
-                    .iter()
-                    .map(|(local_name, (ip, arity))| (local_name.clone(), Value::Function(ip + code_offset, *arity)))
-                    .collect::<HashMap<_, _>>();
-                vm.seed_module_locals(main_key, &seeded_locals);
-            }
-            if let Some(defs) = &main_hoisted_export_defs
-                && !defs.is_empty()
-            {
-                let code_offset = main_code_offset.unwrap_or(0);
-                let seeded_exports = defs
-                    .iter()
-                    .map(|(export_name, (ip, arity))| (export_name.clone(), Value::Function(ip + code_offset, *arity)))
-                    .collect::<HashMap<_, _>>();
-                vm.seed_module_exports(ctx, main_key, &seeded_exports);
-            }
-            if !main_requests.is_empty() {
-                vm.evaluate_module_requests(ctx, entry_path, main_requests);
-            }
-        }
-
-        // Inject loaded module bindings into module_locals before execution.
-        if run_as_module {
-            vm.inject_loaded_module_bindings(ctx);
-        }
-
-        // let mut vm = VM::new(chunk, ctx);
-        vm.set_source_context(script_str, script_path_buf.as_deref());
-        let mut v = vm.run(ctx)?;
-        if let Some((main_key, main_export_names, ..)) = &main_module_record {
-            vm.finalize_active_module_record(ctx, main_key, main_export_names);
-        }
-
-        // Helper behavior for eval/unit-test entry points: if the top-level result
-        // is a settled Promise, expose its payload so direct callers can assert it.
-        // File execution should preserve normal script semantics and must not turn
-        // a bare `import()` completion value into a process-level failure.
-        if unwrap_top_level_promise {
-            for _ in 0..8 {
-                let step = if let Value::Object(obj) = &v {
-                    let b = obj.borrow();
-                    let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
-                    if is_promise {
-                        let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
-                        let next = b.get("__promise_value__").cloned();
-                        Some((rejected, next))
-                    } else {
-                        None
-                    }
+                    Some(std::path::PathBuf::from(p_str))
                 } else {
                     None
                 };
 
-                let Some((rejected, next)) = step else {
-                    break;
-                };
-                let Some(next) = next else {
-                    break;
-                };
+                let mut compiler = Compiler::new();
+                compiler.set_source_text(script_str.to_string());
+                if run_as_module && let Some(ref p) = script_path_buf {
+                    compiler.set_script_filename(p.to_string_lossy().to_string());
+                }
+                let mut main_hoisted_local_defs: Option<HashMap<String, (usize, u8)>> = None;
+                let mut main_hoisted_export_defs: Option<HashMap<String, (usize, u8)>> = None;
+                let mut main_code_offset: Option<usize> = None;
 
-                if rejected && let Value::Object(obj) = &next {
-                    let b = obj.borrow();
-                    if let Some(Value::String(t)) = b.get("__type__") {
-                        let tn = crate::unicode::utf16_to_utf8(t);
-                        if tn == "Error" || tn.ends_with("Error") {
-                            drop(b);
-                            return Err(vm.vm_error_to_js_error(ctx, &next));
+                // Multi-file module loading: load dependency graphs before compiling the main
+                // module so import/re-export metadata is available during compilation.
+                let mut main_module_record: Option<MainModuleRecord> = None;
+                if run_as_module && let Some(ref entry_path) = script_path_buf {
+                    let main_key = entry_path.to_string_lossy().to_string();
+                    let (main_export_names, main_export_name_to_local, main_reexport_sources) = collect_exports_from_ast(&statements);
+                    vm.pre_create_module_namespace(ctx, &main_key);
+                    vm.seed_module_record(&main_key, &main_export_names, &main_export_name_to_local);
+                    vm.seed_module_export_metadata(&main_key, &main_export_name_to_local, &main_reexport_sources, entry_path);
+                    let main_has_tla = module_has_top_level_await(&statements);
+
+                    let self_basename = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let requests = collect_module_requests(&statements, self_basename);
+                    main_module_record = Some((
+                        main_key,
+                        main_export_names,
+                        main_export_name_to_local,
+                        main_reexport_sources,
+                        requests.clone(),
+                        main_has_tla,
+                        entry_path.clone(),
+                    ));
+                    if let Some((
+                        main_key,
+                        main_export_names,
+                        main_export_name_to_local,
+                        main_reexport_sources,
+                        main_requests,
+                        main_has_tla,
+                        entry_path,
+                    )) = &main_module_record
+                    {
+                        vm.seed_pending_module_record(
+                            ctx,
+                            main_key,
+                            script_str,
+                            entry_path,
+                            &statements,
+                            main_export_names,
+                            main_export_name_to_local,
+                            main_reexport_sources,
+                            main_requests,
+                            *main_has_tla,
+                        );
+                        vm.mark_module_record_evaluating(main_key);
+                    }
+                    if !requests.is_empty() {
+                        vm.load_module_graph(ctx, entry_path, &requests);
+                        // Propagate load errors (e.g. SyntaxError) for all dependencies,
+                        // including deferred modules whose evaluation is skipped.
+                        vm.check_module_load_health(ctx, entry_path, &requests)?;
+                        // Fixup circular re-exports
+                        vm.fixup_circular_reexports();
+                        // Validate module resolution: check that all re-exports and
+                        // import bindings resolve to actual exports in source modules.
+                        if let Some((ref mk, _, ref metl, ref mrs, _, _, ref ep)) = main_module_record {
+                            vm.validate_module_resolution(mk, &statements, metl, mrs, ep)?;
+                        }
+                        // Pass loaded module info to the main compiler
+                        for (path, exports) in &vm.loaded_modules {
+                            let mut info = HashMap::new();
+                            for k in exports.keys() {
+                                info.insert(k.clone(), path.clone());
+                            }
+                            compiler.set_loaded_module_exports(path.clone(), info);
                         }
                     }
                 }
-                v = next;
-            }
-        }
 
-        match v {
-            Value::String(s) => {
-                let s_utf8 = crate::unicode::utf16_to_utf8(&s);
-                match serde_json::to_string(&s_utf8) {
-                    Ok(quoted) => Ok(quoted),
-                    Err(_) => Ok(format!("\"{}\"", s_utf8)),
+                let chunk = compiler.compile(&statements)?;
+                if let Some((_, _, main_export_name_to_local, _, _, _, _)) = &main_module_record {
+                    let hoisted_locals = collect_hoisted_function_names(&statements);
+                    if !hoisted_locals.is_empty() {
+                        let hoisted_defs = collect_hoisted_function_defs(&chunk, &hoisted_locals);
+                        main_hoisted_export_defs = Some(collect_hoisted_export_function_defs(&hoisted_defs, main_export_name_to_local));
+                        main_hoisted_local_defs = Some(hoisted_defs);
+                    }
+                }
+
+                // If dependency code was already merged into vm.chunk, merge the main
+                // module's chunk too so all code shares one unified bytecode buffer.
+                if run_as_module && vm.chunk.code.is_empty() {
+                    main_code_offset = Some(0);
+                    vm.chunk = chunk;
+                    vm.main_module_ip_start = Some(0);
+                } else if run_as_module && !vm.chunk.code.is_empty() {
+                    // Save module-specific metadata before merge consumes the chunk
+                    let main_loaded_module_vars = chunk.loaded_module_vars.clone();
+                    let main_self_namespace_imports = chunk.self_namespace_imports.clone();
+                    let main_self_deferred_namespace_imports = chunk.self_deferred_namespace_imports.clone();
+                    let main_self_import_aliases = chunk.self_import_aliases.clone();
+                    let main_const_import_bindings = chunk.const_import_bindings.clone();
+
+                    let main_ip = vm.chunk.merge_dependency_chunk(chunk);
+                    main_code_offset = Some(main_ip);
+                    vm.ip = main_ip;
+                    vm.main_module_ip_start = Some(main_ip);
+
+                    // Restore main module's module-specific metadata on the merged chunk
+                    vm.chunk.loaded_module_vars = main_loaded_module_vars;
+                    vm.chunk.self_namespace_imports = main_self_namespace_imports;
+                    vm.chunk.self_deferred_namespace_imports = main_self_deferred_namespace_imports;
+                    vm.chunk.self_import_aliases = main_self_import_aliases;
+                    vm.chunk.const_import_bindings = main_const_import_bindings;
+                } else {
+                    vm.chunk = chunk;
+                }
+
+                // In module mode, top-level `this` is undefined (not globalThis)
+                if run_as_module {
+                    vm.set_module_this();
+                }
+
+                if let Some((
+                    main_key,
+                    main_export_names,
+                    main_export_name_to_local,
+                    main_reexport_sources,
+                    main_requests,
+                    main_has_tla,
+                    entry_path,
+                )) = &main_module_record
+                {
+                    vm.register_current_module_record(
+                        ctx,
+                        main_key,
+                        script_str,
+                        entry_path,
+                        &statements,
+                        main_export_names,
+                        main_export_name_to_local,
+                        main_reexport_sources,
+                        main_requests,
+                        *main_has_tla,
+                    );
+                    vm.mark_module_record_evaluating(main_key);
+                    if let Some(defs) = &main_hoisted_local_defs
+                        && !defs.is_empty()
+                    {
+                        let code_offset = main_code_offset.unwrap_or(0);
+                        let seeded_locals = defs
+                            .iter()
+                            .map(|(local_name, (ip, arity))| (local_name.clone(), Value::Function(ip + code_offset, *arity)))
+                            .collect::<HashMap<_, _>>();
+                        vm.seed_module_locals(main_key, &seeded_locals);
+                    }
+                    if let Some(defs) = &main_hoisted_export_defs
+                        && !defs.is_empty()
+                    {
+                        let code_offset = main_code_offset.unwrap_or(0);
+                        let seeded_exports = defs
+                            .iter()
+                            .map(|(export_name, (ip, arity))| (export_name.clone(), Value::Function(ip + code_offset, *arity)))
+                            .collect::<HashMap<_, _>>();
+                        vm.seed_module_exports(ctx, main_key, &seeded_exports);
+                    }
+                    if !main_requests.is_empty() {
+                        vm.evaluate_module_requests(ctx, entry_path, main_requests);
+                    }
+                }
+
+                // Inject loaded module bindings into module_locals before execution.
+                if run_as_module {
+                    vm.inject_loaded_module_bindings(ctx);
+                }
+
+                // let mut vm = VM::new(chunk, ctx);
+                vm.set_source_context(script_str, script_path_buf.as_deref());
+                if let Some((main_key, main_export_names, ..)) = &main_module_record {
+                    module_to_finalize = Some((main_key.clone(), main_export_names.clone()));
+                }
+                initialized = true;
+            }
+
+            let Some(mut v) = vm.run_slice(ctx, gc_opcode_budget)? else {
+                return Ok(None);
+            };
+            if let Some((main_key, main_export_names)) = &module_to_finalize {
+                vm.finalize_active_module_record(ctx, main_key, main_export_names);
+            }
+
+            // Helper behavior for eval/unit-test entry points: if the top-level result
+            // is a settled Promise, expose its payload so direct callers can assert it.
+            // File execution should preserve normal script semantics and must not turn
+            // a bare `import()` completion value into a process-level failure.
+            if unwrap_top_level_promise {
+                for _ in 0..8 {
+                    let step = if let Value::Object(obj) = &v {
+                        let b = obj.borrow();
+                        let is_promise =
+                            matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                        if is_promise {
+                            let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                            let next = b.get("__promise_value__").cloned();
+                            Some((rejected, next))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let Some((rejected, next)) = step else {
+                        break;
+                    };
+                    let Some(next) = next else {
+                        break;
+                    };
+
+                    if rejected && let Value::Object(obj) = &next {
+                        let b = obj.borrow();
+                        if let Some(Value::String(t)) = b.get("__type__") {
+                            let tn = crate::unicode::utf16_to_utf8(t);
+                            if tn == "Error" || tn.ends_with("Error") {
+                                drop(b);
+                                return Err(vm.vm_error_to_js_error(ctx, &next));
+                            }
+                        }
+                    }
+                    v = next;
                 }
             }
-            Value::Array(_) | Value::Object(_) => Ok(value_to_compact_result_string(&v)),
-            _ => Ok(value_to_string(&v)),
+
+            match v {
+                Value::String(s) => {
+                    let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+                    match serde_json::to_string(&s_utf8) {
+                        Ok(quoted) => Ok(Some(quoted)),
+                        Err(_) => Ok(Some(format!("\"{}\"", s_utf8))),
+                    }
+                }
+                Value::Array(_) | Value::Object(_) => Ok(Some(value_to_compact_result_string(&v))),
+                _ => Ok(Some(value_to_string(&v))),
+            }
+        });
+
+        match step {
+            Ok(Some(result)) => break Ok(result),
+            Ok(None) => arena.collect_debt(),
+            Err(error) => break Err(error),
         }
-    });
+    };
 
     // Run incremental GC to reclaim unreachable objects before returning.
     arena.collect_debt();

@@ -1,4 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use javascript::DEFAULT_GC_OPCODE_BUDGET as B;
 use javascript::*;
 use std::hint::black_box;
 
@@ -20,7 +21,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 });
                 p.then(result => result * 2);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -36,7 +37,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                  .then(x => x - 3)
                  .then(x => x / 2);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -49,7 +50,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 });
                 p.catch(err => "caught: " + err);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -65,7 +66,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 });
                 Promise.all([p1, p2]);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -77,7 +78,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 let p2 = new Promise(resolve => resolve(2));
                 Promise.race([p1, p2]);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -88,7 +89,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 let f = x => x * 2;
                 f(5);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -100,7 +101,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                     resolve(42);
                 });
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -111,7 +112,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 let arr = [1, 2, 3];
                 arr.length;
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -125,7 +126,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 }
                 test();
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -137,7 +138,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                     .then(x => x * 2)
                     .then(result => result + 10);
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 
@@ -162,7 +163,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                     .catch(err => "error: " + err)
                     .finally(() => "cleanup");
             "#;
-            black_box(evaluate_script(script, false, None::<&std::path::Path>)).unwrap();
+            black_box(evaluate_script(script, false, None::<&std::path::Path>, B)).unwrap();
         })
     });
 }

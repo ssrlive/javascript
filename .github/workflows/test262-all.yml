@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -36,7 +36,8 @@ jobs:
       - name: Run test262 subset ${{ matrix.cluster }}
         if: ${{ !cancelled() }}
         env:
-          FAIL_ON_FAILURE: 'true'
+          FAIL_ON_FAILURE: "true"
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -63,8 +64,8 @@ jobs:
               RUN_TESTS='true'
               ;;
             4)
-              TITLE='annexB'
-              FOCUS='annexB'
+              TITLE='annexB,staging/decorators'
+              FOCUS='annexB,staging/decorators'
               RUN_TESTS='true'
               ;;
             *)
@@ -188,4 +189,3 @@ jobs:
               [ -n "$feat" ] && echo "- $feat"
             done <<< "$unsupported_features"
           fi
-

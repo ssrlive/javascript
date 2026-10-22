@@ -17,6 +17,44 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_array_accessor_reentry_and_sealed_descriptor_state() {
+        let script = r#"
+            const array = [0, 1, 2, "last"];
+            Object.defineProperty(array, "0", {
+              get() {
+                array.length = 3;
+                return 0;
+              },
+              configurable: true
+            });
+            const every = array.every((value, index) => index !== 3);
+
+            const sealed = [0, 1];
+            Object.seal(sealed);
+            every &&
+              Object.isSealed(sealed) &&
+              Object.getOwnPropertyDescriptor(sealed, "length").configurable === false
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_object_literal_getter_has_no_function_prototype() {
+        let script = r#"
+            const getter = Object.getOwnPropertyDescriptor({ get value() {} }, "value").get;
+            const prototypeBefore = Object.getOwnPropertyDescriptor(getter, "prototype");
+            Object.defineProperty(getter, "prototype", {
+              get() { throw "prototype getter called"; }
+            });
+            prototypeBefore === undefined &&
+              Object.getOwnPropertyDescriptor(getter, "prototype").get !== undefined
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_math_constants() {
         let script = "Math.PI";
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();

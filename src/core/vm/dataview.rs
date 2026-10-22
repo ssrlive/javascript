@@ -639,10 +639,10 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(&mut data_view_map, "name", &Value::from("DataView"), false, false, true);
         Self::insert_property_with_attributes(&mut data_view_map, "length", &Value::Number(1.0), false, false, true);
         data_view_map.insert("prototype".to_string(), dv_proto_val);
-        write_attrs_to_legacy_map(&mut data_view_map, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut data_view_map, "prototype", PropAttrs::empty());
         let data_view_ctor = Value::Object(new_gc_cell_ptr(ctx, data_view_map));
         if let Value::Object(ctor_obj) = &data_view_ctor
-            && let Some(Value::Object(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+            && let Some(Value::Object(proto_obj)) = own_data_from_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), data_view_ctor.clone());
             mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");

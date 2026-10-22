@@ -467,7 +467,7 @@ impl<'gc> VM<'gc> {
             "@@sym:3".to_string(),
             Self::make_host_fn_with_name_len(ctx, "date.toPrimitive", "[Symbol.toPrimitive]", 1.0, false),
         );
-        write_attrs_to_legacy_map(&mut date_proto, "@@sym:3", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut date_proto, "@@sym:3", PropAttrs::CONFIGURABLE);
         let date_proto_obj = new_gc_cell_ptr(ctx, date_proto);
         mark_nonenumerable(&mut date_map, "now");
         mark_nonenumerable(&mut date_map, "parse");

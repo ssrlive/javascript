@@ -1,14 +1,6 @@
 //! Unified property descriptor model.
 //!
-//! Replaces the legacy hidden-key encoding (`__readonly_*__`,
-//! `__nonenumerable_*__`, `__nonconfigurable_*__`, `__get_*`, `__set_*`)
-//! with a single `PropertyDescriptor` that lives alongside each property.
-//!
-//! ## Migration strategy
-//!
-//! The types here are introduced first; existing storage is untouched.
-//! Conversion helpers bridge between legacy hidden-key maps and the new
-//! model so both representations can coexist during the dual-track phase.
+//! Property descriptors are stored inline with their property values.
 
 use crate::core::value::Value;
 use crate::core::{Collect, GcTrace};
@@ -167,20 +159,10 @@ impl<'gc> PropDesc<'gc> {
         map
     }
 
-    /// Write this descriptor into the object map.
-    ///
-    /// Accessor compatibility keys (`__get_*` / `__set_*`) are still kept for
-    /// legacy lookup paths, but attribute flags are stored inline on
-    /// `Value::Property` and no longer use `__readonly_*__` /
-    /// `__nonenumerable_*__` / `__nonconfigurable_*__` marker keys.
-    pub fn write_to_legacy_map(&self, map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
-        let getter_key = make_getter_key(key);
-        let setter_key = make_setter_key(key);
-
+    /// Write this descriptor into the object's property map.
+    pub fn write_to_map(&self, map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
         match &self.kind {
             PropKind::Data(v) => {
-                map.shift_remove(&getter_key);
-                map.shift_remove(&setter_key);
                 if self.attrs == PropAttrs::WEC {
                     map.insert(key.to_string(), v.clone());
                 } else {
@@ -196,16 +178,6 @@ impl<'gc> PropDesc<'gc> {
                 }
             }
             PropKind::Accessor { get, set } => {
-                if let Some(g) = get {
-                    map.insert(getter_key.clone(), g.clone());
-                } else {
-                    map.shift_remove(&getter_key);
-                }
-                if let Some(s) = set {
-                    map.insert(setter_key.clone(), s.clone());
-                } else {
-                    map.shift_remove(&setter_key);
-                }
                 map.insert(
                     key.to_string(),
                     Value::Property {
@@ -219,32 +191,25 @@ impl<'gc> PropDesc<'gc> {
         }
     }
 
-    /// Remove all hidden keys and the visible key itself.
-    pub fn remove_legacy_keys(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
+    /// Remove the own property identified by `key`.
+    pub fn remove_property_key(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
         map.shift_remove(key);
-        map.shift_remove(&make_getter_key(key));
-        map.shift_remove(&make_setter_key(key));
     }
 }
 
-// ── Legacy conversion helpers ──────────────────────────────────────
+// ── Property map helpers ───────────────────────────────────────────
 
-/// Prefix constants used for accessor compatibility keys.
-pub const GETTER_PREFIX: &str = "__get_";
-pub const SETTER_PREFIX: &str = "__set_";
+/// Prefix constants used for private accessor storage slots.
+pub const PRIVATE_GETTER_SLOT_PREFIX: &str = "__get_";
+pub const PRIVATE_SETTER_SLOT_PREFIX: &str = "__set_";
 
 /// Read just the attribute flags for `key` from a property map.
-pub fn attrs_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
-    desc_from_legacy_map(map, key).map(|d| d.attrs).unwrap_or(PropAttrs::WEC)
+pub fn attrs_from_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
+    desc_from_map(map, key).map(|d| d.attrs).unwrap_or(PropAttrs::WEC)
 }
 
 /// Build a `PropDesc` from a property map.
-pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<PropDesc<'gc>> {
-    let getter_key = make_getter_key(key);
-    let setter_key = make_setter_key(key);
-    let hidden_get = map.get(&getter_key).cloned();
-    let hidden_set = map.get(&setter_key).cloned();
-
+pub fn desc_from_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<PropDesc<'gc>> {
     if let Some(Value::Property {
         value,
         getter,
@@ -252,11 +217,12 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
         attrs,
     }) = map.get(key)
     {
-        let get = getter.as_ref().map(|g| (**g).clone()).or_else(|| hidden_get.clone());
-        let set = setter.as_ref().map(|s| (**s).clone()).or_else(|| hidden_set.clone());
-        if value.is_none() || get.is_some() || set.is_some() {
+        if value.is_none() || getter.is_some() || setter.is_some() {
             return Some(PropDesc {
-                kind: PropKind::Accessor { get, set },
+                kind: PropKind::Accessor {
+                    get: getter.as_ref().map(|g| (**g).clone()),
+                    set: setter.as_ref().map(|s| (**s).clone()),
+                },
                 attrs: *attrs,
             });
         }
@@ -264,16 +230,6 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
         return Some(PropDesc {
             kind: PropKind::Data(data),
             attrs: *attrs,
-        });
-    }
-
-    if hidden_get.is_some() || hidden_set.is_some() {
-        return Some(PropDesc {
-            kind: PropKind::Accessor {
-                get: hidden_get,
-                set: hidden_set,
-            },
-            attrs: PropAttrs::EC,
         });
     }
 
@@ -285,8 +241,8 @@ pub fn desc_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, k
 
 /// Read the own data value for `key`, unwrapping `Value::Property` when the
 /// property is represented inline. Returns `None` for accessors or missing keys.
-pub fn own_data_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<Value<'gc>> {
-    match desc_from_legacy_map(map, key)?.kind {
+pub fn own_data_from_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<Value<'gc>> {
+    match desc_from_map(map, key)?.kind {
         PropKind::Data(v) => Some(v),
         PropKind::Accessor { .. } => None,
     }
@@ -297,9 +253,9 @@ fn update_attrs_for_key<'gc, F>(map: &mut indexmap::IndexMap<String, Value<'gc>>
 where
     F: FnOnce(PropAttrs) -> PropAttrs,
 {
-    if let Some(mut desc) = desc_from_legacy_map(map, key) {
+    if let Some(mut desc) = desc_from_map(map, key) {
         desc.attrs = f(desc.attrs);
-        desc.write_to_legacy_map(map, key);
+        desc.write_to_map(map, key);
     }
 }
 
@@ -326,7 +282,7 @@ pub fn unmark_nonenumerable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>
 /// Returns `true` if `key` is non-enumerable.
 #[inline]
 pub fn has_nonenumerable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
-    desc_from_legacy_map(map, key)
+    desc_from_map(map, key)
         .map(|d| !d.attrs.contains(PropAttrs::ENUMERABLE))
         .unwrap_or(false)
 }
@@ -352,7 +308,7 @@ pub fn unmark_readonly<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, ke
 /// Returns `true` if `key` is read-only.
 #[inline]
 pub fn has_readonly_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
-    match desc_from_legacy_map(map, key) {
+    match desc_from_map(map, key) {
         Some(desc) if desc.is_accessor() => false,
         Some(desc) => !desc.attrs.contains(PropAttrs::WRITABLE),
         None => false,
@@ -368,19 +324,10 @@ pub fn mark_nonconfigurable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>
     });
 }
 
-/// Remove non-configurable marker for `key`.
-#[inline]
-pub fn unmark_nonconfigurable<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
-    update_attrs_for_key(map, key, |mut attrs| {
-        attrs.insert(PropAttrs::CONFIGURABLE);
-        attrs
-    });
-}
-
 /// Returns `true` if `key` is non-configurable.
 #[inline]
 pub fn has_nonconfigurable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
-    desc_from_legacy_map(map, key)
+    desc_from_map(map, key)
         .map(|d| !d.attrs.contains(PropAttrs::CONFIGURABLE))
         .unwrap_or(false)
 }
@@ -390,139 +337,115 @@ pub fn has_nonconfigurable_mark<'gc>(map: &indexmap::IndexMap<String, Value<'gc>
 /// Get the getter function for `key`, if any.
 #[inline]
 pub fn get_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
-    if let Some(Value::Property { getter: Some(g), .. }) = map.get(key) {
-        return Some(g.as_ref());
+    match map.get(key) {
+        Some(Value::Property { getter: Some(g), .. }) => Some(g.as_ref()),
+        _ => None,
     }
-    map.get(&make_getter_key(key))
 }
 
 /// Returns `true` if `key` has a getter.
 #[inline]
 pub fn has_getter<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
-    if let Some(Value::Property { getter: Some(_), .. }) = map.get(key) {
-        return true;
-    }
-    map.contains_key(&make_getter_key(key))
+    matches!(map.get(key), Some(Value::Property { getter: Some(_), .. }))
 }
 
 /// Returns `true` if `key` has a setter.
 #[inline]
 pub fn has_setter<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> bool {
-    if let Some(Value::Property { setter: Some(_), .. }) = map.get(key) {
-        return true;
-    }
-    map.contains_key(&make_setter_key(key))
+    matches!(map.get(key), Some(Value::Property { setter: Some(_), .. }))
 }
 
 /// Set (or replace) the getter for `key`.
 #[inline]
 pub fn set_getter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, val: Value<'gc>) {
     let current_set = lookup_setter(map, key).cloned();
-    let attrs = desc_from_legacy_map(map, key)
+    let attrs = desc_from_map(map, key)
         .map(|d| if d.is_accessor() { d.attrs } else { PropAttrs::EC })
         .unwrap_or(PropAttrs::EC);
-    PropDesc::accessor(Some(val), current_set, attrs).write_to_legacy_map(map, key);
+    PropDesc::accessor(Some(val), current_set, attrs).write_to_map(map, key);
 }
 
 /// Set (or replace) the setter for `key`.
 #[inline]
 pub fn set_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, val: Value<'gc>) {
     let current_get = lookup_getter(map, key).cloned();
-    let attrs = desc_from_legacy_map(map, key)
+    let attrs = desc_from_map(map, key)
         .map(|d| if d.is_accessor() { d.attrs } else { PropAttrs::EC })
         .unwrap_or(PropAttrs::EC);
-    PropDesc::accessor(current_get, Some(val), attrs).write_to_legacy_map(map, key);
+    PropDesc::accessor(current_get, Some(val), attrs).write_to_map(map, key);
 }
 
 /// Remove the getter for `key`.
 #[inline]
 pub fn remove_getter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
-    if let Some(desc) = desc_from_legacy_map(map, key)
+    if let Some(desc) = desc_from_map(map, key)
         && let PropKind::Accessor { set, .. } = desc.kind
     {
         if set.is_some() {
-            PropDesc::accessor(None, set, desc.attrs).write_to_legacy_map(map, key);
+            PropDesc::accessor(None, set, desc.attrs).write_to_map(map, key);
         } else {
             map.shift_remove(key);
-            map.shift_remove(&make_getter_key(key));
-            map.shift_remove(&make_setter_key(key));
         }
-        return;
     }
-    map.shift_remove(&make_getter_key(key));
 }
 
 /// Remove the setter for `key`.
 #[inline]
 pub fn remove_setter<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
-    if let Some(desc) = desc_from_legacy_map(map, key)
+    if let Some(desc) = desc_from_map(map, key)
         && let PropKind::Accessor { get, .. } = desc.kind
     {
         if get.is_some() {
-            PropDesc::accessor(get, None, desc.attrs).write_to_legacy_map(map, key);
+            PropDesc::accessor(get, None, desc.attrs).write_to_map(map, key);
         } else {
             map.shift_remove(key);
-            map.shift_remove(&make_getter_key(key));
-            map.shift_remove(&make_setter_key(key));
         }
-        return;
     }
-    map.shift_remove(&make_setter_key(key));
 }
 
 /// Look up the getter value for `key`, returning a reference if present.
 #[inline]
 pub fn lookup_getter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
-    if let Some(Value::Property { getter: Some(g), .. }) = map.get(key) {
-        return Some(g.as_ref());
-    }
-    map.get(&make_getter_key(key))
+    get_getter(map, key)
 }
 
 /// Look up the setter value for `key`, returning a reference if present.
 #[inline]
 pub fn lookup_setter<'a, 'gc>(map: &'a indexmap::IndexMap<String, Value<'gc>>, key: &str) -> Option<&'a Value<'gc>> {
-    if let Some(Value::Property { setter: Some(s), .. }) = map.get(key) {
-        return Some(s.as_ref());
+    match map.get(key) {
+        Some(Value::Property { setter: Some(s), .. }) => Some(s.as_ref()),
+        _ => None,
     }
-    map.get(&make_setter_key(key))
 }
 
-/// Get the getter key string for `key`.
+/// Build the private getter slot name for `key`.
 #[inline]
-pub fn make_getter_key(key: impl AsRef<str>) -> String {
-    format!("{}{}", GETTER_PREFIX, key.as_ref())
+pub fn private_getter_slot_key(key: impl AsRef<str>) -> String {
+    format!("{}{}", PRIVATE_GETTER_SLOT_PREFIX, key.as_ref())
 }
 
-/// Get the setter key string for `key`.
+/// Build the private setter slot name for `key`.
 #[inline]
-pub fn make_setter_key(key: impl AsRef<str>) -> String {
-    format!("{}{}", SETTER_PREFIX, key.as_ref())
+pub fn private_setter_slot_key(key: impl AsRef<str>) -> String {
+    format!("{}{}", PRIVATE_SETTER_SLOT_PREFIX, key.as_ref())
 }
 
 // ── Batch attribute write ──────────────────────────────────────────
 
 /// Read the current attribute flags for `key` from a property map.
-pub fn read_attrs_from_legacy_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
-    attrs_from_legacy_map(map, key)
+pub fn read_attrs_from_map<'gc>(map: &indexmap::IndexMap<String, Value<'gc>>, key: &str) -> PropAttrs {
+    attrs_from_map(map, key)
 }
 
 /// Write attribute flags for `key` into a property map.
-pub fn write_attrs_to_legacy_map<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, attrs: PropAttrs) {
-    if let Some(mut desc) = desc_from_legacy_map(map, key) {
+pub fn write_attrs_to_map<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str, attrs: PropAttrs) {
+    if let Some(mut desc) = desc_from_map(map, key) {
         desc.attrs = attrs;
-        desc.write_to_legacy_map(map, key);
+        desc.write_to_map(map, key);
     }
 }
 
-/// Remove a property and its associated accessor hidden-keys.
+/// Remove a property.
 pub fn remove_property_completely<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
     map.shift_remove(key);
-    clear_attr_markers(map, key);
-}
-
-/// Clear accessor hidden-keys for `key` WITHOUT removing the key itself.
-pub fn clear_attr_markers<'gc>(map: &mut indexmap::IndexMap<String, Value<'gc>>, key: &str) {
-    map.shift_remove(&make_getter_key(key));
-    map.shift_remove(&make_setter_key(key));
 }

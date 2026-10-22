@@ -145,3 +145,31 @@ fn test_reflect_define_property_mixed_descriptor_returns_false() {
     let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
     assert_eq!(result, "false");
 }
+
+#[test]
+fn test_getter_prefix_is_a_regular_property_name() {
+    let script = r#"
+        var o = { "__get_value": 7, value: 1 };
+        Object.keys(o).join(",") + ":" + o["__get_value"] + ":" + ("value" in o);
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "\"__get_value,value:7:true\"");
+}
+
+#[test]
+fn test_array_index_accessor_descriptor_precedes_dense_element() {
+    let script = r#"
+        var calls = 0;
+        var values = [1];
+        Object.defineProperty(values, "0", {
+            get: function() { return 5; },
+            set: function(value) { calls = value; },
+            enumerable: true,
+            configurable: true
+        });
+        values[0] = 9;
+        values[0] + ":" + calls + ":" + Object.keys(values).join(",");
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "\"5:9:0\"");
+}

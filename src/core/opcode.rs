@@ -79,8 +79,8 @@ pub enum Opcode {
     DefineGlobalConst = 73,          // define an immutable global binding
     GetNewTarget = 74,               // push current new.target value onto stack
     Yield = 75,                      // suspend generator: pop yielded value, save state, return {value, done: false}
-    SetComputedGetter = 76,          // pop val, pop computed key, peek obj; store val under __get_<key>
-    SetComputedSetter = 77,          // pop val, pop computed key, peek obj; store val under __set_<key>
+    SetComputedGetter = 76,          // define a getter on a computed property key
+    SetComputedSetter = 77,          // define a setter on a computed property key
     InitProperty = 78,               // object literal own data property initialization by constant key
     InitIndex = 79,                  // object literal own data property initialization by computed key
     GeneratorParamInitDone = 80,     // internal marker: generator parameter initialization completed
@@ -123,6 +123,8 @@ pub enum Opcode {
     SetArguments = 117,     // assign current function's special `arguments` binding
     TailCall = 118,         // proper tail call: like Call, reusing current frame when eligible
     TailCallSpread = 119,   // proper tail call with spread arguments
+    SetComputedClassGetter = 120, // define a non-enumerable class getter on a computed property key
+    SetComputedClassSetter = 121, // define a non-enumerable class setter on a computed property key
 }
 
 impl TryFrom<u8> for Opcode {
@@ -250,6 +252,8 @@ impl TryFrom<u8> for Opcode {
             117 => Opcode::SetArguments,
             118 => Opcode::TailCall,
             119 => Opcode::TailCallSpread,
+            120 => Opcode::SetComputedClassGetter,
+            121 => Opcode::SetComputedClassSetter,
             _ => return Err(crate::raise_syntax_error!(format!("Unknown opcode: {byte}"))),
         };
         Ok(v)
@@ -552,7 +556,8 @@ impl<'gc> Chunk<'gc> {
                 | 97..=100
                 | 102..=103
                 | 105..=107
-                | 117 => {}
+                | 117
+                | 120..=121 => {}
 
                 // u8 operand, no adjustment needed
                 16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 | 108 | 109 | 110 => {

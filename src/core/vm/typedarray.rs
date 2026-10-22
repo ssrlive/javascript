@@ -2829,7 +2829,7 @@ impl<'gc> VM<'gc> {
         // Step 5: Let S be ? Get(C, @@species)
         let mut species_ctor = ctor.clone();
         if let Some(Value::Object(symbol_ctor)) = self.globals.get("Symbol")
-            && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
+            && let Some(species_symbol) = own_data_from_map(&symbol_ctor.borrow(), "species")
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {
             let species = self.read_named_property(ctx, &ctor, &species_key);
@@ -2986,7 +2986,7 @@ impl<'gc> VM<'gc> {
         // Create a new TypedArray with the same type
         let ta_instance_proto: Option<Value<'gc>> = self.globals.get(&ta_name).and_then(|v| {
             if let Value::Object(o) = v {
-                own_data_from_legacy_map(&o.borrow(), "prototype")
+                own_data_from_map(&o.borrow(), "prototype")
             } else {
                 None
             }
@@ -3671,7 +3671,7 @@ impl<'gc> VM<'gc> {
         // Get prototype from constructor for __proto__ on instances
         let ta_instance_proto: Option<Value<'gc>> = self.globals.get(typedarray_name).and_then(|v| {
             if let Value::Object(o) = v {
-                own_data_from_legacy_map(&o.borrow(), "prototype")
+                own_data_from_map(&o.borrow(), "prototype")
             } else {
                 None
             }
@@ -4417,7 +4417,7 @@ impl<'gc> VM<'gc> {
         //        XxxArray.__proto__ → %TypedArray% → Function.prototype
         let mut ta_proto_map = IndexMap::new();
         if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&obj_ctor.borrow(), "prototype")
         {
             ta_proto_map.insert("__proto__".to_string(), obj_proto);
         }
@@ -4608,11 +4608,11 @@ impl<'gc> VM<'gc> {
         // %TypedArray% constructor (abstract — cannot be called directly)
         let mut typed_array_ctor_map = IndexMap::new();
         typed_array_ctor_map.insert("name".to_string(), Value::from("TypedArray"));
-        write_attrs_to_legacy_map(&mut typed_array_ctor_map, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut typed_array_ctor_map, "name", PropAttrs::CONFIGURABLE);
         typed_array_ctor_map.insert("length".to_string(), Value::Number(0.0));
-        write_attrs_to_legacy_map(&mut typed_array_ctor_map, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut typed_array_ctor_map, "length", PropAttrs::CONFIGURABLE);
         typed_array_ctor_map.insert("prototype".to_string(), ta_proto.clone());
-        write_attrs_to_legacy_map(&mut typed_array_ctor_map, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut typed_array_ctor_map, "prototype", PropAttrs::empty());
         // Mark as constructor (for is_constructor_value)
         typed_array_ctor_map.insert("__native_id__".to_string(), Value::Boolean(true));
         // TypedArray.from() and TypedArray.of() static methods
@@ -4655,16 +4655,16 @@ impl<'gc> VM<'gc> {
             let mut ctor_map = IndexMap::new();
             ctor_map.insert("__native_id__".to_string(), Value::Number(ctor_id as f64));
             ctor_map.insert("name".to_string(), Value::from(name));
-            write_attrs_to_legacy_map(&mut ctor_map, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor_map, "name", PropAttrs::CONFIGURABLE);
             ctor_map.insert("length".to_string(), Value::Number(3.0));
-            write_attrs_to_legacy_map(&mut ctor_map, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor_map, "length", PropAttrs::CONFIGURABLE);
             ctor_map.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
-            write_attrs_to_legacy_map(&mut ctor_map, "BYTES_PER_ELEMENT", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor_map, "BYTES_PER_ELEMENT", PropAttrs::empty());
             // Create per-type prototype with __proto__ → %TypedArray%.prototype
             let mut per_proto = IndexMap::new();
             per_proto.insert("__proto__".to_string(), ta_proto.clone());
             per_proto.insert("BYTES_PER_ELEMENT".to_string(), Value::Number(bpe));
-            write_attrs_to_legacy_map(&mut per_proto, "BYTES_PER_ELEMENT", PropAttrs::empty());
+            write_attrs_to_map(&mut per_proto, "BYTES_PER_ELEMENT", PropAttrs::empty());
             // Uint8Array-specific: base64/hex methods on prototype and constructor
             if name == "Uint8Array" {
                 for (method, display, len) in [
@@ -4689,7 +4689,7 @@ impl<'gc> VM<'gc> {
             }
             let per_proto_obj = Value::Object(new_gc_cell_ptr(ctx, per_proto));
             ctor_map.insert("prototype".to_string(), per_proto_obj.clone());
-            write_attrs_to_legacy_map(&mut ctor_map, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor_map, "prototype", PropAttrs::empty());
             // XxxArray.__proto__ = %TypedArray%
             ctor_map.insert("__proto__".to_string(), typed_array_ctor.clone());
             let ctor_val = Value::Object(new_gc_cell_ptr(ctx, ctor_map));
@@ -5131,7 +5131,7 @@ impl<'gc> VM<'gc> {
         data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
         data.props.insert("__length_tracking__".to_string(), Value::Boolean(false));
         if let Some(Value::Object(ctor)) = self.globals.get("Uint8Array")
-            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+            && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
         {
             data.props.insert("__proto__".to_string(), proto);
         }
@@ -5154,7 +5154,7 @@ impl<'gc> VM<'gc> {
         data.props.insert("__fixed_length__".to_string(), Value::Number(len as f64));
         data.props.insert("__length_tracking__".to_string(), Value::Boolean(false));
         if let Some(Value::Object(ctor)) = self.globals.get("Uint8Array")
-            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+            && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
         {
             data.props.insert("__proto__".to_string(), proto);
         }

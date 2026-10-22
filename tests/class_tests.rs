@@ -317,6 +317,23 @@ mod class_tests {
     }
 
     #[test]
+    fn test_class_getter_super_uses_accessor_home_object() {
+        let script = r#"
+            class Parent {
+              get value() { return 41; }
+            }
+            class Child extends Parent {
+              get value() { return super.value + 1; }
+              get ["computed"]() { return super.value + 2; }
+            }
+            const child = new Child();
+            child.value === 42 && child.computed === 43
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
     fn test_super_getter_descriptor_inspect() {
         // Inspect descriptor on the defining prototype for 'value'
         let script = r#"
@@ -484,6 +501,23 @@ mod class_tests {
             let threw = false;
             try { D.value = 1; } catch (error) { threw = error instanceof TypeError; }
             C.read() === 42 && threw
+        "#;
+        let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn test_instance_private_getter_and_setter_pair() {
+        let script = r#"
+            class Counter {
+              #value = 0;
+              get #x() { return this.#value; }
+              set #x(value) { this.#value = value; }
+              read() { return this.#x; }
+              write(value) { this.#x = value; return this.#x; }
+            }
+            const counter = new Counter();
+            counter.read() === 0 && counter.write(20) === 20
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
         assert_eq!(result, "true");

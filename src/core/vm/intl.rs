@@ -198,7 +198,7 @@ impl<'gc> VM<'gc> {
             let Value::Object(obj) = obj else {
                 return None;
             };
-            own_data_from_legacy_map(&obj.borrow(), "prototype")
+            own_data_from_map(&obj.borrow(), "prototype")
         });
 
         let segment_iterator_proto = self.intl_plain_proto_object(ctx, object_proto.clone());
@@ -454,7 +454,7 @@ impl<'gc> VM<'gc> {
         let Some(Value::Object(constructor)) = self.intl_service_constructor_from_global(kind) else {
             return false;
         };
-        let Some(Value::Object(expected_prototype)) = own_data_from_legacy_map(&constructor.borrow(), "prototype") else {
+        let Some(Value::Object(expected_prototype)) = own_data_from_map(&constructor.borrow(), "prototype") else {
             return false;
         };
         let mut current = receiver.borrow().get("__proto__").cloned();
@@ -679,7 +679,7 @@ impl<'gc> VM<'gc> {
         if let Value::Object(ctor_obj) = &ctor {
             let mut ctor_borrow = ctor_obj.borrow_mut(ctx);
             ctor_borrow.insert("prototype".to_string(), prototype.clone());
-            write_attrs_to_legacy_map(&mut ctor_borrow, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor_borrow, "prototype", PropAttrs::empty());
             ctor_borrow.insert("__intl_kind__".to_string(), Value::from(display_name));
             if display_name != "Locale" {
                 ctor_borrow.insert(
@@ -2575,13 +2575,13 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+        let locale_tag = own_data_from_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             })
             .unwrap_or_else(|| "und".to_string());
-        let calendar = own_data_from_legacy_map(&borrow, "__intl_calendar__")
+        let calendar = own_data_from_map(&borrow, "__intl_calendar__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
@@ -2601,12 +2601,12 @@ impl<'gc> VM<'gc> {
         };
         let borrow = locale.borrow();
         let mut values: Vec<String> = Vec::new();
-        if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_collation__") {
+        if let Some(Value::String(text)) = own_data_from_map(&borrow, "__intl_collation__") {
             let value = crate::unicode::utf16_to_utf8(&text);
             values.push(value);
         }
         if values.is_empty() {
-            let language = own_data_from_legacy_map(&borrow, "__intl_language__")
+            let language = own_data_from_map(&borrow, "__intl_language__")
                 .and_then(|value| match value {
                     Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                     _ => None,
@@ -2629,13 +2629,13 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+        let locale_tag = own_data_from_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             })
             .unwrap_or_else(|| "und".to_string());
-        let values = if let Some(Value::String(text)) = own_data_from_legacy_map(&borrow, "__intl_hour_cycle__") {
+        let values = if let Some(Value::String(text)) = own_data_from_map(&borrow, "__intl_hour_cycle__") {
             vec![crate::unicode::utf16_to_utf8(&text)]
         } else {
             let region = Self::intl_locale_region_preference(&locale_tag);
@@ -2658,7 +2658,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let numbering_system = own_data_from_legacy_map(&borrow, "__intl_numbering_system__")
+        let numbering_system = own_data_from_map(&borrow, "__intl_numbering_system__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
@@ -2672,7 +2672,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+        let locale_tag = own_data_from_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
@@ -2681,7 +2681,7 @@ impl<'gc> VM<'gc> {
         let maximized = Self::intl_locale_maximize_tag(&locale_tag);
         let script = Self::intl_locale_base_components(&Self::intl_locale_info(&maximized).base).script;
         let object_proto = self.globals.get("Object").and_then(|value| match value {
-            Value::Object(object) => own_data_from_legacy_map(&object.borrow(), "prototype"),
+            Value::Object(object) => own_data_from_map(&object.borrow(), "prototype"),
             _ => None,
         });
         let mut object = IndexMap::new();
@@ -2730,7 +2730,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let region = own_data_from_legacy_map(&borrow, "__intl_region__").and_then(|value| match value {
+        let region = own_data_from_map(&borrow, "__intl_region__").and_then(|value| match value {
             Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => None,
         });
@@ -2751,14 +2751,14 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let locale_tag = own_data_from_legacy_map(&borrow, "__intl_locale__")
+        let locale_tag = own_data_from_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             })
             .unwrap_or_else(|| "und".to_string());
         let region = Self::intl_locale_region_preference(&locale_tag);
-        let first_day_value = own_data_from_legacy_map(&borrow, "__intl_first_day_of_week__")
+        let first_day_value = own_data_from_map(&borrow, "__intl_first_day_of_week__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
@@ -2777,7 +2777,7 @@ impl<'gc> VM<'gc> {
         };
         let weekend = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(weekend)));
         let object_proto = self.globals.get("Object").and_then(|value| match value {
-            Value::Object(object) => own_data_from_legacy_map(&object.borrow(), "prototype"),
+            Value::Object(object) => own_data_from_map(&object.borrow(), "prototype"),
             _ => None,
         });
         let mut object = IndexMap::new();
@@ -2794,7 +2794,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let current = own_data_from_legacy_map(&borrow, "__intl_locale__")
+        let current = own_data_from_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
@@ -2809,7 +2809,7 @@ impl<'gc> VM<'gc> {
             return Value::Undefined;
         };
         let borrow = locale.borrow();
-        let current = own_data_from_legacy_map(&borrow, "__intl_locale__")
+        let current = own_data_from_map(&borrow, "__intl_locale__")
             .and_then(|value| match value {
                 Value::String(text) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
@@ -9417,7 +9417,7 @@ impl<'gc> VM<'gc> {
         let Value::Object(intl) = self.globals.get("Intl")?.clone() else {
             return None;
         };
-        own_data_from_legacy_map(&intl.borrow(), kind)
+        own_data_from_map(&intl.borrow(), kind)
     }
 
     fn intl_service_get_prototype_from_constructor(

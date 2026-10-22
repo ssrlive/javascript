@@ -2604,7 +2604,7 @@ impl<'gc> VM<'gc> {
 
     pub(super) fn temporal_init_globals(&mut self, ctx: &GcContext<'gc>) {
         let Some(object_proto) = self.globals.get("Object").and_then(|value| match value {
-            Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+            Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
             _ => None,
         }) else {
             return;
@@ -2976,7 +2976,7 @@ impl<'gc> VM<'gc> {
             Self::insert_property_with_attributes(&mut now_map, key, &value, true, false, true);
         }
         now_map.insert("@@sym:4".to_string(), Value::from("Temporal.Now"));
-        write_attrs_to_legacy_map(&mut now_map, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut now_map, "@@sym:4", PropAttrs::CONFIGURABLE);
         let now_obj = Value::Object(new_gc_cell_ptr(ctx, now_map));
 
         let time_zone_ctor = self.temporal_make_ctor(
@@ -3008,7 +3008,7 @@ impl<'gc> VM<'gc> {
             Self::insert_property_with_attributes(&mut temporal_map, key, &value, true, false, true);
         }
         temporal_map.insert("@@sym:4".to_string(), Value::from("Temporal"));
-        write_attrs_to_legacy_map(&mut temporal_map, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut temporal_map, "@@sym:4", PropAttrs::CONFIGURABLE);
 
         let temporal_value = Value::Object(new_gc_cell_ptr(ctx, temporal_map));
         self.globals.insert("Temporal".to_string(), temporal_value.clone());
@@ -3062,7 +3062,7 @@ impl<'gc> VM<'gc> {
                 mark_nonenumerable(&mut proto, key);
             }
             proto.insert("@@sym:4".to_string(), Value::from(to_string_tag));
-            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         }
 
         Self::finalize_ctor_with_prototype(ctx, ctor_obj.borrow().clone(), proto_obj)
@@ -3091,7 +3091,7 @@ impl<'gc> VM<'gc> {
         slot: &str,
     ) -> Option<String> {
         let obj = self.temporal_expect_object(ctx, receiver, kind)?;
-        match own_data_from_legacy_map(&obj.borrow(), slot) {
+        match own_data_from_map(&obj.borrow(), slot) {
             Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => {
                 self.throw_type_error(ctx, &format!("Temporal.{kind} is missing internal slot {slot}"));
@@ -3105,8 +3105,8 @@ impl<'gc> VM<'gc> {
             return None;
         };
         let borrow = obj.borrow();
-        match own_data_from_legacy_map(&borrow, SLOT_KIND) {
-            Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == kind => match own_data_from_legacy_map(&borrow, slot) {
+        match own_data_from_map(&borrow, SLOT_KIND) {
+            Some(Value::String(text)) if crate::unicode::utf16_to_utf8(&text) == kind => match own_data_from_map(&borrow, slot) {
                 Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
                 _ => None,
             },
@@ -3119,7 +3119,7 @@ impl<'gc> VM<'gc> {
             return None;
         };
         let borrow = obj.borrow();
-        match own_data_from_legacy_map(&borrow, SLOT_KIND) {
+        match own_data_from_map(&borrow, SLOT_KIND) {
             Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => None,
         }
@@ -3130,7 +3130,7 @@ impl<'gc> VM<'gc> {
         let Value::Object(obj) = temporal else {
             return None;
         };
-        own_data_from_legacy_map(&obj.borrow(), kind)
+        own_data_from_map(&obj.borrow(), kind)
     }
 
     fn temporal_expect_object(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>, kind: &str) -> Option<ObjectHandle<'gc>> {
@@ -3143,7 +3143,7 @@ impl<'gc> VM<'gc> {
 
     fn temporal_ctor_prototype(&self, ctor_value: Option<&Value<'gc>>) -> Option<Value<'gc>> {
         ctor_value.and_then(|value| match value {
-            Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+            Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
             _ => None,
         })
     }
@@ -3483,7 +3483,7 @@ impl<'gc> VM<'gc> {
         };
         let mut borrow = obj.borrow_mut(ctx);
         borrow.insert(SLOT_REFERENCE_DAY.to_string(), Value::from(reference_day.to_string().as_str()));
-        if let Some(Value::String(repr)) = own_data_from_legacy_map(&borrow, SLOT_REPR) {
+        if let Some(Value::String(repr)) = own_data_from_map(&borrow, SLOT_REPR) {
             let base = crate::unicode::utf16_to_utf8(&repr);
             let updated = if let Some((date_part, calendar_part)) = base.split_once('[') {
                 if let Some((year_month_part, _)) = date_part.rsplit_once('-') {
@@ -4262,24 +4262,24 @@ impl<'gc> VM<'gc> {
         }
 
         let current_borrow = current_obj.borrow();
-        let current_year = match own_data_from_legacy_map(&current_borrow, "year") {
+        let current_year = match own_data_from_map(&current_borrow, "year") {
             Some(Value::Number(value)) => value as i32,
             _ => return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth is missing year")),
         };
-        let current_month_code = match own_data_from_legacy_map(&current_borrow, "monthCode") {
+        let current_month_code = match own_data_from_map(&current_borrow, "monthCode") {
             Some(Value::String(text)) => MonthCode::from_str(&crate::unicode::utf16_to_utf8(&text))
                 .map_err(|_| TemporalError::range().with_message("Invalid monthCode"))?,
             _ => return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth is missing monthCode")),
         };
-        let current_era = match own_data_from_legacy_map(&current_borrow, "era") {
+        let current_era = match own_data_from_map(&current_borrow, "era") {
             Some(Value::String(text)) => TinyAsciiStr::<19>::from_str(&crate::unicode::utf16_to_utf8(&text)).ok(),
             _ => None,
         };
-        let current_era_year = match own_data_from_legacy_map(&current_borrow, "eraYear") {
+        let current_era_year = match own_data_from_map(&current_borrow, "eraYear") {
             Some(Value::Number(value)) => Some(value as i32),
             _ => None,
         };
-        let calendar_id = match own_data_from_legacy_map(&current_borrow, "calendarId") {
+        let calendar_id = match own_data_from_map(&current_borrow, "calendarId") {
             Some(Value::String(text)) => crate::unicode::utf16_to_utf8(&text),
             _ => return Err(TemporalError::r#type().with_message("Temporal.PlainYearMonth is missing calendarId")),
         };
@@ -4628,14 +4628,14 @@ impl<'gc> VM<'gc> {
             return None;
         };
         let borrow = obj.borrow();
-        match own_data_from_legacy_map(&borrow, SLOT_KIND) {
+        match own_data_from_map(&borrow, SLOT_KIND) {
             Some(Value::String(kind))
                 if matches!(
                     crate::unicode::utf16_to_utf8(&kind).as_str(),
                     "PlainDate" | "PlainDateTime" | "PlainMonthDay" | "PlainYearMonth" | "ZonedDateTime"
                 ) =>
             {
-                match own_data_from_legacy_map(&borrow, "calendarId") {
+                match own_data_from_map(&borrow, "calendarId") {
                     Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
                     _ => Some("iso8601".to_string()),
                 }
@@ -6585,13 +6585,13 @@ impl<'gc> VM<'gc> {
         let receiver = receiver?;
         if let Value::Object(obj) = receiver {
             let borrow = obj.borrow();
-            if matches!(own_data_from_legacy_map(&borrow, SLOT_KIND), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(&kind) == "Duration")
+            if matches!(own_data_from_map(&borrow, SLOT_KIND), Some(Value::String(kind)) if crate::unicode::utf16_to_utf8(&kind) == "Duration")
             {
-                let read_i64 = |key: &str| match own_data_from_legacy_map(&borrow, key) {
+                let read_i64 = |key: &str| match own_data_from_map(&borrow, key) {
                     Some(Value::Number(value)) => Some(value as i64),
                     _ => None,
                 };
-                let read_i128 = |key: &str| match own_data_from_legacy_map(&borrow, key) {
+                let read_i128 = |key: &str| match own_data_from_map(&borrow, key) {
                     Some(Value::Number(value)) => Some(value as i128),
                     _ => None,
                 };
@@ -6644,27 +6644,27 @@ impl<'gc> VM<'gc> {
     ) -> Option<PlainYearMonth> {
         let obj = self.temporal_expect_object(ctx, receiver, "PlainYearMonth")?;
         let borrow = obj.borrow();
-        let year = match own_data_from_legacy_map(&borrow, "year") {
+        let year = match own_data_from_map(&borrow, "year") {
             Some(Value::Number(value)) => value as i32,
             _ => return None,
         };
-        let month = match own_data_from_legacy_map(&borrow, "month") {
+        let month = match own_data_from_map(&borrow, "month") {
             Some(Value::Number(value)) => Some(value as u8),
             _ => None,
         };
-        let month_code = match own_data_from_legacy_map(&borrow, "monthCode") {
+        let month_code = match own_data_from_map(&borrow, "monthCode") {
             Some(Value::String(text)) => MonthCode::from_str(&crate::unicode::utf16_to_utf8(&text)).ok(),
             _ => None,
         };
-        let era = match own_data_from_legacy_map(&borrow, "era") {
+        let era = match own_data_from_map(&borrow, "era") {
             Some(Value::String(text)) => TinyAsciiStr::<19>::from_str(&crate::unicode::utf16_to_utf8(&text)).ok(),
             _ => None,
         };
-        let era_year = match own_data_from_legacy_map(&borrow, "eraYear") {
+        let era_year = match own_data_from_map(&borrow, "eraYear") {
             Some(Value::Number(value)) => Some(value as i32),
             _ => None,
         };
-        let calendar = match own_data_from_legacy_map(&borrow, "calendarId") {
+        let calendar = match own_data_from_map(&borrow, "calendarId") {
             Some(Value::String(text)) => Calendar::from_str(&crate::unicode::utf16_to_utf8(&text)).ok()?,
             _ => return None,
         };
@@ -6674,11 +6674,11 @@ impl<'gc> VM<'gc> {
         } else {
             None
         };
-        let reference_day = match own_data_from_legacy_map(&borrow, SLOT_REFERENCE_DAY) {
+        let reference_day = match own_data_from_map(&borrow, SLOT_REFERENCE_DAY) {
             Some(Value::String(text)) => u8::from_str(&crate::unicode::utf16_to_utf8(&text)).ok(),
             _ => None,
         };
-        let reference_iso_date = match own_data_from_legacy_map(&borrow, SLOT_REFERENCE_ISO_DATE) {
+        let reference_iso_date = match own_data_from_map(&borrow, SLOT_REFERENCE_ISO_DATE) {
             Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => None,
         };
@@ -6756,11 +6756,11 @@ impl<'gc> VM<'gc> {
             return None;
         };
         let borrow = obj.borrow();
-        match own_data_from_legacy_map(&borrow, SLOT_KIND) {
+        match own_data_from_map(&borrow, SLOT_KIND) {
             Some(Value::String(slot_kind)) if crate::unicode::utf16_to_utf8(&slot_kind) == kind => {}
             _ => return None,
         }
-        match own_data_from_legacy_map(&borrow, key) {
+        match own_data_from_map(&borrow, key) {
             Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => None,
         }
@@ -6846,7 +6846,7 @@ impl<'gc> VM<'gc> {
         let Some(Value::Object(obj)) = receiver.cloned() else {
             return None;
         };
-        match own_data_from_legacy_map(&obj.borrow(), key) {
+        match own_data_from_map(&obj.borrow(), key) {
             Some(Value::String(text)) => Some(crate::unicode::utf16_to_utf8(&text)),
             _ => None,
         }

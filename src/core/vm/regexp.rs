@@ -454,7 +454,7 @@ impl<'gc> VM<'gc> {
             return Gc::ptr_eq(*re_obj, *home);
         }
         if let Some(Value::Object(regexp_ctor)) = self.globals.get("RegExp")
-            && let Some(Value::Object(proto)) = own_data_from_legacy_map(&regexp_ctor.borrow(), "prototype")
+            && let Some(Value::Object(proto)) = own_data_from_map(&regexp_ctor.borrow(), "prototype")
         {
             return Gc::ptr_eq(*re_obj, proto);
         }
@@ -919,7 +919,7 @@ impl<'gc> VM<'gc> {
     pub(super) fn regexp_init_prototype(&mut self, ctx: &GcContext<'gc>) {
         let mut regexp_proto = IndexMap::new();
         if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&obj_ctor.borrow(), "prototype")
         {
             regexp_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -933,44 +933,54 @@ impl<'gc> VM<'gc> {
             "toString".to_string(),
             Self::make_host_fn_with_name_len(ctx, "regexp.toString", "toString", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("source"),
+        set_getter(
+            &mut regexp_proto,
+            "source",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_source", "get source", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("global"),
+        set_getter(
+            &mut regexp_proto,
+            "global",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_global", "get global", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("ignoreCase"),
+        set_getter(
+            &mut regexp_proto,
+            "ignoreCase",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_ignoreCase", "get ignoreCase", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("multiline"),
+        set_getter(
+            &mut regexp_proto,
+            "multiline",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_multiline", "get multiline", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("sticky"),
+        set_getter(
+            &mut regexp_proto,
+            "sticky",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_sticky", "get sticky", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("dotAll"),
+        set_getter(
+            &mut regexp_proto,
+            "dotAll",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_dotAll", "get dotAll", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("unicode"),
+        set_getter(
+            &mut regexp_proto,
+            "unicode",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_unicode", "get unicode", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("hasIndices"),
+        set_getter(
+            &mut regexp_proto,
+            "hasIndices",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_hasIndices", "get hasIndices", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("unicodeSets"),
+        set_getter(
+            &mut regexp_proto,
+            "unicodeSets",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_unicodeSets", "get unicodeSets", 0.0, false),
         );
-        regexp_proto.insert(
-            make_getter_key("flags"),
+        set_getter(
+            &mut regexp_proto,
+            "flags",
             Self::make_host_fn_with_name_len(ctx, "regexp.get_flags", "get flags", 0.0, false),
         );
         regexp_proto.insert(
@@ -1098,7 +1108,7 @@ impl<'gc> VM<'gc> {
         if let Some(iter_proto_val) = self.globals.get("__IteratorPrototype__").cloned() {
             iter_proto.insert("__proto__".to_string(), iter_proto_val);
         } else if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&obj_ctor.borrow(), "prototype")
         {
             iter_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -1106,7 +1116,7 @@ impl<'gc> VM<'gc> {
         iter_proto.insert("next".to_string(), Self::make_native_fn(ctx, BUILTIN_ITERATOR_NEXT, "next", 0.0));
         // Symbol.toStringTag = "RegExp String Iterator" (non-writable, non-enumerable, configurable)
         iter_proto.insert("@@sym:4".to_string(), Value::from("RegExp String Iterator"));
-        write_attrs_to_legacy_map(&mut iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         iter_proto.insert("__configurable_@@sym:4__".to_string(), Value::Boolean(true));
         // Mark next as non-enumerable, writable, configurable
         mark_nonenumerable(&mut iter_proto, "next");
@@ -1123,7 +1133,7 @@ impl<'gc> VM<'gc> {
             .iter()
             .filter_map(|(key, value)| match value {
                 Value::Object(obj) if obj.borrow().contains_key("__host_fn__") => Some(key.clone()),
-                _ if key.starts_with(GETTER_PREFIX) => Some(key.clone()),
+                _ if key.starts_with(PRIVATE_GETTER_SLOT_PREFIX) => Some(key.clone()),
                 _ => None,
             })
             .collect();
@@ -1188,11 +1198,11 @@ impl<'gc> VM<'gc> {
         map.insert("__toStringTag__".to_string(), Value::from("RegExp"));
         map.insert("lastIndex".to_string(), Value::Number(0.0));
         if let Some(Value::Object(ctor)) = self.globals.get("RegExp")
-            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+            && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
         {
             map.insert("__proto__".to_string(), proto);
         }
-        write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
+        write_attrs_to_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
         Value::Object(new_gc_cell_ptr(ctx, map))
     }
 
@@ -1236,7 +1246,7 @@ impl<'gc> VM<'gc> {
             borrow.insert("__type__".to_string(), Value::from("RegExp"));
             borrow.insert("__toStringTag__".to_string(), Value::from("RegExp"));
             borrow.insert("lastIndex".to_string(), Value::Number(0.0));
-            write_attrs_to_legacy_map(&mut borrow, "lastIndex", PropAttrs::WRITABLE);
+            write_attrs_to_map(&mut borrow, "lastIndex", PropAttrs::WRITABLE);
             return Some(receiver.clone());
         }
         None
@@ -1292,7 +1302,7 @@ impl<'gc> VM<'gc> {
         let parts = self.regex_split_string(rust_str, re_obj, limit);
         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(parts));
         if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
-            && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
+            && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
         {
             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
         }
@@ -2439,7 +2449,7 @@ impl<'gc> VM<'gc> {
         // If lastIndex is non-writable, throw TypeError.
         {
             let borrow = re_obj.borrow();
-            let attrs = read_attrs_from_legacy_map(&borrow, "lastIndex");
+            let attrs = read_attrs_from_map(&borrow, "lastIndex");
             if !attrs.contains(PropAttrs::WRITABLE) {
                 drop(borrow);
                 self.throw_type_error(ctx, "Cannot assign to read only property 'lastIndex' of object '[object RegExp]'");

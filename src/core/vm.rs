@@ -1,11 +1,11 @@
 use crate::core::function_id::*;
 use crate::core::opcode::{Chunk, Opcode};
 use crate::core::property_descriptor::{
-    GETTER_PREFIX, PropAttrs, PropDesc, PropKind, SETTER_PREFIX, attrs_from_legacy_map, clear_attr_markers, desc_from_legacy_map,
-    get_getter, has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter, lookup_getter, lookup_setter,
-    make_getter_key, make_setter_key, mark_nonconfigurable, mark_nonenumerable, mark_readonly, own_data_from_legacy_map,
-    read_attrs_from_legacy_map, remove_getter, remove_property_completely, remove_setter, set_getter, set_setter, unmark_nonconfigurable,
-    unmark_nonenumerable, unmark_readonly, write_attrs_to_legacy_map,
+    PRIVATE_GETTER_SLOT_PREFIX, PRIVATE_SETTER_SLOT_PREFIX, PropAttrs, PropDesc, PropKind, attrs_from_map, desc_from_map, get_getter,
+    has_getter, has_nonconfigurable_mark, has_nonenumerable_mark, has_readonly_mark, has_setter, lookup_getter, lookup_setter,
+    mark_nonconfigurable, mark_nonenumerable, mark_readonly, own_data_from_map, private_getter_slot_key, private_setter_slot_key,
+    read_attrs_from_map, remove_getter, remove_property_completely, remove_setter, set_getter, set_setter, unmark_nonenumerable,
+    unmark_readonly, write_attrs_to_map,
 };
 use crate::core::value::{VmArrayData, VmMapData, VmSetData, VmSymbolData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
@@ -927,8 +927,8 @@ impl<'gc> VM<'gc> {
             if let Value::Object(ref obj) = thrower {
                 let mut b = obj.borrow_mut(ctx);
                 // Mark name and length as non-writable, non-enumerable, non-configurable
-                write_attrs_to_legacy_map(&mut b, "name", PropAttrs::empty());
-                write_attrs_to_legacy_map(&mut b, "length", PropAttrs::empty());
+                write_attrs_to_map(&mut b, "name", PropAttrs::empty());
+                write_attrs_to_map(&mut b, "length", PropAttrs::empty());
                 b.insert("__frozen__".to_string(), Value::Boolean(true));
                 b.insert("__sealed__".to_string(), Value::Boolean(true));
                 b.insert("__non_extensible__".to_string(), Value::Boolean(true));
@@ -1114,7 +1114,7 @@ impl<'gc> VM<'gc> {
         {
             map.insert("__proto__".to_string(), proto);
         }
-        write_attrs_to_legacy_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
+        write_attrs_to_map(&mut map, "lastIndex", PropAttrs::WRITABLE);
         Some(Value::Object(new_gc_cell_ptr(ctx, map)))
     }
 
@@ -1262,7 +1262,7 @@ impl<'gc> VM<'gc> {
             "@@sym:4".to_string(),
             Value::from(if deferred { "Deferred Module" } else { "Module" }),
         );
-        write_attrs_to_legacy_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
+        write_attrs_to_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
         let main_ns = Value::Object(crate::core::new_gc_cell_ptr(ctx, ns_map));
         if deferred {
             self.deferred_module_ns_objects.insert(module_key.to_string(), main_ns);
@@ -1756,7 +1756,7 @@ impl<'gc> VM<'gc> {
             "@@sym:4".to_string(),
             Value::from(if deferred { "Deferred Module" } else { "Module" }),
         );
-        write_attrs_to_legacy_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
+        write_attrs_to_map(&mut ns_map, "@@sym:4", PropAttrs::empty());
 
         let mut bindings_map = IndexMap::new();
         for (export_name, local_name) in sorted_entries {
@@ -3496,7 +3496,7 @@ impl<'gc> VM<'gc> {
             return None;
         }
         let is_accessor = has_get || has_set;
-        let attrs = read_attrs_from_legacy_map(&borrow, key);
+        let attrs = read_attrs_from_map(&borrow, key);
         let configurable = attrs.contains(PropAttrs::CONFIGURABLE);
         let enumerable = attrs.contains(PropAttrs::ENUMERABLE);
         let writable = has_data && attrs.contains(PropAttrs::WRITABLE);
@@ -3665,7 +3665,7 @@ impl<'gc> VM<'gc> {
 
         let mut species_ctor = ctor.clone();
         if let Some(Value::Object(symbol_ctor)) = self.globals.get("Symbol")
-            && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
+            && let Some(species_symbol) = own_data_from_map(&symbol_ctor.borrow(), "species")
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {
             let species = self.read_named_property(ctx, &ctor, &species_key);
@@ -3707,7 +3707,7 @@ impl<'gc> VM<'gc> {
 
         let mut species_ctor = ctor.clone();
         if let Some(Value::Object(symbol_ctor)) = self.globals.get("Symbol")
-            && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
+            && let Some(species_symbol) = own_data_from_map(&symbol_ctor.borrow(), "species")
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {
             let species = self.read_named_property(ctx, &ctor, &species_key);
@@ -4012,7 +4012,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut string_iter_proto, "next");
         string_iter_proto.insert("@@sym:4".to_string(), Value::from("String Iterator"));
-        write_attrs_to_legacy_map(&mut string_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut string_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         Value::Object(new_gc_cell_ptr(ctx, string_iter_proto))
     }
 
@@ -4041,7 +4041,7 @@ impl<'gc> VM<'gc> {
         if configurable {
             attrs |= PropAttrs::CONFIGURABLE;
         }
-        write_attrs_to_legacy_map(map, key, attrs);
+        write_attrs_to_map(map, key, attrs);
     }
 
     fn insert_property_with_attributes(
@@ -4060,6 +4060,21 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(map, key, value, true, false, true);
     }
 
+    fn insert_nonenumerable_properties(
+        map: &mut IndexMap<String, Value<'gc>>,
+        properties: impl IntoIterator<Item = (&'static str, Value<'gc>)>,
+    ) {
+        for (key, value) in properties {
+            Self::insert_nonenumerable_property(map, key, &value);
+        }
+    }
+
+    fn insert_native_properties(map: &mut IndexMap<String, Value<'gc>>, properties: &[(&str, FunctionID)]) {
+        for &(key, id) in properties {
+            map.insert(key.to_string(), Value::NativeFunction(id));
+        }
+    }
+
     fn insert_prototype_property(map: &mut IndexMap<String, Value<'gc>>, prototype: &Value<'gc>) {
         Self::insert_property_with_attributes(map, "prototype", prototype, false, false, false);
     }
@@ -4076,7 +4091,7 @@ impl<'gc> VM<'gc> {
 
     fn array_prototype_value(&self) -> Option<Value<'gc>> {
         self.globals.get("Array").and_then(|value| match value {
-            Value::Object(array_ctor) => own_data_from_legacy_map(&array_ctor.borrow(), "prototype"),
+            Value::Object(array_ctor) => own_data_from_map(&array_ctor.borrow(), "prototype"),
             _ => None,
         })
     }
@@ -4567,7 +4582,7 @@ impl<'gc> VM<'gc> {
 
     fn wrap_descriptor_object(&self, ctx: &GcContext<'gc>, mut desc: IndexMap<String, Value<'gc>>) -> Value<'gc> {
         if let Some(Value::Object(object_ctor)) = self.globals.get("Object")
-            && let Some(proto) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
+            && let Some(proto) = own_data_from_map(&object_ctor.borrow(), "prototype")
         {
             desc.insert("__proto__".to_string(), proto);
         }
@@ -4745,7 +4760,7 @@ impl<'gc> VM<'gc> {
         let mut map = IndexMap::new();
         map.insert("__type__".to_string(), Value::from("Promise"));
         if let Some(Value::Object(ctor)) = self.globals.get("Promise")
-            && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+            && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
         {
             map.insert("__proto__".to_string(), proto);
         }
@@ -5486,8 +5501,8 @@ impl<'gc> VM<'gc> {
                 eval_map.insert("__realm_id__".to_string(), Value::Number(realm_id as f64));
                 eval_map.insert("name".to_string(), Value::from("eval"));
                 eval_map.insert("length".to_string(), Value::Number(1.0));
-                write_attrs_to_legacy_map(&mut eval_map, "name", PropAttrs::CONFIGURABLE);
-                write_attrs_to_legacy_map(&mut eval_map, "length", PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut eval_map, "name", PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut eval_map, "length", PropAttrs::CONFIGURABLE);
                 let eval_fn = Value::Object(new_gc_cell_ptr(ctx, eval_map));
                 child_global_this.borrow_mut(ctx).insert("eval".to_string(), eval_fn.clone());
 
@@ -5730,7 +5745,7 @@ impl<'gc> VM<'gc> {
                 ]
                 .iter()
                 .filter_map(|name| match self.globals.get(*name) {
-                    Some(Value::Object(ctor)) => match own_data_from_legacy_map(&ctor.borrow(), "prototype") {
+                    Some(Value::Object(ctor)) => match own_data_from_map(&ctor.borrow(), "prototype") {
                         Some(Value::Object(proto)) => Some(proto),
                         _ => None,
                     },
@@ -6365,7 +6380,7 @@ impl<'gc> VM<'gc> {
 
                     let mut sc = ctor.clone();
                     if let Some(Value::Object(symbol_ctor)) = self.globals.get("Symbol")
-                        && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
+                        && let Some(species_symbol) = own_data_from_map(&symbol_ctor.borrow(), "species")
                         && let Some(species_key) = self.symbol_key_string(&species_symbol)
                     {
                         let species = self.read_named_property(ctx, &ctor, &species_key);
@@ -8960,7 +8975,7 @@ impl<'gc> VM<'gc> {
                                 Value::String(name) => Some(crate::unicode::utf16_to_utf8(name)),
                                 _ => None,
                             });
-                            let message = own_data_from_legacy_map(&borrow, "message")
+                            let message = own_data_from_map(&borrow, "message")
                                 .as_ref()
                                 .map(value_to_string)
                                 .unwrap_or_default();
@@ -12391,7 +12406,7 @@ impl<'gc> VM<'gc> {
                         }
                         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(symbols));
                         if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
-                            && let Some(proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
+                            && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                         {
                             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                         }
@@ -12554,17 +12569,7 @@ impl<'gc> VM<'gc> {
                         let borrow = obj.borrow();
                         let mut seen_sym_keys: Vec<String> = Vec::new();
                         for k in borrow.keys() {
-                            let sym_key = k
-                                .strip_prefix("@@sym:")
-                                .map(|id| format!("@@sym:{}", id))
-                                .or_else(|| {
-                                    k.strip_prefix(&format!("{}@@sym:", GETTER_PREFIX))
-                                        .map(|id| format!("@@sym:{}", id))
-                                })
-                                .or_else(|| {
-                                    k.strip_prefix(&format!("{}@@sym:", SETTER_PREFIX))
-                                        .map(|id| format!("@@sym:{}", id))
-                                });
+                            let sym_key = k.strip_prefix("@@sym:").map(|id| format!("@@sym:{}", id));
                             if let Some(id_str) = sym_key
                                 && !seen_sym_keys.contains(&id_str)
                                 && let Some(id_num) = id_str.strip_prefix("@@sym:")
@@ -12580,17 +12585,7 @@ impl<'gc> VM<'gc> {
                     let b = arr.borrow();
                     let mut seen_sym_keys: Vec<String> = Vec::new();
                     for k in b.props.keys() {
-                        let sym_key = k
-                            .strip_prefix("@@sym:")
-                            .map(|id| format!("@@sym:{}", id))
-                            .or_else(|| {
-                                k.strip_prefix(&format!("{}@@sym:", GETTER_PREFIX))
-                                    .map(|id| format!("@@sym:{}", id))
-                            })
-                            .or_else(|| {
-                                k.strip_prefix(&format!("{}@@sym:", SETTER_PREFIX))
-                                    .map(|id| format!("@@sym:{}", id))
-                            });
+                        let sym_key = k.strip_prefix("@@sym:").map(|id| format!("@@sym:{}", id));
                         if let Some(id_str) = sym_key
                             && !seen_sym_keys.contains(&id_str)
                             && let Some(id_num) = id_str.strip_prefix("@@sym:")
@@ -12607,17 +12602,7 @@ impl<'gc> VM<'gc> {
                     };
                     let mut seen_sym_keys: Vec<String> = Vec::new();
                     for k in props.keys() {
-                        let sym_key = k
-                            .strip_prefix("@@sym:")
-                            .map(|id| format!("@@sym:{}", id))
-                            .or_else(|| {
-                                k.strip_prefix(&format!("{}@@sym:", GETTER_PREFIX))
-                                    .map(|id| format!("@@sym:{}", id))
-                            })
-                            .or_else(|| {
-                                k.strip_prefix(&format!("{}@@sym:", SETTER_PREFIX))
-                                    .map(|id| format!("@@sym:{}", id))
-                            });
+                        let sym_key = k.strip_prefix("@@sym:").map(|id| format!("@@sym:{}", id));
                         if let Some(id_str) = sym_key
                             && !seen_sym_keys.contains(&id_str)
                             && let Some(id_num) = id_str.strip_prefix("@@sym:")
@@ -12981,18 +12966,7 @@ impl<'gc> VM<'gc> {
                     if !non_ext {
                         return Value::Boolean(false);
                     }
-                    let mut keys: Vec<String> = b
-                        .keys()
-                        .filter(|k| !k.starts_with("__") && !k.starts_with("@@sym:"))
-                        .cloned()
-                        .collect();
-                    for k in b.keys() {
-                        if let Some(name) = k.strip_prefix(GETTER_PREFIX).or_else(|| k.strip_prefix(SETTER_PREFIX))
-                            && !keys.contains(&name.to_string())
-                        {
-                            keys.push(name.to_string());
-                        }
-                    }
+                    let keys = self.collect_object_map_keys(&b, false);
                     let all_nonconfig = keys.iter().all(|k| has_nonconfigurable_mark(&b, k));
                     Value::Boolean(all_nonconfig)
                 } else if let Value::Function(ip, arity) | Value::Closure(ip, arity, _) = &arg {
@@ -13011,19 +12985,8 @@ impl<'gc> VM<'gc> {
                     if !non_ext {
                         return Value::Boolean(false);
                     }
-                    for (i, v) in b.elements.iter().enumerate() {
-                        if !matches!(v, Value::Undefined)
-                            && !b.props.contains_key(&format!("__deleted_{}", i))
-                            && !has_nonconfigurable_mark(&b.props, &i.to_string())
-                        {
-                            return Value::Boolean(false);
-                        }
-                    }
-                    for k in b.props.keys() {
-                        if k.starts_with("__") {
-                            continue;
-                        }
-                        if !has_nonconfigurable_mark(&b.props, k) {
+                    for key in self.collect_array_keys(ctx, &b, false, true) {
+                        if key != "length" && !has_nonconfigurable_mark(&b.props, &key) {
                             return Value::Boolean(false);
                         }
                     }
@@ -13105,34 +13068,18 @@ impl<'gc> VM<'gc> {
                     if !non_ext {
                         return Value::Boolean(false);
                     }
-                    for (k, _v) in b.iter() {
-                        if k.starts_with("__") || k.starts_with("@@sym:") {
-                            continue;
-                        }
-                        if !has_nonconfigurable_mark(&b, k) {
+                    for key in self.collect_object_map_keys(&b, false) {
+                        if !has_nonconfigurable_mark(&b, &key) {
                             return Value::Boolean(false);
                         }
                         let is_accessor = matches!(
-                            desc_from_legacy_map(&b, k),
+                            desc_from_map(&b, &key),
                             Some(PropDesc {
                                 kind: PropKind::Accessor { .. },
                                 ..
                             })
                         );
-                        if !is_accessor && !has_readonly_mark(&b, k) {
-                            return Value::Boolean(false);
-                        }
-                    }
-                    let mut accessor_keys: Vec<String> = Vec::new();
-                    for k in b.keys() {
-                        if let Some(name) = k.strip_prefix(GETTER_PREFIX).or_else(|| k.strip_prefix(SETTER_PREFIX))
-                            && !accessor_keys.contains(&name.to_string())
-                        {
-                            accessor_keys.push(name.to_string());
-                        }
-                    }
-                    for key in accessor_keys {
-                        if !has_nonconfigurable_mark(&b, &key) {
+                        if !is_accessor && !has_readonly_mark(&b, &key) {
                             return Value::Boolean(false);
                         }
                     }
@@ -13143,39 +13090,18 @@ impl<'gc> VM<'gc> {
                     if !non_ext {
                         return Value::Boolean(false);
                     }
-                    for (i, v) in b.elements.iter().enumerate() {
-                        if matches!(v, Value::Undefined) || b.props.contains_key(&format!("__deleted_{}", i)) {
-                            continue;
-                        }
-                        if !has_nonconfigurable_mark(&b.props, &i.to_string()) {
-                            return Value::Boolean(false);
-                        }
-                        if !has_readonly_mark(&b.props, &i.to_string()) {
-                            return Value::Boolean(false);
-                        }
-                    }
-                    for k in b.props.keys() {
-                        if k.starts_with("__") {
-                            continue;
-                        }
-                        if !has_nonconfigurable_mark(&b.props, k) {
-                            return Value::Boolean(false);
-                        }
-                        let has_accessor = has_getter(&b.props, k) || has_setter(&b.props, k);
-                        if !has_accessor && !has_readonly_mark(&b.props, k) {
-                            return Value::Boolean(false);
-                        }
-                    }
-                    let mut accessor_keys: Vec<String> = Vec::new();
-                    for k in b.props.keys() {
-                        if let Some(name) = k.strip_prefix(GETTER_PREFIX).or_else(|| k.strip_prefix(SETTER_PREFIX))
-                            && !accessor_keys.contains(&name.to_string())
-                        {
-                            accessor_keys.push(name.to_string());
-                        }
-                    }
-                    for key in accessor_keys {
+                    for key in self.collect_array_keys(ctx, &b, false, true) {
                         if !has_nonconfigurable_mark(&b.props, &key) {
+                            return Value::Boolean(false);
+                        }
+                        let is_accessor = matches!(
+                            desc_from_map(&b.props, &key),
+                            Some(PropDesc {
+                                kind: PropKind::Accessor { .. },
+                                ..
+                            })
+                        );
+                        if !is_accessor && !has_readonly_mark(&b.props, &key) {
                             return Value::Boolean(false);
                         }
                     }
@@ -14335,7 +14261,7 @@ impl<'gc> VM<'gc> {
                     let mut temp = IndexMap::new();
                     temp.insert("__type__".to_string(), Value::from("Promise"));
                     if let Some(Value::Object(promise_ctor)) = self.globals.get("Promise")
-                        && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
+                        && let Some(proto) = own_data_from_map(&promise_ctor.borrow(), "prototype")
                     {
                         temp.insert("__proto__".to_string(), proto);
                     }
@@ -14952,7 +14878,7 @@ impl<'gc> VM<'gc> {
         // Insert length before name and prototype (spec order: length, name, prototype)
         let observable_length = self.chunk.fn_lengths.get(&ip).copied().unwrap_or(arity as usize) as f64;
         props.insert("length".to_string(), Value::Number(observable_length));
-        write_attrs_to_legacy_map(&mut props, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut props, "length", PropAttrs::CONFIGURABLE);
         if is_method || is_generator {
             props.insert("__non_constructor__".to_string(), Value::Boolean(true));
         }
@@ -14962,7 +14888,7 @@ impl<'gc> VM<'gc> {
         } else {
             props.insert("name".to_string(), Value::String(Vec::new()));
         }
-        write_attrs_to_legacy_map(&mut props, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut props, "name", PropAttrs::CONFIGURABLE);
         // prototype property (after length and name)
         if needs_prototype {
             let mut proto = IndexMap::new();
@@ -14984,7 +14910,7 @@ impl<'gc> VM<'gc> {
                 proto.insert("__proto__".to_string(), obj_proto);
             }
             props.insert("prototype".to_string(), Value::Object(new_gc_cell_ptr(ctx, proto)));
-            write_attrs_to_legacy_map(&mut props, "prototype", PropAttrs::WRITABLE);
+            write_attrs_to_map(&mut props, "prototype", PropAttrs::WRITABLE);
             if is_class_ctor {
                 mark_readonly(&mut props, "prototype");
             }
@@ -15099,17 +15025,29 @@ impl<'gc> VM<'gc> {
             let has_private_member = match obj {
                 Value::Object(map) => {
                     let borrow = map.borrow();
-                    borrow.contains_key(key) || has_getter(&borrow, key) || has_setter(&borrow, key)
+                    borrow.contains_key(key)
+                        || borrow.contains_key(&private_getter_slot_key(key))
+                        || borrow.contains_key(&private_setter_slot_key(key))
+                        || has_getter(&borrow, key)
+                        || has_setter(&borrow, key)
                 }
                 Value::Array(array) => {
                     let borrow = array.borrow();
-                    borrow.props.contains_key(key) || has_getter(&borrow.props, key) || has_setter(&borrow.props, key)
+                    borrow.props.contains_key(key)
+                        || borrow.props.contains_key(&private_getter_slot_key(key))
+                        || borrow.props.contains_key(&private_setter_slot_key(key))
+                        || has_getter(&borrow.props, key)
+                        || has_setter(&borrow.props, key)
                 }
                 Value::Function(ip, arity) | Value::Closure(ip, arity, _) => {
                     let overlay = self.get_closure_overlay(obj);
                     let shared = self.get_fn_props(ctx, *ip, *arity);
                     let has_in = |properties: &IndexMap<String, Value<'gc>>| {
-                        properties.contains_key(key) || has_getter(properties, key) || has_setter(properties, key)
+                        properties.contains_key(key)
+                            || properties.contains_key(&private_getter_slot_key(key))
+                            || properties.contains_key(&private_setter_slot_key(key))
+                            || has_getter(properties, key)
+                            || has_setter(properties, key)
                     };
                     overlay.is_some_and(|properties| has_in(&properties.borrow())) || has_in(&shared.borrow())
                 }
@@ -15312,7 +15250,7 @@ impl<'gc> VM<'gc> {
                         },
                         attrs: *attrs,
                     }),
-                    Some(value) => Some(PropDesc::data(value.clone(), attrs_from_legacy_map(&borrow, "__proto__"))),
+                    Some(value) => Some(PropDesc::data(value.clone(), attrs_from_map(&borrow, "__proto__"))),
                     None => match borrow.get("__proto__") {
                         Some(Value::Property { getter, setter, attrs, .. }) => Some(PropDesc {
                             kind: PropKind::Accessor {
@@ -15325,7 +15263,7 @@ impl<'gc> VM<'gc> {
                     },
                 }
             } else {
-                desc_from_legacy_map(&borrow, key)
+                desc_from_map(&borrow, key)
             };
             let own_prop = if key == "__proto__" {
                 borrow
@@ -15338,7 +15276,11 @@ impl<'gc> VM<'gc> {
             } else {
                 borrow.get(key).cloned()
             };
-            let key_exists = own_desc.is_some();
+            let private_getter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_getter_slot_key(key));
+            let private_setter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_setter_slot_key(key));
+            let key_exists = own_desc.is_some()
+                || private_getter_key.as_ref().is_some_and(|slot_key| borrow.contains_key(slot_key))
+                || private_setter_key.as_ref().is_some_and(|slot_key| borrow.contains_key(slot_key));
             let mut is_readonly = has_readonly_mark(&borrow, key);
             // String wrappers have readonly character indices
             if !is_readonly
@@ -15354,8 +15296,6 @@ impl<'gc> VM<'gc> {
                     is_readonly = true;
                 }
             }
-            let getter_key = make_getter_key(key);
-            let setter_key = make_setter_key(key);
             let mut proto_for_lookup = borrow.get("__proto__").cloned();
             if proto_for_lookup.is_none()
                 && let Some(Value::String(type_name_u16)) = borrow.get("__type__")
@@ -15374,7 +15314,6 @@ impl<'gc> VM<'gc> {
             // If key doesn't exist on own properties and proto is a proxy, delegate to proxy's [[Set]]
             // Walk the full prototype chain looking for a proxy trap (spec: OrdinarySet step 2b)
             if !key_exists && !is_frozen && !is_readonly {
-                let has_own_setter = borrow.get(&setter_key).is_some();
                 let mut proxy_chain = proto_for_lookup.clone();
                 let mut found_proxy = None;
                 let mut chain_depth = 0;
@@ -15397,7 +15336,7 @@ impl<'gc> VM<'gc> {
                 }
                 if let Some(ref proxy_val) = found_proxy {
                     drop(borrow);
-                    if !has_own_setter && let Some(result) = self.try_proxy_set(ctx, proxy_val, key, val, Some(&setter_receiver))? {
+                    if let Some(result) = self.try_proxy_set(ctx, proxy_val, key, val, Some(&setter_receiver))? {
                         if matches!(result, Value::Boolean(false)) {
                             if self.current_execution_is_strict() {
                                 let err =
@@ -15409,14 +15348,11 @@ impl<'gc> VM<'gc> {
                         return Ok(result);
                     }
                     // Re-borrow after try_proxy_set
-                    let borrow = map.borrow();
                     let proto_prop = proto_for_lookup
                         .as_ref()
                         .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
                     let own_prop_is_accessor = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { .. }));
-                    let own_prop_has_getter = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { get: Some(_), .. }));
                     let proto_prop_is_accessor = matches!(proto_prop.as_ref(), Some(Value::Property { value: None, .. }));
-                    let proto_prop_has_getter = matches!(proto_prop.as_ref(), Some(Value::Property { getter: Some(_), .. }));
                     let own_prop_setter = match own_desc.as_ref().map(|d| &d.kind) {
                         Some(PropKind::Accessor { set: Some(setter), .. }) => Some(setter.clone()),
                         _ => None,
@@ -15427,24 +15363,25 @@ impl<'gc> VM<'gc> {
                         }
                         _ => None,
                     };
-                    let has_getter = borrow.get(&getter_key).is_some()
-                        || own_prop_has_getter
-                        || proto_prop_has_getter
-                        || proto_for_lookup
-                            .as_ref()
-                            .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
-                            .is_some();
-                    let setter_fn = own_prop_setter
-                        .or_else(|| borrow.get(&setter_key).cloned())
-                        .or(proto_prop_setter)
-                        .or_else(|| {
-                            proto_for_lookup
+                    let has_private_getter = private_getter_key.as_ref().is_some_and(|slot_key| {
+                        map.borrow().contains_key(slot_key)
+                            || proto_for_lookup
                                 .as_ref()
-                                .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
-                        });
-                    drop(borrow);
+                                .and_then(|proto| self.lookup_proto_chain(Some(proto), slot_key))
+                                .is_some()
+                    });
+                    let setter_fn = own_prop_setter.or(proto_prop_setter).or_else(|| {
+                        private_setter_key.as_ref().and_then(|slot_key| {
+                            map.borrow().get(slot_key).cloned().or_else(|| {
+                                proto_for_lookup
+                                    .as_ref()
+                                    .and_then(|proto| self.lookup_proto_chain(Some(proto), slot_key))
+                            })
+                        })
+                    });
                     // Execute setter or store value
-                    let accessor_without_setter = (own_prop_is_accessor || proto_prop_is_accessor || has_getter) && setter_fn.is_none();
+                    let accessor_without_setter =
+                        (own_prop_is_accessor || proto_prop_is_accessor || has_private_getter) && setter_fn.is_none();
                     if let Some(setter_fn_val) = setter_fn {
                         if self.is_value_callable(&setter_fn_val) {
                             let saved = std::mem::take(&mut self.try_stack);
@@ -15486,11 +15423,14 @@ impl<'gc> VM<'gc> {
             if own_is_data && !is_frozen && !is_readonly {
                 drop(borrow);
                 let mut b = map.borrow_mut(ctx);
-                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_GETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     if base_key == "__proto__" {
                         let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
                             Some(Value::Property { attrs, .. }) => *attrs,
-                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            Some(_) => attrs_from_map(&b, "__proto__"),
                             None => PropAttrs::EC,
                         };
                         let current_setter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
@@ -15509,11 +15449,14 @@ impl<'gc> VM<'gc> {
                     } else {
                         set_getter(&mut b, base_key, val.clone());
                     }
-                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                } else if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_SETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     if base_key == "__proto__" {
                         let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
                             Some(Value::Property { attrs, .. }) => *attrs,
-                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            Some(_) => attrs_from_map(&b, "__proto__"),
                             None => PropAttrs::EC,
                         };
                         let current_getter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
@@ -15586,9 +15529,7 @@ impl<'gc> VM<'gc> {
                 .as_ref()
                 .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
             let own_prop_is_accessor = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { .. }));
-            let own_prop_has_getter = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { get: Some(_), .. }));
             let proto_prop_is_accessor = matches!(proto_prop.as_ref(), Some(Value::Property { value: None, .. }));
-            let proto_prop_has_getter = matches!(proto_prop.as_ref(), Some(Value::Property { getter: Some(_), .. }));
             let own_prop_setter = match own_desc.as_ref().map(|d| &d.kind) {
                 Some(PropKind::Accessor { set: Some(setter), .. }) => Some(setter.clone()),
                 _ => None,
@@ -15597,28 +15538,30 @@ impl<'gc> VM<'gc> {
                 Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => Some((**setter).clone()),
                 _ => None,
             };
-            let has_getter = borrow.get(&getter_key).is_some()
-                || own_prop_has_getter
-                || proto_prop_has_getter
-                || proto_for_lookup
-                    .as_ref()
-                    .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
-                    .is_some();
+            let has_private_getter = private_getter_key.as_ref().is_some_and(|slot_key| {
+                borrow.contains_key(slot_key)
+                    || proto_for_lookup
+                        .as_ref()
+                        .and_then(|proto| self.lookup_proto_chain(Some(proto), slot_key))
+                        .is_some()
+            });
             let setter = if own_is_data {
                 None
             } else {
                 own_prop_setter
-                    .or_else(|| borrow.get(&setter_key).cloned())
+                    .or_else(|| private_setter_key.as_ref().and_then(|slot_key| borrow.get(slot_key).cloned()))
                     .or(proto_prop_setter)
                     .or_else(|| {
-                        proto_for_lookup
-                            .as_ref()
-                            .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
+                        private_setter_key.as_ref().and_then(|slot_key| {
+                            proto_for_lookup
+                                .as_ref()
+                                .and_then(|proto| self.lookup_proto_chain(Some(proto), slot_key))
+                        })
                     })
             };
             let proto_readonly = !is_readonly && !key_exists && self.has_readonly_in_proto_chain(proto_for_lookup.as_ref(), key);
             drop(borrow);
-            let accessor_without_setter = (own_prop_is_accessor || proto_prop_is_accessor || has_getter) && setter.is_none();
+            let accessor_without_setter = (own_prop_is_accessor || proto_prop_is_accessor || has_private_getter) && setter.is_none();
             let non_ext_proto_mutation = is_non_ext && key == "__proto__" && !key_exists;
 
             if let Some(setter_fn) = setter {
@@ -15652,11 +15595,14 @@ impl<'gc> VM<'gc> {
                 self.handle_throw(ctx, &err)?;
             } else {
                 let mut b = map.borrow_mut(ctx);
-                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_GETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     if base_key == "__proto__" {
                         let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
                             Some(Value::Property { attrs, .. }) => *attrs,
-                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            Some(_) => attrs_from_map(&b, "__proto__"),
                             None => PropAttrs::EC,
                         };
                         let current_setter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
@@ -15675,11 +15621,14 @@ impl<'gc> VM<'gc> {
                     } else {
                         set_getter(&mut b, base_key, val.clone());
                     }
-                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                } else if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_SETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     if base_key == "__proto__" {
                         let attrs = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
                             Some(Value::Property { attrs, .. }) => *attrs,
-                            Some(_) => attrs_from_legacy_map(&b, "__proto__"),
+                            Some(_) => attrs_from_map(&b, "__proto__"),
                             None => PropAttrs::EC,
                         };
                         let current_getter = match b.get(OWN_DUNDER_PROTO_DATA_KEY) {
@@ -15829,10 +15778,8 @@ impl<'gc> VM<'gc> {
                 // Only treat as array element index if idx < 2^32 - 1 (max array index per spec).
                 // Keys >= 2^32 - 1 (e.g. "4294967295") are stored as string properties.
                 if idx < 0xFFFF_FFFF {
-                    let (has_getter, setter, is_readonly, key_exists, is_non_ext, has_own_setter, proto_for_lookup) = {
+                    let (has_getter, setter, is_readonly, key_exists, is_non_ext, proto_for_lookup) = {
                         let borrow = arr.borrow();
-                        let getter_key = make_getter_key(key);
-                        let setter_key = make_setter_key(key);
                         let mut proto_for_lookup = borrow.props.get("__proto__").cloned();
                         if proto_for_lookup.is_none()
                             && let Some(Value::Object(array_ctor)) = self.globals.get("Array")
@@ -15840,32 +15787,35 @@ impl<'gc> VM<'gc> {
                         {
                             proto_for_lookup = Some(array_proto);
                         }
-                        let has_getter = borrow.props.get(&getter_key).is_some()
-                            || proto_for_lookup
-                                .as_ref()
-                                .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
-                                .is_some();
-                        let setter = borrow.props.get(&setter_key).cloned().or_else(|| {
-                            proto_for_lookup
-                                .as_ref()
-                                .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
+                        let own_desc = desc_from_map(&borrow.props, key);
+                        let proto_desc = proto_for_lookup
+                            .as_ref()
+                            .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
+                        let own_getter = own_desc.as_ref().and_then(|desc| match &desc.kind {
+                            PropKind::Accessor { get, .. } => get.clone(),
+                            PropKind::Data(_) => None,
                         });
+                        let own_setter = own_desc.as_ref().and_then(|desc| match &desc.kind {
+                            PropKind::Accessor { set, .. } => set.clone(),
+                            PropKind::Data(_) => None,
+                        });
+                        let proto_getter = match proto_desc.as_ref() {
+                            Some(Value::Property { getter: Some(getter), .. }) => Some((**getter).clone()),
+                            _ => None,
+                        };
+                        let proto_setter = match proto_desc.as_ref() {
+                            Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => {
+                                Some((**setter).clone())
+                            }
+                            _ => None,
+                        };
+                        let has_getter = own_getter.is_some() || proto_getter.is_some();
+                        let setter = own_setter.or(proto_setter);
                         let key_exists = (idx < borrow.elements.len() && !borrow.props.contains_key(&format!("__deleted_{}", idx)))
-                            || borrow.props.contains_key(key)
-                            || borrow.props.contains_key(&getter_key)
-                            || borrow.props.contains_key(&setter_key);
+                            || own_desc.is_some();
                         let is_readonly = has_readonly_mark(&borrow.props, key);
                         let is_non_ext = matches!(borrow.props.get("__non_extensible__"), Some(Value::Boolean(true)));
-                        let has_own_setter = borrow.props.contains_key(&setter_key);
-                        (
-                            has_getter,
-                            setter,
-                            is_readonly,
-                            key_exists,
-                            is_non_ext,
-                            has_own_setter,
-                            proto_for_lookup,
-                        )
+                        (has_getter, setter, is_readonly, key_exists, is_non_ext, proto_for_lookup)
                     };
 
                     // TypedArray [[Set]] prototype chain interception for Array receivers.
@@ -15926,7 +15876,6 @@ impl<'gc> VM<'gc> {
                         && let Some(ref proto_val) = proto_for_lookup
                         && let Value::Object(proto_map) = proto_val
                         && proto_map.borrow().contains_key("__proxy_target__")
-                        && !has_own_setter
                         && let Some(result) = self.try_proxy_set(ctx, proto_val, key, val, Some(&setter_receiver))?
                     {
                         if matches!(result, Value::Boolean(false)) {
@@ -16112,10 +16061,10 @@ impl<'gc> VM<'gc> {
             }
 
             // Respect accessor/readonly/non-extensible behavior for non-index keys.
-            let (is_non_ext, key_exists, is_readonly, has_getter, setter, has_own_setter, own_is_accessor, proto_for_lookup) = {
+            let (is_non_ext, key_exists, is_readonly, has_getter, setter, own_is_accessor, proto_for_lookup) = {
                 let borrow = arr.borrow();
-                let getter_key = make_getter_key(key);
-                let setter_key = make_setter_key(key);
+                let private_getter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_getter_slot_key(key));
+                let private_setter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_setter_slot_key(key));
                 let mut proto_for_lookup = borrow.props.get("__proto__").cloned();
                 if proto_for_lookup.is_none()
                     && let Some(Value::Object(array_ctor)) = self.globals.get("Array")
@@ -16123,35 +16072,60 @@ impl<'gc> VM<'gc> {
                 {
                     proto_for_lookup = Some(array_proto);
                 }
-                let own_desc = desc_from_legacy_map(&borrow.props, key);
+                let own_desc = desc_from_map(&borrow.props, key);
                 let is_non_ext = matches!(borrow.props.get("__non_extensible__"), Some(Value::Boolean(true)));
-                let key_exists = own_desc.is_some();
+                let key_exists = own_desc.is_some()
+                    || private_getter_key
+                        .as_ref()
+                        .is_some_and(|slot_key| borrow.props.contains_key(slot_key))
+                    || private_setter_key
+                        .as_ref()
+                        .is_some_and(|slot_key| borrow.props.contains_key(slot_key));
                 let is_readonly = has_readonly_mark(&borrow.props, key);
                 let own_is_accessor = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { .. }));
-                let has_getter = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { get: Some(_), .. }))
-                    || proto_for_lookup
-                        .as_ref()
-                        .and_then(|proto| self.lookup_proto_chain(Some(proto), &getter_key))
-                        .is_some();
-                let setter = match own_desc.as_ref().map(|d| &d.kind) {
+                let proto_prop = proto_for_lookup
+                    .as_ref()
+                    .and_then(|proto| self.lookup_proto_chain(Some(proto), key));
+                let own_getter = match own_desc.as_ref().map(|d| &d.kind) {
+                    Some(PropKind::Accessor { get: Some(getter), .. }) => Some(getter.clone()),
+                    _ => None,
+                };
+                let proto_getter = match proto_prop.as_ref() {
+                    Some(Value::Property { getter: Some(getter), .. }) => Some((**getter).clone()),
+                    _ => None,
+                };
+                let private_getter = private_getter_key.as_ref().and_then(|slot_key| {
+                    borrow.props.get(slot_key).cloned().or_else(|| {
+                        proto_for_lookup
+                            .as_ref()
+                            .and_then(|proto| self.lookup_proto_chain(Some(proto), slot_key))
+                    })
+                });
+                let has_getter = own_getter.is_some() || proto_getter.is_some() || private_getter.is_some();
+                let own_setter = match own_desc.as_ref().map(|d| &d.kind) {
                     Some(PropKind::Accessor { set: Some(setter), .. }) => Some(setter.clone()),
                     _ => None,
-                }
-                .or_else(|| borrow.props.get(&setter_key).cloned())
-                .or_else(|| {
-                    proto_for_lookup
-                        .as_ref()
-                        .and_then(|proto| self.lookup_proto_chain(Some(proto), &setter_key))
+                };
+                let proto_setter = match proto_prop.as_ref() {
+                    Some(Value::Property { setter: Some(setter), .. }) if !matches!(&**setter, Value::Undefined) => {
+                        Some((**setter).clone())
+                    }
+                    _ => None,
+                };
+                let private_setter = private_setter_key.as_ref().and_then(|slot_key| {
+                    borrow.props.get(slot_key).cloned().or_else(|| {
+                        proto_for_lookup
+                            .as_ref()
+                            .and_then(|proto| self.lookup_proto_chain(Some(proto), slot_key))
+                    })
                 });
-                let has_own_setter = matches!(own_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { set: Some(_), .. }))
-                    || borrow.props.contains_key(&setter_key);
+                let setter = own_setter.or(proto_setter).or(private_setter);
                 (
                     is_non_ext,
                     key_exists,
                     is_readonly,
                     has_getter,
                     setter,
-                    has_own_setter,
                     own_is_accessor,
                     proto_for_lookup,
                 )
@@ -16163,7 +16137,6 @@ impl<'gc> VM<'gc> {
                 && let Some(ref proto_val) = proto_for_lookup
                 && let Value::Object(proto_map) = proto_val
                 && proto_map.borrow().contains_key("__proxy_target__")
-                && !has_own_setter
                 && let Some(result) = self.try_proxy_set(ctx, proto_val, key, val, Some(&setter_receiver))?
             {
                 if matches!(result, Value::Boolean(false)) {
@@ -16241,16 +16214,26 @@ impl<'gc> VM<'gc> {
             let props = self.get_fn_props(ctx, *ip, *arity);
             // For Closure with overlay, check overlay for setter/getter first
             let overlay = self.get_closure_overlay(obj);
+            let private_getter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_getter_slot_key(key));
+            let private_setter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_setter_slot_key(key));
             let current_desc = overlay
                 .as_ref()
-                .and_then(|o| desc_from_legacy_map(&o.borrow(), key))
-                .or_else(|| desc_from_legacy_map(&props.borrow(), key));
+                .and_then(|o| desc_from_map(&o.borrow(), key))
+                .or_else(|| desc_from_map(&props.borrow(), key));
             let own_is_data = matches!(current_desc.as_ref().map(|d| &d.kind), Some(PropKind::Data(_)));
             // Check for setter accessor
             let setter_fn = overlay
                 .as_ref()
                 .and_then(|o| lookup_setter(&o.borrow(), key).cloned())
-                .or_else(|| lookup_setter(&props.borrow(), key).cloned());
+                .or_else(|| lookup_setter(&props.borrow(), key).cloned())
+                .or_else(|| {
+                    private_setter_key.as_ref().and_then(|slot_key| {
+                        overlay
+                            .as_ref()
+                            .and_then(|o| o.borrow().get(slot_key).cloned())
+                            .or_else(|| props.borrow().get(slot_key).cloned())
+                    })
+                });
             if let Some(sf) = setter_fn {
                 let _ = self.vm_call_function_value(ctx, &sf, obj, std::slice::from_ref(val))?;
                 return Ok(val.clone());
@@ -16260,11 +16243,12 @@ impl<'gc> VM<'gc> {
                     .as_ref()
                     .and_then(|o| o.borrow().get("__proto__").cloned())
                     .or_else(|| props.borrow().get("__proto__").cloned());
-                let inherited_setter = self.lookup_proto_chain(proto.as_ref(), &make_setter_key(key)).or_else(|| {
-                    match self.lookup_proto_chain(proto.as_ref(), key) {
-                        Some(Value::Property { setter: Some(setter), .. }) if !matches!(&*setter, Value::Undefined) => Some(*setter),
-                        _ => None,
-                    }
+                let inherited_private_setter = private_setter_key
+                    .as_ref()
+                    .and_then(|slot_key| self.lookup_proto_chain(proto.as_ref(), slot_key));
+                let inherited_setter = inherited_private_setter.or_else(|| match self.lookup_proto_chain(proto.as_ref(), key) {
+                    Some(Value::Property { setter: Some(setter), .. }) if !matches!(&*setter, Value::Undefined) => Some(*setter),
+                    _ => None,
                 });
                 if let Some(setter) = inherited_setter {
                     let _ = self.vm_call_function_value(ctx, &setter, &setter_receiver, std::slice::from_ref(val))?;
@@ -16283,7 +16267,11 @@ impl<'gc> VM<'gc> {
                 let b = props.borrow();
                 let is_frozen = matches!(b.get("__frozen__"), Some(Value::Boolean(true)));
                 let is_non_ext = matches!(b.get("__non_extensible__"), Some(Value::Boolean(true)));
-                let key_exists = b.contains_key(key) || has_getter(&b, key) || has_setter(&b, key);
+                let key_exists = b.contains_key(key)
+                    || has_getter(&b, key)
+                    || has_setter(&b, key)
+                    || private_getter_key.as_ref().is_some_and(|slot_key| b.contains_key(slot_key))
+                    || private_setter_key.as_ref().is_some_and(|slot_key| b.contains_key(slot_key));
                 if is_frozen || (is_non_ext && !key_exists) {
                     drop(b);
                     if self.current_execution_is_strict() {
@@ -16297,27 +16285,39 @@ impl<'gc> VM<'gc> {
             // Write to per-closure overlay when available, otherwise shared fn_props
             if let Some(o) = overlay {
                 let mut borrow = o.borrow_mut(ctx);
-                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_GETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     set_getter(&mut borrow, base_key, val.clone());
-                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                } else if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_SETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     set_setter(&mut borrow, base_key, val.clone());
                 } else if let Some(desc) = current_desc
                     && let PropKind::Data(_) = desc.kind
                 {
-                    PropDesc::data(val.clone(), desc.attrs).write_to_legacy_map(&mut borrow, key);
+                    PropDesc::data(val.clone(), desc.attrs).write_to_map(&mut borrow, key);
                 } else {
                     borrow.insert(key.to_string(), val.clone());
                 }
             } else {
                 let mut borrow = props.borrow_mut(ctx);
-                if let Some(base_key) = key.strip_prefix(GETTER_PREFIX) {
+                if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_GETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     set_getter(&mut borrow, base_key, val.clone());
-                } else if let Some(base_key) = key.strip_prefix(SETTER_PREFIX) {
+                } else if let Some(base_key) = key
+                    .strip_prefix(PRIVATE_SETTER_SLOT_PREFIX)
+                    .filter(|base_key| base_key.starts_with(super::PRIVATE_KEY_PREFIX))
+                {
                     set_setter(&mut borrow, base_key, val.clone());
                 } else if let Some(desc) = current_desc
                     && let PropKind::Data(_) = desc.kind
                 {
-                    PropDesc::data(val.clone(), desc.attrs).write_to_legacy_map(&mut borrow, key);
+                    PropDesc::data(val.clone(), desc.attrs).write_to_map(&mut borrow, key);
                 } else {
                     borrow.insert(key.to_string(), val.clone());
                 }
@@ -16603,7 +16603,7 @@ impl<'gc> VM<'gc> {
         if let Some(props) = self.fn_props.get(&ip).copied() {
             let should_update = {
                 let borrow = props.borrow();
-                match own_data_from_legacy_map(&borrow, "name") {
+                match own_data_from_map(&borrow, "name") {
                     Some(Value::String(s)) => s.is_empty(),
                     Some(_) => false,
                     None => true,
@@ -16613,7 +16613,7 @@ impl<'gc> VM<'gc> {
                 let new_name = self.chunk.fn_names.get(&ip).cloned().unwrap_or_default();
                 let mut borrow = props.borrow_mut(ctx);
                 borrow.insert("name".to_string(), Value::from(&new_name));
-                write_attrs_to_legacy_map(&mut borrow, "name", PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut borrow, "name", PropAttrs::CONFIGURABLE);
             }
         }
     }
@@ -16643,7 +16643,7 @@ impl<'gc> VM<'gc> {
         if let Some(props) = self.fn_props.get(&ip).copied() {
             let should_update = {
                 let borrow = props.borrow();
-                match own_data_from_legacy_map(&borrow, "name") {
+                match own_data_from_map(&borrow, "name") {
                     Some(Value::String(s)) => {
                         let current = crate::unicode::utf16_to_utf8(&s);
                         current.is_empty() || current == base
@@ -16655,7 +16655,7 @@ impl<'gc> VM<'gc> {
             if should_update {
                 let mut borrow = props.borrow_mut(ctx);
                 borrow.insert("name".to_string(), Value::from(&accessor_name));
-                write_attrs_to_legacy_map(&mut borrow, "name", PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut borrow, "name", PropAttrs::CONFIGURABLE);
             }
         }
     }
@@ -16750,7 +16750,8 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        let getter_key = make_getter_key(key);
+        let private_getter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_getter_slot_key(key));
+        let private_setter_key = key.starts_with(super::PRIVATE_KEY_PREFIX).then(|| private_setter_slot_key(key));
         let mut current = Some(obj.clone());
         let mut depth = 0;
         while let Some(cur) = current {
@@ -16928,7 +16929,7 @@ impl<'gc> VM<'gc> {
                             }
                         }
                     }
-                    if let Some(getter_fn) = borrow.get(&getter_key).cloned() {
+                    if let Some(getter_fn) = private_getter_key.as_ref().and_then(|slot_key| borrow.get(slot_key).cloned()) {
                         drop(borrow);
                         let getter_fn = if let Some(rid) = realm_id {
                             self.remap_cross_realm_value(ctx, getter_fn, rid)
@@ -16937,8 +16938,7 @@ impl<'gc> VM<'gc> {
                         };
                         return self.invoke_getter_with_receiver(ctx, &getter_fn, receiver);
                     }
-                    // Setter-only accessor: if __set_<key> exists but no getter/data, return undefined
-                    if has_setter(&borrow, key) {
+                    if private_setter_key.as_ref().is_some_and(|slot_key| borrow.contains_key(slot_key)) {
                         return Value::Undefined;
                     }
                     if depth == 1 {
@@ -17085,7 +17085,7 @@ impl<'gc> VM<'gc> {
                                     | "constructor" => {
                                         // Return whatever Number.prototype actually has (respects overrides and deletes)
                                         if let Some(Value::Object(num_proto)) = self.ctor_prototype_from_globals(ctx, "Number")
-                                            && let Some(v) = own_data_from_legacy_map(&num_proto.borrow(), key)
+                                            && let Some(v) = own_data_from_map(&num_proto.borrow(), key)
                                         {
                                             return v;
                                         }
@@ -17162,11 +17162,7 @@ impl<'gc> VM<'gc> {
                     let borrow = props.borrow();
                     // %ThrowTypeError% accessor on restricted function properties.
                     // Accessing inherited Function.prototype.arguments/caller should throw.
-                    if (key == "caller" || key == "arguments")
-                        && !borrow.contains_key(key)
-                        && !borrow.contains_key(&getter_key)
-                        && !has_setter(&borrow, key)
-                    {
+                    if (key == "caller" || key == "arguments") && !borrow.contains_key(key) && !has_setter(&borrow, key) {
                         let msg = "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them";
                         drop(borrow);
                         self.throw_type_error(ctx, msg);
@@ -17177,9 +17173,9 @@ impl<'gc> VM<'gc> {
                         _ => None,
                     };
                     if let Some(val) = borrow.get(key).cloned() {
-                        // Setter-only accessor: if __set_{key} exists without __get_{key},
-                        // this is an accessor property and reads return undefined
-                        if has_setter(&borrow, key) && !borrow.contains_key(&getter_key) {
+                        if private_setter_key.as_ref().is_some_and(|slot_key| borrow.contains_key(slot_key))
+                            && private_getter_key.as_ref().is_none_or(|slot_key| !borrow.contains_key(slot_key))
+                        {
                             return Value::Undefined;
                         }
                         let materialized = self.materialize_property_read_value(ctx, receiver, val);
@@ -17208,7 +17204,7 @@ impl<'gc> VM<'gc> {
                             materialized
                         };
                     }
-                    if let Some(gf) = borrow.get(&getter_key).cloned() {
+                    if let Some(gf) = private_getter_key.as_ref().and_then(|slot_key| borrow.get(slot_key).cloned()) {
                         drop(borrow);
                         let gf = if let Some(rid) = realm_id {
                             self.remap_cross_realm_value(ctx, gf, rid)
@@ -17230,19 +17226,15 @@ impl<'gc> VM<'gc> {
                             .or_else(|| props.borrow().get(k).cloned())
                     };
                     // %ThrowTypeError% accessor on restricted function properties.
-                    if (key == "caller" || key == "arguments")
-                        && lookup_in(key).is_none()
-                        && lookup_in(&getter_key).is_none()
-                        && lookup_in(&make_setter_key(key)).is_none()
-                    {
+                    if (key == "caller" || key == "arguments") && lookup_in(key).is_none() {
                         let msg = "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them";
                         self.throw_type_error(ctx, msg);
                         return Value::Undefined;
                     }
                     if let Some(val) = lookup_in(key) {
-                        // Setter-only accessor check
-                        let setter_key = make_setter_key(key);
-                        if lookup_in(&setter_key).is_some() && lookup_in(&getter_key).is_none() {
+                        if private_setter_key.as_ref().is_some_and(|slot_key| lookup_in(slot_key).is_some())
+                            && private_getter_key.as_ref().is_none_or(|slot_key| lookup_in(slot_key).is_none())
+                        {
                             return Value::Undefined;
                         }
                         let materialized = self.materialize_property_read_value(ctx, receiver, val);
@@ -17266,7 +17258,7 @@ impl<'gc> VM<'gc> {
                         }
                         return materialized;
                     }
-                    if let Some(gf) = lookup_in(&getter_key) {
+                    if let Some(gf) = private_getter_key.as_ref().and_then(|slot_key| lookup_in(slot_key)) {
                         return self.invoke_getter_with_receiver(ctx, &gf, receiver);
                     }
                     current = lookup_in("__proto__");
@@ -17279,26 +17271,34 @@ impl<'gc> VM<'gc> {
                         _ => None,
                     };
                     let logical_len = self.vm_array_logical_length_u64(&borrow) as usize;
+                    if key.starts_with(super::PRIVATE_KEY_PREFIX) {
+                        if let Some(value) = borrow.props.get(key).cloned() {
+                            drop(borrow);
+                            return self.materialize_property_read_value(ctx, receiver, value);
+                        }
+                        if let Some(getter) = private_getter_key.as_ref().and_then(|slot_key| borrow.props.get(slot_key).cloned()) {
+                            drop(borrow);
+                            return self.invoke_getter_with_receiver(ctx, &getter, receiver);
+                        }
+                        if private_setter_key
+                            .as_ref()
+                            .is_some_and(|slot_key| borrow.props.contains_key(slot_key))
+                        {
+                            return Value::Undefined;
+                        }
+                    }
                     if key == "length" {
                         if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
                             return Value::Number(*n);
                         }
                         return Value::Number(borrow.elements.len() as f64);
                     }
-                    if let Some(gf) = borrow.props.get(&getter_key).cloned() {
-                        drop(borrow);
-                        let gf = if let Some(rid) = realm_id {
-                            self.remap_cross_realm_value(ctx, gf, rid)
-                        } else {
-                            gf
-                        };
-                        return self.invoke_getter_with_receiver(ctx, &gf, receiver);
-                    }
                     if let Ok(idx) = key.parse::<usize>()
                         && idx < 0xFFFF_FFFF
                         && idx < logical_len
                         && idx < borrow.elements.len()
                         && !borrow.props.contains_key(&format!("__deleted_{}", idx))
+                        && !matches!(borrow.props.get(key), Some(Value::Property { .. }))
                     {
                         return borrow.elements[idx].clone();
                     }
@@ -17308,15 +17308,13 @@ impl<'gc> VM<'gc> {
                             .map(|idx| idx >= 0xFFFF_FFFF || idx < logical_len)
                             .unwrap_or(true)
                     {
+                        drop(borrow);
                         let val = self.materialize_property_read_value(ctx, receiver, val);
                         return if let Some(rid) = realm_id {
                             self.remap_cross_realm_value(ctx, val, rid)
                         } else {
                             val
                         };
-                    }
-                    if has_setter(&borrow.props, key) {
-                        return Value::Undefined;
                     }
                     let mut next = borrow.props.get("__proto__").cloned();
                     if next.is_none()
@@ -17344,10 +17342,6 @@ impl<'gc> VM<'gc> {
                             other => return other,
                         }
                     }
-                    if let Some(gf) = borrow.get(&getter_key).cloned() {
-                        drop(borrow);
-                        return self.invoke_getter_with_receiver(ctx, &gf, receiver);
-                    }
                     current = borrow.get("__proto__").cloned();
                 }
                 _ => break,
@@ -17368,11 +17362,11 @@ impl<'gc> VM<'gc> {
     fn ctor_prototype_from_globals(&mut self, ctx: &GcContext<'gc>, ctor_name: &str) -> Option<Value<'gc>> {
         let ctor = self.globals.get(ctor_name).cloned()?;
         match ctor {
-            Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+            Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
             Value::Function(ip, arity) | Value::Closure(ip, arity, _) => {
-                own_data_from_legacy_map(&self.get_fn_props(ctx, ip, arity).borrow(), "prototype")
+                own_data_from_map(&self.get_fn_props(ctx, ip, arity).borrow(), "prototype")
             }
-            Value::NativeFunction(id) => own_data_from_legacy_map(&self.get_native_fn_props(ctx, id).borrow(), "prototype"),
+            Value::NativeFunction(id) => own_data_from_map(&self.get_native_fn_props(ctx, id).borrow(), "prototype"),
             _ => None,
         }
     }
@@ -17427,7 +17421,7 @@ impl<'gc> VM<'gc> {
                 let current_fn = Value::Function(*ip, *arity);
                 let props = self.get_fn_props(ctx, *ip, *arity);
                 let borrow = props.borrow();
-                let value = own_data_from_legacy_map(&borrow, key);
+                let value = own_data_from_map(&borrow, key);
                 let getter_fn = lookup_getter(&borrow, key).cloned();
                 let has_setter_prop = has_setter(&borrow, key);
                 let proto = borrow.get("__proto__").cloned();
@@ -17480,8 +17474,8 @@ impl<'gc> VM<'gc> {
                 let shared = self.get_fn_props(ctx, *ip, *arity);
                 // Look up key: overlay first, then shared fn_props
                 let value = overlay
-                    .and_then(|o| own_data_from_legacy_map(&o.borrow(), key))
-                    .or_else(|| own_data_from_legacy_map(&shared.borrow(), key));
+                    .and_then(|o| own_data_from_map(&o.borrow(), key))
+                    .or_else(|| own_data_from_map(&shared.borrow(), key));
                 let getter_fn = overlay
                     .and_then(|o| lookup_getter(&o.borrow(), key).cloned())
                     .or_else(|| lookup_getter(&shared.borrow(), key).cloned());
@@ -17533,7 +17527,7 @@ impl<'gc> VM<'gc> {
             Value::NativeFunction(id) => {
                 let props = self.get_native_fn_props(ctx, *id);
                 let borrow = props.borrow();
-                let value = own_data_from_legacy_map(&borrow, key);
+                let value = own_data_from_map(&borrow, key);
                 let getter_fn = lookup_getter(&borrow, key).cloned();
                 let has_setter_prop = has_setter(&borrow, key);
                 let proto = borrow.get("__proto__").cloned();
@@ -17567,13 +17561,9 @@ impl<'gc> VM<'gc> {
                     // For TypedArrays, check prototype getter (handles detached buffer)
                     if borrow.props.contains_key("__typedarray_name__") {
                         // Check for own "length" data property (from Object.defineProperty)
-                        if let Some(v) = borrow.props.get("length") {
-                            return self.materialize_property_read_value(ctx, obj, v.clone());
-                        }
-                        // Fall through to prototype getter
-                        if let Some(gf) = lookup_getter(&borrow.props, "length").cloned() {
+                        if let Some(v) = borrow.props.get("length").cloned() {
                             drop(borrow);
-                            return self.invoke_getter_with_receiver(ctx, &gf, obj);
+                            return self.materialize_property_read_value(ctx, obj, v);
                         }
                         let proto = borrow.props.get("__proto__").cloned();
                         drop(borrow);
@@ -17589,11 +17579,6 @@ impl<'gc> VM<'gc> {
                         return Value::Number(*n);
                     }
                     return Value::Number(borrow.elements.len() as f64);
-                }
-                // Check accessor properties
-                if let Some(gf) = lookup_getter(&borrow.props, key).cloned() {
-                    drop(borrow);
-                    return self.invoke_getter_with_receiver(ctx, &gf, obj);
                 }
                 let is_ta = borrow.props.contains_key("__typedarray_name__");
                 if is_ta {
@@ -17613,6 +17598,15 @@ impl<'gc> VM<'gc> {
                         return self.materialize_property_read_value(ctx, obj, v.clone());
                     }
                 } else {
+                    if let Some(v) = borrow.props.get(key).cloned()
+                        && key
+                            .parse::<usize>()
+                            .map(|idx| idx >= 0xFFFF_FFFF || idx < logical_len)
+                            .unwrap_or(true)
+                    {
+                        drop(borrow);
+                        return self.materialize_property_read_value(ctx, obj, v);
+                    }
                     if let Ok(idx) = key.parse::<usize>()
                         && idx < 0xFFFF_FFFF
                         && idx < logical_len
@@ -17621,17 +17615,6 @@ impl<'gc> VM<'gc> {
                     {
                         return borrow.elements[idx].clone();
                     }
-                    if let Some(v) = borrow.props.get(key)
-                        && key
-                            .parse::<usize>()
-                            .map(|idx| idx >= 0xFFFF_FFFF || idx < logical_len)
-                            .unwrap_or(true)
-                    {
-                        return self.materialize_property_read_value(ctx, obj, v.clone());
-                    }
-                }
-                if has_setter(&borrow.props, key) {
-                    return Value::Undefined;
                 }
                 let mut proto = borrow.props.get("__proto__").cloned();
                 if proto.is_none()
@@ -17882,13 +17865,8 @@ impl<'gc> VM<'gc> {
             match p {
                 Value::Object(map) => {
                     let borrow = map.borrow();
-                    // Check for Property descriptor with setter
                     if let Some(Value::Property { setter: Some(s), .. }) = borrow.get(key) {
                         return Some((**s).clone());
-                    }
-                    // Check for __set_key convention
-                    if let Some(setter_fn) = lookup_setter(&borrow, key) {
-                        return Some(setter_fn.clone());
                     }
                     let next = Self::internal_proto_from_object_map(&borrow);
                     drop(borrow);
@@ -17903,7 +17881,10 @@ impl<'gc> VM<'gc> {
     /// Check if `key` has an accessor (getter or setter) anywhere in the prototype chain.
     #[inline]
     fn has_accessor_in_proto_chain(&self, proto: Option<&Value<'gc>>, key: &str) -> bool {
-        self.lookup_proto_chain(proto, &make_getter_key(key)).is_some() || self.lookup_proto_chain(proto, &make_setter_key(key)).is_some()
+        matches!(
+            self.lookup_proto_chain(proto, key),
+            Some(Value::Property { getter: Some(_), .. } | Value::Property { setter: Some(_), .. })
+        )
     }
 
     /// Check whether the first matching own property in a prototype chain is
@@ -17954,7 +17935,7 @@ impl<'gc> VM<'gc> {
                     if current.is_none()
                         && let Some(Value::Object(function_ctor)) = self.globals.get("Function")
                     {
-                        current = own_data_from_legacy_map(&function_ctor.borrow(), "prototype");
+                        current = own_data_from_map(&function_ctor.borrow(), "prototype");
                     }
                 }
                 Value::NativeFunction(id) => {
@@ -18011,7 +17992,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         // No fn_props yet — follow default Function.prototype chain
                         if let Some(Value::Object(function_ctor)) = self.globals.get("Function") {
-                            current = own_data_from_legacy_map(&function_ctor.borrow(), "prototype");
+                            current = own_data_from_map(&function_ctor.borrow(), "prototype");
                         } else {
                             break;
                         }
@@ -18055,7 +18036,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         // No native_fn_props yet — follow default Function.prototype chain
                         if let Some(Value::Object(function_ctor)) = self.globals.get("Function") {
-                            current = own_data_from_legacy_map(&function_ctor.borrow(), "prototype");
+                            current = own_data_from_map(&function_ctor.borrow(), "prototype");
                         } else {
                             break;
                         }
@@ -18072,50 +18053,60 @@ impl<'gc> VM<'gc> {
     fn register_builtins(&mut self, ctx: &GcContext<'gc>) {
         // console object
         let mut console_map = IndexMap::new();
-        console_map.insert("log".to_string(), Value::NativeFunction(BUILTIN_CONSOLE_LOG));
-        console_map.insert("warn".to_string(), Value::NativeFunction(BUILTIN_CONSOLE_WARN));
-        console_map.insert("error".to_string(), Value::NativeFunction(BUILTIN_CONSOLE_ERROR));
+        Self::insert_native_properties(
+            &mut console_map,
+            &[
+                ("log", BUILTIN_CONSOLE_LOG),
+                ("warn", BUILTIN_CONSOLE_WARN),
+                ("error", BUILTIN_CONSOLE_ERROR),
+            ],
+        );
         self.globals
             .insert("console".to_string(), Value::Object(new_gc_cell_ptr(ctx, console_map)));
 
         // Math object
         let mut math_map = IndexMap::new();
-        math_map.insert("floor".to_string(), Value::NativeFunction(BUILTIN_MATH_FLOOR));
-        math_map.insert("ceil".to_string(), Value::NativeFunction(BUILTIN_MATH_CEIL));
-        math_map.insert("round".to_string(), Value::NativeFunction(BUILTIN_MATH_ROUND));
-        math_map.insert("abs".to_string(), Value::NativeFunction(BUILTIN_MATH_ABS));
-        math_map.insert("sqrt".to_string(), Value::NativeFunction(BUILTIN_MATH_SQRT));
-        math_map.insert("max".to_string(), Value::NativeFunction(BUILTIN_MATH_MAX));
-        math_map.insert("min".to_string(), Value::NativeFunction(BUILTIN_MATH_MIN));
-        math_map.insert("sin".to_string(), Value::NativeFunction(BUILTIN_MATH_SIN));
-        math_map.insert("cos".to_string(), Value::NativeFunction(BUILTIN_MATH_COS));
-        math_map.insert("tan".to_string(), Value::NativeFunction(BUILTIN_MATH_TAN));
-        math_map.insert("asin".to_string(), Value::NativeFunction(BUILTIN_MATH_ASIN));
-        math_map.insert("acos".to_string(), Value::NativeFunction(BUILTIN_MATH_ACOS));
-        math_map.insert("atan".to_string(), Value::NativeFunction(BUILTIN_MATH_ATAN));
-        math_map.insert("atan2".to_string(), Value::NativeFunction(BUILTIN_MATH_ATAN2));
-        math_map.insert("sinh".to_string(), Value::NativeFunction(BUILTIN_MATH_SINH));
-        math_map.insert("cosh".to_string(), Value::NativeFunction(BUILTIN_MATH_COSH));
-        math_map.insert("tanh".to_string(), Value::NativeFunction(BUILTIN_MATH_TANH));
-        math_map.insert("asinh".to_string(), Value::NativeFunction(BUILTIN_MATH_ASINH));
-        math_map.insert("acosh".to_string(), Value::NativeFunction(BUILTIN_MATH_ACOSH));
-        math_map.insert("atanh".to_string(), Value::NativeFunction(BUILTIN_MATH_ATANH));
-        math_map.insert("exp".to_string(), Value::NativeFunction(BUILTIN_MATH_EXP));
-        math_map.insert("expm1".to_string(), Value::NativeFunction(BUILTIN_MATH_EXPM1));
-        math_map.insert("log".to_string(), Value::NativeFunction(BUILTIN_MATH_LOG));
-        math_map.insert("log10".to_string(), Value::NativeFunction(BUILTIN_MATH_LOG10));
-        math_map.insert("log1p".to_string(), Value::NativeFunction(BUILTIN_MATH_LOG1P));
-        math_map.insert("log2".to_string(), Value::NativeFunction(BUILTIN_MATH_LOG2));
-        math_map.insert("fround".to_string(), Value::NativeFunction(BUILTIN_MATH_FROUND));
-        math_map.insert("f16round".to_string(), Value::NativeFunction(BUILTIN_MATH_F16ROUND));
-        math_map.insert("trunc".to_string(), Value::NativeFunction(BUILTIN_MATH_TRUNC));
-        math_map.insert("cbrt".to_string(), Value::NativeFunction(BUILTIN_MATH_CBRT));
-        math_map.insert("hypot".to_string(), Value::NativeFunction(BUILTIN_MATH_HYPOT));
-        math_map.insert("sign".to_string(), Value::NativeFunction(BUILTIN_MATH_SIGN));
-        math_map.insert("pow".to_string(), Value::NativeFunction(BUILTIN_MATH_POW));
-        math_map.insert("random".to_string(), Value::NativeFunction(BUILTIN_MATH_RANDOM));
-        math_map.insert("clz32".to_string(), Value::NativeFunction(BUILTIN_MATH_CLZ32));
-        math_map.insert("imul".to_string(), Value::NativeFunction(BUILTIN_MATH_IMUL));
+        Self::insert_native_properties(
+            &mut math_map,
+            &[
+                ("floor", BUILTIN_MATH_FLOOR),
+                ("ceil", BUILTIN_MATH_CEIL),
+                ("round", BUILTIN_MATH_ROUND),
+                ("abs", BUILTIN_MATH_ABS),
+                ("sqrt", BUILTIN_MATH_SQRT),
+                ("max", BUILTIN_MATH_MAX),
+                ("min", BUILTIN_MATH_MIN),
+                ("sin", BUILTIN_MATH_SIN),
+                ("cos", BUILTIN_MATH_COS),
+                ("tan", BUILTIN_MATH_TAN),
+                ("asin", BUILTIN_MATH_ASIN),
+                ("acos", BUILTIN_MATH_ACOS),
+                ("atan", BUILTIN_MATH_ATAN),
+                ("atan2", BUILTIN_MATH_ATAN2),
+                ("sinh", BUILTIN_MATH_SINH),
+                ("cosh", BUILTIN_MATH_COSH),
+                ("tanh", BUILTIN_MATH_TANH),
+                ("asinh", BUILTIN_MATH_ASINH),
+                ("acosh", BUILTIN_MATH_ACOSH),
+                ("atanh", BUILTIN_MATH_ATANH),
+                ("exp", BUILTIN_MATH_EXP),
+                ("expm1", BUILTIN_MATH_EXPM1),
+                ("log", BUILTIN_MATH_LOG),
+                ("log10", BUILTIN_MATH_LOG10),
+                ("log1p", BUILTIN_MATH_LOG1P),
+                ("log2", BUILTIN_MATH_LOG2),
+                ("fround", BUILTIN_MATH_FROUND),
+                ("f16round", BUILTIN_MATH_F16ROUND),
+                ("trunc", BUILTIN_MATH_TRUNC),
+                ("cbrt", BUILTIN_MATH_CBRT),
+                ("hypot", BUILTIN_MATH_HYPOT),
+                ("sign", BUILTIN_MATH_SIGN),
+                ("pow", BUILTIN_MATH_POW),
+                ("random", BUILTIN_MATH_RANDOM),
+                ("clz32", BUILTIN_MATH_CLZ32),
+                ("imul", BUILTIN_MATH_IMUL),
+            ],
+        );
         math_map.insert(
             "sumPrecise".to_string(),
             Self::make_native_fn(ctx, BUILTIN_MATH_SUMPRECISE, "sumPrecise", 1.0),
@@ -18225,7 +18216,7 @@ impl<'gc> VM<'gc> {
             "unscopables",
             "isConcatSpreadable",
         ] {
-            write_attrs_to_legacy_map(&mut sym_obj, key, PropAttrs::empty());
+            write_attrs_to_map(&mut sym_obj, key, PropAttrs::empty());
         }
         sym_obj.insert("for".to_string(), Value::NativeFunction(BUILTIN_SYMBOL_FOR));
         mark_nonenumerable(&mut sym_obj, "for");
@@ -18392,8 +18383,8 @@ impl<'gc> VM<'gc> {
         array_obj.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAY as f64));
         array_obj.insert("name".to_string(), Value::from("Array"));
         array_obj.insert("length".to_string(), Value::Number(1.0));
-        write_attrs_to_legacy_map(&mut array_obj, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut array_obj, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut array_obj, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut array_obj, "length", PropAttrs::CONFIGURABLE);
         mark_nonenumerable(&mut array_obj, "isArray");
         mark_nonenumerable(&mut array_obj, "of");
         mark_nonenumerable(&mut array_obj, "from");
@@ -18411,103 +18402,50 @@ impl<'gc> VM<'gc> {
         let array_to_string_fn = Self::make_host_fn_with_name_len(ctx, "array.toString", "toString", 0.0, false);
         let array_to_string_fn_for_ta = array_to_string_fn.clone();
         let array_to_locale_string_fn = Self::make_host_fn_with_name_len(ctx, "array.toLocaleString", "toLocaleString", 0.0, false);
-        arr_proto.props.insert("@@sym:1".to_string(), array_values_fn.clone());
-        arr_proto
-            .props
-            .insert("push".to_string(), Value::NativeFunction(BUILTIN_ARRAY_PUSH));
-        arr_proto.props.insert("pop".to_string(), Value::NativeFunction(BUILTIN_ARRAY_POP));
-        arr_proto
-            .props
-            .insert("join".to_string(), Value::NativeFunction(BUILTIN_ARRAY_JOIN));
-        arr_proto.props.insert("toString".to_string(), array_to_string_fn);
-        arr_proto.props.insert("toLocaleString".to_string(), array_to_locale_string_fn);
-        arr_proto.props.insert("values".to_string(), array_values_fn);
-        arr_proto.props.insert("entries".to_string(), array_entries_fn);
-        arr_proto.props.insert("keys".to_string(), array_keys_fn);
-        arr_proto
-            .props
-            .insert("indexOf".to_string(), Value::NativeFunction(BUILTIN_ARRAY_INDEXOF));
-        arr_proto
-            .props
-            .insert("slice".to_string(), Value::NativeFunction(BUILTIN_ARRAY_SLICE));
-        arr_proto
-            .props
-            .insert("concat".to_string(), Value::NativeFunction(BUILTIN_ARRAY_CONCAT));
-        arr_proto.props.insert("map".to_string(), Value::NativeFunction(BUILTIN_ARRAY_MAP));
-        arr_proto
-            .props
-            .insert("filter".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FILTER));
-        arr_proto
-            .props
-            .insert("forEach".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FOREACH));
-        arr_proto
-            .props
-            .insert("reduce".to_string(), Value::NativeFunction(BUILTIN_ARRAY_REDUCE));
-        arr_proto
-            .props
-            .insert("shift".to_string(), Value::NativeFunction(BUILTIN_ARRAY_SHIFT));
-        arr_proto
-            .props
-            .insert("unshift".to_string(), Value::NativeFunction(BUILTIN_ARRAY_UNSHIFT));
-        arr_proto
-            .props
-            .insert("splice".to_string(), Value::NativeFunction(BUILTIN_ARRAY_SPLICE));
-        arr_proto
-            .props
-            .insert("reverse".to_string(), Value::NativeFunction(BUILTIN_ARRAY_REVERSE));
-        arr_proto
-            .props
-            .insert("sort".to_string(), Value::NativeFunction(BUILTIN_ARRAY_SORT));
-        arr_proto
-            .props
-            .insert("find".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FIND));
-        arr_proto
-            .props
-            .insert("findIndex".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FINDINDEX));
-        arr_proto
-            .props
-            .insert("includes".to_string(), Value::NativeFunction(BUILTIN_ARRAY_INCLUDES));
-        arr_proto
-            .props
-            .insert("flat".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FLAT));
-        arr_proto
-            .props
-            .insert("flatMap".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FLATMAP));
-        arr_proto.props.insert("copyWithin".to_string(), array_copy_within_fn);
-        arr_proto.props.insert("at".to_string(), Value::NativeFunction(BUILTIN_ARRAY_AT));
-        arr_proto
-            .props
-            .insert("every".to_string(), Value::NativeFunction(BUILTIN_ARRAY_EVERY));
-        arr_proto
-            .props
-            .insert("some".to_string(), Value::NativeFunction(BUILTIN_ARRAY_SOME));
-        arr_proto
-            .props
-            .insert("fill".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FILL));
-        arr_proto
-            .props
-            .insert("lastIndexOf".to_string(), Value::NativeFunction(BUILTIN_ARRAY_LASTINDEXOF));
-        arr_proto
-            .props
-            .insert("findLast".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FINDLAST));
-        arr_proto
-            .props
-            .insert("findLastIndex".to_string(), Value::NativeFunction(BUILTIN_ARRAY_FINDLASTINDEX));
-        arr_proto
-            .props
-            .insert("reduceRight".to_string(), Value::NativeFunction(BUILTIN_ARRAY_REDUCERIGHT));
-        arr_proto
-            .props
-            .insert("toReversed".to_string(), Value::NativeFunction(BUILTIN_ARRAY_TOREVERSED));
-        arr_proto
-            .props
-            .insert("toSorted".to_string(), Value::NativeFunction(BUILTIN_ARRAY_TOSORTED));
-        arr_proto
-            .props
-            .insert("toSpliced".to_string(), Value::NativeFunction(BUILTIN_ARRAY_TOSPLICED));
-        arr_proto
-            .props
-            .insert("with".to_string(), Value::NativeFunction(BUILTIN_ARRAY_WITH));
+        Self::insert_nonenumerable_properties(
+            &mut arr_proto.props,
+            [
+                ("@@sym:1", array_values_fn.clone()),
+                ("push", Value::NativeFunction(BUILTIN_ARRAY_PUSH)),
+                ("pop", Value::NativeFunction(BUILTIN_ARRAY_POP)),
+                ("join", Value::NativeFunction(BUILTIN_ARRAY_JOIN)),
+                ("toString", array_to_string_fn),
+                ("toLocaleString", array_to_locale_string_fn),
+                ("values", array_values_fn),
+                ("entries", array_entries_fn),
+                ("keys", array_keys_fn),
+                ("indexOf", Value::NativeFunction(BUILTIN_ARRAY_INDEXOF)),
+                ("slice", Value::NativeFunction(BUILTIN_ARRAY_SLICE)),
+                ("concat", Value::NativeFunction(BUILTIN_ARRAY_CONCAT)),
+                ("map", Value::NativeFunction(BUILTIN_ARRAY_MAP)),
+                ("filter", Value::NativeFunction(BUILTIN_ARRAY_FILTER)),
+                ("forEach", Value::NativeFunction(BUILTIN_ARRAY_FOREACH)),
+                ("reduce", Value::NativeFunction(BUILTIN_ARRAY_REDUCE)),
+                ("shift", Value::NativeFunction(BUILTIN_ARRAY_SHIFT)),
+                ("unshift", Value::NativeFunction(BUILTIN_ARRAY_UNSHIFT)),
+                ("splice", Value::NativeFunction(BUILTIN_ARRAY_SPLICE)),
+                ("reverse", Value::NativeFunction(BUILTIN_ARRAY_REVERSE)),
+                ("sort", Value::NativeFunction(BUILTIN_ARRAY_SORT)),
+                ("find", Value::NativeFunction(BUILTIN_ARRAY_FIND)),
+                ("findIndex", Value::NativeFunction(BUILTIN_ARRAY_FINDINDEX)),
+                ("includes", Value::NativeFunction(BUILTIN_ARRAY_INCLUDES)),
+                ("flat", Value::NativeFunction(BUILTIN_ARRAY_FLAT)),
+                ("flatMap", Value::NativeFunction(BUILTIN_ARRAY_FLATMAP)),
+                ("copyWithin", array_copy_within_fn),
+                ("at", Value::NativeFunction(BUILTIN_ARRAY_AT)),
+                ("every", Value::NativeFunction(BUILTIN_ARRAY_EVERY)),
+                ("some", Value::NativeFunction(BUILTIN_ARRAY_SOME)),
+                ("fill", Value::NativeFunction(BUILTIN_ARRAY_FILL)),
+                ("lastIndexOf", Value::NativeFunction(BUILTIN_ARRAY_LASTINDEXOF)),
+                ("findLast", Value::NativeFunction(BUILTIN_ARRAY_FINDLAST)),
+                ("findLastIndex", Value::NativeFunction(BUILTIN_ARRAY_FINDLASTINDEX)),
+                ("reduceRight", Value::NativeFunction(BUILTIN_ARRAY_REDUCERIGHT)),
+                ("toReversed", Value::NativeFunction(BUILTIN_ARRAY_TOREVERSED)),
+                ("toSorted", Value::NativeFunction(BUILTIN_ARRAY_TOSORTED)),
+                ("toSpliced", Value::NativeFunction(BUILTIN_ARRAY_TOSPLICED)),
+                ("with", Value::NativeFunction(BUILTIN_ARRAY_WITH)),
+            ],
+        );
         // Array.prototype[@@unscopables]: null-prototype object
         {
             let mut unscopables = IndexMap::new();
@@ -18536,50 +18474,7 @@ impl<'gc> VM<'gc> {
             let unscopables_obj = Value::Object(new_gc_cell_ptr(ctx, unscopables));
             arr_proto.props.insert("@@sym:14".to_string(), unscopables_obj);
             // writable: false, enumerable: false, configurable: true
-            write_attrs_to_legacy_map(&mut arr_proto.props, "@@sym:14", PropAttrs::CONFIGURABLE);
-        }
-        for key in [
-            "@@sym:1",
-            "values",
-            "entries",
-            "keys",
-            "push",
-            "pop",
-            "join",
-            "toString",
-            "toLocaleString",
-            "indexOf",
-            "slice",
-            "concat",
-            "map",
-            "filter",
-            "forEach",
-            "reduce",
-            "shift",
-            "unshift",
-            "splice",
-            "reverse",
-            "sort",
-            "find",
-            "findIndex",
-            "includes",
-            "flat",
-            "flatMap",
-            "copyWithin",
-            "at",
-            "every",
-            "some",
-            "fill",
-            "lastIndexOf",
-            "findLast",
-            "findLastIndex",
-            "reduceRight",
-            "toReversed",
-            "toSorted",
-            "toSpliced",
-            "with",
-        ] {
-            mark_nonenumerable(&mut arr_proto.props, key);
+            write_attrs_to_map(&mut arr_proto.props, "@@sym:14", PropAttrs::CONFIGURABLE);
         }
         let array_proto = new_gc_cell_ptr(ctx, arr_proto);
         Self::insert_prototype_property(&mut array_obj, &Value::Array(array_proto));
@@ -18723,15 +18618,15 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut array_buffer_proto, "transferToImmutable");
         array_buffer_proto.insert("@@sym:4".to_string(), Value::from("ArrayBuffer"));
-        write_attrs_to_legacy_map(&mut array_buffer_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut array_buffer_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         let array_buffer_proto_val = Value::Object(new_gc_cell_ptr(ctx, array_buffer_proto));
 
         let mut array_buffer_map = IndexMap::new();
         array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_ARRAYBUFFER as f64));
         array_buffer_map.insert("name".to_string(), Value::from("ArrayBuffer"));
         array_buffer_map.insert("length".to_string(), Value::Number(1.0));
-        write_attrs_to_legacy_map(&mut array_buffer_map, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut array_buffer_map, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut array_buffer_map, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut array_buffer_map, "length", PropAttrs::CONFIGURABLE);
         array_buffer_map.insert(
             "isView".to_string(),
             Self::make_host_fn_with_name_len(ctx, "arrayBuffer.isView", "isView", 1.0, false),
@@ -18739,10 +18634,10 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut array_buffer_map, "isView");
         Self::insert_species_getter(&mut array_buffer_map, ctx);
         array_buffer_map.insert("prototype".to_string(), array_buffer_proto_val);
-        write_attrs_to_legacy_map(&mut array_buffer_map, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut array_buffer_map, "prototype", PropAttrs::empty());
         let array_buffer_ctor = Value::Object(new_gc_cell_ptr(ctx, array_buffer_map));
         if let Value::Object(ctor_obj) = &array_buffer_ctor
-            && let Some(Value::Object(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+            && let Some(Value::Object(proto_obj)) = own_data_from_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj
                 .borrow_mut(ctx)
@@ -18760,11 +18655,11 @@ impl<'gc> VM<'gc> {
         let mut shared_array_buffer_map = IndexMap::new();
         shared_array_buffer_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_SHAREDARRAYBUFFER as f64));
         shared_array_buffer_map.insert("length".to_string(), Value::Number(1.0));
-        write_attrs_to_legacy_map(&mut shared_array_buffer_map, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut shared_array_buffer_map, "length", PropAttrs::CONFIGURABLE);
         let mut sab_proto = IndexMap::new();
         sab_proto.insert("__type__".to_string(), Value::from("SharedArrayBuffer"));
         sab_proto.insert("@@sym:4".to_string(), Value::from("SharedArrayBuffer"));
-        write_attrs_to_legacy_map(&mut sab_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut sab_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         set_getter(
             &mut sab_proto,
             "byteLength",
@@ -18795,10 +18690,10 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut sab_proto, "slice");
         let sab_proto_val = Value::Object(new_gc_cell_ptr(ctx, sab_proto));
         shared_array_buffer_map.insert("prototype".to_string(), sab_proto_val);
-        write_attrs_to_legacy_map(&mut shared_array_buffer_map, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut shared_array_buffer_map, "prototype", PropAttrs::empty());
         let sab_ctor = Value::Object(new_gc_cell_ptr(ctx, shared_array_buffer_map));
         if let Value::Object(ctor_obj) = &sab_ctor
-            && let Some(Value::Object(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+            && let Some(Value::Object(proto_obj)) = own_data_from_map(&ctor_obj.borrow(), "prototype")
         {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), sab_ctor.clone());
             mark_nonenumerable(&mut proto_obj.borrow_mut(ctx), "constructor");
@@ -18808,73 +18703,42 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "SharedArrayBuffer");
 
         let mut atomics_map = IndexMap::new();
-        atomics_map.insert(
-            "isLockFree".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.isLockFree", "isLockFree", 1.0, false),
+        Self::insert_nonenumerable_properties(
+            &mut atomics_map,
+            [
+                (
+                    "isLockFree",
+                    Self::make_host_fn_with_name_len(ctx, "atomics.isLockFree", "isLockFree", 1.0, false),
+                ),
+                ("load", Self::make_host_fn_with_name_len(ctx, "atomics.load", "load", 2.0, false)),
+                ("store", Self::make_host_fn_with_name_len(ctx, "atomics.store", "store", 3.0, false)),
+                (
+                    "compareExchange",
+                    Self::make_host_fn_with_name_len(ctx, "atomics.compareExchange", "compareExchange", 4.0, false),
+                ),
+                ("and", Self::make_host_fn_with_name_len(ctx, "atomics.and", "and", 3.0, false)),
+                ("add", Self::make_host_fn_with_name_len(ctx, "atomics.add", "add", 3.0, false)),
+                (
+                    "exchange",
+                    Self::make_host_fn_with_name_len(ctx, "atomics.exchange", "exchange", 3.0, false),
+                ),
+                ("sub", Self::make_host_fn_with_name_len(ctx, "atomics.sub", "sub", 3.0, false)),
+                ("or", Self::make_host_fn_with_name_len(ctx, "atomics.or", "or", 3.0, false)),
+                ("xor", Self::make_host_fn_with_name_len(ctx, "atomics.xor", "xor", 3.0, false)),
+                ("wait", Self::make_host_fn_with_name_len(ctx, "atomics.wait", "wait", 4.0, false)),
+                (
+                    "notify",
+                    Self::make_host_fn_with_name_len(ctx, "atomics.notify", "notify", 3.0, false),
+                ),
+                (
+                    "waitAsync",
+                    Self::make_host_fn_with_name_len(ctx, "atomics.waitAsync", "waitAsync", 4.0, false),
+                ),
+                ("pause", Self::make_native_fn(ctx, BUILTIN_ATOMICS_PAUSE, "pause", 0.0)),
+            ],
         );
-        mark_nonenumerable(&mut atomics_map, "isLockFree");
-        atomics_map.insert(
-            "load".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.load", "load", 2.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "load");
-        atomics_map.insert(
-            "store".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.store", "store", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "store");
-        atomics_map.insert(
-            "compareExchange".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.compareExchange", "compareExchange", 4.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "compareExchange");
-        atomics_map.insert(
-            "and".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.and", "and", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "and");
-        atomics_map.insert(
-            "add".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.add", "add", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "add");
-        atomics_map.insert(
-            "exchange".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.exchange", "exchange", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "exchange");
-        atomics_map.insert(
-            "sub".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.sub", "sub", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "sub");
-        atomics_map.insert(
-            "or".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.or", "or", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "or");
-        atomics_map.insert(
-            "xor".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.xor", "xor", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "xor");
-        atomics_map.insert(
-            "wait".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.wait", "wait", 4.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "wait");
-        atomics_map.insert(
-            "notify".to_string(),
-            Self::make_host_fn_with_name_len(ctx, "atomics.notify", "notify", 3.0, false),
-        );
-        mark_nonenumerable(&mut atomics_map, "notify");
         atomics_map.insert("@@sym:4".to_string(), Value::from("Atomics"));
-        write_attrs_to_legacy_map(&mut atomics_map, "@@sym:4", PropAttrs::CONFIGURABLE);
-        let wait_async_fn = Self::make_host_fn_with_name_len(ctx, "atomics.waitAsync", "waitAsync", 4.0, false);
-        atomics_map.insert("waitAsync".to_string(), wait_async_fn);
-        mark_nonenumerable(&mut atomics_map, "waitAsync");
-        atomics_map.insert("pause".to_string(), Self::make_native_fn(ctx, BUILTIN_ATOMICS_PAUSE, "pause", 0.0));
-        mark_nonenumerable(&mut atomics_map, "pause");
+        write_attrs_to_map(&mut atomics_map, "@@sym:4", PropAttrs::CONFIGURABLE);
         let atomics_obj = Value::Object(new_gc_cell_ptr(ctx, atomics_map));
         self.globals.insert("Atomics".to_string(), atomics_obj.clone());
         self.global_this.borrow_mut(ctx).insert("Atomics".to_string(), atomics_obj);
@@ -19025,9 +18889,9 @@ impl<'gc> VM<'gc> {
             "__proto__".to_string(),
             self.globals.get("Error").cloned().unwrap_or(Value::Undefined),
         );
-        write_attrs_to_legacy_map(&mut aggregate_error_ctor, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut aggregate_error_ctor, "length", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut aggregate_error_ctor, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut aggregate_error_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut aggregate_error_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut aggregate_error_ctor, "prototype", PropAttrs::empty());
 
         let aggregate_error_ctor_obj = Value::Object(new_gc_cell_ptr(ctx, aggregate_error_ctor));
         if let Value::Object(proto) = &aggregate_error_proto_obj {
@@ -19067,9 +18931,9 @@ impl<'gc> VM<'gc> {
             "__proto__".to_string(),
             self.globals.get("Error").cloned().unwrap_or(Value::Undefined),
         );
-        write_attrs_to_legacy_map(&mut suppressed_error_ctor, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut suppressed_error_ctor, "length", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut suppressed_error_ctor, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut suppressed_error_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut suppressed_error_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut suppressed_error_ctor, "prototype", PropAttrs::empty());
 
         let suppressed_error_ctor_obj = Value::Object(new_gc_cell_ptr(ctx, suppressed_error_ctor));
         if let Value::Object(proto) = &suppressed_error_proto_obj {
@@ -19126,7 +18990,7 @@ impl<'gc> VM<'gc> {
             Self::insert_getter_property_with_attributes(&mut proto, "disposed", &disposed_getter, false, true);
 
             proto.insert("@@sym:4".to_string(), Value::from("DisposableStack"));
-            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
 
             let proto_val = Value::Object(new_gc_cell_ptr(ctx, proto));
 
@@ -19141,9 +19005,9 @@ impl<'gc> VM<'gc> {
             {
                 ctor.insert("__proto__".to_string(), fn_proto);
             }
-            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "prototype", PropAttrs::empty());
 
             let ctor_val = Value::Object(new_gc_cell_ptr(ctx, ctor));
             if let Value::Object(p) = &proto_val {
@@ -19195,7 +19059,7 @@ impl<'gc> VM<'gc> {
             Self::insert_getter_property_with_attributes(&mut proto, "disposed", &disposed_getter, false, true);
 
             proto.insert("@@sym:4".to_string(), Value::from("AsyncDisposableStack"));
-            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
 
             let proto_val = Value::Object(new_gc_cell_ptr(ctx, proto));
 
@@ -19210,9 +19074,9 @@ impl<'gc> VM<'gc> {
             {
                 ctor.insert("__proto__".to_string(), fn_proto);
             }
-            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "prototype", PropAttrs::empty());
 
             let ctor_val = Value::Object(new_gc_cell_ptr(ctx, ctor));
             if let Value::Object(p) = &proto_val {
@@ -19236,7 +19100,7 @@ impl<'gc> VM<'gc> {
 
             let fn_proto = self.globals.get("Function").and_then(|f| {
                 if let Value::Object(obj) = f {
-                    own_data_from_legacy_map(&obj.borrow(), "prototype")
+                    own_data_from_map(&obj.borrow(), "prototype")
                 } else {
                     None
                 }
@@ -19261,7 +19125,7 @@ impl<'gc> VM<'gc> {
             mark_nonenumerable(&mut proto, "importValue");
 
             proto.insert("@@sym:4".to_string(), Value::from("ShadowRealm"));
-            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
 
             let proto_val = Value::Object(new_gc_cell_ptr(ctx, proto));
 
@@ -19276,16 +19140,16 @@ impl<'gc> VM<'gc> {
             {
                 ctor.insert("__proto__".to_string(), fn_proto);
             }
-            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "prototype", PropAttrs::empty());
 
             let ctor_val = Value::Object(new_gc_cell_ptr(ctx, ctor));
             if let Value::Object(p) = &proto_val {
                 let mut borrow = p.borrow_mut(ctx);
                 borrow.insert("constructor".to_string(), ctor_val.clone());
                 mark_nonenumerable(&mut borrow, "constructor");
-                write_attrs_to_legacy_map(&mut borrow, "constructor", PropAttrs::WRITABLE | PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut borrow, "constructor", PropAttrs::WRITABLE | PropAttrs::CONFIGURABLE);
             }
             self.globals.insert("ShadowRealm".to_string(), ctor_val.clone());
             self.global_this.borrow_mut(ctx).insert("ShadowRealm".to_string(), ctor_val);
@@ -19494,7 +19358,7 @@ impl<'gc> VM<'gc> {
         // (they were created before Object was available)
         for ctor_name in ["DisposableStack", "AsyncDisposableStack", "ShadowRealm"] {
             if let Some(Value::Object(ctor_obj)) = self.globals.get(ctor_name)
-                && let Some(Value::Object(proto_obj)) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+                && let Some(Value::Object(proto_obj)) = own_data_from_map(&ctor_obj.borrow(), "prototype")
             {
                 proto_obj
                     .borrow_mut(ctx)
@@ -19554,7 +19418,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut iterator_helper_proto, "return");
         iterator_helper_proto.insert("@@sym:4".to_string(), Value::from("Iterator Helper"));
-        write_attrs_to_legacy_map(&mut iterator_helper_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut iterator_helper_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         let iterator_helper_proto_val = Value::Object(new_gc_cell_ptr(ctx, iterator_helper_proto));
         self.globals
             .insert("__IteratorHelperPrototype__".to_string(), iterator_helper_proto_val.clone());
@@ -19599,7 +19463,7 @@ impl<'gc> VM<'gc> {
             );
             mark_nonenumerable(&mut ctor, "zipKeyed");
             ctor.insert("prototype".to_string(), iterator_proto_val.clone());
-            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor, "prototype", PropAttrs::empty());
         }
         if let Value::Object(iterator_proto_obj) = &iterator_proto_val {
             let mut borrow = iterator_proto_obj.borrow_mut(ctx);
@@ -19642,7 +19506,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut array_iter_proto, "next");
         array_iter_proto.insert("@@sym:4".to_string(), Value::from("Array Iterator"));
-        write_attrs_to_legacy_map(&mut array_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut array_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__ArrayIteratorPrototype__".to_string(),
             Value::Object(new_gc_cell_ptr(ctx, array_iter_proto)),
@@ -19656,7 +19520,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut map_iter_proto, "next");
         map_iter_proto.insert("@@sym:4".to_string(), Value::from("Map Iterator"));
-        write_attrs_to_legacy_map(&mut map_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut map_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__MapIteratorPrototype__".to_string(),
             Value::Object(new_gc_cell_ptr(ctx, map_iter_proto)),
@@ -19670,7 +19534,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut set_iter_proto, "next");
         set_iter_proto.insert("@@sym:4".to_string(), Value::from("Set Iterator"));
-        write_attrs_to_legacy_map(&mut set_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut set_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__SetIteratorPrototype__".to_string(),
             Value::Object(new_gc_cell_ptr(ctx, set_iter_proto)),
@@ -19683,7 +19547,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut string_iter_proto, "next");
         string_iter_proto.insert("@@sym:4".to_string(), Value::from("String Iterator"));
-        write_attrs_to_legacy_map(&mut string_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut string_iter_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         self.globals.insert(
             "__StringIteratorPrototype__".to_string(),
             Value::Object(new_gc_cell_ptr(ctx, string_iter_proto)),
@@ -19707,9 +19571,9 @@ impl<'gc> VM<'gc> {
             // Symbol.prototype[@@toPrimitive]
             let to_prim = Self::make_host_fn_with_name_len(ctx, "symbol.toPrimitive", "[Symbol.toPrimitive]", 1.0, false);
             symbol_proto.insert("@@sym:3".to_string(), to_prim);
-            write_attrs_to_legacy_map(&mut symbol_proto, "@@sym:3", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut symbol_proto, "@@sym:3", PropAttrs::CONFIGURABLE);
             symbol_proto.insert("@@sym:4".to_string(), Value::from("Symbol"));
-            write_attrs_to_legacy_map(&mut symbol_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut symbol_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             let symbol_proto = new_gc_cell_ptr(ctx, symbol_proto);
             Self::insert_prototype_property(&mut symbol_ctor.borrow_mut(ctx), &Value::Object(symbol_proto));
             Self::insert_constructor_backref(ctx, &symbol_proto, &Value::Object(*symbol_ctor));
@@ -19839,7 +19703,7 @@ impl<'gc> VM<'gc> {
         string_proto.insert("__value__".to_string(), Value::String(Vec::new()));
         string_proto.insert("__proto__".to_string(), Value::Object(object_proto));
         string_proto.insert("length".to_string(), Value::Number(0.0));
-        write_attrs_to_legacy_map(&mut string_proto, "length", PropAttrs::empty());
+        write_attrs_to_map(&mut string_proto, "length", PropAttrs::empty());
         for (name, builtin_id, length) in [
             ("toString", BUILTIN_STRING_TOSTRING, 0.0),
             ("valueOf", BUILTIN_STRING_VALUEOF, 0.0),
@@ -19942,8 +19806,8 @@ impl<'gc> VM<'gc> {
             boolean_map.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_BOOLEAN as f64));
             boolean_map.insert("name".to_string(), Value::from("Boolean"));
             boolean_map.insert("length".to_string(), Value::Number(1.0));
-            write_attrs_to_legacy_map(&mut boolean_map, "name", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut boolean_map, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut boolean_map, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut boolean_map, "length", PropAttrs::CONFIGURABLE);
             let mut boolean_proto = IndexMap::new();
             boolean_proto.insert("__type__".to_string(), Value::from("Boolean"));
             boolean_proto.insert("__value__".to_string(), Value::Boolean(false));
@@ -19960,7 +19824,7 @@ impl<'gc> VM<'gc> {
             boolean_proto.insert("__proto__".to_string(), Value::Object(object_proto));
             let boolean_proto_obj = Value::Object(new_gc_cell_ptr(ctx, boolean_proto));
             boolean_map.insert("prototype".to_string(), boolean_proto_obj.clone());
-            write_attrs_to_legacy_map(&mut boolean_map, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut boolean_map, "prototype", PropAttrs::empty());
             let boolean_ctor = Value::Object(new_gc_cell_ptr(ctx, boolean_map));
             if let Value::Object(proto_obj) = boolean_proto_obj {
                 proto_obj.borrow_mut(ctx).insert("constructor".to_string(), boolean_ctor.clone());
@@ -20016,9 +19880,9 @@ impl<'gc> VM<'gc> {
             gt.insert("Infinity".to_string(), Value::Number(f64::INFINITY));
             gt.insert("NaN".to_string(), Value::Number(f64::NAN));
             gt.insert("undefined".to_string(), Value::Undefined);
-            write_attrs_to_legacy_map(&mut gt, "Infinity", PropAttrs::empty());
-            write_attrs_to_legacy_map(&mut gt, "NaN", PropAttrs::empty());
-            write_attrs_to_legacy_map(&mut gt, "undefined", PropAttrs::empty());
+            write_attrs_to_map(&mut gt, "Infinity", PropAttrs::empty());
+            write_attrs_to_map(&mut gt, "NaN", PropAttrs::empty());
+            write_attrs_to_map(&mut gt, "undefined", PropAttrs::empty());
         }
 
         // Map / Set constructors
@@ -20054,7 +19918,7 @@ impl<'gc> VM<'gc> {
             let mut proto = IndexMap::new();
             proto.insert("__proto__".to_string(), Value::Object(object_proto));
             proto.insert("@@sym:4".to_string(), Value::from(tag_name));
-            write_attrs_to_legacy_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             proto.insert("constructor".to_string(), ctor_value.clone());
             mark_nonenumerable(&mut proto, "constructor");
             match ctor_id {
@@ -20189,7 +20053,7 @@ impl<'gc> VM<'gc> {
             let props = self.get_native_fn_props(ctx, ctor_id);
             let mut b = props.borrow_mut(ctx);
             b.insert("prototype".to_string(), proto_val);
-            write_attrs_to_legacy_map(&mut b, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut b, "prototype", PropAttrs::empty());
         }
         self.global_this
             .borrow_mut(ctx)
@@ -20201,7 +20065,7 @@ impl<'gc> VM<'gc> {
             let mut wr_proto = IndexMap::new();
             wr_proto.insert("__proto__".to_string(), Value::Object(object_proto));
             wr_proto.insert("@@sym:4".to_string(), Value::from("WeakRef"));
-            write_attrs_to_legacy_map(&mut wr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut wr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             wr_proto.insert("constructor".to_string(), Value::NativeFunction(BUILTIN_CTOR_WEAKREF));
             mark_nonenumerable(&mut wr_proto, "constructor");
             wr_proto.insert("deref".to_string(), Value::NativeFunction(BUILTIN_WEAKREF_DEREF));
@@ -20210,7 +20074,7 @@ impl<'gc> VM<'gc> {
             let props = self.get_native_fn_props(ctx, BUILTIN_CTOR_WEAKREF);
             let mut b = props.borrow_mut(ctx);
             b.insert("prototype".to_string(), wr_proto_val);
-            write_attrs_to_legacy_map(&mut b, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut b, "prototype", PropAttrs::empty());
         }
         self.globals
             .insert("FinalizationRegistry".to_string(), Value::NativeFunction(BUILTIN_CTOR_FR));
@@ -20218,7 +20082,7 @@ impl<'gc> VM<'gc> {
             let mut fr_proto = IndexMap::new();
             fr_proto.insert("__proto__".to_string(), Value::Object(object_proto));
             fr_proto.insert("@@sym:4".to_string(), Value::from("FinalizationRegistry"));
-            write_attrs_to_legacy_map(&mut fr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut fr_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
             fr_proto.insert("constructor".to_string(), Value::NativeFunction(BUILTIN_CTOR_FR));
             mark_nonenumerable(&mut fr_proto, "constructor");
             fr_proto.insert("register".to_string(), Value::NativeFunction(BUILTIN_FR_REGISTER));
@@ -20229,7 +20093,7 @@ impl<'gc> VM<'gc> {
             let props = self.get_native_fn_props(ctx, BUILTIN_CTOR_FR);
             let mut b = props.borrow_mut(ctx);
             b.insert("prototype".to_string(), fr_proto_val);
-            write_attrs_to_legacy_map(&mut b, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut b, "prototype", PropAttrs::empty());
         }
         self.bigint_init_prototype(ctx);
         self.regexp_init_prototype(ctx);
@@ -20395,7 +20259,7 @@ impl<'gc> VM<'gc> {
         Self::insert_property_with_attributes(&mut fn_proto, "name", &Value::from(""), false, false, true);
         fn_proto.insert("__host_fn__".to_string(), Value::from("function.prototype.callable"));
         if let Some(Value::Object(obj_global)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&obj_global.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&obj_global.borrow(), "prototype")
         {
             fn_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -20406,9 +20270,9 @@ impl<'gc> VM<'gc> {
         function_map.insert("length".to_string(), Value::Number(1.0));
         function_map.insert("name".to_string(), Value::from("Function"));
         function_map.insert("prototype".to_string(), fn_proto_val);
-        write_attrs_to_legacy_map(&mut function_map, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut function_map, "length", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut function_map, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut function_map, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut function_map, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut function_map, "prototype", PropAttrs::empty());
         function_map.insert("__origin_global".to_string(), Value::Object(self.global_this));
         let function_val = Value::Object(new_gc_cell_ptr(ctx, function_map));
         if let Value::Object(function_obj) = &function_val {
@@ -20423,7 +20287,7 @@ impl<'gc> VM<'gc> {
             .borrow_mut(ctx)
             .insert("@@sym:2".to_string(), Value::NativeFunction(BUILTIN_FN_HASINSTANCE));
         mark_nonenumerable(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2");
-        write_attrs_to_legacy_map(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2", PropAttrs::empty());
+        write_attrs_to_map(&mut fn_proto_obj.borrow_mut(ctx), "@@sym:2", PropAttrs::empty());
         self.globals.insert("Function".to_string(), function_val.clone());
         self.global_this.borrow_mut(ctx).insert("Function".to_string(), function_val);
         mark_nonenumerable(&mut self.global_this.borrow_mut(ctx), "Function");
@@ -20499,7 +20363,7 @@ impl<'gc> VM<'gc> {
             }
         }
         if let Some(Value::Object(obj_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&obj_ctor.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&obj_ctor.borrow(), "prototype")
         {
             self.global_this.borrow_mut(ctx).insert("__proto__".to_string(), obj_proto);
         }
@@ -20509,8 +20373,8 @@ impl<'gc> VM<'gc> {
         async_fn_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
         async_fn_ctor.insert("length".to_string(), Value::Number(1.0));
         async_fn_ctor.insert("name".to_string(), Value::from("AsyncFunction"));
-        write_attrs_to_legacy_map(&mut async_fn_ctor, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut async_fn_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_fn_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_fn_ctor, "length", PropAttrs::CONFIGURABLE);
         async_fn_ctor.insert("__async_function_constructor__".to_string(), Value::Boolean(true));
         if let Some(function_ctor) = self.globals.get("Function").cloned() {
             async_fn_ctor.insert("__proto__".to_string(), function_ctor);
@@ -20520,9 +20384,9 @@ impl<'gc> VM<'gc> {
         async_fn_proto.insert("constructor".to_string(), Value::Undefined);
         mark_nonenumerable(&mut async_fn_proto, "constructor");
         async_fn_proto.insert("@@sym:4".to_string(), Value::from("AsyncFunction"));
-        write_attrs_to_legacy_map(&mut async_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         if let Some(Value::Object(function_ctor_obj)) = self.globals.get("Function")
-            && let Some(fn_proto) = own_data_from_legacy_map(&function_ctor_obj.borrow(), "prototype")
+            && let Some(fn_proto) = own_data_from_map(&function_ctor_obj.borrow(), "prototype")
         {
             async_fn_proto.insert("__proto__".to_string(), fn_proto);
         }
@@ -20532,7 +20396,7 @@ impl<'gc> VM<'gc> {
         if let Value::Object(ctor_obj) = &async_fn_ctor_val {
             let mut b = ctor_obj.borrow_mut(ctx);
             b.insert("prototype".to_string(), async_fn_proto_val.clone());
-            write_attrs_to_legacy_map(&mut b, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut b, "prototype", PropAttrs::empty());
         }
         if let Value::Object(proto_obj) = &async_fn_proto_val {
             proto_obj
@@ -20579,7 +20443,7 @@ impl<'gc> VM<'gc> {
         );
         mark_nonenumerable(&mut async_iterator_proto, "@@sym:13");
         if let Some(Value::Object(object_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&object_ctor.borrow(), "prototype")
         {
             async_iterator_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -20593,8 +20457,8 @@ impl<'gc> VM<'gc> {
             m.insert("__native_id__".to_string(), Value::Number(id as f64));
             m.insert("name".to_string(), Value::from(name));
             m.insert("length".to_string(), Value::Number(length));
-            write_attrs_to_legacy_map(&mut m, "name", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut m, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut m, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut m, "length", PropAttrs::CONFIGURABLE);
             m.insert("__non_constructor__".to_string(), Value::Boolean(true));
             Value::Object(new_gc_cell_ptr(ctx, m))
         };
@@ -20610,27 +20474,27 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut async_gen_proto, "return");
         async_gen_proto.insert(async_to_string_tag_key.clone(), Value::from("AsyncGenerator"));
         async_gen_proto.insert("Symbol(Symbol.toStringTag)".to_string(), Value::from("AsyncGenerator"));
-        write_attrs_to_legacy_map(&mut async_gen_proto, &async_to_string_tag_key, PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut async_gen_proto, "Symbol(Symbol.toStringTag)", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_gen_proto, &async_to_string_tag_key, PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_gen_proto, "Symbol(Symbol.toStringTag)", PropAttrs::CONFIGURABLE);
         let async_gen_proto_val = Value::Object(new_gc_cell_ptr(ctx, async_gen_proto));
         self.async_generator_prototype = async_gen_proto_val.clone();
 
         let mut async_gen_fn_proto = IndexMap::new();
         async_gen_fn_proto.insert("prototype".to_string(), async_gen_proto_val.clone());
-        write_attrs_to_legacy_map(&mut async_gen_fn_proto, "prototype", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_gen_fn_proto, "prototype", PropAttrs::CONFIGURABLE);
         async_gen_fn_proto.insert("@@sym:4".to_string(), Value::from("AsyncGeneratorFunction"));
-        write_attrs_to_legacy_map(&mut async_gen_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_gen_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
 
         let mut async_gen_ctor = IndexMap::new();
         async_gen_ctor.insert("__native_id__".to_string(), Value::Number(BUILTIN_CTOR_FUNCTION as f64));
         async_gen_ctor.insert("length".to_string(), Value::Number(1.0));
         async_gen_ctor.insert("name".to_string(), Value::from("AsyncGeneratorFunction"));
-        write_attrs_to_legacy_map(&mut async_gen_ctor, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut async_gen_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_gen_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut async_gen_ctor, "length", PropAttrs::CONFIGURABLE);
         async_gen_ctor.insert("__async_generator_function_constructor__".to_string(), Value::Boolean(true));
 
         if let Some(Value::Object(function_ctor)) = self.globals.get("Function")
-            && let Some(function_proto) = own_data_from_legacy_map(&function_ctor.borrow(), "prototype")
+            && let Some(function_proto) = own_data_from_map(&function_ctor.borrow(), "prototype")
         {
             async_gen_ctor.insert("__proto__".to_string(), function_proto);
         }
@@ -20640,23 +20504,23 @@ impl<'gc> VM<'gc> {
         if let Value::Object(ctor_obj) = &async_gen_ctor_val {
             let mut ctor_obj = ctor_obj.borrow_mut(ctx);
             ctor_obj.insert("prototype".to_string(), async_gen_fn_proto_val.clone());
-            write_attrs_to_legacy_map(&mut ctor_obj, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor_obj, "prototype", PropAttrs::empty());
         }
         if let Value::Object(proto_obj) = &async_gen_fn_proto_val {
             let mut pb = proto_obj.borrow_mut(ctx);
             pb.insert("constructor".to_string(), async_gen_ctor_val.clone());
-            write_attrs_to_legacy_map(&mut pb, "constructor", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut pb, "constructor", PropAttrs::CONFIGURABLE);
         }
         if let (Value::Object(async_gen_proto_obj), Value::Object(async_gen_fn_proto_obj)) = (&async_gen_proto_val, &async_gen_fn_proto_val)
         {
             let mut agb = async_gen_proto_obj.borrow_mut(ctx);
             agb.insert("constructor".to_string(), async_gen_fn_proto_val.clone());
-            write_attrs_to_legacy_map(&mut agb, "constructor", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut agb, "constructor", PropAttrs::CONFIGURABLE);
 
             agb.insert("__proto__".to_string(), async_iterator_proto_val.clone());
 
             if let Some(Value::Object(function_ctor_obj)) = self.globals.get("Function")
-                && let Some(fn_proto) = own_data_from_legacy_map(&function_ctor_obj.borrow(), "prototype")
+                && let Some(fn_proto) = own_data_from_map(&function_ctor_obj.borrow(), "prototype")
             {
                 async_gen_fn_proto_obj.borrow_mut(ctx).insert("__proto__".to_string(), fn_proto);
             }
@@ -20675,7 +20539,7 @@ impl<'gc> VM<'gc> {
             .globals
             .get("Function")
             .and_then(|v| match v {
-                Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+                Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
                 _ => None,
             })
             .unwrap_or(Value::Undefined);
@@ -20692,7 +20556,7 @@ impl<'gc> VM<'gc> {
             .globals
             .get("Object")
             .and_then(|v| match v {
-                Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+                Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
                 _ => None,
             })
             .unwrap_or(Value::Null);
@@ -20700,7 +20564,7 @@ impl<'gc> VM<'gc> {
             .globals
             .get("Function")
             .and_then(|v| match v {
-                Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
+                Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
                 _ => None,
             })
             .unwrap_or(Value::Null);
@@ -20740,9 +20604,9 @@ impl<'gc> VM<'gc> {
             ctor.insert("length".to_string(), Value::Number(0.0));
             ctor.insert("prototype".to_string(), abs_mod_src_proto_val);
             ctor.insert("__proto__".to_string(), function_proto.clone());
-            write_attrs_to_legacy_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
-            write_attrs_to_legacy_map(&mut ctor, "prototype", PropAttrs::empty());
+            write_attrs_to_map(&mut ctor, "name", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "length", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut ctor, "prototype", PropAttrs::empty());
         }
         self.globals.insert("AbstractModuleSource".to_string(), abs_mod_src_ctor.clone());
         self.globals
@@ -20757,12 +20621,12 @@ impl<'gc> VM<'gc> {
         // %GeneratorPrototype% — shared prototype for generator iterator objects
         let mut gen_proto = IndexMap::new();
         gen_proto.insert("@@sym:4".to_string(), Value::from("Generator"));
-        write_attrs_to_legacy_map(&mut gen_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut gen_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         // Per spec: %GeneratorPrototype% [[Prototype]] = %IteratorPrototype%
         if let Some(iter_proto) = self.globals.get("__IteratorPrototype__").cloned() {
             gen_proto.insert("__proto__".to_string(), iter_proto);
         } else if let Some(Value::Object(object_ctor)) = self.globals.get("Object")
-            && let Some(obj_proto) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
+            && let Some(obj_proto) = own_data_from_map(&object_ctor.borrow(), "prototype")
         {
             gen_proto.insert("__proto__".to_string(), obj_proto);
         }
@@ -20789,12 +20653,12 @@ impl<'gc> VM<'gc> {
         // GeneratorFunction.prototype.prototype === %GeneratorPrototype%
         let mut gen_fn_proto = IndexMap::new();
         gen_fn_proto.insert("prototype".to_string(), self.generator_prototype.clone());
-        write_attrs_to_legacy_map(&mut gen_fn_proto, "prototype", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut gen_fn_proto, "prototype", PropAttrs::CONFIGURABLE);
         gen_fn_proto.insert("__configurable_prototype__".to_string(), Value::Boolean(true));
         gen_fn_proto.insert("@@sym:4".to_string(), Value::from("GeneratorFunction"));
-        write_attrs_to_legacy_map(&mut gen_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut gen_fn_proto, "@@sym:4", PropAttrs::CONFIGURABLE);
         if let Some(Value::Object(function_ctor)) = self.globals.get("Function")
-            && let Some(fn_proto) = own_data_from_legacy_map(&function_ctor.borrow(), "prototype")
+            && let Some(fn_proto) = own_data_from_map(&function_ctor.borrow(), "prototype")
         {
             gen_fn_proto.insert("__proto__".to_string(), fn_proto);
         }
@@ -20805,12 +20669,12 @@ impl<'gc> VM<'gc> {
         gen_fn_ctor.insert("length".to_string(), Value::Number(1.0));
         gen_fn_ctor.insert("name".to_string(), Value::from("GeneratorFunction"));
         gen_fn_ctor.insert("prototype".to_string(), gen_fn_proto_val.clone());
-        write_attrs_to_legacy_map(&mut gen_fn_ctor, "name", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut gen_fn_ctor, "length", PropAttrs::CONFIGURABLE);
-        write_attrs_to_legacy_map(&mut gen_fn_ctor, "prototype", PropAttrs::empty());
+        write_attrs_to_map(&mut gen_fn_ctor, "name", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut gen_fn_ctor, "length", PropAttrs::CONFIGURABLE);
+        write_attrs_to_map(&mut gen_fn_ctor, "prototype", PropAttrs::empty());
         gen_fn_ctor.insert("__generator_function_constructor__".to_string(), Value::Boolean(true));
         if let Some(Value::Object(function_ctor)) = self.globals.get("Function")
-            && let Some(fn_proto) = own_data_from_legacy_map(&function_ctor.borrow(), "prototype")
+            && let Some(fn_proto) = own_data_from_map(&function_ctor.borrow(), "prototype")
         {
             gen_fn_ctor.insert("__proto__".to_string(), fn_proto);
         }
@@ -20818,7 +20682,7 @@ impl<'gc> VM<'gc> {
 
         if let Value::Object(proto_obj) = &gen_fn_proto_val {
             proto_obj.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_ctor_val.clone());
-            write_attrs_to_legacy_map(&mut proto_obj.borrow_mut(ctx), "constructor", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut proto_obj.borrow_mut(ctx), "constructor", PropAttrs::CONFIGURABLE);
             proto_obj
                 .borrow_mut(ctx)
                 .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
@@ -20827,7 +20691,7 @@ impl<'gc> VM<'gc> {
         // Set %GeneratorPrototype%.constructor = %GeneratorFunction.prototype%
         if let Value::Object(gp) = &self.generator_prototype {
             gp.borrow_mut(ctx).insert("constructor".to_string(), gen_fn_proto_val.clone());
-            write_attrs_to_legacy_map(&mut gp.borrow_mut(ctx), "constructor", PropAttrs::CONFIGURABLE);
+            write_attrs_to_map(&mut gp.borrow_mut(ctx), "constructor", PropAttrs::CONFIGURABLE);
             gp.borrow_mut(ctx)
                 .insert("__configurable_constructor__".to_string(), Value::Boolean(true));
         }
@@ -21210,7 +21074,7 @@ impl<'gc> VM<'gc> {
                     // forward it to the inner compiled function's fn_props.
                     // This ensures the generator inherits from the right prototype chain.
                     let outer_fn_prototype = if is_dynamic_generator || is_async_dynamic_gen {
-                        own_data_from_legacy_map(&borrow, "prototype")
+                        own_data_from_map(&borrow, "prototype")
                     } else {
                         None
                     };
@@ -22683,7 +22547,7 @@ impl<'gc> VM<'gc> {
     fn initialize_error_data(&mut self, ctx: &GcContext<'gc>, map: &ObjectHandle<'gc>, error_name: &str) {
         let message = {
             let borrow = map.borrow();
-            own_data_from_legacy_map(&borrow, "message")
+            own_data_from_map(&borrow, "message")
                 .as_ref()
                 .map(value_to_string)
                 .unwrap_or_default()
@@ -22775,8 +22639,8 @@ impl<'gc> VM<'gc> {
                 borrow
                     .get("__type__")
                     .map(value_to_string)
-                    .or_else(|| own_data_from_legacy_map(&borrow, "name").as_ref().map(value_to_string)),
-                own_data_from_legacy_map(&borrow, "message")
+                    .or_else(|| own_data_from_map(&borrow, "name").as_ref().map(value_to_string)),
+                own_data_from_map(&borrow, "message")
                     .as_ref()
                     .map(value_to_string)
                     .unwrap_or_default(),
@@ -22854,7 +22718,7 @@ impl<'gc> VM<'gc> {
                 borrow
                     .get("__type__")
                     .map(value_to_string)
-                    .or_else(|| own_data_from_legacy_map(&borrow, "name").as_ref().map(value_to_string))
+                    .or_else(|| own_data_from_map(&borrow, "name").as_ref().map(value_to_string))
             };
 
             let inferred_type = if explicit_type.is_none() {
@@ -22882,10 +22746,10 @@ impl<'gc> VM<'gc> {
             let type_name = borrow
                 .get("__type__")
                 .map(value_to_string)
-                .or_else(|| own_data_from_legacy_map(&borrow, "name").as_ref().map(value_to_string))
+                .or_else(|| own_data_from_map(&borrow, "name").as_ref().map(value_to_string))
                 .or(inferred_type)
                 .unwrap_or_else(|| "Error".to_string());
-            let message = own_data_from_legacy_map(&borrow, "message")
+            let message = own_data_from_map(&borrow, "message")
                 .as_ref()
                 .map(value_to_string)
                 .unwrap_or_else(|| value_to_string(thrown));
@@ -24227,7 +24091,7 @@ impl<'gc> VM<'gc> {
                 let mut map = IndexMap::new();
                 map.insert("__type__".to_string(), Value::from("Promise"));
                 if let Some(Value::Object(promise_ctor)) = self.globals.get("Promise")
-                    && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
+                    && let Some(proto) = own_data_from_map(&promise_ctor.borrow(), "prototype")
                 {
                     map.insert("__proto__".to_string(), proto);
                 }
@@ -24258,7 +24122,7 @@ impl<'gc> VM<'gc> {
                     },
                 );
                 let mut set_obj = IndexMap::new();
-                set_setter(&mut set_obj, "data__", Value::Set(set_handle));
+                set_obj.insert("__set_data__".to_string(), Value::Set(set_handle));
                 set_obj.insert("__type__".to_string(), Value::from("Set"));
                 if let Some(proto_value) = proto.clone() {
                     set_obj.insert("__proto__".to_string(), proto_value);
@@ -24535,7 +24399,7 @@ impl<'gc> VM<'gc> {
                     },
                 );
                 let mut set_obj = IndexMap::new();
-                set_setter(&mut set_obj, "data__", Value::Set(set_handle));
+                set_obj.insert("__set_data__".to_string(), Value::Set(set_handle));
                 set_obj.insert("__type__".to_string(), Value::from("WeakSet"));
                 if let Some(proto_value) = proto {
                     set_obj.insert("__proto__".to_string(), proto_value);
@@ -24644,7 +24508,7 @@ impl<'gc> VM<'gc> {
                     );
                 }
                 if let Some(Value::Object(promise_ctor)) = self.globals.get("Promise")
-                    && let Some(proto) = own_data_from_legacy_map(&promise_ctor.borrow(), "prototype")
+                    && let Some(proto) = own_data_from_map(&promise_ctor.borrow(), "prototype")
                 {
                     map.insert("__proto__".to_string(), proto);
                 }
@@ -26361,261 +26225,42 @@ impl<'gc> VM<'gc> {
                 println!("{}", msg);
                 Value::Undefined
             }
-            BUILTIN_MATH_FLOOR => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.floor())
-            }
-            BUILTIN_MATH_CEIL => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.ceil())
-            }
-            BUILTIN_MATH_ROUND => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                if n.is_nan() || n.is_infinite() || n == 0.0 {
-                    Value::Number(n)
-                } else if n > 0.0 && n < 0.5 {
-                    Value::Number(0.0)
-                } else if (-0.5..0.0).contains(&n) {
-                    Value::Number(-0.0)
-                } else {
-                    let frac = n - n.trunc();
-                    if frac == 0.0 {
-                        Value::Number(n)
-                    } else {
-                        Value::Number((n + 0.5).floor())
-                    }
-                }
-            }
-            BUILTIN_MATH_ABS => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.abs())
-            }
-            BUILTIN_MATH_SQRT => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.sqrt())
-            }
-            BUILTIN_MATH_MAX => {
-                // ToNumber coercion for all args first (left-to-right order)
-                let mut nums = Vec::with_capacity(args.len());
-                for a in args {
-                    let n = match a {
-                        Value::Number(n) => *n,
-                        _ => match self.extract_number_with_coercion(ctx, a) {
-                            Some(n) => n,
-                            None => return Value::Undefined,
-                        },
-                    };
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    nums.push(n);
-                }
-                let mut result = f64::NEG_INFINITY;
-                for n in nums {
-                    if n.is_nan() {
-                        return Value::Number(f64::NAN);
-                    }
-                    if n > result || (n == 0.0 && result == 0.0 && result.is_sign_negative() && !n.is_sign_negative()) {
-                        result = n;
-                    }
-                }
-                Value::Number(result)
-            }
-            BUILTIN_MATH_MIN => {
-                let mut nums = Vec::with_capacity(args.len());
-                for a in args {
-                    let n = match a {
-                        Value::Number(n) => *n,
-                        _ => match self.extract_number_with_coercion(ctx, a) {
-                            Some(n) => n,
-                            None => return Value::Undefined,
-                        },
-                    };
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    nums.push(n);
-                }
-                let mut result = f64::INFINITY;
-                for n in nums {
-                    if n.is_nan() {
-                        return Value::Number(f64::NAN);
-                    }
-                    if n < result || (n == 0.0 && result == 0.0 && !result.is_sign_negative() && n.is_sign_negative()) {
-                        result = n;
-                    }
-                }
-                Value::Number(result)
-            }
-            BUILTIN_MATH_SIN => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.sin())
-            }
-            BUILTIN_MATH_COS => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.cos())
-            }
-            BUILTIN_MATH_TAN => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.tan())
-            }
-            BUILTIN_MATH_ASIN => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.asin())
-            }
-            BUILTIN_MATH_ACOS => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.acos())
-            }
-            BUILTIN_MATH_ATAN => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.atan())
-            }
-            BUILTIN_MATH_ATAN2 => {
-                let y = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                let x = args.get(1).map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(y.atan2(x))
-            }
-            BUILTIN_MATH_SINH => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.sinh())
-            }
-            BUILTIN_MATH_COSH => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.cosh())
-            }
-            BUILTIN_MATH_TANH => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.tanh())
-            }
-            BUILTIN_MATH_ASINH => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.asinh())
-            }
-            BUILTIN_MATH_ACOSH => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.acosh())
-            }
-            BUILTIN_MATH_ATANH => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.atanh())
-            }
-            BUILTIN_MATH_EXP => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.exp())
-            }
-            BUILTIN_MATH_EXPM1 => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.exp_m1())
-            }
-            BUILTIN_MATH_LOG => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.ln())
-            }
-            BUILTIN_MATH_LOG10 => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.log10())
-            }
-            BUILTIN_MATH_LOG1P => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.ln_1p())
-            }
-            BUILTIN_MATH_LOG2 => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.log2())
-            }
-            BUILTIN_MATH_FROUND => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number((n as f32) as f64)
-            }
-            BUILTIN_MATH_F16ROUND => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(f16round(n))
-            }
-            BUILTIN_MATH_TRUNC => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.trunc())
-            }
-            BUILTIN_MATH_CBRT => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                Value::Number(n.cbrt())
-            }
-            BUILTIN_MATH_HYPOT => {
-                if args.is_empty() {
-                    return Value::Number(0.0); // +0
-                }
-                // Spec: First coerce all arguments to numbers (left-to-right), then compute
-                let mut coerced_nums = Vec::new();
-                for a in args {
-                    match self.extract_number_with_coercion(ctx, a) {
-                        Some(n) => coerced_nums.push(n),
-                        None => return Value::Undefined, // TypeError propagated
-                    }
-                }
-                // If any argument is ±Infinity, return +Infinity (even if others are NaN)
-                if coerced_nums.iter().any(|n| n.is_infinite()) {
-                    return Value::Number(f64::INFINITY);
-                }
-                if coerced_nums.iter().any(|n| n.is_nan()) {
-                    return Value::Number(f64::NAN);
-                }
-                let sum: f64 = coerced_nums.iter().map(|n| n * n).sum();
-                Value::Number(sum.sqrt())
-            }
-            BUILTIN_MATH_SIGN => {
-                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
-                if n.is_nan() {
-                    Value::Number(f64::NAN)
-                } else if n == 0.0 {
-                    Value::Number(n) // preserves -0
-                } else if n > 0.0 {
-                    Value::Number(1.0)
-                } else {
-                    Value::Number(-1.0)
-                }
-            }
-            BUILTIN_MATH_POW => {
-                let base = if let Some(Value::Number(n)) = args.first() { *n } else { f64::NAN };
-                let exp = if let Some(Value::Number(n)) = args.get(1) { *n } else { f64::NAN };
-                // Spec special cases
-                #[allow(clippy::if_same_then_else)]
-                if exp.is_nan() {
-                    Value::Number(f64::NAN)
-                } else if exp == 0.0 {
-                    Value::Number(1.0)
-                } else if base.is_nan() {
-                    Value::Number(f64::NAN)
-                } else if base.abs() == 1.0 && exp.is_infinite() {
-                    Value::Number(f64::NAN)
-                } else {
-                    Value::Number(base.powf(exp))
-                }
-            }
-            BUILTIN_MATH_RANDOM => {
-                // Simple pseudo-random using system time
-                use std::time::SystemTime;
-                let seed = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                // Simple hash and keep 53 random bits to map into [0, 1)
-                let mixed = seed ^ (seed >> 17) ^ (seed << 13);
-                let bits53 = mixed & ((1u64 << 53) - 1);
-                let v = (bits53 as f64) / ((1u64 << 53) as f64);
-                Value::Number(v)
-            }
-            BUILTIN_MATH_CLZ32 => {
-                if let Some(Value::Number(n)) = args.first() {
-                    Value::Number(to_uint32(*n).leading_zeros() as f64)
-                } else {
-                    Value::Number(32.0)
-                }
-            }
-            BUILTIN_MATH_IMUL => {
-                let a = args.first().map(|v| to_int32(to_number(v))).unwrap_or(0);
-                let b = args.get(1).map(|v| to_int32(to_number(v))).unwrap_or(0);
-                Value::Number((a.wrapping_mul(b)) as f64)
-            }
+            BUILTIN_MATH_FLOOR
+            | BUILTIN_MATH_CEIL
+            | BUILTIN_MATH_ROUND
+            | BUILTIN_MATH_ABS
+            | BUILTIN_MATH_SQRT
+            | BUILTIN_MATH_MAX
+            | BUILTIN_MATH_MIN
+            | BUILTIN_MATH_SIN
+            | BUILTIN_MATH_COS
+            | BUILTIN_MATH_TAN
+            | BUILTIN_MATH_ASIN
+            | BUILTIN_MATH_ACOS
+            | BUILTIN_MATH_ATAN
+            | BUILTIN_MATH_ATAN2
+            | BUILTIN_MATH_SINH
+            | BUILTIN_MATH_COSH
+            | BUILTIN_MATH_TANH
+            | BUILTIN_MATH_ASINH
+            | BUILTIN_MATH_ACOSH
+            | BUILTIN_MATH_ATANH
+            | BUILTIN_MATH_EXP
+            | BUILTIN_MATH_EXPM1
+            | BUILTIN_MATH_LOG
+            | BUILTIN_MATH_LOG10
+            | BUILTIN_MATH_LOG1P
+            | BUILTIN_MATH_LOG2
+            | BUILTIN_MATH_FROUND
+            | BUILTIN_MATH_F16ROUND
+            | BUILTIN_MATH_TRUNC
+            | BUILTIN_MATH_CBRT
+            | BUILTIN_MATH_HYPOT
+            | BUILTIN_MATH_SIGN
+            | BUILTIN_MATH_POW
+            | BUILTIN_MATH_RANDOM
+            | BUILTIN_MATH_CLZ32
+            | BUILTIN_MATH_IMUL => self.call_math_builtin(ctx, id, args),
             BUILTIN_ISNAN => {
                 let arg = args.first().cloned().unwrap_or(Value::Undefined);
                 match self.extract_number_with_coercion(ctx, &arg) {
@@ -27845,8 +27490,8 @@ impl<'gc> VM<'gc> {
                             .collect();
                         let mut gt_borrow = gt.borrow_mut(ctx);
                         for (k, v) in public_globals {
-                            if let Some(existing_desc) = desc_from_legacy_map(&gt_borrow, &k) {
-                                PropDesc::data(v, existing_desc.attrs).write_to_legacy_map(&mut gt_borrow, &k);
+                            if let Some(existing_desc) = desc_from_map(&gt_borrow, &k) {
+                                PropDesc::data(v, existing_desc.attrs).write_to_map(&mut gt_borrow, &k);
                             } else {
                                 gt_borrow.insert(k, v);
                             }
@@ -28096,8 +27741,8 @@ impl<'gc> VM<'gc> {
                             let in_fn_scope = self.direct_eval && !self.frames.is_empty();
                             if !in_fn_scope {
                                 let mut gt = self.global_this.borrow_mut(ctx);
-                                if let Some(existing_desc) = desc_from_legacy_map(&gt, k) {
-                                    PropDesc::data(adjusted, existing_desc.attrs).write_to_legacy_map(&mut gt, k);
+                                if let Some(existing_desc) = desc_from_map(&gt, k) {
+                                    PropDesc::data(adjusted, existing_desc.attrs).write_to_map(&mut gt, k);
                                 } else {
                                     gt.insert(k.clone(), adjusted);
                                 }
@@ -28277,8 +27922,8 @@ impl<'gc> VM<'gc> {
                 map.insert("__fn_params__".to_string(), Value::from(&params_src));
                 map.insert("length".to_string(), Value::Number(param_count as f64));
                 map.insert("name".to_string(), Value::from("anonymous"));
-                write_attrs_to_legacy_map(&mut map, "length", PropAttrs::CONFIGURABLE);
-                write_attrs_to_legacy_map(&mut map, "name", PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut map, "length", PropAttrs::CONFIGURABLE);
+                write_attrs_to_map(&mut map, "name", PropAttrs::CONFIGURABLE);
                 map.insert("__type__".to_string(), Value::from("Function"));
                 if let Some(origin_global) = dynamic_origin_global.clone() {
                     // Also propagate __realm_id__ from the origin global
@@ -28342,7 +27987,7 @@ impl<'gc> VM<'gc> {
                         .unwrap_or_else(|| self.generator_prototype.clone());
                     fn_proto.insert("__proto__".to_string(), ctor_gen_proto);
                     map.insert("prototype".to_string(), Value::Object(new_gc_cell_ptr(ctx, fn_proto)));
-                    write_attrs_to_legacy_map(&mut map, "prototype", PropAttrs::WRITABLE);
+                    write_attrs_to_map(&mut map, "prototype", PropAttrs::WRITABLE);
                 }
 
                 let function_obj = new_gc_cell_ptr(ctx, map);
@@ -28659,7 +28304,7 @@ impl<'gc> VM<'gc> {
                     .collect();
                 let out = new_gc_cell_ptr(ctx, VmArrayData::new(keys));
                 if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
-                    && let Some(proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
+                    && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                 {
                     out.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                 }
@@ -28738,7 +28383,7 @@ impl<'gc> VM<'gc> {
                 }
                 let out = new_gc_cell_ptr(ctx, VmArrayData::new(vals));
                 if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
-                    && let Some(proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
+                    && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                 {
                     out.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                 }
@@ -28798,7 +28443,7 @@ impl<'gc> VM<'gc> {
                             }
                             let pair = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::from(&key), value]));
                             if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
-                                && let Some(proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
+                                && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                             {
                                 pair.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                             }
@@ -28834,7 +28479,7 @@ impl<'gc> VM<'gc> {
                         }
                         let pair = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::from(&key), value]));
                         if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
-                            && let Some(proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
+                            && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                         {
                             pair.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                         }
@@ -28844,7 +28489,7 @@ impl<'gc> VM<'gc> {
 
                 let out = new_gc_cell_ptr(ctx, VmArrayData::new(entries));
                 if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
-                    && let Some(proto) = own_data_from_legacy_map(&array_ctor.borrow(), "prototype")
+                    && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                 {
                     out.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                 }
@@ -29054,26 +28699,7 @@ impl<'gc> VM<'gc> {
                                     self.proxy_own_keys_for_assign(ctx, src)
                                 } else {
                                     let b = src_map.borrow();
-                                    let mut keys: Vec<String> = b
-                                        .keys()
-                                        .filter(|k| !k.starts_with("__"))
-                                        .filter(|k| !has_nonenumerable_mark(&b, k))
-                                        .cloned()
-                                        .collect();
-                                    for k in b.keys() {
-                                        let accessor_key = if let Some(rest) = k.strip_prefix(GETTER_PREFIX) {
-                                            Some(rest.to_string())
-                                        } else {
-                                            k.strip_prefix(SETTER_PREFIX).map(|rest| rest.to_string())
-                                        };
-                                        if let Some(ak) = accessor_key
-                                            && !keys.contains(&ak)
-                                            && !has_nonenumerable_mark(&b, &ak)
-                                        {
-                                            keys.push(ak);
-                                        }
-                                    }
-                                    keys
+                                    self.collect_object_map_keys(&b, true)
                                 };
                                 for k in keys {
                                     let v = self.read_named_property(ctx, src, &k);
@@ -30259,7 +29885,7 @@ impl<'gc> VM<'gc> {
                         if borrow.contains_key("__module_namespace__") {
                             if Self::namespace_is_symbol_like_key(obj, &key) {
                                 // Symbol properties use ordinary [[GetOwnProperty]]
-                                if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
+                                if let Some(desc) = desc_from_map(&borrow, &key) {
                                     return self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id);
                                 }
                                 return Value::Undefined;
@@ -30303,23 +29929,22 @@ impl<'gc> VM<'gc> {
                                         attrs: *attrs,
                                     },
                                     other => {
-                                        let a = attrs_from_legacy_map(&borrow, &key);
+                                        let a = attrs_from_map(&borrow, &key);
                                         PropDesc::data(other.clone(), a)
                                     }
                                 };
                                 return self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id);
                             }
-                            // Fall back to accessor lookup only (Value::Property or __get_/__set_).
                             // Plain data at "__proto__" is the internal [[Prototype]] slot,
                             // NOT an own property.
-                            if let Some(desc) = desc_from_legacy_map(&borrow, "__proto__")
+                            if let Some(desc) = desc_from_map(&borrow, "__proto__")
                                 && matches!(desc.kind, PropKind::Accessor { .. })
                             {
                                 return self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id);
                             }
                             return Value::Undefined;
                         }
-                        if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
+                        if let Some(desc) = desc_from_map(&borrow, &key) {
                             self.make_descriptor_object_from_desc_for_realm(ctx, &desc, realm_id)
                         } else {
                             Value::Undefined
@@ -30329,7 +29954,7 @@ impl<'gc> VM<'gc> {
                         let borrow = arr.borrow();
                         let is_ta = borrow.props.contains_key("__typedarray_name__");
                         if key == "length" {
-                            if let Some(desc) = desc_from_legacy_map(&borrow.props, "length") {
+                            if let Some(desc) = desc_from_map(&borrow.props, "length") {
                                 return self.make_descriptor_object_from_desc(ctx, &desc);
                             }
                             let len = if let Some(Value::Number(n)) = borrow.props.get("__array_length__") {
@@ -30355,7 +29980,7 @@ impl<'gc> VM<'gc> {
                                     }
                                 } else {
                                     // Not a canonical numeric index — treat as ordinary property
-                                    if let Some(desc) = desc_from_legacy_map(&borrow.props, &key) {
+                                    if let Some(desc) = desc_from_map(&borrow.props, &key) {
                                         self.make_descriptor_object_from_desc(ctx, &desc)
                                     } else {
                                         Value::Undefined
@@ -30365,9 +29990,9 @@ impl<'gc> VM<'gc> {
                                 && idx < borrow.elements.len()
                                 && !borrow.props.contains_key(&format!("__deleted_{}", idx))
                             {
-                                let a = attrs_from_legacy_map(&borrow.props, &key);
+                                let a = attrs_from_map(&borrow.props, &key);
                                 self.make_descriptor_object_from_desc(ctx, &PropDesc::data(borrow.elements[idx].clone(), a))
-                            } else if let Some(desc) = desc_from_legacy_map(&borrow.props, &key) {
+                            } else if let Some(desc) = desc_from_map(&borrow.props, &key) {
                                 self.make_descriptor_object_from_desc(ctx, &desc)
                             } else {
                                 Value::Undefined
@@ -30378,7 +30003,7 @@ impl<'gc> VM<'gc> {
                         let Some(fn_props) = self.merged_fn_props_for_value(ctx, val) else {
                             return Value::Undefined;
                         };
-                        if let Some(desc) = desc_from_legacy_map(&fn_props, &key) {
+                        if let Some(desc) = desc_from_map(&fn_props, &key) {
                             self.make_descriptor_object_from_desc(ctx, &desc)
                         } else {
                             Value::Undefined
@@ -30387,7 +30012,7 @@ impl<'gc> VM<'gc> {
                     Some(Value::NativeFunction(id)) => {
                         let props = self.get_native_fn_props(ctx, *id);
                         let borrow = props.borrow();
-                        if let Some(desc) = desc_from_legacy_map(&borrow, &key) {
+                        if let Some(desc) = desc_from_map(&borrow, &key) {
                             self.make_descriptor_object_from_desc(ctx, &desc)
                         } else {
                             Value::Undefined
@@ -30881,7 +30506,7 @@ impl<'gc> VM<'gc> {
                             obj.insert("__type__".to_string(), Value::from("Number"));
                             obj.insert("__value__".to_string(), arg.clone());
                             if let Some(Value::Object(ctor)) = self.globals.get("Number")
-                                && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+                                && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
                             {
                                 obj.insert("__proto__".to_string(), proto);
                             }
@@ -30892,7 +30517,7 @@ impl<'gc> VM<'gc> {
                             obj.insert("__type__".to_string(), Value::from("String"));
                             obj.insert("__value__".to_string(), arg.clone());
                             if let Some(Value::Object(ctor)) = self.globals.get("String")
-                                && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+                                && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
                             {
                                 obj.insert("__proto__".to_string(), proto);
                             }
@@ -30903,7 +30528,7 @@ impl<'gc> VM<'gc> {
                             obj.insert("__type__".to_string(), Value::from("Boolean"));
                             obj.insert("__value__".to_string(), arg.clone());
                             if let Some(Value::Object(ctor)) = self.globals.get("Boolean")
-                                && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+                                && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
                             {
                                 obj.insert("__proto__".to_string(), proto);
                             }
@@ -30914,7 +30539,7 @@ impl<'gc> VM<'gc> {
                             obj.insert("__type__".to_string(), Value::from("BigInt"));
                             obj.insert("__value__".to_string(), Value::BigInt(bi.clone()));
                             if let Some(Value::Object(ctor)) = self.globals.get("BigInt")
-                                && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+                                && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
                             {
                                 obj.insert("__proto__".to_string(), proto);
                             }
@@ -30933,7 +30558,7 @@ impl<'gc> VM<'gc> {
                                 wrapper.insert("__type__".to_string(), Value::from("Symbol"));
                                 wrapper.insert("__value__".to_string(), arg.clone());
                                 if let Some(Value::Object(ctor)) = self.globals.get("Symbol")
-                                    && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+                                    && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
                                 {
                                     wrapper.insert("__proto__".to_string(), proto);
                                 }
@@ -30947,7 +30572,7 @@ impl<'gc> VM<'gc> {
                 }
                 let mut obj = IndexMap::new();
                 if let Some(Value::Object(obj_global)) = self.globals.get("Object")
-                    && let Some(proto) = own_data_from_legacy_map(&obj_global.borrow(), "prototype")
+                    && let Some(proto) = own_data_from_map(&obj_global.borrow(), "prototype")
                 {
                     obj.insert("__proto__".to_string(), proto);
                 }
@@ -31385,25 +31010,279 @@ impl<'gc> VM<'gc> {
     }
 
     /// Execute a method call (receiver.method(args))
-    fn call_method_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+    fn call_math_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, args: &[Value<'gc>]) -> Value<'gc> {
+        match id {
+            BUILTIN_MATH_FLOOR => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.floor())
+            }
+            BUILTIN_MATH_CEIL => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.ceil())
+            }
+            BUILTIN_MATH_ROUND => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                if n.is_nan() || n.is_infinite() || n == 0.0 {
+                    Value::Number(n)
+                } else if n > 0.0 && n < 0.5 {
+                    Value::Number(0.0)
+                } else if (-0.5..0.0).contains(&n) {
+                    Value::Number(-0.0)
+                } else {
+                    let frac = n - n.trunc();
+                    if frac == 0.0 {
+                        Value::Number(n)
+                    } else {
+                        Value::Number((n + 0.5).floor())
+                    }
+                }
+            }
+            BUILTIN_MATH_ABS => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.abs())
+            }
+            BUILTIN_MATH_SQRT => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.sqrt())
+            }
+            BUILTIN_MATH_MAX => {
+                // ToNumber coercion for all args first (left-to-right order)
+                let mut nums = Vec::with_capacity(args.len());
+                for a in args {
+                    let n = match a {
+                        Value::Number(n) => *n,
+                        _ => match self.extract_number_with_coercion(ctx, a) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    nums.push(n);
+                }
+                let mut result = f64::NEG_INFINITY;
+                for n in nums {
+                    if n.is_nan() {
+                        return Value::Number(f64::NAN);
+                    }
+                    if n > result || (n == 0.0 && result == 0.0 && result.is_sign_negative() && !n.is_sign_negative()) {
+                        result = n;
+                    }
+                }
+                Value::Number(result)
+            }
+            BUILTIN_MATH_MIN => {
+                let mut nums = Vec::with_capacity(args.len());
+                for a in args {
+                    let n = match a {
+                        Value::Number(n) => *n,
+                        _ => match self.extract_number_with_coercion(ctx, a) {
+                            Some(n) => n,
+                            None => return Value::Undefined,
+                        },
+                    };
+                    if self.pending_throw.is_some() {
+                        return Value::Undefined;
+                    }
+                    nums.push(n);
+                }
+                let mut result = f64::INFINITY;
+                for n in nums {
+                    if n.is_nan() {
+                        return Value::Number(f64::NAN);
+                    }
+                    if n < result || (n == 0.0 && result == 0.0 && !result.is_sign_negative() && n.is_sign_negative()) {
+                        result = n;
+                    }
+                }
+                Value::Number(result)
+            }
+            BUILTIN_MATH_SIN => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.sin())
+            }
+            BUILTIN_MATH_COS => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.cos())
+            }
+            BUILTIN_MATH_TAN => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.tan())
+            }
+            BUILTIN_MATH_ASIN => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.asin())
+            }
+            BUILTIN_MATH_ACOS => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.acos())
+            }
+            BUILTIN_MATH_ATAN => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.atan())
+            }
+            BUILTIN_MATH_ATAN2 => {
+                let y = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                let x = args.get(1).map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(y.atan2(x))
+            }
+            BUILTIN_MATH_SINH => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.sinh())
+            }
+            BUILTIN_MATH_COSH => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.cosh())
+            }
+            BUILTIN_MATH_TANH => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.tanh())
+            }
+            BUILTIN_MATH_ASINH => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.asinh())
+            }
+            BUILTIN_MATH_ACOSH => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.acosh())
+            }
+            BUILTIN_MATH_ATANH => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.atanh())
+            }
+            BUILTIN_MATH_EXP => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.exp())
+            }
+            BUILTIN_MATH_EXPM1 => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.exp_m1())
+            }
+            BUILTIN_MATH_LOG => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.ln())
+            }
+            BUILTIN_MATH_LOG10 => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.log10())
+            }
+            BUILTIN_MATH_LOG1P => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.ln_1p())
+            }
+            BUILTIN_MATH_LOG2 => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.log2())
+            }
+            BUILTIN_MATH_FROUND => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number((n as f32) as f64)
+            }
+            BUILTIN_MATH_F16ROUND => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(f16round(n))
+            }
+            BUILTIN_MATH_TRUNC => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.trunc())
+            }
+            BUILTIN_MATH_CBRT => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                Value::Number(n.cbrt())
+            }
+            BUILTIN_MATH_HYPOT => {
+                if args.is_empty() {
+                    return Value::Number(0.0); // +0
+                }
+                // Spec: First coerce all arguments to numbers (left-to-right), then compute
+                let mut coerced_nums = Vec::new();
+                for a in args {
+                    match self.extract_number_with_coercion(ctx, a) {
+                        Some(n) => coerced_nums.push(n),
+                        None => return Value::Undefined, // TypeError propagated
+                    }
+                }
+                // If any argument is ±Infinity, return +Infinity (even if others are NaN)
+                if coerced_nums.iter().any(|n| n.is_infinite()) {
+                    return Value::Number(f64::INFINITY);
+                }
+                if coerced_nums.iter().any(|n| n.is_nan()) {
+                    return Value::Number(f64::NAN);
+                }
+                let sum: f64 = coerced_nums.iter().map(|n| n * n).sum();
+                Value::Number(sum.sqrt())
+            }
+            BUILTIN_MATH_SIGN => {
+                let n = args.first().map(|v| to_number(v)).unwrap_or(f64::NAN);
+                if n.is_nan() {
+                    Value::Number(f64::NAN)
+                } else if n == 0.0 {
+                    Value::Number(n) // preserves -0
+                } else if n > 0.0 {
+                    Value::Number(1.0)
+                } else {
+                    Value::Number(-1.0)
+                }
+            }
+            BUILTIN_MATH_POW => {
+                let base = if let Some(Value::Number(n)) = args.first() { *n } else { f64::NAN };
+                let exp = if let Some(Value::Number(n)) = args.get(1) { *n } else { f64::NAN };
+                // Spec special cases
+                #[allow(clippy::if_same_then_else)]
+                if exp.is_nan() {
+                    Value::Number(f64::NAN)
+                } else if exp == 0.0 {
+                    Value::Number(1.0)
+                } else if base.is_nan() {
+                    Value::Number(f64::NAN)
+                } else if base.abs() == 1.0 && exp.is_infinite() {
+                    Value::Number(f64::NAN)
+                } else {
+                    Value::Number(base.powf(exp))
+                }
+            }
+            BUILTIN_MATH_RANDOM => {
+                // Simple pseudo-random using system time
+                use std::time::SystemTime;
+                let seed = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                // Simple hash and keep 53 random bits to map into [0, 1)
+                let mixed = seed ^ (seed >> 17) ^ (seed << 13);
+                let bits53 = mixed & ((1u64 << 53) - 1);
+                let v = (bits53 as f64) / ((1u64 << 53) as f64);
+                Value::Number(v)
+            }
+            BUILTIN_MATH_CLZ32 => {
+                if let Some(Value::Number(n)) = args.first() {
+                    Value::Number(to_uint32(*n).leading_zeros() as f64)
+                } else {
+                    Value::Number(32.0)
+                }
+            }
+            BUILTIN_MATH_IMUL => {
+                let a = args.first().map(|v| to_int32(to_number(v))).unwrap_or(0);
+                let b = args.get(1).map(|v| to_int32(to_number(v))).unwrap_or(0);
+                Value::Number((a.wrapping_mul(b)) as f64)
+            }
+            _ => Value::Undefined,
+        }
+    }
+
+    fn call_generic_change_array_by_copy(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        id: FunctionID,
+        receiver: &Value<'gc>,
+        args: &[Value<'gc>],
+    ) -> Value<'gc> {
         // Generic change-array-by-copy: handle non-array this values
         if matches!(
             id,
             BUILTIN_ARRAY_TOREVERSED | BUILTIN_ARRAY_TOSORTED | BUILTIN_ARRAY_TOSPLICED | BUILTIN_ARRAY_WITH
         ) {
-            if matches!(receiver, Value::Null | Value::Undefined) {
-                self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                return Value::Undefined;
-            }
-            // toSorted: check IsCallable(compareFn) BEFORE reading length (spec step 1)
-            if id == BUILTIN_ARRAY_TOSORTED
-                && let Some(ref cmp) = args.first()
-                && !matches!(cmp, Value::Undefined)
-                && !self.is_value_callable(cmp)
-            {
-                self.throw_type_error(ctx, "The comparison function must be either a function or undefined");
-                return Value::Undefined;
-            }
             // For non-array objects: coerce to object, read properties by index
             if !matches!(receiver, Value::Array(_)) {
                 let obj = self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver));
@@ -31602,12 +31481,36 @@ impl<'gc> VM<'gc> {
                 }
             }
         }
+        Value::Undefined
+    }
+
+    fn call_method_builtin(&mut self, ctx: &GcContext<'gc>, id: FunctionID, receiver: &Value<'gc>, args: &[Value<'gc>]) -> Value<'gc> {
+        if matches!(
+            id,
+            BUILTIN_ARRAY_TOREVERSED | BUILTIN_ARRAY_TOSORTED | BUILTIN_ARRAY_TOSPLICED | BUILTIN_ARRAY_WITH
+        ) {
+            if matches!(receiver, Value::Null | Value::Undefined) {
+                self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                return Value::Undefined;
+            }
+            if id == BUILTIN_ARRAY_TOSORTED
+                && let Some(cmp) = args.first()
+                && !matches!(cmp, Value::Undefined)
+                && !self.is_value_callable(cmp)
+            {
+                self.throw_type_error(ctx, "The comparison function must be either a function or undefined");
+                return Value::Undefined;
+            }
+            if !matches!(receiver, Value::Array(_)) {
+                return self.call_generic_change_array_by_copy(ctx, id, receiver, args);
+            }
+        }
         match id {
             BUILTIN_SYMBOL => {
                 self.throw_type_error(ctx, "Symbol is not a constructor");
                 return Value::Undefined;
             }
-            BUILTIN_CTOR_ARRAYBUFFER => {
+            BUILTIN_CTOR_ARRAYBUFFER | BUILTIN_CTOR_PROMISE => {
                 if let Value::Object(recv_obj) = receiver {
                     let out = self.call_builtin(ctx, id, args);
                     if self.pending_throw.is_some() {
@@ -31632,24 +31535,6 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_CTOR_DATAVIEW => {
                 return self.dataview_call_method_builtin(ctx, receiver, args);
-            }
-            BUILTIN_CTOR_PROMISE => {
-                if let Value::Object(recv_obj) = receiver {
-                    let out = self.call_builtin(ctx, id, args);
-                    if self.pending_throw.is_some() {
-                        return Value::Undefined;
-                    }
-                    if let Value::Object(out_obj) = out {
-                        let out_b = out_obj.borrow();
-                        let mut recv_b = recv_obj.borrow_mut(ctx);
-                        for (k, v) in out_b.iter() {
-                            if k != "__proto__" {
-                                recv_b.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
-                    return receiver.clone();
-                }
             }
             BUILTIN_CTOR_FUNCTION => {
                 return self.call_builtin(ctx, id, args);
@@ -31832,9 +31717,8 @@ impl<'gc> VM<'gc> {
                         }
                     }
                     let mut borrow = obj.borrow_mut(ctx);
-                    set_setter(
-                        &mut borrow,
-                        "data__",
+                    borrow.insert(
+                        "__set_data__".to_string(),
                         Value::Set(new_gc_cell_ptr(ctx, VmSetData { values, is_weak: false })),
                     );
                     borrow.insert("__type__".to_string(), Value::from("Set"));
@@ -31861,9 +31745,8 @@ impl<'gc> VM<'gc> {
             BUILTIN_CTOR_WEAKSET => {
                 if let Value::Object(obj) = receiver {
                     let mut borrow = obj.borrow_mut(ctx);
-                    set_setter(
-                        &mut borrow,
-                        "data__",
+                    borrow.insert(
+                        "__set_data__".to_string(),
                         Value::Set(new_gc_cell_ptr(
                             ctx,
                             VmSetData {
@@ -32747,9 +32630,7 @@ impl<'gc> VM<'gc> {
                         let idx_opt = prop_key
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
-                            .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.parse::<usize>().ok());
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -32867,9 +32748,7 @@ impl<'gc> VM<'gc> {
                         let idx_opt = prop_key
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
-                            .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.parse::<usize>().ok());
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -33156,9 +33035,7 @@ impl<'gc> VM<'gc> {
                         let idx_opt = prop_key
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<u64>().ok())
-                            .or_else(|| prop_key.parse::<u64>().ok())
-                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<u64>().ok()))
-                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<u64>().ok()));
+                            .or_else(|| prop_key.parse::<u64>().ok());
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -33254,9 +33131,7 @@ impl<'gc> VM<'gc> {
                         let idx_opt = prop_key
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
-                            .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.parse::<usize>().ok());
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -34509,9 +34384,7 @@ impl<'gc> VM<'gc> {
                         let idx_opt = prop_key
                             .strip_prefix("__deleted_")
                             .and_then(|s| s.parse::<usize>().ok())
-                            .or_else(|| prop_key.parse::<usize>().ok())
-                            .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()))
-                            .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(|s| s.parse::<usize>().ok()));
+                            .or_else(|| prop_key.parse::<usize>().ok());
                         if let Some(idx) = idx_opt {
                             len = len.max(idx.saturating_add(1));
                         }
@@ -36238,7 +36111,7 @@ impl<'gc> VM<'gc> {
                     if let Some(0) = limit {
                         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![]));
                         if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
-                            && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
+                            && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
                         {
                             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                         }
@@ -36247,7 +36120,7 @@ impl<'gc> VM<'gc> {
                     if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
                         let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::String(crate::unicode::utf8_to_utf16(&rust_str))]));
                         if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
-                            && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
+                            && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
                         {
                             arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                         }
@@ -36269,7 +36142,7 @@ impl<'gc> VM<'gc> {
                     };
                     let arr = new_gc_cell_ptr(ctx, VmArrayData::new(parts));
                     if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
-                        && let Some(proto) = own_data_from_legacy_map(&arr_ctor.borrow(), "prototype")
+                        && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
                     {
                         arr.borrow_mut(ctx).props.insert("__proto__".to_string(), proto);
                     }
@@ -38247,7 +38120,7 @@ impl<'gc> VM<'gc> {
                         result.insert("done".to_string(), Value::Boolean(false));
                         return Value::Object(new_gc_cell_ptr(ctx, result));
                     }
-                    set_setter(&mut obj.borrow_mut(ctx), "target__", Value::Undefined);
+                    obj.borrow_mut(ctx).insert("__set_target__".to_string(), Value::Undefined);
                     let mut result = IndexMap::new();
                     result.insert("value".to_string(), Value::Undefined);
                     result.insert("done".to_string(), Value::Boolean(true));
@@ -40666,7 +40539,7 @@ impl<'gc> VM<'gc> {
     /// `kind` is "value" or "entry".
     fn make_set_iterator(&self, ctx: &GcContext<'gc>, set_val: Value<'gc>, kind: &str) -> Value<'gc> {
         let mut obj = IndexMap::new();
-        set_setter(&mut obj, "target__", set_val);
+        obj.insert("__set_target__".to_string(), set_val);
         obj.insert("__index__".to_string(), Value::Number(0.0));
         obj.insert("__iter_kind__".to_string(), Value::String(crate::unicode::utf8_to_utf16(kind)));
         if let Some(proto) = self.globals.get("__SetIteratorPrototype__").cloned() {
@@ -41310,7 +41183,7 @@ impl<'gc> VM<'gc> {
         if let Some(ctor) = self.globals.get("TypeError").cloned() {
             map.insert("constructor".to_string(), ctor.clone());
             if let Value::Object(ctor_obj) = ctor
-                && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+                && let Some(proto) = own_data_from_map(&ctor_obj.borrow(), "prototype")
             {
                 map.insert("__proto__".to_string(), proto);
             }
@@ -41326,7 +41199,7 @@ impl<'gc> VM<'gc> {
         if let Some(ctor) = self.globals.get("SyntaxError").cloned() {
             map.insert("constructor".to_string(), ctor.clone());
             if let Value::Object(ctor_obj) = ctor
-                && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+                && let Some(proto) = own_data_from_map(&ctor_obj.borrow(), "prototype")
             {
                 map.insert("__proto__".to_string(), proto);
             }
@@ -41342,7 +41215,7 @@ impl<'gc> VM<'gc> {
         if let Some(ctor) = self.globals.get("RangeError").cloned() {
             map.insert("constructor".to_string(), ctor.clone());
             if let Value::Object(ctor_obj) = ctor
-                && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+                && let Some(proto) = own_data_from_map(&ctor_obj.borrow(), "prototype")
             {
                 map.insert("__proto__".to_string(), proto);
             }
@@ -41358,7 +41231,7 @@ impl<'gc> VM<'gc> {
         if let Some(ctor) = self.globals.get("ReferenceError").cloned() {
             map.insert("constructor".to_string(), ctor.clone());
             if let Value::Object(ctor_obj) = ctor
-                && let Some(proto) = own_data_from_legacy_map(&ctor_obj.borrow(), "prototype")
+                && let Some(proto) = own_data_from_map(&ctor_obj.borrow(), "prototype")
             {
                 map.insert("__proto__".to_string(), proto);
             }
@@ -41511,21 +41384,21 @@ impl<'gc> VM<'gc> {
                 None
             } else if raw_key == OWN_DUNDER_PROTO_DATA_KEY {
                 Some("__proto__")
-            } else if let Some(rest) = raw_key.strip_prefix(GETTER_PREFIX) {
-                if rest.starts_with("@@sym:") { None } else { Some(rest) }
-            } else if let Some(rest) = raw_key.strip_prefix(SETTER_PREFIX) {
-                if rest.starts_with("@@sym:") { None } else { Some(rest) }
-            } else if raw_key.starts_with("__")
-                && (raw_key == "__origin_global"
-                    || raw_key.ends_with("__")
-                    || raw_key.starts_with("__brand_")
-                    || raw_key.starts_with("__deleted_"))
+            } else if raw_key
+                .strip_prefix(PRIVATE_GETTER_SLOT_PREFIX)
+                .is_some_and(|rest| rest.starts_with(super::PRIVATE_KEY_PREFIX))
+                || raw_key
+                    .strip_prefix(PRIVATE_SETTER_SLOT_PREFIX)
+                    .is_some_and(|rest| rest.starts_with(super::PRIVATE_KEY_PREFIX))
+                || (raw_key.starts_with("__")
+                    && (raw_key == "__origin_global"
+                        || raw_key.ends_with("__")
+                        || raw_key.starts_with("__brand_")
+                        || raw_key.starts_with("__deleted_")))
             {
                 None
-            } else if raw_key.starts_with("__") {
-                // User-visible property that happens to start with "__" (e.g. __declared__var)
-                Some(raw_key.as_str())
             } else {
+                // User-visible properties that happen to start with "__" remain visible.
                 Some(raw_key.as_str())
             };
 
@@ -41597,12 +41470,14 @@ impl<'gc> VM<'gc> {
             if raw_key.starts_with("@@sym:") {
                 continue;
             }
-            let candidate = if let Some(rest) = raw_key.strip_prefix(GETTER_PREFIX) {
-                if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
-            } else if let Some(rest) = raw_key.strip_prefix(SETTER_PREFIX) {
-                if rest.starts_with("@@sym:") { None } else { Some(rest.to_string()) }
-            } else if raw_key.starts_with("__")
-                && (raw_key.ends_with("__") || raw_key.starts_with("__brand_") || raw_key.starts_with("__deleted_"))
+            let candidate = if raw_key
+                .strip_prefix(PRIVATE_GETTER_SLOT_PREFIX)
+                .is_some_and(|rest| rest.starts_with(super::PRIVATE_KEY_PREFIX))
+                || raw_key
+                    .strip_prefix(PRIVATE_SETTER_SLOT_PREFIX)
+                    .is_some_and(|rest| rest.starts_with(super::PRIVATE_KEY_PREFIX))
+                || (raw_key.starts_with("__")
+                    && (raw_key.ends_with("__") || raw_key.starts_with("__brand_") || raw_key.starts_with("__deleted_")))
             {
                 None
             } else {
@@ -41793,14 +41668,14 @@ impl<'gc> VM<'gc> {
                             {
                                 let type_name = crate::unicode::utf16_to_utf8(type_name_u16);
                                 if let Some(Value::Object(ctor)) = self.globals.get(&type_name)
-                                    && let Some(proto) = own_data_from_legacy_map(&ctor.borrow(), "prototype")
+                                    && let Some(proto) = own_data_from_map(&ctor.borrow(), "prototype")
                                 {
                                     next = Some(proto);
                                 }
                             }
                             if next.is_none()
                                 && let Some(Value::Object(object_ctor)) = self.globals.get("Object")
-                                && let Some(Value::Object(obj_proto)) = own_data_from_legacy_map(&object_ctor.borrow(), "prototype")
+                                && let Some(Value::Object(obj_proto)) = own_data_from_map(&object_ctor.borrow(), "prototype")
                                 && !Gc::ptr_eq(m, obj_proto)
                             {
                                 next = Some(Value::Object(obj_proto));
@@ -41948,8 +41823,6 @@ impl<'gc> VM<'gc> {
         // Use a separate storage key for "__proto__" to avoid clashing with the
         // internal prototype chain slot.
         let data_key = if key == "__proto__" { OWN_DUNDER_PROTO_DATA_KEY } else { key };
-        let getter_key = make_getter_key(key);
-        let setter_key = make_setter_key(key);
 
         let (
             current_exists,
@@ -41986,16 +41859,7 @@ impl<'gc> VM<'gc> {
                 None
             };
             let current_desc = if implicit_string_data.is_none() {
-                desc_from_legacy_map(&borrow, key).or_else(|| {
-                    if key == "__proto__" {
-                        borrow
-                            .get(OWN_DUNDER_PROTO_DATA_KEY)
-                            .cloned()
-                            .map(|value| PropDesc::data(value, attrs_from_legacy_map(&borrow, key)))
-                    } else {
-                        None
-                    }
-                })
+                desc_from_map(&borrow, data_key)
             } else {
                 None
             };
@@ -42157,179 +42021,35 @@ impl<'gc> VM<'gc> {
             if configurable {
                 attrs |= PropAttrs::CONFIGURABLE;
             }
-            if key != "__proto__" {
-                let final_desc = if is_accessor {
-                    let final_get = match desc.get("get") {
-                        Some(Value::Undefined) => None,
-                        Some(getter) => Some(getter.clone()),
-                        None if current_exists && current_is_accessor && current_has_getter => Some(current_get.clone()),
-                        _ => None,
-                    };
-                    let final_set = match desc.get("set") {
-                        Some(Value::Undefined) => None,
-                        Some(setter) => Some(setter.clone()),
-                        None if current_exists && current_is_accessor && current_has_setter => Some(current_set.clone()),
-                        _ => None,
-                    };
-                    PropDesc::accessor(final_get, final_set, attrs)
-                } else {
-                    let final_value = desc
-                        .get("value")
-                        .cloned()
-                        .or_else(|| {
-                            if current_exists && !current_is_accessor {
-                                Some(current_value.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(Value::Undefined);
-                    PropDesc::data(final_value, attrs)
+            let final_desc = if is_accessor {
+                let final_get = match desc.get("get") {
+                    Some(Value::Undefined) => None,
+                    Some(getter) => Some(getter.clone()),
+                    None if current_exists && current_is_accessor && current_has_getter => Some(current_get.clone()),
+                    _ => None,
                 };
-                final_desc.write_to_legacy_map(&mut borrow, key);
+                let final_set = match desc.get("set") {
+                    Some(Value::Undefined) => None,
+                    Some(setter) => Some(setter.clone()),
+                    None if current_exists && current_is_accessor && current_has_setter => Some(current_set.clone()),
+                    _ => None,
+                };
+                PropDesc::accessor(final_get, final_set, attrs)
             } else {
-                let existing_slot_index = if current_exists {
-                    borrow
-                        .get_index_of(data_key)
-                        .or_else(|| borrow.get_index_of(&getter_key))
-                        .or_else(|| borrow.get_index_of(&setter_key))
-                } else {
-                    None
-                };
-                let preserve_accessor_slots = current_exists && current_is_accessor && !desc_is_data;
-                if !preserve_accessor_slots {
-                    borrow.shift_remove(&getter_key);
-                    borrow.shift_remove(&setter_key);
-                }
-                unmark_readonly(&mut borrow, key);
-                unmark_nonconfigurable(&mut borrow, key);
-                unmark_nonenumerable(&mut borrow, key);
-
-                if is_accessor {
-                    borrow.shift_remove(data_key);
-                }
-                if is_accessor {
-                    let mut wrote_accessor_slot = false;
-                    let mut next_accessor_insert_index = existing_slot_index;
-                    if let Some(getter) = desc.get("get") {
-                        if matches!(getter, Value::Undefined) {
-                            borrow.shift_remove(&getter_key);
+                let final_value = desc
+                    .get("value")
+                    .cloned()
+                    .or_else(|| {
+                        if current_exists && !current_is_accessor {
+                            Some(current_value.clone())
                         } else {
-                            if borrow.contains_key(&getter_key) {
-                                borrow.insert(getter_key.clone(), getter.clone());
-                                if let Some(idx) = next_accessor_insert_index {
-                                    next_accessor_insert_index = Some(idx + 1);
-                                }
-                            } else if let Some(idx) = next_accessor_insert_index {
-                                if idx >= borrow.len() {
-                                    borrow.insert(getter_key.clone(), getter.clone());
-                                } else {
-                                    borrow.shift_insert(idx, getter_key.clone(), getter.clone());
-                                }
-                                next_accessor_insert_index = Some(idx + 1);
-                            } else {
-                                borrow.insert(getter_key.clone(), getter.clone());
-                            }
-                            wrote_accessor_slot = true;
+                            None
                         }
-                    } else if current_exists && current_is_accessor && current_has_getter {
-                        if borrow.contains_key(&getter_key) {
-                            borrow.insert(getter_key.clone(), current_get.clone());
-                            if let Some(idx) = next_accessor_insert_index {
-                                next_accessor_insert_index = Some(idx + 1);
-                            }
-                        } else if let Some(idx) = next_accessor_insert_index {
-                            if idx >= borrow.len() {
-                                borrow.insert(getter_key.clone(), current_get.clone());
-                            } else {
-                                borrow.shift_insert(idx, getter_key.clone(), current_get.clone());
-                            }
-                            next_accessor_insert_index = Some(idx + 1);
-                        } else {
-                            borrow.insert(getter_key.clone(), current_get.clone());
-                        }
-                        wrote_accessor_slot = true;
-                    }
-                    if let Some(setter) = desc.get("set") {
-                        if matches!(setter, Value::Undefined) {
-                            borrow.shift_remove(&setter_key);
-                        } else {
-                            if borrow.contains_key(&setter_key) {
-                                borrow.insert(setter_key.clone(), setter.clone());
-                                if let Some(idx) = next_accessor_insert_index {
-                                    next_accessor_insert_index = Some(idx + 1);
-                                }
-                            } else if let Some(idx) = next_accessor_insert_index {
-                                if idx >= borrow.len() {
-                                    borrow.insert(setter_key.clone(), setter.clone());
-                                } else {
-                                    borrow.shift_insert(idx, setter_key.clone(), setter.clone());
-                                }
-                                next_accessor_insert_index = Some(idx + 1);
-                            } else {
-                                borrow.insert(setter_key.clone(), setter.clone());
-                            }
-                            wrote_accessor_slot = true;
-                        }
-                    } else if current_exists && current_is_accessor && current_has_setter {
-                        if borrow.contains_key(&setter_key) {
-                            borrow.insert(setter_key.clone(), current_set.clone());
-                            if let Some(idx) = next_accessor_insert_index {
-                                next_accessor_insert_index = Some(idx + 1);
-                            }
-                        } else if let Some(idx) = next_accessor_insert_index {
-                            if idx >= borrow.len() {
-                                borrow.insert(setter_key.clone(), current_set.clone());
-                            } else {
-                                borrow.shift_insert(idx, setter_key.clone(), current_set.clone());
-                            }
-                            next_accessor_insert_index = Some(idx + 1);
-                        } else {
-                            borrow.insert(setter_key.clone(), current_set.clone());
-                        }
-                        wrote_accessor_slot = true;
-                    }
-                    if !wrote_accessor_slot {
-                        if let Some(idx) = next_accessor_insert_index {
-                            if idx >= borrow.len() {
-                                borrow.insert(setter_key.clone(), Value::Undefined);
-                            } else {
-                                borrow.shift_insert(idx, setter_key.clone(), Value::Undefined);
-                            }
-                        } else {
-                            borrow.insert(setter_key.clone(), Value::Undefined);
-                        }
-                    }
-                } else {
-                    if let Some(val) = desc.get("value") {
-                        if !borrow.contains_key(data_key) {
-                            if let Some(idx) = existing_slot_index {
-                                if idx >= borrow.len() {
-                                    borrow.insert(data_key.to_string(), val.clone());
-                                } else {
-                                    borrow.shift_insert(idx, data_key.to_string(), val.clone());
-                                }
-                            } else {
-                                borrow.insert(data_key.to_string(), val.clone());
-                            }
-                        } else {
-                            borrow.insert(data_key.to_string(), val.clone());
-                        }
-                    } else if !(borrow.contains_key(data_key) || current_exists && current_is_accessor) {
-                        if let Some(idx) = existing_slot_index {
-                            if idx >= borrow.len() {
-                                borrow.insert(data_key.to_string(), Value::Undefined);
-                            } else {
-                                borrow.shift_insert(idx, data_key.to_string(), Value::Undefined);
-                            }
-                        } else {
-                            borrow.insert(data_key.to_string(), Value::Undefined);
-                        }
-                    }
-                }
-
-                write_attrs_to_legacy_map(&mut borrow, key, attrs);
-            }
+                    })
+                    .unwrap_or(Value::Undefined);
+                PropDesc::data(final_value, attrs)
+            };
+            final_desc.write_to_map(&mut borrow, data_key);
         }
         true
     }
@@ -42471,9 +42191,9 @@ impl<'gc> VM<'gc> {
 
             if !desc.contains_key("value") {
                 if matches!(desc.get("writable"), Some(Value::Boolean(false))) {
-                    PropDesc::data(Value::Number(old_len as f64), PropAttrs::empty()).write_to_legacy_map(&mut b.props, "length");
+                    PropDesc::data(Value::Number(old_len as f64), PropAttrs::empty()).write_to_map(&mut b.props, "length");
                 } else if matches!(desc.get("writable"), Some(Value::Boolean(true))) {
-                    PropDesc::data(Value::Number(old_len as f64), PropAttrs::WRITABLE).write_to_legacy_map(&mut b.props, "length");
+                    PropDesc::data(Value::Number(old_len as f64), PropAttrs::WRITABLE).write_to_map(&mut b.props, "length");
                 }
                 return true;
             }
@@ -42497,15 +42217,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
                 for prop_key in b.props.keys() {
-                    let parsed = if let Ok(idx) = prop_key.parse::<u64>() {
-                        Some(idx)
-                    } else if let Some(rest) = prop_key.strip_prefix(GETTER_PREFIX) {
-                        rest.parse::<u64>().ok()
-                    } else if let Some(rest) = prop_key.strip_prefix(SETTER_PREFIX) {
-                        rest.parse::<u64>().ok()
-                    } else {
-                        None
-                    };
+                    let parsed = prop_key.parse::<u64>().ok();
                     if let Some(idx) = parsed
                         && idx >= new_len
                         && idx < old_len
@@ -42535,7 +42247,7 @@ impl<'gc> VM<'gc> {
                         if failure_writable {
                             failure_attrs |= PropAttrs::WRITABLE;
                         }
-                        PropDesc::data(Value::Number((i + 1) as f64), failure_attrs).write_to_legacy_map(&mut b.props, "length");
+                        PropDesc::data(Value::Number((i + 1) as f64), failure_attrs).write_to_map(&mut b.props, "length");
                         self.throw_type_error(ctx, "Cannot redefine non-configurable property");
                         return false;
                     }
@@ -42557,7 +42269,7 @@ impl<'gc> VM<'gc> {
             if final_writable {
                 attrs |= PropAttrs::WRITABLE;
             }
-            PropDesc::data(Value::Number(new_len as f64), attrs).write_to_legacy_map(&mut b.props, "length");
+            PropDesc::data(Value::Number(new_len as f64), attrs).write_to_map(&mut b.props, "length");
             return true;
         }
 
@@ -42582,9 +42294,7 @@ impl<'gc> VM<'gc> {
                     return false;
                 }
 
-                let getter_key = make_getter_key(key);
-                let setter_key = make_setter_key(key);
-                let current_desc = desc_from_legacy_map(&b.props, key);
+                let current_desc = desc_from_map(&b.props, key);
                 let current_is_accessor = matches!(current_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { .. }));
                 let current_has_getter = matches!(
                     current_desc.as_ref().map(|d| &d.kind),
@@ -42614,7 +42324,7 @@ impl<'gc> VM<'gc> {
                 let current_value = if (idx_u64 as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx_u64)) {
                     b.elements[idx_u64 as usize].clone()
                 } else {
-                    own_data_from_legacy_map(&b.props, key).unwrap_or(Value::Undefined)
+                    own_data_from_map(&b.props, key).unwrap_or(Value::Undefined)
                 };
 
                 // Preserve non-configurable invariant (minimal checks used by current tests)
@@ -42675,46 +42385,10 @@ impl<'gc> VM<'gc> {
                 } else {
                     current_is_accessor
                 };
-                let preserve_accessor_slots = own_exists && current_is_accessor && is_accessor;
-                if !preserve_accessor_slots {
-                    b.props.shift_remove(&getter_key);
-                    b.props.shift_remove(&setter_key);
-                }
-                unmark_nonenumerable(&mut b.props, key);
-                unmark_nonconfigurable(&mut b.props, key);
-                unmark_readonly(&mut b.props, key);
-
                 if is_accessor {
-                    let mut wrote_accessor_slot = false;
                     if (idx_u64 as usize) < b.elements.len() {
                         b.elements[idx_u64 as usize] = Value::Undefined;
                         b.props.insert(format!("__deleted_{}", idx_u64), Value::Boolean(true));
-                    }
-                    b.props.shift_remove(key);
-                    if let Some(val) = desc.get("get") {
-                        if matches!(val, Value::Undefined) {
-                            b.props.shift_remove(&getter_key);
-                        } else {
-                            b.props.insert(getter_key.clone(), val.clone());
-                            wrote_accessor_slot = true;
-                        }
-                    } else if own_exists && current_is_accessor && current_has_getter {
-                        b.props.insert(getter_key.clone(), current_get.clone());
-                        wrote_accessor_slot = true;
-                    }
-                    if let Some(val) = desc.get("set") {
-                        if matches!(val, Value::Undefined) {
-                            b.props.shift_remove(&setter_key);
-                        } else {
-                            b.props.insert(setter_key.clone(), val.clone());
-                            wrote_accessor_slot = true;
-                        }
-                    } else if own_exists && current_is_accessor && current_has_setter {
-                        b.props.insert(setter_key.clone(), current_set.clone());
-                        wrote_accessor_slot = true;
-                    }
-                    if !wrote_accessor_slot {
-                        b.props.insert(setter_key.clone(), Value::Undefined);
                     }
                 } else if let Some(val) = desc.get("value") {
                     remove_property_completely(&mut b.props, key);
@@ -42775,23 +42449,40 @@ impl<'gc> VM<'gc> {
                 }
                 let has_dense_element =
                     (idx_u64 as usize) < b.elements.len() && !b.props.contains_key(&format!("__deleted_{}", idx_u64)) && !is_accessor;
-                if has_dense_element {
+                if is_accessor {
+                    let final_get = match desc.get("get") {
+                        Some(Value::Undefined) => None,
+                        Some(getter) => Some(getter.clone()),
+                        None if own_exists && current_is_accessor && current_has_getter => Some(current_get),
+                        _ => None,
+                    };
+                    let final_set = match desc.get("set") {
+                        Some(Value::Undefined) => None,
+                        Some(setter) => Some(setter.clone()),
+                        None if own_exists && current_is_accessor && current_has_setter => Some(current_set),
+                        _ => None,
+                    };
+                    PropDesc::accessor(final_get, final_set, attrs).write_to_map(&mut b.props, key);
+                } else if has_dense_element {
                     if attrs == PropAttrs::WEC {
                         b.props.shift_remove(key);
                     } else {
                         let dense_value = b.elements[idx_u64 as usize].clone();
-                        b.props.insert(
-                            key.to_string(),
-                            Value::Property {
-                                value: Some(Box::new(dense_value)),
-                                getter: None,
-                                setter: None,
-                                attrs,
-                            },
-                        );
+                        PropDesc::data(dense_value, attrs).write_to_map(&mut b.props, key);
                     }
                 } else {
-                    write_attrs_to_legacy_map(&mut b.props, key, attrs);
+                    let final_value = desc
+                        .get("value")
+                        .cloned()
+                        .or_else(|| {
+                            if own_exists && !current_is_accessor {
+                                Some(current_value.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(Value::Undefined);
+                    PropDesc::data(final_value, attrs).write_to_map(&mut b.props, key);
                 }
 
                 if idx_u64 + 1 > old_len {
@@ -42808,9 +42499,7 @@ impl<'gc> VM<'gc> {
             return false;
         }
 
-        let getter_key = make_getter_key(key);
-        let setter_key = make_setter_key(key);
-        let current_desc = desc_from_legacy_map(&b.props, key);
+        let current_desc = desc_from_map(&b.props, key);
         let current_is_accessor = matches!(current_desc.as_ref().map(|d| &d.kind), Some(PropKind::Accessor { .. }));
         let current_has_getter = matches!(
             current_desc.as_ref().map(|d| &d.kind),
@@ -42837,7 +42526,7 @@ impl<'gc> VM<'gc> {
             Some(PropKind::Accessor { set: Some(set), .. }) => set.clone(),
             _ => Value::Undefined,
         };
-        let current_value = own_data_from_legacy_map(&b.props, key).unwrap_or(Value::Undefined);
+        let current_value = own_data_from_map(&b.props, key).unwrap_or(Value::Undefined);
         if own_exists && !current_configurable {
             if matches!(desc.get("configurable"), Some(Value::Boolean(true))) {
                 self.throw_type_error(ctx, "Cannot redefine non-configurable property");
@@ -42894,51 +42583,6 @@ impl<'gc> VM<'gc> {
         } else {
             current_is_accessor
         };
-        let preserve_accessor_slots = own_exists && current_is_accessor && is_accessor;
-        if !preserve_accessor_slots {
-            b.props.shift_remove(&getter_key);
-            b.props.shift_remove(&setter_key);
-        }
-        unmark_nonenumerable(&mut b.props, key);
-        unmark_nonconfigurable(&mut b.props, key);
-        unmark_readonly(&mut b.props, key);
-
-        if is_accessor {
-            let mut wrote_accessor_slot = false;
-            b.props.shift_remove(key);
-            if let Some(v) = desc.get("get") {
-                if matches!(v, Value::Undefined) {
-                    b.props.shift_remove(&getter_key);
-                } else {
-                    b.props.insert(getter_key.clone(), v.clone());
-                    wrote_accessor_slot = true;
-                }
-            } else if own_exists && current_is_accessor && current_has_getter {
-                b.props.insert(getter_key.clone(), current_get.clone());
-                wrote_accessor_slot = true;
-            }
-            if let Some(v) = desc.get("set") {
-                if matches!(v, Value::Undefined) {
-                    b.props.shift_remove(&setter_key);
-                } else {
-                    b.props.insert(setter_key.clone(), v.clone());
-                    wrote_accessor_slot = true;
-                }
-            } else if own_exists && current_is_accessor && current_has_setter {
-                b.props.insert(setter_key.clone(), current_set.clone());
-                wrote_accessor_slot = true;
-            }
-            if !wrote_accessor_slot {
-                b.props.insert(setter_key.clone(), Value::Undefined);
-            }
-        } else if let Some(v) = desc.get("value") {
-            b.props.insert(key.to_string(), v.clone());
-        } else if own_exists && current_is_accessor {
-            // Empty descriptor on an accessor should preserve accessor semantics.
-        } else if !b.props.contains_key(key) {
-            b.props.insert(key.to_string(), Value::Undefined);
-        }
-
         let enumerable = match desc.get("enumerable") {
             Some(Value::Boolean(v)) => *v,
             _ if own_exists => current_enumerable,
@@ -42949,22 +42593,54 @@ impl<'gc> VM<'gc> {
             _ if own_exists => current_configurable,
             _ => false,
         };
-        if !enumerable {
-            mark_nonenumerable(&mut b.props, key);
-        }
-        if !configurable {
-            mark_nonconfigurable(&mut b.props, key);
-        }
-        if !is_accessor {
-            let writable = match desc.get("writable") {
+        let writable = if !is_accessor {
+            match desc.get("writable") {
                 Some(Value::Boolean(v)) => *v,
                 _ if own_exists && !current_is_accessor => current_writable,
                 _ => false,
-            };
-            if !writable {
-                mark_readonly(&mut b.props, key);
             }
+        } else {
+            false
+        };
+        let mut attrs = PropAttrs::empty();
+        if writable {
+            attrs |= PropAttrs::WRITABLE;
         }
+        if enumerable {
+            attrs |= PropAttrs::ENUMERABLE;
+        }
+        if configurable {
+            attrs |= PropAttrs::CONFIGURABLE;
+        }
+        let final_desc = if is_accessor {
+            let final_get = match desc.get("get") {
+                Some(Value::Undefined) => None,
+                Some(getter) => Some(getter.clone()),
+                None if own_exists && current_is_accessor && current_has_getter => Some(current_get),
+                _ => None,
+            };
+            let final_set = match desc.get("set") {
+                Some(Value::Undefined) => None,
+                Some(setter) => Some(setter.clone()),
+                None if own_exists && current_is_accessor && current_has_setter => Some(current_set),
+                _ => None,
+            };
+            PropDesc::accessor(final_get, final_set, attrs)
+        } else {
+            let final_value = desc
+                .get("value")
+                .cloned()
+                .or({
+                    if own_exists && !current_is_accessor {
+                        Some(current_value)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(Value::Undefined);
+            PropDesc::data(final_value, attrs)
+        };
+        final_desc.write_to_map(&mut b.props, key);
         true
     }
 
@@ -43653,8 +43329,7 @@ impl<'gc> VM<'gc> {
             return Ok(Some(result));
         }
 
-        // Delegate to has_property_in_chain which correctly handles
-        // own properties, accessor patterns (__get_/__set_), __type__-based
+        // Delegate to has_property_in_chain for own properties, type-based
         // prototype resolution, and full prototype chain traversal.
         Ok(Some(self.has_property_in_chain(ctx, &target, key)))
     }
@@ -44892,7 +44567,7 @@ impl<'gc> VM<'gc> {
         let mut species_ctor = ctor.clone();
         if ctor_is_object
             && let Some(Value::Object(symbol_ctor)) = self.globals.get("Symbol")
-            && let Some(species_symbol) = own_data_from_legacy_map(&symbol_ctor.borrow(), "species")
+            && let Some(species_symbol) = own_data_from_map(&symbol_ctor.borrow(), "species")
             && let Some(species_key) = self.symbol_key_string(&species_symbol)
         {
             let species = self.read_named_property(ctx, &ctor, &species_key);
@@ -45347,7 +45022,7 @@ impl<'gc> VM<'gc> {
         let fn_proto_value = Value::Object(new_gc_cell_ptr(ctx, fn_proto));
         let _ = self.mutate_value_props(ctx, value, |props| {
             props.insert("prototype".to_string(), fn_proto_value.clone());
-            write_attrs_to_legacy_map(&mut *props, "prototype", PropAttrs::WRITABLE);
+            write_attrs_to_map(&mut *props, "prototype", PropAttrs::WRITABLE);
         });
     }
 
@@ -45641,9 +45316,7 @@ impl<'gc> VM<'gc> {
             let idx_opt = prop_key
                 .strip_prefix("__deleted_")
                 .and_then(parse_array_index)
-                .or_else(|| parse_array_index(prop_key))
-                .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(parse_array_index))
-                .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(parse_array_index));
+                .or_else(|| parse_array_index(prop_key));
             if let Some(idx) = idx_opt {
                 len = len.max(idx.saturating_add(1));
             }
@@ -45671,9 +45344,7 @@ impl<'gc> VM<'gc> {
             }
         }
         for prop_key in arr.props.keys() {
-            let idx_opt = parse_array_index(prop_key)
-                .or_else(|| prop_key.strip_prefix(GETTER_PREFIX).and_then(parse_array_index))
-                .or_else(|| prop_key.strip_prefix(SETTER_PREFIX).and_then(parse_array_index));
+            let idx_opt = parse_array_index(prop_key);
             if let Some(idx) = idx_opt {
                 indices.insert(idx);
             }
@@ -46970,8 +46641,8 @@ impl<'gc> VM<'gc> {
 
         let fn_proto = {
             let direct = match func {
-                Value::Object(obj) => own_data_from_legacy_map(&obj.borrow(), "prototype"),
-                Value::Function(ip, arity) | Value::Closure(ip, arity, _) => own_data_from_legacy_map(
+                Value::Object(obj) => own_data_from_map(&obj.borrow(), "prototype"),
+                Value::Function(ip, arity) | Value::Closure(ip, arity, _) => own_data_from_map(
                     &self
                         .get_fn_props_for_value(ctx, func)
                         .unwrap_or_else(|| self.get_fn_props(ctx, *ip, *arity))

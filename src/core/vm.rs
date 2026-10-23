@@ -32178,18 +32178,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_SORT {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) if receiver.is_symbol_value() => {
-                    self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver))
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
@@ -32300,15 +32290,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_ITERATOR && !matches!(receiver, Value::Array(_)) {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let mut obj = IndexMap::new();
@@ -32323,15 +32306,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_SLICE {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let len_u64 = match self.array_like_length_u64(ctx, &target) {
@@ -32427,15 +32403,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_INDEXOF {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -32530,15 +32499,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_LASTINDEXOF {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -32606,15 +32568,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_FOREACH {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -32724,15 +32679,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_FILTER {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -32939,15 +32887,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_FILL {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let fill_value = args.first().cloned().unwrap_or(Value::Undefined);
@@ -33009,15 +32950,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_INCLUDES {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -33106,15 +33040,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_REDUCE {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -33282,15 +33209,8 @@ impl<'gc> VM<'gc> {
         }
 
         if matches!(id, BUILTIN_ARRAY_EVERY | BUILTIN_ARRAY_SOME) {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -33359,15 +33279,8 @@ impl<'gc> VM<'gc> {
             id,
             BUILTIN_ARRAY_FIND | BUILTIN_ARRAY_FINDINDEX | BUILTIN_ARRAY_FINDLAST | BUILTIN_ARRAY_FINDLASTINDEX
         ) {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
@@ -33447,15 +33360,8 @@ impl<'gc> VM<'gc> {
         }
 
         if matches!(id, BUILTIN_ARRAY_REDUCE | BUILTIN_ARRAY_REDUCERIGHT) {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -33642,15 +33548,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_SHIFT {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             if let Value::Object(map) = &target
@@ -33710,15 +33609,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_REVERSE {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let Some(len_u64) = self.array_like_length_u64(ctx, &target) else {
@@ -33796,15 +33688,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_POP {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             if let Value::Object(map) = &target
@@ -33854,15 +33739,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_PUSH {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             if let Value::Object(map) = &target
@@ -33900,15 +33778,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_CONCAT {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let Some(result) = self.array_species_create(ctx, &target, 0) else {
@@ -34005,15 +33876,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_JOIN && !matches!(receiver, Value::Array(_)) {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let sep = match args.first() {
@@ -34063,15 +33927,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_FLAT {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let depth = match args.first() {
@@ -34132,15 +33989,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_FLATMAP {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let callback = args.first().cloned().unwrap_or(Value::Undefined);
@@ -34201,15 +34051,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_MAP {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let is_typed_array = matches!(&target, Value::Array(arr) if arr.borrow().props.contains_key("__typedarray_name__"));
@@ -34279,15 +34122,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_UNSHIFT {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             if let Value::Object(map) = &target
@@ -34361,15 +34197,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_AT {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let len = match &target {
@@ -34438,15 +34267,8 @@ impl<'gc> VM<'gc> {
         }
 
         if id == BUILTIN_ARRAY_SPLICE {
-            let target = match receiver {
-                Value::Undefined | Value::Null => {
-                    self.throw_type_error(ctx, "Cannot convert undefined or null to object");
-                    return Value::Undefined;
-                }
-                Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
-                    receiver.clone()
-                }
-                _ => self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver)),
+            let Some(target) = self.array_method_target_object(ctx, receiver) else {
+                return Value::Undefined;
             };
 
             let len_v = self.read_named_property(ctx, &target, "length");
@@ -45373,6 +45195,19 @@ impl<'gc> VM<'gc> {
         let new_len = (idx as u64).saturating_add(1);
         if new_len > old_len {
             borrow.props.insert("__array_length__".to_string(), Value::Number(new_len as f64));
+        }
+    }
+
+    fn array_method_target_object(&mut self, ctx: &GcContext<'gc>, receiver: &Value<'gc>) -> Option<Value<'gc>> {
+        match receiver {
+            Value::Undefined | Value::Null => {
+                self.throw_type_error(ctx, "Cannot convert undefined or null to object");
+                None
+            }
+            Value::Object(_) | Value::Array(_) | Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) => {
+                Some(receiver.clone())
+            }
+            _ => Some(self.call_builtin(ctx, BUILTIN_CTOR_OBJECT, std::slice::from_ref(receiver))),
         }
     }
 

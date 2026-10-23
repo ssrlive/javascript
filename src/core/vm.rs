@@ -6743,86 +6743,10 @@ impl<'gc> VM<'gc> {
                         }
 
                         let index_v = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        let mut index_prim = self.try_to_primitive(ctx, &index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, &index_v) else {
                             return Value::Undefined;
-                        }
-                        if index_prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if index_prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        };
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -6957,72 +6881,10 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        };
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -7135,86 +6997,10 @@ impl<'gc> VM<'gc> {
                         }
 
                         let index_v = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        let mut index_prim = self.try_to_primitive(ctx, &index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, &index_v) else {
                             return Value::Undefined;
-                        }
-                        if index_prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if index_prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        };
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -7401,86 +7187,10 @@ impl<'gc> VM<'gc> {
                         }
 
                         let index_v = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        let mut index_prim = self.try_to_primitive(ctx, &index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, &index_v) else {
                             return Value::Undefined;
-                        }
-                        if index_prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if index_prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        };
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -7719,67 +7429,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(value_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -7790,11 +7442,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
                         if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_OR) {
@@ -7885,67 +7533,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(value_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -7956,11 +7546,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
                         if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_AND) {
@@ -8054,67 +7640,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(expected_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -8138,11 +7666,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -8297,67 +7821,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(value_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -8368,11 +7834,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
                         if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_ADD) {
@@ -8463,67 +7925,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(value_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -8534,11 +7938,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
                         if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_EXCHANGE) {
@@ -8627,67 +8027,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(value_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -8698,11 +8040,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
                         if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_SUB) {
@@ -8794,67 +8132,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(value_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -8865,11 +8145,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
                         if let Some(old_value) = self.shared_atomic_rmw(ctx, &arr, idx, &ta_name, value_v, BUILTIN_ATOMICS_XOR) {
@@ -24741,15 +24017,13 @@ impl<'gc> VM<'gc> {
             }
             BUILTIN_ATOMICS_LOAD => {
                 if let (Some(Value::Array(arr)), Some(idx_val)) = (args.first(), args.get(1)) {
-                    let mut idx_num = to_number(idx_val);
-                    if idx_num.is_nan() {
-                        idx_num = 0.0;
-                    }
-                    let i = if idx_num.is_finite() && idx_num.trunc() >= 0.0 {
-                        idx_num.trunc() as usize
-                    } else {
-                        0
+                    let Some(i) = self.atomics_to_index(ctx, idx_val) else {
+                        return Value::Undefined;
                     };
+                    let len = arr.borrow().elements.len();
+                    if !self.atomics_index_in_bounds(ctx, i, len) {
+                        return Value::Undefined;
+                    }
                     if let Some(value) = self.shared_ta_read_element(arr, i) {
                         return value;
                     }
@@ -24765,46 +24039,41 @@ impl<'gc> VM<'gc> {
                         .get("__typedarray_name__")
                         .map(value_to_string)
                         .unwrap_or_default();
-                    let mut idx_num = to_number(idx_val);
-                    if idx_num.is_nan() {
-                        idx_num = 0.0;
-                    }
-                    let i = if idx_num.is_finite() && idx_num.trunc() >= 0.0 {
-                        idx_num.trunc() as usize
-                    } else {
-                        0
+                    let Some(i) = self.atomics_to_index(ctx, idx_val) else {
+                        return Value::Undefined;
                     };
-                    if i < arr.borrow().elements.len() {
-                        if ta_name == "BigInt64Array" || ta_name == "BigUint64Array" {
-                            let Some(big_val) = self.value_to_bigint(ctx, val) else {
-                                return Value::Undefined;
-                            };
-                            let coerced = coerce_bigint_for_ta(&big_val, &ta_name);
-                            arr.borrow_mut(ctx).elements[i] = Value::BigInt(Box::new(coerced));
-                            self.sync_ta_element_to_buffer(ctx, arr, i, 0.0, &ta_name);
-                            return Value::BigInt(Box::new(big_val));
-                        }
-
-                        let val_num = to_number(val);
-                        let to_integer = if val_num.is_nan() {
-                            0.0
-                        } else if val_num == 0.0 || !val_num.is_finite() {
-                            val_num
-                        } else {
-                            val_num.trunc()
-                        };
-                        let normalized_ret = if to_integer == 0.0 { 0.0 } else { to_integer };
-                        let store_i32 = to_int32(normalized_ret);
-                        let store_num = if normalized_ret >= 0.0 && store_i32 < 0 {
-                            (store_i32 as u32) as f64
-                        } else {
-                            store_i32 as f64
-                        };
-                        arr.borrow_mut(ctx).elements[i] = Value::Number(store_num);
-                        self.sync_ta_element_to_buffer(ctx, arr, i, store_num, &ta_name);
-                        return Value::Number(normalized_ret);
+                    let len = arr.borrow().elements.len();
+                    if !self.atomics_index_in_bounds(ctx, i, len) {
+                        return Value::Undefined;
                     }
-                    return val.clone();
+                    if ta_name == "BigInt64Array" || ta_name == "BigUint64Array" {
+                        let Some(big_val) = self.value_to_bigint(ctx, val) else {
+                            return Value::Undefined;
+                        };
+                        let coerced = coerce_bigint_for_ta(&big_val, &ta_name);
+                        arr.borrow_mut(ctx).elements[i] = Value::BigInt(Box::new(coerced));
+                        self.sync_ta_element_to_buffer(ctx, arr, i, 0.0, &ta_name);
+                        return Value::BigInt(Box::new(big_val));
+                    }
+
+                    let val_num = to_number(val);
+                    let to_integer = if val_num.is_nan() {
+                        0.0
+                    } else if val_num == 0.0 || !val_num.is_finite() {
+                        val_num
+                    } else {
+                        val_num.trunc()
+                    };
+                    let normalized_ret = if to_integer == 0.0 { 0.0 } else { to_integer };
+                    let store_i32 = to_int32(normalized_ret);
+                    let store_num = if normalized_ret >= 0.0 && store_i32 < 0 {
+                        (store_i32 as u32) as f64
+                    } else {
+                        store_i32 as f64
+                    };
+                    arr.borrow_mut(ctx).elements[i] = Value::Number(store_num);
+                    self.sync_ta_element_to_buffer(ctx, arr, i, store_num, &ta_name);
+                    return Value::Number(normalized_ret);
                 }
                 Value::Undefined
             }
@@ -24858,67 +24127,9 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         };
 
-                        let mut index_prim = self.try_to_primitive(ctx, index_v, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
+                        let Some(idx) = self.atomics_to_index(ctx, index_v) else {
                             return Value::Undefined;
-                        }
-                        if let Value::Object(obj) = index_prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => index_prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
-                                }
-                            }
-                            if matches!(index_prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => index_prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return Value::Undefined;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        if !idx_num.is_finite() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
+                        };
 
                         let Some(expected_v) = args.get(2) else {
                             let mut err_map = IndexMap::new();
@@ -24942,11 +24153,7 @@ impl<'gc> VM<'gc> {
                         };
                         let is_bigint_ta = ta_name == "BigInt64Array" || ta_name == "BigUint64Array";
 
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -25098,34 +24305,11 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
 
-                        let index_prim = {
-                            let idx_val = args.get(1).cloned().unwrap_or(Value::Undefined);
-                            match self.try_to_primitive(ctx, &idx_val, "number") {
-                                Value::Undefined if self.pending_throw.is_some() => return Value::Undefined,
-                                prim => match self.try_to_primitive(ctx, &prim, "number") {
-                                    Value::Undefined if self.pending_throw.is_some() => return Value::Undefined,
-                                    prim => prim,
-                                },
-                            }
-                        };
-                        let mut idx_num = to_number(&index_prim);
-                        if idx_num.is_nan() {
-                            idx_num = 0.0;
-                        }
-                        let idx_int = idx_num.trunc();
-                        if !idx_int.is_finite() || idx_int < 0.0 {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        let index_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+                        let Some(idx) = self.atomics_to_index(ctx, &index_value) else {
                             return Value::Undefined;
-                        }
-                        let idx = idx_int as usize;
-                        if idx >= len {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                            err_map.insert("message".to_string(), Value::from("Index out of range"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                        };
+                        if !self.atomics_index_in_bounds(ctx, idx, len) {
                             return Value::Undefined;
                         }
 
@@ -25377,66 +24561,6 @@ impl<'gc> VM<'gc> {
                     let len = arr_borrow.elements.len();
                     drop(arr_borrow);
 
-                    let mut to_number_with_coercion = |input: Value<'gc>| -> Option<f64> {
-                        let mut prim = self.try_to_primitive(ctx, &input, "number");
-                        if let Some(thrown) = self.pending_throw.take() {
-                            self.pending_throw = Some(thrown);
-                            return None;
-                        }
-                        if prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return None;
-                        }
-
-                        if let Value::Object(obj) = prim.clone() {
-                            let this_obj = Value::Object(obj);
-                            let value_of = obj.borrow().get("valueOf").cloned();
-                            if let Some(value_of_fn) = value_of
-                                && matches!(
-                                    value_of_fn,
-                                    Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                )
-                            {
-                                match self.vm_call_function_value(ctx, &value_of_fn, &this_obj, &[]) {
-                                    Ok(v) => prim = v,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return None;
-                                    }
-                                }
-                            }
-                            if matches!(prim, Value::Object(_) | Value::Array(_) | Value::Map(_) | Value::Set(_)) {
-                                let to_string = obj.borrow().get("toString").cloned();
-                                if let Some(to_string_fn) = to_string
-                                    && matches!(
-                                        to_string_fn,
-                                        Value::Function(..) | Value::Closure(..) | Value::NativeFunction(_) | Value::Object(_)
-                                    )
-                                {
-                                    match self.vm_call_function_value(ctx, &to_string_fn, &this_obj, &[]) {
-                                        Ok(v) => prim = v,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if prim.is_symbol_value() {
-                            let mut err_map = IndexMap::new();
-                            err_map.insert("__type__".to_string(), Value::from("TypeError"));
-                            err_map.insert("message".to_string(), Value::from("Cannot convert a Symbol value to a number"));
-                            self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
-                            return None;
-                        }
-
-                        Some(to_number(&prim))
-                    };
-
                     if ta_name != "Int32Array" && ta_name != "BigInt64Array" {
                         let mut err_map = IndexMap::new();
                         err_map.insert("__type__".to_string(), Value::from("TypeError"));
@@ -25459,40 +24583,22 @@ impl<'gc> VM<'gc> {
                         return Value::Undefined;
                     }
 
-                    let mut idx_num = match to_number_with_coercion(args.get(1).cloned().unwrap_or(Value::Undefined)) {
-                        Some(n) => n,
-                        None => return Value::Undefined,
-                    };
-                    if idx_num.is_nan() {
-                        idx_num = 0.0;
-                    }
-                    if !idx_num.is_finite() || idx_num.trunc() < 0.0 {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                        err_map.insert("message".to_string(), Value::from("Index out of range"));
-                        self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                    let index_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let Some(idx) = self.atomics_to_index(ctx, &index_value) else {
                         return Value::Undefined;
-                    }
-                    let idx = idx_num.trunc() as usize;
-                    if idx >= len {
-                        let mut err_map = IndexMap::new();
-                        err_map.insert("__type__".to_string(), Value::from("RangeError"));
-                        err_map.insert("message".to_string(), Value::from("Index out of range"));
-                        self.pending_throw = Some(Value::Object(new_gc_cell_ptr(ctx, err_map)));
+                    };
+                    if !self.atomics_index_in_bounds(ctx, idx, len) {
                         return Value::Undefined;
                     }
 
                     let expected = if ta_name == "Int32Array" {
-                        let n = match to_number_with_coercion(args.get(2).cloned().unwrap_or(Value::Undefined)) {
+                        let expected_value = args.get(2).cloned().unwrap_or(Value::Undefined);
+                        let n = match self.extract_number_with_coercion(ctx, &expected_value) {
                             Some(v) => v,
                             None => return Value::Undefined,
                         };
                         Value::Number(to_int32(n) as f64)
                     } else {
-                        // BigInt64Array: convert value via ToBigInt
-                        // Drop the closure to release the mutable borrow on `self`
-                        #[allow(clippy::drop_non_drop)]
-                        drop(to_number_with_coercion);
                         let value_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
                         match self.value_to_bigint(ctx, &value_arg) {
                             Some(bi) => Value::BigInt(Box::new(bi)),
@@ -25502,15 +24608,9 @@ impl<'gc> VM<'gc> {
 
                     let timeout = if args.len() > 3 {
                         let timeout_arg = args.get(3).cloned().unwrap_or(Value::Undefined);
-                        if timeout_arg.is_symbol_value() {
-                            self.throw_type_error(ctx, "Cannot convert a Symbol value to a number");
+                        let Some(timeout_num) = self.extract_number_with_coercion(ctx, &timeout_arg) else {
                             return Value::Undefined;
-                        }
-                        let prim = self.try_to_primitive(ctx, &timeout_arg, "number");
-                        if self.pending_throw.is_some() {
-                            return Value::Undefined;
-                        }
-                        let timeout_num = to_number(&prim);
+                        };
                         if timeout_num.is_nan() {
                             f64::INFINITY
                         } else {
@@ -41098,6 +40198,30 @@ impl<'gc> VM<'gc> {
         }
 
         Some(to_number(&prim))
+    }
+
+    fn atomics_to_index(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<usize> {
+        let mut index = self.extract_number_with_coercion(ctx, value)?;
+        if index.is_nan() {
+            index = 0.0;
+        }
+
+        let integer_index = index.trunc();
+        if !integer_index.is_finite() || integer_index < 0.0 {
+            self.throw_range_error_object(ctx, "Index out of range");
+            return None;
+        }
+
+        Some(integer_index as usize)
+    }
+
+    fn atomics_index_in_bounds(&mut self, ctx: &GcContext<'gc>, index: usize, length: usize) -> bool {
+        if index >= length {
+            self.throw_range_error_object(ctx, "Index out of range");
+            false
+        } else {
+            true
+        }
     }
 
     /// ToNumeric(value): returns Value::BigInt or Value::Number after ToPrimitive coercion.

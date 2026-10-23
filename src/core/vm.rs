@@ -10011,12 +10011,9 @@ impl<'gc> VM<'gc> {
                 }
 
                 let key = match args.first() {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10071,12 +10068,9 @@ impl<'gc> VM<'gc> {
                 }
 
                 let key = match args.first() {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10125,12 +10119,9 @@ impl<'gc> VM<'gc> {
                 }
 
                 let key = match args.first() {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10177,12 +10168,9 @@ impl<'gc> VM<'gc> {
                 }
 
                 let key = match args.first() {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10379,12 +10367,9 @@ impl<'gc> VM<'gc> {
             }
             "object.propertyIsEnumerable" => {
                 let key = match args.first() {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10518,12 +10503,9 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10576,12 +10558,9 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10606,12 +10585,9 @@ impl<'gc> VM<'gc> {
                 }
                 let key_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -10887,12 +10863,9 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -11045,12 +11018,8 @@ impl<'gc> VM<'gc> {
                                     self.throw_type_error(ctx, "ownKeys trap result must contain only strings and symbols");
                                     return Value::Undefined;
                                 }
-                                let key = match self.as_property_key_string(ctx, item) {
-                                    Ok(k) => k,
-                                    Err(err) => {
-                                        self.set_pending_throw_from_error(&err);
-                                        return Value::Undefined;
-                                    }
+                                let Some(key) = self.as_property_key_string_or_set_pending(ctx, item) else {
+                                    return Value::Undefined;
                                 };
                                 if trap_keys.contains(&key) {
                                     self.throw_type_error(ctx, "ownKeys trap result contains duplicate keys");
@@ -11279,12 +11248,9 @@ impl<'gc> VM<'gc> {
                     return Value::Undefined;
                 }
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -11747,12 +11713,8 @@ impl<'gc> VM<'gc> {
                                 self.throw_type_error(ctx, "ownKeys trap result must contain only strings and symbols");
                                 return Value::Undefined;
                             }
-                            let key = match self.as_property_key_string(ctx, item) {
-                                Ok(k) => k,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    return Value::Undefined;
-                                }
+                            let Some(key) = self.as_property_key_string_or_set_pending(ctx, item) else {
+                                return Value::Undefined;
                             };
                             if trap_keys.contains(&key) {
                                 self.throw_type_error(ctx, "ownKeys trap result contains duplicate keys");
@@ -11942,12 +11904,8 @@ impl<'gc> VM<'gc> {
                         if matches!(desc, Value::Undefined) {
                             continue;
                         }
-                        let key = match self.as_property_key_string(ctx, key_val) {
-                            Ok(k) => k,
-                            Err(err) => {
-                                self.set_pending_throw_from_error(&err);
-                                return Value::Undefined;
-                            }
+                        let Some(key) = self.as_property_key_string_or_set_pending(ctx, key_val) else {
+                            return Value::Undefined;
                         };
                         out.insert(key, desc);
                     }
@@ -27446,12 +27404,8 @@ impl<'gc> VM<'gc> {
                             if !is_enumerable {
                                 continue;
                             }
-                            let key = match self.as_property_key_string(ctx, item) {
-                                Ok(k) => k,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    return Value::Undefined;
-                                }
+                            let Some(key) = self.as_property_key_string_or_set_pending(ctx, item) else {
+                                return Value::Undefined;
                             };
                             let v = self.read_named_property(ctx, &target, &key);
                             if self.pending_throw.is_some() {
@@ -27513,12 +27467,8 @@ impl<'gc> VM<'gc> {
                     }
                     if let Value::Array(arr) = keys {
                         for key_val in arr.borrow().iter() {
-                            let key = match self.as_property_key_string(ctx, key_val) {
-                                Ok(k) => k,
-                                Err(err) => {
-                                    self.set_pending_throw_from_error(&err);
-                                    return Value::Undefined;
-                                }
+                            let Some(key) = self.as_property_key_string_or_set_pending(ctx, key_val) else {
+                                return Value::Undefined;
                             };
                             if key.starts_with("@@sym:") {
                                 continue;
@@ -27706,12 +27656,8 @@ impl<'gc> VM<'gc> {
                                         continue;
                                     }
 
-                                    let k = match self.as_property_key_string(ctx, &key_val) {
-                                        Ok(k) => k,
-                                        Err(err) => {
-                                            self.set_pending_throw_from_error(&err);
-                                            return target_obj;
-                                        }
+                                    let Some(k) = self.as_property_key_string_or_set_pending(ctx, &key_val) else {
+                                        return target_obj;
                                     };
 
                                     let v = self.read_named_property(ctx, src, &k);
@@ -28138,12 +28084,9 @@ impl<'gc> VM<'gc> {
                 }
 
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -28557,12 +28500,9 @@ impl<'gc> VM<'gc> {
             BUILTIN_OBJECT_DEFINEPROP => {
                 let key_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -28824,12 +28764,9 @@ impl<'gc> VM<'gc> {
                 }
                 let key_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let key = match args.get(1) {
-                    Some(v) => match self.as_property_key_string(ctx, v) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    Some(v) => match self.as_property_key_string_or_set_pending(ctx, v) {
+                        Some(k) => k,
+                        None => return Value::Undefined,
                     },
                     None => String::new(),
                 };
@@ -29283,12 +29220,8 @@ impl<'gc> VM<'gc> {
                         continue;
                     }
 
-                    let key = match self.as_property_key_string(ctx, &key_val) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    let Some(key) = self.as_property_key_string_or_set_pending(ctx, &key_val) else {
+                        return Value::Undefined;
                     };
                     let desc_val = self.read_named_property(ctx, &descs_val, &key);
                     if self.pending_throw.is_some() {
@@ -29382,12 +29315,8 @@ impl<'gc> VM<'gc> {
                                             self.throw_type_error(ctx, "ownKeys trap result must contain only strings and symbols");
                                             return Value::Undefined;
                                         }
-                                        let key = match self.as_property_key_string(ctx, item) {
-                                            Ok(k) => k,
-                                            Err(err) => {
-                                                self.set_pending_throw_from_error(&err);
-                                                return Value::Undefined;
-                                            }
+                                        let Some(key) = self.as_property_key_string_or_set_pending(ctx, item) else {
+                                            return Value::Undefined;
                                         };
                                         if trap_keys.contains(&key) {
                                             self.throw_type_error(ctx, "ownKeys trap result contains duplicate keys");
@@ -29708,13 +29637,10 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    match self.as_property_key_string(ctx, &sym_iter) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
-                    }
+                    let Some(key) = self.as_property_key_string_or_set_pending(ctx, &sym_iter) else {
+                        return Value::Undefined;
+                    };
+                    key
                 };
 
                 let iterator_method = self.read_named_property(ctx, &iterable_for_get, &iterator_key);
@@ -29800,12 +29726,8 @@ impl<'gc> VM<'gc> {
                             }
                         };
 
-                    let key = match self.as_property_key_string(ctx, &key_val) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
+                    let Some(key) = self.as_property_key_string_or_set_pending(ctx, &key_val) else {
+                        return Value::Undefined;
                     };
                     groups.entry(key).or_default().push(value);
                     index += 1;
@@ -29847,13 +29769,10 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    match self.as_property_key_string(ctx, &sym_iter) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            self.set_pending_throw_from_error(&err);
-                            return Value::Undefined;
-                        }
-                    }
+                    let Some(key) = self.as_property_key_string_or_set_pending(ctx, &sym_iter) else {
+                        return Value::Undefined;
+                    };
+                    key
                 };
 
                 let iterator_method = self.read_named_property(ctx, &iterable_for_get, &iterator_key);
@@ -37232,12 +37151,8 @@ impl<'gc> VM<'gc> {
         // Object.prototype.hasOwnProperty(key)
         if id == BUILTIN_OBJ_HASOWNPROPERTY {
             let key_val = args.first().cloned().unwrap_or(Value::Undefined);
-            let key = match self.as_property_key_string(ctx, &key_val) {
-                Ok(k) => k,
-                Err(err) => {
-                    self.set_pending_throw_from_error(&err);
-                    return Value::Undefined;
-                }
+            let Some(key) = self.as_property_key_string_or_set_pending(ctx, &key_val) else {
+                return Value::Undefined;
             };
             if matches!(receiver, Value::Undefined | Value::Null) {
                 self.throw_type_error(ctx, "Cannot convert undefined or null to object");
@@ -40092,6 +40007,31 @@ impl<'gc> VM<'gc> {
                         self.vm_to_string_like_spec(ctx, &prim)
                     }
                     _ => Ok(value_to_string(&prim)),
+                }
+            }
+        }
+    }
+
+    fn as_property_key_string_or_set_pending(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Option<String> {
+        match self.as_property_key_string(ctx, value) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                None
+            }
+        }
+    }
+
+    fn as_property_key_string_or_handle_throw(&mut self, ctx: &GcContext<'gc>, value: &Value<'gc>) -> Result<Option<String>, JSError> {
+        match self.as_property_key_string(ctx, value) {
+            Ok(key) => Ok(Some(key)),
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                if let Some(thrown) = self.pending_throw.take() {
+                    self.handle_throw(ctx, &thrown)?;
+                    Ok(None)
+                } else {
+                    Err(err)
                 }
             }
         }

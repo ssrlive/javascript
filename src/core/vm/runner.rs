@@ -3386,12 +3386,8 @@ impl<'gc> VM<'gc> {
                 continue;
             }
 
-            let key = match self.as_property_key_string(ctx, &key_val) {
-                Ok(k) => k,
-                Err(err) => {
-                    self.set_pending_throw_from_error(&err);
-                    break;
-                }
+            let Some(key) = self.as_property_key_string_or_set_pending(ctx, &key_val) else {
+                break;
             };
 
             let prop_value = self.read_named_property(ctx, &from_obj, &key);
@@ -3506,12 +3502,8 @@ impl<'gc> VM<'gc> {
 
         let keys: Vec<Value<'gc>> = keys_arr.borrow().iter().cloned().collect();
         for key_val in keys {
-            let key = match self.as_property_key_string(ctx, &key_val) {
-                Ok(k) => k,
-                Err(err) => {
-                    self.set_pending_throw_from_error(&err);
-                    break;
-                }
+            let Some(key) = self.as_property_key_string_or_set_pending(ctx, &key_val) else {
+                break;
             };
 
             // Skip excluded keys — don't even call getOwnPropertyDescriptor
@@ -5146,16 +5138,8 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         };
         // Now convert key (ToPropertyKey may have side effects)
-        let key = match self.as_property_key_string(ctx, &key_val) {
-            Ok(k) => k,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(key) = self.as_property_key_string_or_handle_throw(ctx, &key_val)? else {
+            return Ok(OpcodeAction::Continue);
         };
         // Per spec §9.1.9: look up setter on super_base chain,
         // write data properties on receiver.
@@ -5257,16 +5241,8 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         };
         // Now convert key (ToPropertyKey may call toString() which can mutate prototype chain)
-        let key = match self.as_property_key_string(ctx, &key_val) {
-            Ok(k) => k,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(key) = self.as_property_key_string_or_handle_throw(ctx, &key_val)? else {
+            return Ok(OpcodeAction::Continue);
         };
         let current_func_ip = self.frames.last().map(|frame| frame.func_ip);
         let mut value = self.read_named_property_with_receiver(ctx, &super_base, &key, &receiver);
@@ -5304,16 +5280,8 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
 
-        let coerced_key = match self.as_property_key_string(ctx, &index) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &index)? else {
+            return Ok(OpcodeAction::Continue);
         };
         match self.try_proxy_get(ctx, &obj, &coerced_key, None) {
             Ok(Some(v)) => {
@@ -5601,16 +5569,8 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        let coerced_key = match self.as_property_key_string(ctx, &index) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &index)? else {
+            return Ok(OpcodeAction::Continue);
         };
         match &obj {
             Value::Array(_) => match self.assign_named_property(ctx, &obj, &coerced_key, &val, None) {
@@ -5684,16 +5644,8 @@ impl<'gc> VM<'gc> {
         let val = self.stack.pop().expect("VM Stack underflow on DefineComputedMethod (val)");
         let index = self.stack.pop().expect("VM Stack underflow on DefineComputedMethod (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on DefineComputedMethod (obj)");
-        let coerced_key = match self.as_property_key_string(ctx, &index) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &index)? else {
+            return Ok(OpcodeAction::Continue);
         };
         self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
         match &obj {
@@ -5753,16 +5705,8 @@ impl<'gc> VM<'gc> {
         let val = self.stack.pop().expect("VM Stack underflow on InitIndex (val)");
         let index = self.stack.pop().expect("VM Stack underflow on InitIndex (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on InitIndex (obj)");
-        let coerced_key = match self.as_property_key_string(ctx, &index) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &index)? else {
+            return Ok(OpcodeAction::Continue);
         };
         self.maybe_infer_function_name_from_key(ctx, &coerced_key, Some(&index), &val);
         match &obj {
@@ -5830,16 +5774,8 @@ impl<'gc> VM<'gc> {
         let val = self.stack.pop().expect("VM Stack underflow on SetComputedGetter (val)");
         let index = self.stack.pop().expect("VM Stack underflow on SetComputedGetter (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetComputedGetter (obj)");
-        let coerced_key = match self.as_property_key_string(ctx, &index) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &index)? else {
+            return Ok(OpcodeAction::Continue);
         };
         self.maybe_infer_accessor_function_name_from_key(ctx, "get", &coerced_key, Some(&index), &val);
         if let Value::Object(map) = &obj {
@@ -5936,16 +5872,8 @@ impl<'gc> VM<'gc> {
         let val = self.stack.pop().expect("VM Stack underflow on SetComputedSetter (val)");
         let index = self.stack.pop().expect("VM Stack underflow on SetComputedSetter (index)");
         let obj = self.stack.pop().expect("VM Stack underflow on SetComputedSetter (obj)");
-        let coerced_key = match self.as_property_key_string(ctx, &index) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &index)? else {
+            return Ok(OpcodeAction::Continue);
         };
         self.maybe_infer_accessor_function_name_from_key(ctx, "set", &coerced_key, Some(&index), &val);
         if let Value::Object(map) = &obj {
@@ -6039,16 +5967,8 @@ impl<'gc> VM<'gc> {
     // Opcode::ToPropertyKey
     fn run_opcode_to_property_key(&mut self, ctx: &GcContext<'gc>) -> Result<OpcodeAction<'gc>, JSError> {
         let raw = self.stack.pop().expect("VM Stack underflow on ToPropertyKey");
-        let coerced_key = match self.as_property_key_string(ctx, &raw) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(coerced_key) = self.as_property_key_string_or_handle_throw(ctx, &raw)? else {
+            return Ok(OpcodeAction::Continue);
         };
         self.stack.push(Value::from(coerced_key.as_str()));
         Ok(OpcodeAction::Continue)
@@ -6975,16 +6895,8 @@ impl<'gc> VM<'gc> {
             return Ok(OpcodeAction::Continue);
         }
 
-        let key = match self.as_property_key_string(ctx, &key_val) {
-            Ok(key) => key,
-            Err(err) => {
-                self.set_pending_throw_from_error(&err);
-                if let Some(thrown) = self.pending_throw.take() {
-                    self.handle_throw(ctx, &thrown)?;
-                    return Ok(OpcodeAction::Continue);
-                }
-                return Err(err);
-            }
+        let Some(key) = self.as_property_key_string_or_handle_throw(ctx, &key_val)? else {
+            return Ok(OpcodeAction::Continue);
         };
         // Ergonomic brand check: `#field in obj` (inside the class that owns #field)
         // must return true when the object has that private field as an own property.

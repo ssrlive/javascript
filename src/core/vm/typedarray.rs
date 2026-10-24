@@ -4706,19 +4706,12 @@ impl<'gc> VM<'gc> {
 
     // ── Uint8Array base64/hex helpers ──────────────────────────────────
 
-    const BASE64_CHARS: &'static [u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const BASE64URL_CHARS: &'static [u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-    fn base64_decode_char(c: u8, use_url: bool) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' if !use_url => Some(62),
-            b'/' if !use_url => Some(63),
-            b'-' if use_url => Some(62),
-            b'_' if use_url => Some(63),
-            _ => None,
+    fn base64_engine_kind(use_url: bool, padding: bool) -> base64easy::EngineKind {
+        match (use_url, padding) {
+            (false, true) => base64easy::EngineKind::Standard,
+            (false, false) => base64easy::EngineKind::StandardNoPad,
+            (true, true) => base64easy::EngineKind::UrlSafe,
+            (true, false) => base64easy::EngineKind::UrlSafeNoPad,
         }
     }
 
@@ -4789,11 +4782,8 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    /// Core base64 decode per spec's FromBase64.
-    /// Returns (decoded_bytes, chars_read, optional_error_message).
-    /// Bytes/read always reflect valid data decoded so far.
-    /// Caller writes bytes first, then throws error if present.
-    fn base64_decode_core(
+    /// Apply FromBase64 chunk and buffer rules, delegating byte decoding to base64easy.
+    fn decode_base64_input(
         &self,
         input: &str,
         use_url: bool,
@@ -4806,153 +4796,119 @@ impl<'gc> VM<'gc> {
             return (Vec::new(), 0, None);
         }
         let bytes = input.as_bytes();
-        let len = bytes.len();
-        let mut result: Vec<u8> = Vec::new();
-        let mut chunk: Vec<u8> = Vec::new();
-        let mut i = 0;
-        let mut read = 0; // "handledChunkStart" — past last complete operation
+        let mut result = Vec::new();
+        let mut index = 0;
+        let mut read = 0;
 
-        while i < len {
-            let c = bytes[i];
-            if matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
-                i += 1;
-                continue;
+        while index < bytes.len() {
+            while index < bytes.len() && matches!(bytes[index], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                index += 1;
             }
-            if c == b'=' {
-                if chunk.len() == 2 {
-                    let mut j = i + 1;
-                    while j < len && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
-                        j += 1;
-                    }
-                    if j >= len || bytes[j] != b'=' {
-                        if last_chunk_handling == "stop-before-partial" {
-                            return (result, read, None);
-                        }
-                        return (result, read, Some("Invalid base64: expected second padding character".into()));
-                    }
-                    // Check trailing content after '==' BEFORE decoding
-                    let mut trail = j + 1;
-                    while trail < len && matches!(bytes[trail], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
-                        trail += 1;
-                    }
-                    if trail < len {
-                        return (result, read, Some("Invalid base64: trailing content after padding".into()));
-                    }
-                    if last_chunk_handling == "strict" && chunk[1] & 0x0F != 0 {
-                        return (result, read, Some("Invalid base64: non-zero padding bits".into()));
-                    }
-                    let b = (chunk[0] << 2) | (chunk[1] >> 4);
-                    if result.len() + 1 > max_len {
+            if index == bytes.len() {
+                read = index;
+                break;
+            }
+
+            let mut chunk = [0; 4];
+            let mut chunk_len = 0;
+            while index < bytes.len() && chunk_len < 4 {
+                let byte = bytes[index];
+                index += 1;
+                if !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
+                    chunk[chunk_len] = byte;
+                    chunk_len += 1;
+                }
+            }
+            let chunk_end = index;
+            let chunk = &chunk[..chunk_len];
+            let has_padding = chunk.contains(&b'=');
+            let is_partial = chunk_len < 4;
+
+            if last_chunk_handling == "stop-before-partial"
+                && chunk.iter().position(|&byte| byte == b'=') == Some(2)
+                && (chunk_len < 4 || chunk[3] != b'=')
+            {
+                let mut padded = [b'A'; 4];
+                padded[..2].copy_from_slice(&chunk[..2]);
+                let mut decoded = [0; 3];
+                if let Err(error) = base64easy::decode_slice(padded, &mut decoded, Self::base64_engine_kind(use_url, false)) {
+                    return (result, read, Some(format!("Invalid base64: {error}")));
+                }
+                return (result, read, None);
+            }
+
+            if is_partial && last_chunk_handling == "stop-before-partial" {
+                if let Some(padding_at) = chunk.iter().position(|&byte| byte == b'=') {
+                    if padding_at == 2 {
                         return (result, read, None);
                     }
-                    result.push(b);
-                    read = j + 1;
-                    chunk.clear();
-                    i = j + 1;
-                    continue;
-                } else if chunk.len() == 3 {
-                    // Check trailing content after '=' BEFORE decoding
-                    let mut trail = i + 1;
-                    while trail < len && matches!(bytes[trail], b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
-                        trail += 1;
-                    }
-                    if trail < len {
-                        return (result, read, Some("Invalid base64: trailing content after padding".into()));
-                    }
-                    if last_chunk_handling == "strict" && chunk[2] & 0x03 != 0 {
-                        return (result, read, Some("Invalid base64: non-zero padding bits".into()));
-                    }
-                    let b0 = (chunk[0] << 2) | (chunk[1] >> 4);
-                    let b1 = ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2);
-                    if result.len() + 2 > max_len {
-                        return (result, read, None);
-                    }
-                    result.push(b0);
-                    result.push(b1);
-                    read = i + 1;
-                    chunk.clear();
-                    i += 1;
-                    continue;
-                } else {
                     return (result, read, Some("Invalid base64: unexpected padding".into()));
                 }
+                let mut padded = [b'A'; 4];
+                padded[..chunk_len].copy_from_slice(chunk);
+                let mut decoded = [0; 3];
+                if let Err(error) = base64easy::decode_slice(padded, &mut decoded, Self::base64_engine_kind(use_url, false)) {
+                    return (result, read, Some(format!("Invalid base64: {error}")));
+                }
+                return (result, read, None);
             }
 
-            let val = match Self::base64_decode_char(c, use_url) {
-                Some(v) => v,
-                None => {
-                    return (result, read, Some(format!("Invalid base64 character: {}", c as char)));
-                }
-            };
-            chunk.push(val);
-            i += 1;
-
-            if chunk.len() == 4 {
-                let b0 = (chunk[0] << 2) | (chunk[1] >> 4);
-                let b1 = ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2);
-                let b2 = ((chunk[2] & 0x03) << 6) | chunk[3];
-                // All-or-nothing: can't fit all 3 → stop before this chunk
-                if result.len() + 3 > max_len {
-                    return (result, read, None);
-                }
-                result.push(b0);
-                result.push(b1);
-                result.push(b2);
-                read = i;
-                chunk.clear();
-                // Early return when maxLength reached
-                if result.len() >= max_len {
-                    return (result, read, None);
-                }
-            }
-        }
-
-        // Handle remaining partial chunk
-        if !chunk.is_empty() {
-            if chunk.len() == 1 {
-                if last_chunk_handling == "stop-before-partial" {
-                    return (result, read, None);
+            if is_partial && chunk.len() == 1 {
+                let mut padded = [b'A'; 4];
+                padded[..chunk_len].copy_from_slice(chunk);
+                let mut decoded = [0; 3];
+                if let Err(error) = base64easy::decode_slice(padded, &mut decoded, Self::base64_engine_kind(use_url, false)) {
+                    return (result, read, Some(format!("Invalid base64: {error}")));
                 }
                 return (result, read, Some("Invalid base64: incomplete chunk".into()));
             }
-            if last_chunk_handling == "stop-before-partial" {
-                return (result, read, None);
-            }
-            if last_chunk_handling == "strict" {
+
+            if is_partial && !has_padding && last_chunk_handling == "strict" {
                 return (result, read, Some("Invalid base64: missing padding".into()));
             }
-            // "loose" mode
-            if chunk.len() == 2 {
-                let b = (chunk[0] << 2) | (chunk[1] >> 4);
-                if result.len() + 1 > max_len {
-                    return (result, read, None);
-                }
-                result.push(b);
-                read = i;
-            } else if chunk.len() == 3 {
-                let b0 = (chunk[0] << 2) | (chunk[1] >> 4);
-                let b1 = ((chunk[1] & 0x0F) << 4) | (chunk[2] >> 2);
-                if result.len() + 2 > max_len {
-                    return (result, read, None);
-                }
-                result.push(b0);
-                result.push(b1);
-                read = i;
-            }
-        } else {
-            read = i;
-        }
 
-        // Trailing garbage check (only for fromBase64 — no maxLength)
-        if max_length.is_none() {
-            let mut trail = read;
-            while trail < len {
-                let c = bytes[trail];
-                if matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0C) {
-                    trail += 1;
-                    continue;
+            let padding_count = chunk.iter().rev().take_while(|&&byte| byte == b'=').count();
+            let valid_padding_shape = !is_partial
+                && ((padding_count == 1 && chunk[2] != b'=')
+                    || (padding_count == 2 && chunk[1] != b'=' && chunk[2] == b'=')
+                    || padding_count == 0);
+            if has_padding && valid_padding_shape {
+                let trailing_content = bytes[index..]
+                    .iter()
+                    .any(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C));
+                if trailing_content {
+                    return (result, read, Some("Invalid base64: trailing content after padding".into()));
                 }
-                return (result, read, Some("Invalid base64: trailing garbage".into()));
+            }
+
+            let mut encoded = [b'A'; 4];
+            encoded[..chunk_len].copy_from_slice(chunk);
+            let (encoded_len, engine, decoded_len) = if is_partial && has_padding {
+                (chunk_len, Self::base64_engine_kind(use_url, true), None)
+            } else if has_padding && last_chunk_handling == "loose" && valid_padding_shape {
+                let decoded_len = 3usize.saturating_sub(padding_count);
+                encoded[4 - padding_count..].fill(b'A');
+                (4, Self::base64_engine_kind(use_url, false), Some(decoded_len))
+            } else if is_partial {
+                (4, Self::base64_engine_kind(use_url, false), Some(chunk_len - 1))
+            } else {
+                (chunk_len, Self::base64_engine_kind(use_url, has_padding), None)
+            };
+
+            let mut decoded = [0; 3];
+            let codec_decoded_len = match base64easy::decode_slice(&encoded[..encoded_len], &mut decoded, engine) {
+                Ok(decoded_len) => decoded_len,
+                Err(error) => return (result, read, Some(format!("Invalid base64: {error}"))),
+            };
+            let decoded_len = decoded_len.unwrap_or(codec_decoded_len);
+            if result.len() + decoded_len > max_len {
+                return (result, read, None);
+            }
+            result.extend_from_slice(&decoded[..decoded_len]);
+            read = chunk_end;
+
+            if max_length.is_some() && result.len() >= max_len && !has_padding {
+                return (result, read, None);
             }
         }
 
@@ -5189,39 +5145,8 @@ impl<'gc> VM<'gc> {
         }
 
         let bytes = self.get_uint8array_bytes(this);
-        let alphabet = if use_url { Self::BASE64URL_CHARS } else { Self::BASE64_CHARS };
-        let mut result = String::new();
-        for chunk in bytes.chunks(3) {
-            match chunk.len() {
-                3 => {
-                    let (b0, b1, b2) = (chunk[0] as usize, chunk[1] as usize, chunk[2] as usize);
-                    result.push(alphabet[b0 >> 2] as char);
-                    result.push(alphabet[((b0 & 3) << 4) | (b1 >> 4)] as char);
-                    result.push(alphabet[((b1 & 0xF) << 2) | (b2 >> 6)] as char);
-                    result.push(alphabet[b2 & 0x3F] as char);
-                }
-                2 => {
-                    let (b0, b1) = (chunk[0] as usize, chunk[1] as usize);
-                    result.push(alphabet[b0 >> 2] as char);
-                    result.push(alphabet[((b0 & 3) << 4) | (b1 >> 4)] as char);
-                    result.push(alphabet[(b1 & 0xF) << 2] as char);
-                    if !omit_padding {
-                        result.push('=');
-                    }
-                }
-                1 => {
-                    let b0 = chunk[0] as usize;
-                    result.push(alphabet[b0 >> 2] as char);
-                    result.push(alphabet[(b0 & 3) << 4] as char);
-                    if !omit_padding {
-                        result.push('=');
-                        result.push('=');
-                    }
-                }
-                _ => {}
-            }
-        }
-        Value::from(&result)
+        let result = base64easy::encode(bytes, Self::base64_engine_kind(use_url, !omit_padding));
+        Value::from(result.as_str())
     }
 
     fn uint8array_to_hex(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -5256,7 +5181,7 @@ impl<'gc> VM<'gc> {
             Some(v) => v,
             None => return Value::Undefined,
         };
-        let (bytes, _read, error) = self.base64_decode_core(&input_str, use_url, &last_chunk, None);
+        let (bytes, _read, error) = self.decode_base64_input(&input_str, use_url, &last_chunk, None);
         if let Some(msg) = error {
             self.throw_syntax_error(ctx, &msg);
             return Value::Undefined;
@@ -5309,7 +5234,7 @@ impl<'gc> VM<'gc> {
             Value::Array(arr) => arr.borrow().elements.len(),
             _ => 0,
         };
-        let (bytes, read, error) = self.base64_decode_core(&input_str, use_url, &last_chunk, Some(target_len));
+        let (bytes, read, error) = self.decode_base64_input(&input_str, use_url, &last_chunk, Some(target_len));
         let written = bytes.len();
         self.write_bytes_to_uint8array(ctx, this, &bytes);
         if let Some(msg) = error {

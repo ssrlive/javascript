@@ -61,6 +61,40 @@ fn test_js_typedarray_constructors_via_script() {
 }
 
 #[test]
+fn test_uint8array_base64_encoding_and_decoding() {
+    let script = r#"
+        const standard = new Uint8Array([102, 111, 111]).toBase64();
+        const urlSafe = new Uint8Array([255, 255]).toBase64({ alphabet: "base64url", omitPadding: true });
+        const decoded = Uint8Array.fromBase64("Zm9v").join(",");
+        const decodedUrlSafe = Uint8Array.fromBase64("__8", { alphabet: "base64url" }).join(",");
+        const loosePartial = Uint8Array.fromBase64("Zh").join(",");
+        [standard, urlSafe, decoded, decodedUrlSafe, loosePartial].join("|");
+    "#;
+
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "\"Zm9v|__8|102,111,111|255,255|102\"");
+}
+
+#[test]
+fn test_uint8array_base64_decode_modes_and_partial_writes() {
+    let script = r#"
+        let strictRejectsNonCanonicalBits = false;
+        try {
+            Uint8Array.fromBase64("Zh", { lastChunkHandling: "strict" });
+        } catch (error) {
+            strictRejectsNonCanonicalBits = error instanceof SyntaxError;
+        }
+        const stopped = Uint8Array.fromBase64("Zm9vY", { lastChunkHandling: "stop-before-partial" }).join(",");
+        const target = new Uint8Array(3);
+        const { read, written } = target.setFromBase64("Zm9v");
+        [strictRejectsNonCanonicalBits, stopped, read, written, target.join(",")].join("|");
+    "#;
+
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "\"true|102,111,111|4|3|102,111,111\"");
+}
+
+#[test]
 fn test_js_typedarray_shared_buffer_via_script() {
     // Test that TypedArrays share the same underlying buffer
     let script = r#"

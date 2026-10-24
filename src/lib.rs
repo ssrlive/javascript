@@ -18,5 +18,5 @@ pub use error::{JSError, JSErrorKind};
 // pub use js_promise::set_short_timer_threshold_ms;
 // pub use js_promise::set_wait_for_active_handles;
 pub use repl::Repl;
-pub use runtime::{HostObjectHandle, HostValue, JsRuntime};
+pub use runtime::{JsObjectHandle, JsRuntime, JsValue};
 pub use unicode::{utf8_to_utf16, utf16_to_utf8};

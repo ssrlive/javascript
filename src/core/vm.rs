@@ -11,7 +11,9 @@ use crate::core::value::{ArrayData, MapData, SetData, SymbolData, value_to_strin
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use indexmap::IndexMap;
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 mod bigint;
 mod dataview;
@@ -912,7 +914,7 @@ pub struct VM<'gc> {
     pub(crate) host_roots: HashMap<u64, Value<'gc>>,
     pub(crate) next_host_root_id: u64,
     /// Host callbacks registered by embedding applications via `JsRuntime::register_fn`.
-    host_callbacks: HashMap<String, std::rc::Rc<std::cell::RefCell<crate::runtime::BoxedHostCallback>>>,
+    host_callbacks: HashMap<String, Rc<RefCell<crate::runtime::BoxedJsCallback>>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -3593,10 +3595,9 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
-    pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedHostCallback) {
+    pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedJsCallback) {
         let host_key = format!("host_callback.{name}");
-        self.host_callbacks
-            .insert(name.to_string(), std::rc::Rc::new(std::cell::RefCell::new(callback)));
+        self.host_callbacks.insert(name.to_string(), Rc::new(RefCell::new(callback)));
         let fn_val = Self::make_host_fn_with_name_len(ctx, &host_key, name, 0.0, false);
         if let Value::Object(obj) = &fn_val
             && let Some(Value::Object(fn_ctor)) = self.globals.get("Function").cloned()
@@ -3613,7 +3614,7 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, &format!("Host function '{name}' is not registered"));
             return Value::Undefined;
         };
-        let host_args: Vec<crate::runtime::HostValue> = args.iter().map(|v| self.value_to_host_value(v)).collect();
+        let host_args: Vec<crate::runtime::JsValue> = args.iter().map(|v| self.value_to_host_value(v)).collect();
         let outcome = callback_rc.borrow_mut()(&host_args);
         match outcome {
             Ok(host_val) => match self.host_value_to_value(ctx, &host_val) {
@@ -3632,43 +3633,43 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    pub(crate) fn store_host_root(&mut self, value: Value<'gc>) -> crate::runtime::HostObjectHandle {
+    pub(crate) fn store_host_root(&mut self, value: Value<'gc>) -> crate::runtime::JsObjectHandle {
         let id = self.next_host_root_id;
         self.next_host_root_id = self.next_host_root_id.saturating_add(1);
         self.host_roots.insert(id, value);
-        crate::runtime::HostObjectHandle(id)
+        crate::runtime::JsObjectHandle(id)
     }
 
-    pub(crate) fn value_to_host_value(&mut self, value: &Value<'gc>) -> crate::runtime::HostValue {
-        use crate::runtime::HostValue;
+    pub(crate) fn value_to_host_value(&mut self, value: &Value<'gc>) -> crate::runtime::JsValue {
+        use crate::runtime::JsValue;
         match value {
-            Value::Undefined | Value::Uninitialized => HostValue::Undefined,
-            Value::Null => HostValue::Null,
-            Value::Boolean(b) => HostValue::Boolean(*b),
-            Value::Number(n) => HostValue::Number(*n),
-            Value::BigInt(bi) => HostValue::BigInt((**bi).clone()),
-            Value::String(units) => HostValue::String(crate::unicode::utf16_to_utf8(units)),
-            other => HostValue::Object(self.store_host_root(other.clone())),
+            Value::Undefined | Value::Uninitialized => JsValue::Undefined,
+            Value::Null => JsValue::Null,
+            Value::Boolean(b) => JsValue::Boolean(*b),
+            Value::Number(n) => JsValue::Number(*n),
+            Value::BigInt(bi) => JsValue::BigInt((**bi).clone()),
+            Value::String(units) => JsValue::String(crate::unicode::utf16_to_utf8(units)),
+            other => JsValue::Object(self.store_host_root(other.clone())),
         }
     }
 
-    pub(crate) fn host_value_to_value(&mut self, ctx: &GcContext<'gc>, value: &crate::runtime::HostValue) -> Result<Value<'gc>, JSError> {
-        use crate::runtime::HostValue;
+    pub(crate) fn host_value_to_value(&mut self, ctx: &GcContext<'gc>, value: &crate::runtime::JsValue) -> Result<Value<'gc>, JSError> {
+        use crate::runtime::JsValue;
         match value {
-            HostValue::Undefined => Ok(Value::Undefined),
-            HostValue::Null => Ok(Value::Null),
-            HostValue::Boolean(b) => Ok(Value::Boolean(*b)),
-            HostValue::Number(n) => Ok(Value::Number(*n)),
-            HostValue::BigInt(bi) => Ok(Value::BigInt(Box::new(bi.clone()))),
-            HostValue::String(s) => Ok(Value::from(s.as_str())),
-            HostValue::Array(items) => {
+            JsValue::Undefined => Ok(Value::Undefined),
+            JsValue::Null => Ok(Value::Null),
+            JsValue::Boolean(b) => Ok(Value::Boolean(*b)),
+            JsValue::Number(n) => Ok(Value::Number(*n)),
+            JsValue::BigInt(bi) => Ok(Value::BigInt(Box::new(bi.clone()))),
+            JsValue::String(s) => Ok(Value::from(s.as_str())),
+            JsValue::Array(items) => {
                 let mut elems = Vec::with_capacity(items.len());
                 for item in items {
                     elems.push(self.host_value_to_value(ctx, item)?);
                 }
                 Ok(self.create_vm_array(ctx, elems))
             }
-            HostValue::Record(entries) => {
+            JsValue::Record(entries) => {
                 let mut map = IndexMap::new();
                 if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Object") {
                     map.insert("__proto__".to_string(), proto);
@@ -3683,18 +3684,18 @@ impl<'gc> VM<'gc> {
                 }
                 Ok(Value::Object(new_gc_cell_ptr(ctx, map)))
             }
-            HostValue::Object(handle) => self
+            JsValue::Object(handle) => self
                 .host_roots
                 .get(&handle.id())
                 .cloned()
-                .ok_or_else(|| crate::raise_eval_error!(format!("Invalid or released HostObjectHandle({})", handle.id()))),
+                .ok_or_else(|| crate::raise_eval_error!(format!("Invalid or released JsObjectHandle({})", handle.id()))),
         }
     }
 
     pub(crate) fn host_value_to_json(
         &mut self,
         ctx: &GcContext<'gc>,
-        value: &crate::runtime::HostValue,
+        value: &crate::runtime::JsValue,
     ) -> Result<serde_json::Value, JSError> {
         let vm_val = self.host_value_to_value(ctx, value)?;
         let Some(json_text) = self.json_stringify_root(ctx, &vm_val, None, None, "") else {
@@ -3713,8 +3714,8 @@ impl<'gc> VM<'gc> {
         &mut self,
         ctx: &GcContext<'gc>,
         fn_name: &str,
-        args: &[crate::runtime::HostValue],
-    ) -> Result<crate::runtime::HostValue, JSError> {
+        args: &[crate::runtime::JsValue],
+    ) -> Result<crate::runtime::JsValue, JSError> {
         let callee = if let Some(val) = self.globals.get(fn_name).cloned() {
             val
         } else {

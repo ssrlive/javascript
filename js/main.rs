@@ -10,8 +10,10 @@ fn parse_budget(value: &str) -> std::io::Result<usize> {
     Ok(budget)
 }
 
+const APP_NAME: &str = "js-rs";
+
 #[derive(clap::Parser)]
-#[command(name = "js-rs", version, about = "JavaScript Rust Interpreter")]
+#[command(name = APP_NAME, version, about = "JavaScript Rust Interpreter")]
 struct Cli {
     /// Execute script
     #[arg(short, long)]
@@ -49,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let handler = builder.spawn(run_main)?;
     match handler.join() {
         Ok(res) => res,
-        Err(_) => Err(Box::new(std::io::Error::other("js-rs runtime thread panicked"))),
+        Err(_) => Err(Box::new(std::io::Error::other(format!("{APP_NAME} runtime thread panicked")))),
     }
 }
 
@@ -71,8 +73,8 @@ mod prompt_helper {
     impl Highlighter for ReplPromptHelper {
         fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, default: bool) -> std::borrow::Cow<'b, str> {
             let _ = default;
-            if prompt == "js-rs> " {
-                std::borrow::Cow::Borrowed("\x1b[1;32mjs-rs> \x1b[0m")
+            if prompt == format!("{}> ", super::APP_NAME) {
+                std::borrow::Cow::Owned(format!("\x1b[1;32m{prompt}\x1b[0m"))
             } else if prompt == "... " {
                 std::borrow::Cow::Borrowed("\x1b[1;33m... \x1b[0m")
             } else {
@@ -195,8 +197,12 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
     let mut buffer = String::new();
 
     loop {
-        let prompt = if buffer.is_empty() { "js-rs> " } else { "... " };
-        match rl.readline(prompt) {
+        let prompt = if buffer.is_empty() {
+            format!("{APP_NAME}> ")
+        } else {
+            "... ".to_owned()
+        };
+        match rl.readline(&prompt) {
             Ok(line) => {
                 // support quick exit from the REPL
                 let trimmed = line.trim();

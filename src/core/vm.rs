@@ -724,6 +724,9 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         for state in &self.suspended_module_states {
             state.trace(cc);
         }
+        for value in self.host_roots.values() {
+            value.trace(cc);
+        }
     }
 }
 
@@ -905,6 +908,11 @@ pub struct VM<'gc> {
     suspended_module_states: Vec<SuspendedModuleState<'gc>>,
     /// Template cache: site_id → frozen template array (GetTemplateObject §13.2.8.3)
     template_cache: HashMap<u64, Value<'gc>>,
+    /// Persistent host handles rooted in the GC arena.
+    pub(crate) host_roots: HashMap<u64, Value<'gc>>,
+    pub(crate) next_host_root_id: u64,
+    /// Host callbacks registered by embedding applications via `JsRuntime::register_fn`.
+    host_callbacks: HashMap<String, std::rc::Rc<std::cell::RefCell<crate::runtime::BoxedHostCallback>>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1226,6 +1234,9 @@ impl<'gc> VM<'gc> {
             module_await_suspended: false,
             suspended_module_states: Vec::new(),
             template_cache: HashMap::new(),
+            host_roots: HashMap::new(),
+            next_host_root_id: 1,
+            host_callbacks: HashMap::new(),
         };
         vm.register_builtins(ctx);
         vm
@@ -3570,6 +3581,208 @@ impl<'gc> VM<'gc> {
         result
     }
 
+    pub(crate) fn prepare_merged_script(&mut self, code: &str) -> Result<(), JSError> {
+        let statements = crate::core::parse_program_statements(code, false)?;
+        let mut compiler = crate::core::Compiler::new();
+        compiler.set_source_text(code.to_string());
+        let chunk = compiler.compile(&statements)?;
+        self.validate_script_global_declarations(&chunk)?;
+        let (code_offset, _) = self.merge_eval_chunk(&chunk);
+        self.set_source_context(code, None);
+        self.ip = code_offset;
+        Ok(())
+    }
+
+    pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedHostCallback) {
+        let host_key = format!("host_callback.{name}");
+        self.host_callbacks
+            .insert(name.to_string(), std::rc::Rc::new(std::cell::RefCell::new(callback)));
+        let fn_val = Self::make_host_fn_with_name_len(ctx, &host_key, name, 0.0, false);
+        if let Value::Object(obj) = &fn_val
+            && let Some(Value::Object(fn_ctor)) = self.globals.get("Function").cloned()
+            && let Some(fn_proto) = own_data_from_map(&fn_ctor.borrow(), "prototype")
+        {
+            obj.borrow_mut(ctx).insert("__proto__".to_string(), fn_proto);
+        }
+        self.globals.insert(name.to_string(), fn_val.clone());
+        self.global_this.borrow_mut(ctx).insert(name.to_string(), fn_val);
+    }
+
+    fn invoke_registered_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, args: &[Value<'gc>]) -> Value<'gc> {
+        let Some(callback_rc) = self.host_callbacks.get(name).cloned() else {
+            self.throw_type_error(ctx, &format!("Host function '{name}' is not registered"));
+            return Value::Undefined;
+        };
+        let host_args: Vec<crate::runtime::HostValue> = args.iter().map(|v| self.value_to_host_value(v)).collect();
+        let outcome = callback_rc.borrow_mut()(&host_args);
+        match outcome {
+            Ok(host_val) => match self.host_value_to_value(ctx, &host_val) {
+                Ok(val) => val,
+                Err(err) => {
+                    let thrown = self.vm_value_from_error(ctx, &err);
+                    self.pending_throw = Some(thrown);
+                    Value::Undefined
+                }
+            },
+            Err(err) => {
+                let thrown = self.vm_value_from_error(ctx, &err);
+                self.pending_throw = Some(thrown);
+                Value::Undefined
+            }
+        }
+    }
+
+    pub(crate) fn store_host_root(&mut self, value: Value<'gc>) -> crate::runtime::HostObjectHandle {
+        let id = self.next_host_root_id;
+        self.next_host_root_id = self.next_host_root_id.saturating_add(1);
+        self.host_roots.insert(id, value);
+        crate::runtime::HostObjectHandle(id)
+    }
+
+    pub(crate) fn value_to_host_value(&mut self, value: &Value<'gc>) -> crate::runtime::HostValue {
+        use crate::runtime::HostValue;
+        match value {
+            Value::Undefined | Value::Uninitialized => HostValue::Undefined,
+            Value::Null => HostValue::Null,
+            Value::Boolean(b) => HostValue::Boolean(*b),
+            Value::Number(n) => HostValue::Number(*n),
+            Value::BigInt(bi) => HostValue::BigInt((**bi).clone()),
+            Value::String(units) => HostValue::String(crate::unicode::utf16_to_utf8(units)),
+            other => HostValue::Object(self.store_host_root(other.clone())),
+        }
+    }
+
+    pub(crate) fn host_value_to_value(&mut self, ctx: &GcContext<'gc>, value: &crate::runtime::HostValue) -> Result<Value<'gc>, JSError> {
+        use crate::runtime::HostValue;
+        match value {
+            HostValue::Undefined => Ok(Value::Undefined),
+            HostValue::Null => Ok(Value::Null),
+            HostValue::Boolean(b) => Ok(Value::Boolean(*b)),
+            HostValue::Number(n) => Ok(Value::Number(*n)),
+            HostValue::BigInt(bi) => Ok(Value::BigInt(Box::new(bi.clone()))),
+            HostValue::String(s) => Ok(Value::from(s.as_str())),
+            HostValue::Array(items) => {
+                let mut elems = Vec::with_capacity(items.len());
+                for item in items {
+                    elems.push(self.host_value_to_value(ctx, item)?);
+                }
+                Ok(self.create_vm_array(ctx, elems))
+            }
+            HostValue::Record(entries) => {
+                let mut map = IndexMap::new();
+                if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Object") {
+                    map.insert("__proto__".to_string(), proto);
+                }
+                for (key, val) in entries {
+                    let storage_key = if key == "__proto__" {
+                        OWN_DUNDER_PROTO_DATA_KEY
+                    } else {
+                        key.as_str()
+                    };
+                    map.insert(storage_key.to_string(), self.host_value_to_value(ctx, val)?);
+                }
+                Ok(Value::Object(new_gc_cell_ptr(ctx, map)))
+            }
+            HostValue::Object(handle) => self
+                .host_roots
+                .get(&handle.id())
+                .cloned()
+                .ok_or_else(|| crate::raise_eval_error!(format!("Invalid or released HostObjectHandle({})", handle.id()))),
+        }
+    }
+
+    pub(crate) fn host_value_to_json(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        value: &crate::runtime::HostValue,
+    ) -> Result<serde_json::Value, JSError> {
+        let vm_val = self.host_value_to_value(ctx, value)?;
+        let Some(json_text) = self.json_stringify_root(ctx, &vm_val, None, None, "") else {
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(self.vm_error_to_js_error(ctx, &thrown));
+            }
+            return Ok(serde_json::Value::Null);
+        };
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        serde_json::from_str(&json_text).map_err(|e| crate::raise_eval_error!(format!("Failed to parse serialized JSON: {e}")))
+    }
+
+    pub(crate) fn call_global_function_by_name(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        fn_name: &str,
+        args: &[crate::runtime::HostValue],
+    ) -> Result<crate::runtime::HostValue, JSError> {
+        let callee = if let Some(val) = self.globals.get(fn_name).cloned() {
+            val
+        } else {
+            let gt = Value::Object(self.global_this);
+            let val = self.read_named_property(ctx, &gt, fn_name);
+            if let Some(thrown) = self.pending_throw.take() {
+                return Err(self.vm_error_to_js_error(ctx, &thrown));
+            }
+            val
+        };
+        if !self.is_value_callable(&callee) {
+            return Err(crate::raise_type_error!(format!("'{fn_name}' is not a function")));
+        }
+
+        let mut vm_args = Vec::with_capacity(args.len());
+        for arg in args {
+            vm_args.push(self.host_value_to_value(ctx, arg)?);
+        }
+
+        let this_arg = Value::Object(self.global_this);
+        let mut out = self.vm_call_function_value(ctx, &callee, &this_arg, &vm_args)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        self.flush_async_atomics_waits(ctx, true);
+        self.drain_microtasks(ctx);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        self.drain_timers(ctx)?;
+        self.flush_async_atomics_waits(ctx, true);
+        self.drain_microtasks(ctx);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        self.collect_garbage(ctx);
+        out = self.unwrap_settled_top_level_promise(ctx, out)?;
+        Ok(self.value_to_host_value(&out))
+    }
+
+    pub(crate) fn unwrap_settled_top_level_promise(&mut self, ctx: &GcContext<'gc>, mut v: Value<'gc>) -> Result<Value<'gc>, JSError> {
+        for _ in 0..8 {
+            let step = if let Value::Object(obj) = &v {
+                let b = obj.borrow();
+                let is_promise = matches!(b.get("__type__"), Some(Value::String(s)) if crate::unicode::utf16_to_utf8(s) == "Promise");
+                if is_promise {
+                    let rejected = matches!(b.get("__promise_rejected__"), Some(Value::Boolean(true)));
+                    let next = b.get("__promise_value__").cloned();
+                    Some((rejected, next))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let Some((rejected, Some(next))) = step else {
+                break;
+            };
+
+            if rejected {
+                return Err(self.vm_error_to_js_error(ctx, &next));
+            }
+            v = next;
+        }
+        Ok(v)
+    }
+
     fn call_eval_function(&mut self, ctx: &GcContext<'gc>, source: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
         let func = self.call_builtin(ctx, BUILTIN_EVAL, &[Value::from(source)]);
         if let Some(thrown) = self.pending_throw.take() {
@@ -5270,6 +5483,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
+        if let Some(callback_name) = name.strip_prefix("host_callback.") {
+            return self.invoke_registered_host_callback(ctx, callback_name, args);
+        }
         if name.starts_with("temporal.") {
             return self.temporal_handle_host_fn(ctx, name, receiver, args);
         }
@@ -13821,6 +14037,7 @@ impl<'gc> VM<'gc> {
             || name.starts_with("disposableStack.")
             || name.starts_with("asyncDisposableStack.")
             || name.starts_with("shadowRealm.")
+            || name.starts_with("host_callback.")
         {
             return self.call_host_fn(ctx, name, receiver, args);
         }

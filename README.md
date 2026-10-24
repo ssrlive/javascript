@@ -153,6 +153,25 @@ fn main() {
 }
 ```
 
+Embeddable `JsRuntime` API (persistent state, host callbacks, handles, and JSON conversion):
+
+```rust
+use javascript::{HostValue, JsRuntime};
+
+fn main() {
+    let mut rt = JsRuntime::new();
+    rt.register_fn("hostAdd", |args| {
+        let a = args.first().and_then(HostValue::as_number).unwrap_or(0.0);
+        let b = args.get(1).and_then(HostValue::as_number).unwrap_or(0.0);
+        Ok(HostValue::from(a + b))
+    });
+
+    rt.eval("function compute(x) { return hostAdd(x, 10); }").unwrap();
+    let out = rt.call("compute", &[HostValue::from(32)]).unwrap();
+    assert_eq!(out, HostValue::Number(42.0));
+}
+```
+
 Other exported APIs include tokenize, parse_statement, parse_statements, read_script_file, and value/string helpers.
 
 ## Testing and quality checks

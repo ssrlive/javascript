@@ -1,15 +1,8 @@
-use crate::{
-    JSError,
-    core::{Chunk, JsArenaVm, VM, Value, value_to_compact_result_string, value_to_string},
-};
+use crate::{JSError, runtime::JsRuntime};
 
-/// A small persistent REPL environment wrapper.
-///
-/// Notes:
-/// - `Repl::new()` uses the Bytecode VM backend.
-/// - `Repl::eval(&self, code)` evaluates each submission in the same VM instance.
+/// A small persistent REPL environment backed by [`JsRuntime`].
 pub struct Repl {
-    arena: JsArenaVm,
+    runtime: JsRuntime,
 }
 
 impl Default for Repl {
@@ -19,37 +12,15 @@ impl Default for Repl {
 }
 
 impl Repl {
-    /// Create a VM-backed REPL handle.
+    /// Create a REPL backed by a new [`JsRuntime`].
     pub fn new() -> Self {
-        let arena = JsArenaVm::new(|ctx| VM::new(Chunk::new(), ctx));
-        Repl { arena }
+        Repl { runtime: JsRuntime::new() }
     }
 
-    /// Evaluate a script using the VM backend.
+    /// Evaluate a script in the persistent runtime.
     /// Returns the evaluation result as a string or an error.
     pub fn eval<T: AsRef<str>>(&mut self, script: T) -> Result<String, JSError> {
-        let script = script.as_ref();
-        // let mut vm = self.vm.borrow_mut();
-        let result = self.arena.mutate_root(|ctx, vm| {
-            let v = vm.eval_repl_snippet(ctx, script)?;
-
-            match v {
-                Value::String(s) => {
-                    let s_utf8 = crate::unicode::utf16_to_utf8(&s);
-                    match serde_json::to_string(&s_utf8) {
-                        Ok(quoted) => Ok(quoted),
-                        Err(_) => Ok(format!("\"{}\"", s_utf8)),
-                    }
-                }
-                Value::Array(_) | Value::Object(_) => Ok(value_to_compact_result_string(&v)),
-                _ => Ok(value_to_string(&v)),
-            }
-        });
-
-        // Run incremental GC between REPL evaluations.
-        self.arena.collect_debt();
-
-        result
+        self.runtime.eval_repl(script)
     }
 
     /// Returns true when the given `input` looks like a complete JavaScript

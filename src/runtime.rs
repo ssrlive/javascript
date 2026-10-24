@@ -208,7 +208,7 @@ impl TryFrom<HostValue> for serde_json::Value {
 /// Scripts are executed in opcode-budgeted slices with incremental GC
 /// (`Arena::collect_debt()`) between slices.
 pub struct JsRuntime {
-    arena: JsArenaVm,
+    pub(crate) arena: JsArenaVm,
     gc_opcode_budget: usize,
 }
 
@@ -297,6 +297,27 @@ impl JsRuntime {
             }
         };
 
+        self.arena.collect_debt();
+        result
+    }
+
+    pub(crate) fn eval_repl<T: AsRef<str>>(&mut self, code: T) -> Result<String, JSError> {
+        let script = code.as_ref();
+        let result = self.arena.mutate_root(|ctx, vm| {
+            let value = vm.eval_repl_snippet(ctx, script)?;
+
+            match value {
+                crate::core::Value::String(s) => {
+                    let value = crate::unicode::utf16_to_utf8(&s);
+                    match serde_json::to_string(&value) {
+                        Ok(quoted) => Ok(quoted),
+                        Err(_) => Ok(format!("\"{}\"", value)),
+                    }
+                }
+                crate::core::Value::Array(_) | crate::core::Value::Object(_) => Ok(crate::core::value_to_compact_result_string(&value)),
+                _ => Ok(crate::core::value_to_string(&value)),
+            }
+        });
         self.arena.collect_debt();
         result
     }

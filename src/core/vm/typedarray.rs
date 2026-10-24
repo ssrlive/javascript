@@ -4715,6 +4715,34 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    fn normalize_base64_trailing_bits(chunk: &mut [u8], use_url: bool) {
+        let symbol_count = chunk.iter().position(|&byte| byte == b'=').unwrap_or(chunk.len());
+        let mask = match symbol_count % 4 {
+            2 => 0b11_0000,
+            3 => 0b11_1100,
+            _ => return,
+        };
+        let index = symbol_count - 1;
+        let value = match chunk[index] {
+            b'A'..=b'Z' => chunk[index] - b'A',
+            b'a'..=b'z' => chunk[index] - b'a' + 26,
+            b'0'..=b'9' => chunk[index] - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return,
+        } & mask;
+        chunk[index] = match value {
+            0..=25 => b'A' + value,
+            26..=51 => b'a' + value - 26,
+            52..=61 => b'0' + value - 52,
+            62 if use_url => b'-',
+            62 => b'+',
+            63 if use_url => b'_',
+            63 => b'/',
+            _ => unreachable!(),
+        };
+    }
+
     fn read_base64_alphabet_option(&mut self, ctx: &GcContext<'gc>, opts: Option<&Value<'gc>>) -> Option<bool> {
         let opts = match opts {
             Some(v) if !matches!(v, Value::Undefined) => v,
@@ -4846,6 +4874,7 @@ impl<'gc> VM<'gc> {
                 }
                 let mut padded = [b'A'; 4];
                 padded[..chunk_len].copy_from_slice(chunk);
+                Self::normalize_base64_trailing_bits(&mut padded[..chunk_len], use_url);
                 let mut decoded = [0; 3];
                 if let Err(error) = base64easy::decode_slice(padded, &mut decoded, Self::base64_engine_kind(use_url, false)) {
                     return (result, read, Some(format!("Invalid base64: {error}")));
@@ -4883,6 +4912,13 @@ impl<'gc> VM<'gc> {
 
             let mut encoded = [b'A'; 4];
             encoded[..chunk_len].copy_from_slice(chunk);
+            if last_chunk_handling != "strict"
+                && !bytes[index..]
+                    .iter()
+                    .any(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C))
+            {
+                Self::normalize_base64_trailing_bits(&mut encoded[..chunk_len], use_url);
+            }
             let (encoded_len, engine, decoded_len) = if is_partial && has_padding {
                 (chunk_len, Self::base64_engine_kind(use_url, true), None)
             } else if has_padding && last_chunk_handling == "loose" && valid_padding_shape {

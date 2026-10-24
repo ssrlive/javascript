@@ -80,18 +80,49 @@ fn test_uint8array_base64_decode_modes_and_partial_writes() {
     let script = r#"
         let strictRejectsNonCanonicalBits = false;
         try {
-            Uint8Array.fromBase64("Zh", { lastChunkHandling: "strict" });
+            Uint8Array.fromBase64("ZXhhZh==", { lastChunkHandling: "strict" });
         } catch (error) {
             strictRejectsNonCanonicalBits = error instanceof SyntaxError;
         }
+        const looseNonCanonicalBits = Uint8Array.fromBase64("ZXhhZh==").join(",");
+        const stoppedNonCanonicalBits = Uint8Array.fromBase64("ZXhhZh==", { lastChunkHandling: "stop-before-partial" }).join(",");
         const stopped = Uint8Array.fromBase64("Zm9vY", { lastChunkHandling: "stop-before-partial" }).join(",");
         const target = new Uint8Array(3);
         const { read, written } = target.setFromBase64("Zm9v");
-        [strictRejectsNonCanonicalBits, stopped, read, written, target.join(",")].join("|");
+        [strictRejectsNonCanonicalBits, looseNonCanonicalBits, stoppedNonCanonicalBits, stopped, read, written, target.join(",")].join("|");
     "#;
 
     let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
-    assert_eq!(result, "\"true|102,111,111|4|3|102,111,111\"");
+    assert_eq!(result, "\"true|101,120,97,102|101,120,97,102|102,111,111|4|3|102,111,111\"");
+}
+
+#[test]
+fn test_uint8array_base64_strict_error_is_caught_by_assert_throws() {
+    let script = r#"
+        function Test262Error(message) {
+            this.message = message;
+        }
+        const assert = {
+            throws(expectedErrorConstructor, func) {
+                try {
+                    func();
+                } catch (thrown) {
+                    if (thrown.constructor !== expectedErrorConstructor) {
+                        throw new Test262Error("Unexpected error constructor");
+                    }
+                    return;
+                }
+                throw new Test262Error("Expected an error to be thrown");
+            }
+        };
+        assert.throws(SyntaxError, function() {
+            Uint8Array.fromBase64("ZXhhZg", { lastChunkHandling: "strict" });
+        });
+        "OK";
+    "#;
+
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "\"OK\"");
 }
 
 #[test]

@@ -1055,7 +1055,7 @@ impl<'gc> VM<'gc> {
                     let a = arr.borrow();
                     let elems: Vec<Value<'gc>> = a.elements[begin..end.min(a.elements.len())].to_vec();
                     drop(a);
-                    let mut data = VmArrayData::new(elems);
+                    let mut data = ArrayData::new(elems);
                     data.props.insert("__typedarray_name__".to_string(), Value::from(ta_name.as_str()));
                     data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
                     Value::Array(new_gc_cell_ptr(ctx, data))
@@ -2991,7 +2991,7 @@ impl<'gc> VM<'gc> {
                 None
             }
         });
-        let mut data = VmArrayData::new(elements.clone());
+        let mut data = ArrayData::new(elements.clone());
         data.props.insert("__typedarray_name__".to_string(), Value::from(&ta_name));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         // Create backing ArrayBuffer
@@ -3337,7 +3337,7 @@ impl<'gc> VM<'gc> {
         buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
         buf_map.insert(
             "__buffer_bytes__".to_string(),
-            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(bytes))),
         );
         if let Some(proto) = self.ctor_prototype_from_globals(ctx, "ArrayBuffer") {
             buf_map.insert("__proto__".to_string(), proto);
@@ -3351,7 +3351,7 @@ impl<'gc> VM<'gc> {
         buf_map.insert("byteLength".to_string(), Value::Number(bytes.len() as f64));
         buf_map.insert(
             "__buffer_bytes__".to_string(),
-            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(bytes))),
         );
         buf_map.insert("__immutable__".to_string(), Value::Boolean(true));
         if let Some(proto) = self.ctor_prototype_from_globals(ctx, "ArrayBuffer") {
@@ -3737,7 +3737,7 @@ impl<'gc> VM<'gc> {
                     coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                 }
             }
-            let mut data = VmArrayData::new(coerced_elements);
+            let mut data = ArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
             // Create backing ArrayBuffer with properly encoded bytes
@@ -3864,7 +3864,7 @@ impl<'gc> VM<'gc> {
                     coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                 }
             }
-            let mut data = VmArrayData::new(coerced_elements);
+            let mut data = ArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
             let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
@@ -4048,7 +4048,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     vec![Value::Number(0.0); initial_len]
                 };
-                let mut data = VmArrayData::new(elements);
+                let mut data = ArrayData::new(elements);
                 data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
                 data.props.insert("__buffer_type__".to_string(), Value::from(&buffer_type));
                 data.props.insert("buffer".to_string(), Value::Object(*buf_obj));
@@ -4197,7 +4197,7 @@ impl<'gc> VM<'gc> {
                     coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                 }
             }
-            let mut data = VmArrayData::new(coerced_elements);
+            let mut data = ArrayData::new(coerced_elements);
             data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
             data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
             // Create backing ArrayBuffer with properly encoded bytes
@@ -4326,7 +4326,7 @@ impl<'gc> VM<'gc> {
                         coerced_elements.push(Value::Number(Self::typed_array_coerce_value(num, typedarray_name)));
                     }
                 }
-                let mut data = VmArrayData::new(coerced_elements);
+                let mut data = ArrayData::new(coerced_elements);
                 data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
                 data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
                 let mut bytes = vec![Value::Number(0.0); len * bytes_per_element];
@@ -4391,7 +4391,7 @@ impl<'gc> VM<'gc> {
         } else {
             Value::Number(0.0)
         };
-        let mut data = VmArrayData::new(vec![default_elem; length]);
+        let mut data = ArrayData::new(vec![default_elem; length]);
         data.props.insert("__typedarray_name__".to_string(), Value::from(typedarray_name));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         let bytes = vec![Value::Number(0.0); length * bytes_per_element];
@@ -5118,7 +5118,7 @@ impl<'gc> VM<'gc> {
     fn create_uint8array_from_bytes(&mut self, ctx: &GcContext<'gc>, bytes: Vec<u8>) -> Value<'gc> {
         let elements: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
         let len = elements.len();
-        let mut data = VmArrayData::new(elements);
+        let mut data = ArrayData::new(elements);
         data.props.insert("__typedarray_name__".to_string(), Value::from("Uint8Array"));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         let buf_bytes: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
@@ -5141,7 +5141,7 @@ impl<'gc> VM<'gc> {
     pub(super) fn create_immutable_uint8array_from_bytes(&mut self, ctx: &GcContext<'gc>, bytes: Vec<u8>) -> Value<'gc> {
         let elements: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();
         let len = elements.len();
-        let mut data = VmArrayData::new(elements);
+        let mut data = ArrayData::new(elements);
         data.props.insert("__typedarray_name__".to_string(), Value::from("Uint8Array"));
         data.props.insert("__buffer_type__".to_string(), Value::from("ArrayBuffer"));
         let buf_bytes: Vec<Value<'gc>> = bytes.iter().map(|b| Value::Number(*b as f64)).collect();

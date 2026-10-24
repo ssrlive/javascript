@@ -502,7 +502,7 @@ impl<'gc> VM<'gc> {
         arg_count: usize,
         arity: u8,
         target_ip: usize,
-        upvalues: Vec<VmUpvalueCell<'gc>>,
+        upvalues: Vec<UpvalueCell<'gc>>,
         is_method: bool,
         receiver_or_this: Option<Value<'gc>>,
         derived_tdz: Option<bool>,
@@ -1349,7 +1349,7 @@ impl<'gc> VM<'gc> {
                         }
 
                         let has_no_yields = yielded_values.is_empty();
-                        let mut arr_data = VmArrayData::new(yielded_values);
+                        let mut arr_data = ArrayData::new(yielded_values);
                         {
                             let ab = &mut arr_data;
                             ab.props.insert("__async_generator__".to_string(), Value::Boolean(true));
@@ -1444,7 +1444,7 @@ impl<'gc> VM<'gc> {
                                 }
                             }
 
-                            let mut arr_data = VmArrayData::new(yielded_values);
+                            let mut arr_data = ArrayData::new(yielded_values);
                             arr_data.props.insert("__generator__".to_string(), Value::Boolean(true));
                             arr_data.props.insert("__generator_index__".to_string(), Value::Number(0.0));
                             if !matches!(self.generator_prototype, Value::Undefined) {
@@ -1462,7 +1462,7 @@ impl<'gc> VM<'gc> {
 
                         let saved_args = self.globals.get("__repl_call_args__").cloned();
                         let saved_this = self.globals.get("__repl_call_this__").cloned();
-                        let args_array = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(args_collected)));
+                        let args_array = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(args_collected)));
                         self.globals.insert("__repl_call_args__".to_string(), args_array.clone());
                         self.globals.insert("__repl_call_this__".to_string(), this_val.clone());
                         {
@@ -1515,7 +1515,7 @@ impl<'gc> VM<'gc> {
 
                         let saved_args = self.globals.get("__repl_call_args__").cloned();
                         let saved_this = self.globals.get("__repl_call_this__").cloned();
-                        let args_array = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(args_collected)));
+                        let args_array = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(args_collected)));
                         self.globals.insert("__repl_call_args__".to_string(), args_array.clone());
                         self.globals.insert("__repl_call_this__".to_string(), this_val.clone());
                         {
@@ -3026,7 +3026,7 @@ impl<'gc> VM<'gc> {
                 for (k, v) in borrowed.entries.iter() {
                     let key_val: Value<'gc> = k.clone();
                     let val_val: Value<'gc> = v.clone();
-                    let pair = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![key_val, val_val])));
+                    let pair = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![key_val, val_val])));
                     arr_data.borrow_mut(ctx).elements.push(pair);
                 }
             }
@@ -3602,7 +3602,7 @@ impl<'gc> VM<'gc> {
             }
         };
         let bp = self.frames.last().map(|f| f.bp).unwrap_or(0);
-        let mut captures: Vec<VmUpvalueCell<'gc>> = Vec::with_capacity(capture_count);
+        let mut captures: Vec<UpvalueCell<'gc>> = Vec::with_capacity(capture_count);
         for _cap_i in 0..capture_count {
             let is_local = self.read_byte() != 0;
             let index = self.read_byte() as usize;
@@ -3826,7 +3826,7 @@ impl<'gc> VM<'gc> {
         let count = self.read_byte() as usize;
         let start = self.stack.len() - count;
         let elems: Vec<Value<'gc>> = self.stack.drain(start..).collect();
-        let arr_val = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(elems)));
+        let arr_val = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(elems)));
         // link prototype if Array constructor has prototype property
         if let Some(proto) = self.ctor_prototype_from_globals(ctx, "Array")
             && let Value::Array(arr_obj) = &arr_val
@@ -6377,7 +6377,7 @@ impl<'gc> VM<'gc> {
         }
 
         let keys = out_keys;
-        self.stack.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(keys))));
+        self.stack.push(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(keys))));
         Ok(OpcodeAction::Continue)
     }
 
@@ -6854,10 +6854,10 @@ impl<'gc> VM<'gc> {
                 self.stack.drain(start..end);
                 elems
             };
-            self.stack.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(rest_elems))));
+            self.stack.push(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(rest_elems))));
         } else {
             // No excess args — push empty array
-            self.stack.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new()))));
+            self.stack.push(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(Vec::new()))));
         }
         // The rest array is now the next local slot (at position non_rest_count)
         Ok(OpcodeAction::Continue)

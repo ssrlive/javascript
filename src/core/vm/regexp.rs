@@ -1300,7 +1300,7 @@ impl<'gc> VM<'gc> {
         limit: Option<usize>,
     ) -> Value<'gc> {
         let parts = self.regex_split_string(rust_str, re_obj, limit);
-        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(parts));
+        let arr = new_gc_cell_ptr(ctx, ArrayData::new(parts));
         if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
             && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
         {
@@ -1459,7 +1459,7 @@ impl<'gc> VM<'gc> {
                 return if results.is_empty() {
                     Value::Null
                 } else {
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)))
                 };
             }
 
@@ -1909,7 +1909,7 @@ impl<'gc> VM<'gc> {
         };
 
         if lim == 0 {
-            return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+            return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)));
         }
 
         if size == 0 {
@@ -1918,10 +1918,10 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
             if !matches!(z, Value::Null) {
-                return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)));
             }
             results.push(Value::from(s));
-            return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+            return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)));
         }
 
         let mut p: usize = 0; // previous match end
@@ -1973,7 +1973,7 @@ impl<'gc> VM<'gc> {
             // Add the substring before this match
             results.push(Value::String(s_u16[p..q].to_vec()));
             if results.len() as u32 >= lim {
-                return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)));
             }
 
             // Add capturing groups
@@ -1999,7 +1999,7 @@ impl<'gc> VM<'gc> {
                 }
                 results.push(cap);
                 if results.len() as u32 >= lim {
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)));
                 }
             }
 
@@ -2009,7 +2009,7 @@ impl<'gc> VM<'gc> {
 
         // Add the tail
         results.push(Value::String(s_u16[p..size].to_vec()));
-        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)))
     }
 
     // ── Spec-compliant @@matchAll (ES2024 §22.2.6.9) ───────────────
@@ -2721,7 +2721,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
 
-                let mut arr_data = VmArrayData::new(result_items);
+                let mut arr_data = ArrayData::new(result_items);
                 arr_data.props.insert("index".to_string(), Value::Number(match_start as f64));
                 arr_data.props.insert("input".to_string(), Value::String(input_u16.to_vec()));
                 let mut groups_map = IndexMap::new();
@@ -2761,7 +2761,7 @@ impl<'gc> VM<'gc> {
                     let mut indices_groups_map = IndexMap::new();
                     // Full match indices
                     let pair = vec![Value::Number(match_start as f64), Value::Number(match_end as f64)];
-                    indices_items.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
+                    indices_items.push(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(pair))));
                     // Capturing group indices
                     for cap in &m.captures {
                         match cap {
@@ -2775,7 +2775,7 @@ impl<'gc> VM<'gc> {
                                     (r.start, r.end)
                                 };
                                 let pair = vec![Value::Number(cap_start as f64), Value::Number(cap_end as f64)];
-                                indices_items.push(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(pair))));
+                                indices_items.push(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(pair))));
                             }
                             None => indices_items.push(Value::Undefined),
                         }
@@ -2792,7 +2792,7 @@ impl<'gc> VM<'gc> {
                                     (r.start, r.end)
                                 };
                                 let pair = vec![Value::Number(group_start as f64), Value::Number(group_end as f64)];
-                                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(pair)))
+                                Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(pair)))
                             }
                             None => Value::Undefined,
                         };
@@ -2803,7 +2803,7 @@ impl<'gc> VM<'gc> {
                         };
                         indices_groups_map.insert(key, value);
                     }
-                    let mut indices_array = VmArrayData::new(indices_items);
+                    let mut indices_array = ArrayData::new(indices_items);
                     let indices_groups_value = if indices_groups_map.is_empty() {
                         Value::Undefined
                     } else {

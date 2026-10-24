@@ -129,7 +129,7 @@ Builtins are identified by `FunctionID` (a `usize` constant, e.g., `BUILTIN_CONS
 
 ### Closures / Upvalues
 
-The compiler tracks captured variables in `UpvalueInfo` entries and emits `MakeClosure` opcodes encoding the function index plus the list of captured variables. At runtime, captured variables live in `UpvalueCells` — shared mutable cells so mutations are reflected across all closures.
+The compiler tracks captured variables in `UpvalueInfo` entries and emits `MakeClosure` opcodes encoding the function index plus the list of captured variables. At runtime, captured variables live in `UpvalueCellContainer` — shared mutable cells so mutations are reflected across all closures.
 
 ### Bytecode Encoding
 

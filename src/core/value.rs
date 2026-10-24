@@ -1,5 +1,5 @@
 use crate::core::function_id::*;
-use crate::core::{ArrayHandle, MapHandle, ObjectHandle, PropAttrs, SetHandle, SymbolHandle, UpvalueCells};
+use crate::core::{ArrayHandle, MapHandle, ObjectHandle, PropAttrs, SetHandle, SymbolHandle, UpvalueCellContainer};
 use crate::core::{Collect, GcTrace};
 use crate::unicode::utf16_to_utf8;
 use indexmap::IndexMap;
@@ -8,7 +8,7 @@ use num_bigint::BigInt;
 /// VM Map storage (simple Vec of key-value pairs).
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct VmMapData<'gc> {
+pub struct MapData<'gc> {
     pub entries: Vec<(Value<'gc>, Value<'gc>)>,
     pub is_weak: bool,
 }
@@ -16,14 +16,14 @@ pub struct VmMapData<'gc> {
 /// VM Set storage (simple Vec of values).
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct VmSetData<'gc> {
+pub struct SetData<'gc> {
     pub values: Vec<Value<'gc>>,
     pub is_weak: bool,
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct VmSymbolData {
+pub struct SymbolData {
     pub id: u64,
     pub description: Option<Vec<u16>>,
     pub registered: bool,
@@ -32,11 +32,11 @@ pub struct VmSymbolData {
 /// Array storage with optional named properties (e.g. `arr.foo = "bar"`).
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct VmArrayData<'gc> {
+pub struct ArrayData<'gc> {
     pub elements: Vec<Value<'gc>>,
     pub props: IndexMap<String, Value<'gc>>,
 }
-impl<'gc> VmArrayData<'gc> {
+impl<'gc> ArrayData<'gc> {
     pub fn new(elements: Vec<Value<'gc>>) -> Self {
         Self {
             elements,
@@ -44,13 +44,13 @@ impl<'gc> VmArrayData<'gc> {
         }
     }
 }
-impl<'gc> std::ops::Deref for VmArrayData<'gc> {
+impl<'gc> std::ops::Deref for ArrayData<'gc> {
     type Target = Vec<Value<'gc>>;
     fn deref(&self) -> &Vec<Value<'gc>> {
         &self.elements
     }
 }
-impl<'gc> std::ops::DerefMut for VmArrayData<'gc> {
+impl<'gc> std::ops::DerefMut for ArrayData<'gc> {
     fn deref_mut(&mut self) -> &mut Vec<Value<'gc>> {
         &mut self.elements
     }
@@ -67,7 +67,7 @@ pub enum Value<'gc> {
     String(Vec<u16>),
     Boolean(bool),
     Function(usize, u8),
-    Closure(usize, u8, UpvalueCells<'gc>),
+    Closure(usize, u8, UpvalueCellContainer<'gc>),
     Array(ArrayHandle<'gc>),
     Object(ObjectHandle<'gc>),
     Symbol(SymbolHandle<'gc>),

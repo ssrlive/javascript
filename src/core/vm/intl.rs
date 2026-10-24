@@ -1126,7 +1126,7 @@ impl<'gc> VM<'gc> {
                 "pluralCategories".to_string(),
                 Value::Array(new_gc_cell_ptr(
                     ctx,
-                    VmArrayData::new(
+                    ArrayData::new(
                         Self::intl_plural_rule_categories(
                             borrow
                                 .get("__intl_locale__")
@@ -1238,7 +1238,7 @@ impl<'gc> VM<'gc> {
         match self.intl_canonicalize_locale_list(ctx, value) {
             Ok(locales) => Value::Array(new_gc_cell_ptr(
                 ctx,
-                VmArrayData::new(locales.into_iter().map(|locale| Value::from(locale.as_str())).collect()),
+                ArrayData::new(locales.into_iter().map(|locale| Value::from(locale.as_str())).collect()),
             )),
             Err(err) => {
                 self.pending_throw = Some(err);
@@ -1269,7 +1269,7 @@ impl<'gc> VM<'gc> {
         };
         Value::Array(new_gc_cell_ptr(
             ctx,
-            VmArrayData::new(values.iter().map(|value| Value::from(*value)).collect()),
+            ArrayData::new(values.iter().map(|value| Value::from(*value)).collect()),
         ))
     }
 
@@ -1523,7 +1523,7 @@ impl<'gc> VM<'gc> {
         };
         Value::Array(new_gc_cell_ptr(
             ctx,
-            VmArrayData::new(
+            ArrayData::new(
                 parts
                     .into_iter()
                     .map(|part| {
@@ -1601,7 +1601,7 @@ impl<'gc> VM<'gc> {
         };
         Value::Array(new_gc_cell_ptr(
             ctx,
-            VmArrayData::new(
+            ArrayData::new(
                 parts
                     .into_iter()
                     .map(|part| {
@@ -1942,7 +1942,7 @@ impl<'gc> VM<'gc> {
         };
         Value::Array(new_gc_cell_ptr(
             ctx,
-            VmArrayData::new(
+            ArrayData::new(
                 parts
                     .into_iter()
                     .map(|part| {
@@ -2775,7 +2775,7 @@ impl<'gc> VM<'gc> {
             "AF" => vec![Value::Number(5.0), Value::Number(6.0)],
             _ => vec![Value::Number(6.0), Value::Number(7.0)],
         };
-        let weekend = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(weekend)));
+        let weekend = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(weekend)));
         let object_proto = self.globals.get("Object").and_then(|value| match value {
             Value::Object(object) => own_data_from_map(&object.borrow(), "prototype"),
             _ => None,
@@ -2821,7 +2821,7 @@ impl<'gc> VM<'gc> {
 
     fn intl_string_array(ctx: &GcContext<'gc>, values: &[&str]) -> Value<'gc> {
         let values = values.iter().map(|value| Value::from(*value)).collect::<Vec<_>>();
-        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
+        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values)))
     }
 
     fn intl_locale_clone_with_transformed_tag(&mut self, ctx: &GcContext<'gc>, current: &str, transform: fn(&str) -> String) -> Value<'gc> {
@@ -3092,7 +3092,7 @@ impl<'gc> VM<'gc> {
             }
             supported.push(Value::from(locale.as_str()));
         }
-        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(supported)))
+        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(supported)))
     }
 
     fn intl_collator_compare_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -3464,7 +3464,7 @@ impl<'gc> VM<'gc> {
             .into_iter()
             .map(|(part_type, value, source)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, Some(source)))
             .collect::<Vec<_>>();
-        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
+        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values)))
     }
 
     fn intl_number_format_getter(&mut self, ctx: &GcContext<'gc>, receiver: Option<&Value<'gc>>) -> Value<'gc> {
@@ -3581,7 +3581,7 @@ impl<'gc> VM<'gc> {
                 parts.extend(Self::intl_number_string_parts(ctx, formatter, prefix));
             }
             parts.push(Self::intl_part_object(ctx, "nan", &nan_text));
-            return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
+            return Ok(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(parts))));
         }
         if formatted == "Infinity" || formatted == "-Infinity" {
             let mut parts = Vec::new();
@@ -3591,7 +3591,7 @@ impl<'gc> VM<'gc> {
             } else {
                 parts.push(Self::intl_part_object(ctx, "infinity", &formatted));
             }
-            return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
+            return Ok(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(parts))));
         }
         if options.style == "unit"
             && let Some(pattern) = Self::intl_unit_pattern(&options)
@@ -3619,12 +3619,12 @@ impl<'gc> VM<'gc> {
                     parts.push(Self::intl_part_object(ctx, "literal", suffix_literal));
                 }
                 parts.push(Self::intl_part_object(ctx, "unit", &rendered_suffix_unit));
-                return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
+                return Ok(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(parts))));
             }
         }
         Ok(Value::Array(new_gc_cell_ptr(
             ctx,
-            VmArrayData::new(Self::intl_number_string_parts(ctx, formatter, &formatted)),
+            ArrayData::new(Self::intl_number_string_parts(ctx, formatter, &formatted)),
         )))
     }
 
@@ -3813,7 +3813,7 @@ impl<'gc> VM<'gc> {
         if start_text == end_text {
             let mut parts = vec![Self::intl_range_part_object(ctx, "approximatelySign", "~", "shared")];
             parts.extend(Self::intl_number_parts_with_source(ctx, formatter, &start_text, "shared"));
-            return Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))));
+            return Ok(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(parts))));
         }
         let separator = if options.resolved_locale.starts_with("pt-PT") {
             " - "
@@ -3823,7 +3823,7 @@ impl<'gc> VM<'gc> {
         let mut parts = Self::intl_number_parts_with_source(ctx, formatter, &start_text, "startRange");
         parts.push(Self::intl_range_part_object(ctx, "literal", separator, "shared"));
         parts.extend(Self::intl_number_parts_with_source(ctx, formatter, &end_text, "endRange"));
-        Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(parts))))
+        Ok(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(parts))))
     }
 
     fn intl_number_format_range_inputs(
@@ -5260,7 +5260,7 @@ impl<'gc> VM<'gc> {
             .into_iter()
             .map(|(part_type, value)| Self::intl_date_time_format_part_object(ctx, &part_type, &value, source))
             .collect();
-        Ok(Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values))))
+        Ok(Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values))))
     }
 
     fn intl_date_time_format_parts_array(
@@ -10736,7 +10736,7 @@ impl<'gc> VM<'gc> {
         let segments = Self::intl_segment_utf16(&utf16, &granularity);
         Value::Array(new_gc_cell_ptr(
             ctx,
-            VmArrayData::new(
+            ArrayData::new(
                 segments
                     .into_iter()
                     .map(|segment| Self::intl_segment_data_object(ctx, input, segment))

@@ -7,7 +7,7 @@ use crate::core::property_descriptor::{
     read_attrs_from_map, remove_getter, remove_property_completely, remove_setter, set_getter, set_setter, unmark_nonenumerable,
     unmark_readonly, write_attrs_to_map,
 };
-use crate::core::value::{VmArrayData, VmMapData, VmSetData, VmSymbolData, value_to_string};
+use crate::core::value::{ArrayData, MapData, SetData, SymbolData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
 use indexmap::IndexMap;
@@ -38,15 +38,15 @@ use unicode_normalization::UnicodeNormalization;
 type VmStrong<'gc, T> = Gc<'gc, GcCell<T>>;
 type VmWeak<'gc, T> = GcWeak<'gc, GcCell<T>>;
 
-pub type VmUpvalueCell<'gc> = VmStrong<'gc, Value<'gc>>;
-pub type UpvalueCells<'gc> = Gc<'gc, Vec<VmUpvalueCell<'gc>>>;
-pub type ArrayHandle<'gc> = VmStrong<'gc, VmArrayData<'gc>>;
+pub type UpvalueCell<'gc> = VmStrong<'gc, Value<'gc>>;
+pub type UpvalueCellContainer<'gc> = Gc<'gc, Vec<UpvalueCell<'gc>>>;
+pub type ArrayHandle<'gc> = VmStrong<'gc, ArrayData<'gc>>;
 pub type ObjectHandle<'gc> = VmStrong<'gc, IndexMap<String, Value<'gc>>>;
-pub type VmObjectWeakHandle<'gc> = VmWeak<'gc, IndexMap<String, Value<'gc>>>;
-pub type MapHandle<'gc> = VmStrong<'gc, VmMapData<'gc>>;
-pub type SetHandle<'gc> = VmStrong<'gc, VmSetData<'gc>>;
-pub type SymbolHandle<'gc> = VmStrong<'gc, VmSymbolData>;
-pub type VmSymbolWeakHandle<'gc> = VmWeak<'gc, VmSymbolData>;
+pub type ObjectWeakHandle<'gc> = VmWeak<'gc, IndexMap<String, Value<'gc>>>;
+pub type MapHandle<'gc> = VmStrong<'gc, MapData<'gc>>;
+pub type SetHandle<'gc> = VmStrong<'gc, SetData<'gc>>;
+pub type SymbolHandle<'gc> = VmStrong<'gc, SymbolData>;
+pub type SymbolWeakHandle<'gc> = VmWeak<'gc, SymbolData>;
 
 static VM_OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static VM_NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
@@ -63,15 +63,15 @@ fn vm_next_os_file_id() -> u64 {
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
     pub return_ip: usize,
-    pub bp: usize,                                       // Base pointer
-    pub is_method: bool,                                 // Pop this_stack on return
-    pub arg_count: usize,                                // Actual number of arguments passed
-    pub func_ip: usize,                                  // instruction pointer of the called function
-    pub arguments_obj: Option<Value<'gc>>,               // cached arguments object
-    pub upvalues: Vec<VmUpvalueCell<'gc>>,               // captured upvalue cells (shared mutable)
-    pub saved_args: Option<Vec<Value<'gc>>>,             // saved full arg list when arg_count > arity
-    pub local_cells: HashMap<usize, VmUpvalueCell<'gc>>, // locals captured as upvalue cells
-    pub this_tdz: Option<bool>,                          // None = not derived ctor; Some(true) = uninitialized; Some(false) = initialized
+    pub bp: usize,                                     // Base pointer
+    pub is_method: bool,                               // Pop this_stack on return
+    pub arg_count: usize,                              // Actual number of arguments passed
+    pub func_ip: usize,                                // instruction pointer of the called function
+    pub arguments_obj: Option<Value<'gc>>,             // cached arguments object
+    pub upvalues: Vec<UpvalueCell<'gc>>,               // captured upvalue cells (shared mutable)
+    pub saved_args: Option<Vec<Value<'gc>>>,           // saved full arg list when arg_count > arity
+    pub local_cells: HashMap<usize, UpvalueCell<'gc>>, // locals captured as upvalue cells
+    pub this_tdz: Option<bool>,                        // None = not derived ctor; Some(true) = uninitialized; Some(false) = initialized
 }
 
 #[derive(Debug, Clone)]
@@ -463,9 +463,9 @@ struct GeneratorState<'gc> {
     /// Full original arguments when arg_count exceeds local slots.
     saved_args: Option<Vec<Value<'gc>>>,
     /// Upvalue cells for the generator's closure.
-    upvalues: Vec<VmUpvalueCell<'gc>>,
+    upvalues: Vec<UpvalueCell<'gc>>,
     /// Boxed locals captured by nested closures within the generator frame.
-    local_cells: HashMap<usize, VmUpvalueCell<'gc>>,
+    local_cells: HashMap<usize, UpvalueCell<'gc>>,
     /// Try stack at the point of suspension.
     try_stack: Vec<TryFrame>,
     /// Function IP of the generator body.
@@ -599,7 +599,7 @@ struct SuspendedModuleState<'gc> {
     ip: usize,
     module_locals: IndexMap<String, Value<'gc>>,
     stack: Vec<Value<'gc>>,
-    top_level_cells: HashMap<usize, VmUpvalueCell<'gc>>,
+    top_level_cells: HashMap<usize, UpvalueCell<'gc>>,
     const_globals: std::collections::HashSet<String>,
     loaded_module_vars: std::collections::HashMap<String, (String, String)>,
     const_import_bindings: std::collections::HashSet<String>,
@@ -758,8 +758,8 @@ pub struct VM<'gc> {
     // Global this object — top-level `this` refers to this; SetProperty on it writes to globals
     global_this: ObjectHandle<'gc>,
     symbol_counter: u64,
-    symbol_registry: HashMap<String, Value<'gc>>,         // Symbol.for() registry
-    symbol_values: HashMap<u64, VmSymbolWeakHandle<'gc>>, // symbol_id → Symbol primitive (weak cache)
+    symbol_registry: HashMap<String, Value<'gc>>,       // Symbol.for() registry
+    symbol_values: HashMap<u64, SymbolWeakHandle<'gc>>, // symbol_id → Symbol primitive (weak cache)
     intl_fallback_symbol: Option<Value<'gc>>,
     pending_throw: Option<Value<'gc>>, // deferred throw from call_builtin
     preserved_throw_value: Option<Value<'gc>>,
@@ -780,7 +780,7 @@ pub struct VM<'gc> {
     // Suspended async-function states, keyed by unique ID.
     async_function_states: HashMap<usize, AsyncFunctionState<'gc>>,
     // Weak handles to generator objects; used to GC abandoned suspended states.
-    generator_objects: HashMap<usize, VmObjectWeakHandle<'gc>>,
+    generator_objects: HashMap<usize, ObjectWeakHandle<'gc>>,
     // Track which generator IDs are currently executing (for re-entrant detection).
     generator_executing: std::collections::HashSet<usize>,
     next_generator_id: usize,
@@ -826,7 +826,7 @@ pub struct VM<'gc> {
     // Keyed by the raw Gc pointer of the closure's upvalue vector (stable in mark-sweep GC).
     closure_fn_props: HashMap<usize, ObjectHandle<'gc>>,
     // Upvalue cells for top-level locals captured by closures (no CallFrame at top level).
-    top_level_cells: HashMap<usize, VmUpvalueCell<'gc>>,
+    top_level_cells: HashMap<usize, UpvalueCell<'gc>>,
     // Temp slot: the RegExp.prototype that the currently-executing getter "belongs to".
     // Set before call_host_fn by the caller, read by regexp_handle_host_fn.
     regexp_home_proto_temp: Option<Value<'gc>>,
@@ -987,7 +987,7 @@ impl<'gc> VM<'gc> {
             "__buffer_bytes__".to_string(),
             Value::Array(new_gc_cell_ptr(
                 ctx,
-                VmArrayData::new(snapshot.into_iter().map(|b| Value::Number(b as f64)).collect()),
+                ArrayData::new(snapshot.into_iter().map(|b| Value::Number(b as f64)).collect()),
             )),
         );
         if let Some(Value::Object(sab_ctor)) = self.globals.get("SharedArrayBuffer").cloned()
@@ -3423,7 +3423,7 @@ impl<'gc> VM<'gc> {
     fn create_symbol(&mut self, ctx: &GcContext<'gc>, id: u64, description: Option<Vec<u16>>, registered: bool) -> Value<'gc> {
         let value = Value::Symbol(new_gc_cell_ptr(
             ctx,
-            VmSymbolData {
+            SymbolData {
                 id,
                 description,
                 registered,
@@ -4316,13 +4316,13 @@ impl<'gc> VM<'gc> {
     }
 
     fn create_vm_array(&self, ctx: &GcContext<'gc>, elements: Vec<Value<'gc>>) -> Value<'gc> {
-        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(elements));
+        let arr = new_gc_cell_ptr(ctx, ArrayData::new(elements));
         self.link_array_prototype(ctx, &arr);
         Value::Array(arr)
     }
 
     fn create_vm_sparse_array(&self, ctx: &GcContext<'gc>, len: usize) -> Value<'gc> {
-        let mut data = VmArrayData::new(Vec::new());
+        let mut data = ArrayData::new(Vec::new());
         data.props.insert("__array_length__".to_string(), Value::Number(len as f64));
         if len <= 1024 {
             for i in 0..len {
@@ -5055,7 +5055,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         borrow.insert(
                             "__then_queue__".to_string(),
-                            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![link_value]))),
+                            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![link_value]))),
                         );
                     }
                 }
@@ -5104,7 +5104,7 @@ impl<'gc> VM<'gc> {
         ip: usize,
         arity: u8,
         args: &[Value<'gc>],
-        upvalues: &[VmUpvalueCell<'gc>],
+        upvalues: &[UpvalueCell<'gc>],
         this_arg: &Value<'gc>,
     ) -> Value<'gc> {
         let mut stack_args = args.to_vec();
@@ -6332,7 +6332,7 @@ impl<'gc> VM<'gc> {
                     let copy_len = old_len.min(new_len).min(src_b.elements.len());
                     new_bytes[..copy_len].clone_from_slice(&src_b.elements[..copy_len]);
                 }
-                let new_bytes_arr = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(new_bytes)));
+                let new_bytes_arr = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(new_bytes)));
 
                 // Detach old buffer
                 {
@@ -8915,7 +8915,7 @@ impl<'gc> VM<'gc> {
                 else {
                     return Value::Undefined;
                 };
-                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
+                Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values)))
             }
             "iterator.forEach" => {
                 let recv = receiver.cloned().unwrap_or(Value::Undefined);
@@ -9104,11 +9104,11 @@ impl<'gc> VM<'gc> {
                 obj.insert("__concat_index__".to_string(), Value::Number(0.0));
                 obj.insert(
                     "__concat_items__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(items))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(items))),
                 );
                 obj.insert(
                     "__concat_methods__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(methods))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(methods))),
                 );
                 obj.insert("__concat_current_iterator__".to_string(), Value::Undefined);
                 obj.insert("__concat_current_next__".to_string(), Value::Undefined);
@@ -9410,27 +9410,24 @@ impl<'gc> VM<'gc> {
                 obj.insert("__zip_count__".to_string(), Value::Number(iter_count as f64));
                 obj.insert(
                     "__zip_iterators__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(iters))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(iters))),
                 );
                 obj.insert(
                     "__zip_nexts__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(next_methods))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(next_methods))),
                 );
                 // Track which iterators are done (for longest/strict)
                 obj.insert(
                     "__zip_done_flags__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::Boolean(false); iter_count]))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![Value::Boolean(false); iter_count]))),
                 );
                 if is_keyed {
-                    obj.insert(
-                        "__zip_keys__".to_string(),
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(keys))),
-                    );
+                    obj.insert("__zip_keys__".to_string(), Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(keys))));
                 }
                 if !padding_values.is_empty() {
                     obj.insert(
                         "__zip_padding__".to_string(),
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(padding_values))),
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(padding_values))),
                     );
                 }
                 if let Some(proto) = self.globals.get("__IteratorHelperPrototype__").cloned() {
@@ -9458,7 +9455,7 @@ impl<'gc> VM<'gc> {
                 if let Value::String(s) = &iterable {
                     let chars = Self::utf16_code_point_strings(s);
                     let vals: Vec<Value<'gc>> = chars.into_iter().map(Value::String).collect();
-                    let arr = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vals)));
+                    let arr = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vals)));
                     let arr_iter_fn = self.read_named_property(ctx, &arr, "@@sym:1");
                     if self.is_value_callable(&arr_iter_fn) {
                         match self.vm_call_function_value(ctx, &arr_iter_fn, &arr, &[]) {
@@ -9477,7 +9474,7 @@ impl<'gc> VM<'gc> {
                 {
                     let chars = Self::utf16_code_point_strings(&s);
                     let vals: Vec<Value<'gc>> = chars.into_iter().map(Value::String).collect();
-                    let arr = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vals)));
+                    let arr = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vals)));
                     let arr_iter_fn = self.read_named_property(ctx, &arr, "@@sym:1");
                     if self.is_value_callable(&arr_iter_fn) {
                         match self.vm_call_function_value(ctx, &arr_iter_fn, &arr, &[]) {
@@ -9614,21 +9611,21 @@ impl<'gc> VM<'gc> {
                             }
                         }
 
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(out)))
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(out)))
                     }
                     Value::Map(map) => {
                         let items = map
                             .borrow()
                             .entries
                             .iter()
-                            .map(|(k, v)| Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![k.clone(), v.clone()]))))
+                            .map(|(k, v)| Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![k.clone(), v.clone()]))))
                             .take(max_items)
                             .collect::<Vec<_>>();
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(items)))
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(items)))
                     }
                     Value::Set(set) => {
                         let items = set.borrow().values.iter().take(max_items).cloned().collect::<Vec<_>>();
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(items)))
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(items)))
                     }
                     Value::String(s) => {
                         let text = crate::unicode::utf16_to_utf8(&s);
@@ -9637,7 +9634,7 @@ impl<'gc> VM<'gc> {
                             .take(max_items)
                             .map(|ch| Value::from(&ch.to_string()))
                             .collect::<Vec<_>>();
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values)))
                     }
                     Value::Object(obj) => {
                         // Keep typed-array key iterators live so detach checks can
@@ -9658,7 +9655,7 @@ impl<'gc> VM<'gc> {
                         };
                         if let Some(target_arr) = typed_iter_target {
                             let len = target_arr.borrow().len().min(max_items);
-                            let mut out_arr = VmArrayData::new(vec![Value::Undefined; len]);
+                            let mut out_arr = ArrayData::new(vec![Value::Undefined; len]);
                             out_arr.props.insert("__forof_live_iterator__".to_string(), Value::Object(obj));
                             return Value::Array(new_gc_cell_ptr(ctx, out_arr));
                         }
@@ -9670,7 +9667,7 @@ impl<'gc> VM<'gc> {
                                 .take(max_items)
                                 .map(|ch| Value::from(&ch.to_string()))
                                 .collect::<Vec<_>>();
-                            return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)));
+                            return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values)));
                         }
 
                         let iterable = Value::Object(obj);
@@ -9980,7 +9977,7 @@ impl<'gc> VM<'gc> {
                             }
                         }
 
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(out)))
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(out)))
                     }
                     _ => {
                         let mut err_map = IndexMap::new();
@@ -10029,7 +10026,7 @@ impl<'gc> VM<'gc> {
                 };
                 let items = code_points.into_iter().map(Value::String).collect::<Vec<_>>();
                 let mut obj = IndexMap::new();
-                obj.insert("__items__".to_string(), Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(items))));
+                obj.insert("__items__".to_string(), Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(items))));
                 obj.insert("__index__".to_string(), Value::Number(0.0));
                 obj.insert("__proto__".to_string(), self.ensure_string_iterator_prototype(ctx));
                 Value::Object(new_gc_cell_ptr(ctx, obj))
@@ -11331,7 +11328,7 @@ impl<'gc> VM<'gc> {
                                     out_vals.push(Value::from(key.as_str()));
                                 }
                             }
-                            return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(out_vals)));
+                            return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(out_vals)));
                         }
                         Ok(None) => {}
                         Err(err) => {
@@ -11358,7 +11355,7 @@ impl<'gc> VM<'gc> {
                 if let Value::Array(arr) = symbols {
                     out_vals.extend(arr.borrow().iter().cloned());
                 }
-                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(out_vals)))
+                Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(out_vals)))
             }
             "reflect.isExtensible" => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
@@ -11862,7 +11859,7 @@ impl<'gc> VM<'gc> {
                                 symbols.push(sym_val);
                             }
                         }
-                        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(symbols));
+                        let arr = new_gc_cell_ptr(ctx, ArrayData::new(symbols));
                         if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
                             && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                         {
@@ -12052,7 +12049,7 @@ impl<'gc> VM<'gc> {
                     }
                 } else if let Value::Function(..) | Value::Closure(..) = &target {
                     let Some(props) = self.merged_fn_props_for_value(ctx, &target) else {
-                        return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(symbols)));
+                        return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(symbols)));
                     };
                     let mut seen_sym_keys: Vec<String> = Vec::new();
                     for k in props.keys() {
@@ -12068,7 +12065,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 }
-                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(symbols)))
+                Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(symbols)))
             }
             "object.getOwnPropertyDescriptors" => {
                 let Some(input) = args.first().cloned() else {
@@ -12726,10 +12723,10 @@ impl<'gc> VM<'gc> {
                         }
                         items.push(Value::Array(new_gc_cell_ptr(
                             ctx,
-                            VmArrayData::new(vec![Value::Number(idx as f64), value]),
+                            ArrayData::new(vec![Value::Number(idx as f64), value]),
                         )));
                     }
-                    let arr = new_gc_cell_ptr(ctx, VmArrayData::new(items));
+                    let arr = new_gc_cell_ptr(ctx, ArrayData::new(items));
                     let mut obj = IndexMap::new();
                     obj.insert("__items__".to_string(), Value::Array(arr));
                     obj.insert("__index__".to_string(), Value::Number(0.0));
@@ -12783,7 +12780,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                     }
-                    let arr = new_gc_cell_ptr(ctx, VmArrayData::new(items));
+                    let arr = new_gc_cell_ptr(ctx, ArrayData::new(items));
                     let mut obj = IndexMap::new();
                     obj.insert("__items__".to_string(), Value::Array(arr));
                     obj.insert("__index__".to_string(), Value::Number(0.0));
@@ -12836,10 +12833,7 @@ impl<'gc> VM<'gc> {
                         i += 1;
                     }
                     let mut obj = IndexMap::new();
-                    obj.insert(
-                        "__items__".to_string(),
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values))),
-                    );
+                    obj.insert("__items__".to_string(), Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values))));
                     obj.insert("__index__".to_string(), Value::Number(0.0));
                     obj.insert("__proto__".to_string(), self.ensure_string_iterator_prototype(ctx));
                     Value::Object(new_gc_cell_ptr(ctx, obj))
@@ -12847,7 +12841,7 @@ impl<'gc> VM<'gc> {
                     let mut obj = IndexMap::new();
                     obj.insert(
                         "__items__".to_string(),
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new()))),
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(Vec::new()))),
                     );
                     obj.insert("__index__".to_string(), Value::Number(0.0));
                     obj.insert("__proto__".to_string(), self.ensure_string_iterator_prototype(ctx));
@@ -17842,7 +17836,7 @@ impl<'gc> VM<'gc> {
         mark_nonenumerable(&mut array_obj, "fromAsync");
         Self::insert_species_getter(&mut array_obj, ctx);
         // Create Array.prototype with iterator method
-        let mut arr_proto = VmArrayData::new(Vec::new());
+        let mut arr_proto = ArrayData::new(Vec::new());
         if let Some(obj_proto) = self.ctor_prototype_from_globals(ctx, "Object") {
             arr_proto.props.insert("__proto__".to_string(), obj_proto);
         }
@@ -20602,7 +20596,7 @@ impl<'gc> VM<'gc> {
                             }
                         }
 
-                        let args_array = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(args.to_vec())));
+                        let args_array = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(args.to_vec())));
                         child.globals.insert("__repl_call_args__".to_string(), args_array.clone());
                         child.globals.insert("__repl_call_this__".to_string(), this_arg.clone());
                         {
@@ -20676,7 +20670,7 @@ impl<'gc> VM<'gc> {
 
                     let saved_args = self.globals.get("__repl_call_args__").cloned();
                     let saved_this = self.globals.get("__repl_call_this__").cloned();
-                    let args_array = Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(args.to_vec())));
+                    let args_array = Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(args.to_vec())));
                     self.globals.insert("__repl_call_args__".to_string(), args_array.clone());
                     self.globals.insert("__repl_call_this__".to_string(), this_arg.clone());
                     {
@@ -21496,7 +21490,7 @@ impl<'gc> VM<'gc> {
         obj.insert("__disposable_state__".to_string(), Value::from("pending"));
         obj.insert(
             "__dispose_stack__".to_string(),
-            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![]))),
+            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![]))),
         );
         if !matches!(selected_proto, Value::Undefined) {
             obj.insert("__proto__".to_string(), selected_proto);
@@ -21943,7 +21937,7 @@ impl<'gc> VM<'gc> {
                     .insert("__disposable_state__".to_string(), Value::from("disposed"));
                 obj.borrow_mut(ctx).insert(
                     "__dispose_stack__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![]))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![]))),
                 );
                 new_instance
             }
@@ -23567,7 +23561,7 @@ impl<'gc> VM<'gc> {
 
                 let set_handle = new_gc_cell_ptr(
                     ctx,
-                    VmSetData {
+                    SetData {
                         values: Vec::new(),
                         is_weak: false,
                     },
@@ -23693,7 +23687,7 @@ impl<'gc> VM<'gc> {
 
                 let map_handle = new_gc_cell_ptr(
                     ctx,
-                    VmMapData {
+                    MapData {
                         entries: Vec::new(),
                         is_weak: false,
                     },
@@ -23738,7 +23732,7 @@ impl<'gc> VM<'gc> {
 
                 let map_handle = new_gc_cell_ptr(
                     ctx,
-                    VmMapData {
+                    MapData {
                         entries: Vec::new(),
                         is_weak: true,
                     },
@@ -23844,7 +23838,7 @@ impl<'gc> VM<'gc> {
 
                 let set_handle = new_gc_cell_ptr(
                     ctx,
-                    VmSetData {
+                    SetData {
                         values: Vec::new(),
                         is_weak: true,
                     },
@@ -23955,7 +23949,7 @@ impl<'gc> VM<'gc> {
                 } else {
                     map.insert(
                         "__promise_value__".to_string(),
-                        Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(settled_values))),
+                        Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(settled_values))),
                     );
                 }
                 if let Some(Value::Object(promise_ctor)) = self.globals.get("Promise")
@@ -24176,7 +24170,7 @@ impl<'gc> VM<'gc> {
                 }
                 map.insert(
                     "__buffer_bytes__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(bytes))),
                 );
                 if !matches!(selected_proto, Value::Undefined) {
                     map.insert("__proto__".to_string(), selected_proto);
@@ -25039,7 +25033,7 @@ impl<'gc> VM<'gc> {
                 }
                 map.insert(
                     "__buffer_bytes__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bytes))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(bytes))),
                 );
                 if !matches!(selected_proto, Value::Undefined) {
                     map.insert("__proto__".to_string(), selected_proto);
@@ -27577,7 +27571,7 @@ impl<'gc> VM<'gc> {
                     .into_iter()
                     .map(|k| Value::from(&k))
                     .collect();
-                let out = new_gc_cell_ptr(ctx, VmArrayData::new(keys));
+                let out = new_gc_cell_ptr(ctx, ArrayData::new(keys));
                 if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
                     && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                 {
@@ -27652,7 +27646,7 @@ impl<'gc> VM<'gc> {
                         vals.push(v);
                     }
                 }
-                let out = new_gc_cell_ptr(ctx, VmArrayData::new(vals));
+                let out = new_gc_cell_ptr(ctx, ArrayData::new(vals));
                 if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
                     && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                 {
@@ -27708,7 +27702,7 @@ impl<'gc> VM<'gc> {
                             if self.pending_throw.is_some() {
                                 return Value::Undefined;
                             }
-                            let pair = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::from(&key), value]));
+                            let pair = new_gc_cell_ptr(ctx, ArrayData::new(vec![Value::from(&key), value]));
                             if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
                                 && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                             {
@@ -27744,7 +27738,7 @@ impl<'gc> VM<'gc> {
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
-                        let pair = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::from(&key), value]));
+                        let pair = new_gc_cell_ptr(ctx, ArrayData::new(vec![Value::from(&key), value]));
                         if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
                             && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                         {
@@ -27754,7 +27748,7 @@ impl<'gc> VM<'gc> {
                     }
                 }
 
-                let out = new_gc_cell_ptr(ctx, VmArrayData::new(entries));
+                let out = new_gc_cell_ptr(ctx, ArrayData::new(entries));
                 if let Some(Value::Object(array_ctor)) = self.globals.get("Array")
                     && let Some(proto) = own_data_from_map(&array_ctor.borrow(), "prototype")
                 {
@@ -29953,7 +29947,7 @@ impl<'gc> VM<'gc> {
                 let mut result = IndexMap::new();
                 result.insert("__proto__".to_string(), Value::Null);
                 for (k, v) in groups {
-                    result.insert(k, Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(v))));
+                    result.insert(k, Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(v))));
                 }
                 Value::Object(new_gc_cell_ptr(ctx, result))
             }
@@ -30094,7 +30088,7 @@ impl<'gc> VM<'gc> {
 
                 let map_handle = new_gc_cell_ptr(
                     ctx,
-                    VmMapData {
+                    MapData {
                         entries: Vec::new(),
                         is_weak: false,
                     },
@@ -30111,7 +30105,7 @@ impl<'gc> VM<'gc> {
                 for (key, values) in groups {
                     map_borrow
                         .entries
-                        .push((key, Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values)))));
+                        .push((key, Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values)))));
                 }
                 drop(map_borrow);
                 map
@@ -30554,7 +30548,7 @@ impl<'gc> VM<'gc> {
                                 return Value::Undefined;
                             }
                         }
-                        return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                        return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                     }
                     BUILTIN_ARRAY_TOSORTED => {
                         let cmp_fn = args.first().cloned();
@@ -30621,7 +30615,7 @@ impl<'gc> VM<'gc> {
                         if self.pending_throw.is_some() {
                             return Value::Undefined;
                         }
-                        return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(elems)));
+                        return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(elems)));
                     }
                     BUILTIN_ARRAY_TOSPLICED => {
                         let start_raw = args.first().map(|v| to_number(v)).unwrap_or(0.0);
@@ -30672,7 +30666,7 @@ impl<'gc> VM<'gc> {
                                 return Value::Undefined;
                             }
                         }
-                        return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                        return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                     }
                     BUILTIN_ARRAY_WITH => {
                         let index_raw = if let Some(v) = args.first() {
@@ -30711,7 +30705,7 @@ impl<'gc> VM<'gc> {
                                 }
                             }
                         }
-                        return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                        return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                     }
                     _ => unreachable!(),
                 }
@@ -30920,7 +30914,7 @@ impl<'gc> VM<'gc> {
                         "__map_data__".to_string(),
                         Value::Map(new_gc_cell_ptr(
                             ctx,
-                            VmMapData {
+                            MapData {
                                 entries: Vec::new(),
                                 is_weak: false,
                             },
@@ -30955,7 +30949,7 @@ impl<'gc> VM<'gc> {
                     let mut borrow = obj.borrow_mut(ctx);
                     borrow.insert(
                         "__set_data__".to_string(),
-                        Value::Set(new_gc_cell_ptr(ctx, VmSetData { values, is_weak: false })),
+                        Value::Set(new_gc_cell_ptr(ctx, SetData { values, is_weak: false })),
                     );
                     borrow.insert("__type__".to_string(), Value::from("Set"));
                     return receiver.clone();
@@ -30968,7 +30962,7 @@ impl<'gc> VM<'gc> {
                         "__map_data__".to_string(),
                         Value::Map(new_gc_cell_ptr(
                             ctx,
-                            VmMapData {
+                            MapData {
                                 entries: Vec::new(),
                                 is_weak: true,
                             },
@@ -30985,7 +30979,7 @@ impl<'gc> VM<'gc> {
                         "__set_data__".to_string(),
                         Value::Set(new_gc_cell_ptr(
                             ctx,
-                            VmSetData {
+                            SetData {
                                 values: Vec::new(),
                                 is_weak: true,
                             },
@@ -31265,7 +31259,7 @@ impl<'gc> VM<'gc> {
                     if let Some(Value::Array(arr)) = b.get("__then_queue__").cloned() {
                         arr.borrow_mut(ctx).push(entry_val);
                     } else {
-                        let arr = VmArrayData::new(vec![entry_val]);
+                        let arr = ArrayData::new(vec![entry_val]);
                         b.insert("__then_queue__".to_string(), Value::Array(new_gc_cell_ptr(ctx, arr)));
                     }
                 }
@@ -33807,7 +33801,7 @@ impl<'gc> VM<'gc> {
                         _ => len as usize,
                     };
                     let sliced: Vec<Value<'gc>> = if start < end { a[start..end].to_vec() } else { Vec::new() };
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(sliced)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(sliced)));
                 }
                 BUILTIN_ARRAY_CONCAT => {
                     // Check if receiver itself has @@isConcatSpreadable = false
@@ -33908,7 +33902,7 @@ impl<'gc> VM<'gc> {
                             result_vec.push(arg.clone());
                         }
                     }
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result_vec)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result_vec)));
                 }
                 BUILTIN_ARRAY_MAP => {
                     let callback = args.first().cloned().unwrap_or(Value::Undefined);
@@ -34279,7 +34273,7 @@ impl<'gc> VM<'gc> {
                     }
 
                     // Build removed array with holes preserved
-                    let mut removed_data = VmArrayData::new(removed);
+                    let mut removed_data = ArrayData::new(removed);
                     for hole_idx in removed_holes {
                         removed_data.props.insert(format!("__deleted_{}", hole_idx), Value::Boolean(true));
                     }
@@ -34381,7 +34375,7 @@ impl<'gc> VM<'gc> {
                     for i in (0..len).rev() {
                         result.push(self.read_named_property(ctx, &arr_val, &i.to_string()));
                     }
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                 }
                 BUILTIN_ARRAY_TOSORTED => {
                     let len = {
@@ -34458,7 +34452,7 @@ impl<'gc> VM<'gc> {
                     if self.pending_throw.is_some() {
                         return Value::Undefined;
                     }
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(elems)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(elems)));
                 }
                 BUILTIN_ARRAY_TOSPLICED => {
                     let len = {
@@ -34498,7 +34492,7 @@ impl<'gc> VM<'gc> {
                     for i in (actual_start + actual_delete)..len {
                         result.push(self.read_named_property(ctx, &arr_val, &i.to_string()));
                     }
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                 }
                 BUILTIN_ARRAY_WITH => {
                     let len = {
@@ -34539,7 +34533,7 @@ impl<'gc> VM<'gc> {
                             result.push(self.read_named_property(ctx, &arr_val, &i.to_string()));
                         }
                     }
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                 }
                 BUILTIN_ARRAY_FIND => {
                     if let Some(Value::Function(ip, _) | Value::Closure(ip, _, _)) = args.first() {
@@ -34702,7 +34696,7 @@ impl<'gc> VM<'gc> {
                         .unwrap_or(1);
                     let elements = &arr.borrow().elements;
                     let result = self.flatten_array(elements, depth);
-                    return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                    return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                 }
                 BUILTIN_ARRAY_FLATMAP => {
                     if let Some(Value::Function(ip, arity) | Value::Closure(ip, arity, _)) = args.first() {
@@ -34728,7 +34722,7 @@ impl<'gc> VM<'gc> {
                                 result.push(mapped);
                             }
                         }
-                        return Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(result)));
+                        return Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(result)));
                     }
                     return Value::Undefined;
                 }
@@ -35167,7 +35161,7 @@ impl<'gc> VM<'gc> {
                         },
                     };
                     if let Some(0) = limit {
-                        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![]));
+                        let arr = new_gc_cell_ptr(ctx, ArrayData::new(vec![]));
                         if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
                             && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
                         {
@@ -35176,7 +35170,7 @@ impl<'gc> VM<'gc> {
                         return Value::Array(arr);
                     }
                     if args.is_empty() || matches!(args.first(), Some(Value::Undefined)) {
-                        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::String(crate::unicode::utf8_to_utf16(&rust_str))]));
+                        let arr = new_gc_cell_ptr(ctx, ArrayData::new(vec![Value::String(crate::unicode::utf8_to_utf16(&rust_str))]));
                         if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
                             && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
                         {
@@ -35198,7 +35192,7 @@ impl<'gc> VM<'gc> {
                         let take = limit.unwrap_or(all.len());
                         all.into_iter().take(take).map(Value::from).collect()
                     };
-                    let arr = new_gc_cell_ptr(ctx, VmArrayData::new(parts));
+                    let arr = new_gc_cell_ptr(ctx, ArrayData::new(parts));
                     if let Some(Value::Object(arr_ctor)) = self.globals.get("Array")
                         && let Some(proto) = own_data_from_map(&arr_ctor.borrow(), "prototype")
                     {
@@ -36983,7 +36977,7 @@ impl<'gc> VM<'gc> {
                             if is_entry_iter {
                                 Some(Value::Array(new_gc_cell_ptr(
                                     ctx,
-                                    VmArrayData::new(vec![Value::Number(idx as f64), entry_value]),
+                                    ArrayData::new(vec![Value::Number(idx as f64), entry_value]),
                                 )))
                             } else {
                                 Some(entry_value)
@@ -37034,7 +37028,7 @@ impl<'gc> VM<'gc> {
                         if is_entry_iter {
                             Some(Value::Array(new_gc_cell_ptr(
                                 ctx,
-                                VmArrayData::new(vec![Value::Number(idx as f64), entry_value]),
+                                ArrayData::new(vec![Value::Number(idx as f64), entry_value]),
                             )))
                         } else {
                             Some(entry_value)
@@ -37084,7 +37078,7 @@ impl<'gc> VM<'gc> {
                             return Value::Undefined;
                         }
                         if is_entry_iter {
-                            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![Value::Number(idx as f64), entry_value])))
+                            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![Value::Number(idx as f64), entry_value])))
                         } else {
                             entry_value
                         }
@@ -37128,7 +37122,7 @@ impl<'gc> VM<'gc> {
                         } else if is_value {
                             v
                         } else {
-                            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![k, v])))
+                            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![k, v])))
                         };
                         let mut result = IndexMap::new();
                         result.insert("value".to_string(), value);
@@ -37169,7 +37163,7 @@ impl<'gc> VM<'gc> {
                         let v = s.borrow().values[idx].clone();
                         obj.borrow_mut(ctx).insert("__index__".to_string(), Value::Number((idx + 1) as f64));
                         let value = if is_entry {
-                            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![v.clone(), v])))
+                            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![v.clone(), v])))
                         } else {
                             v
                         };
@@ -37957,7 +37951,7 @@ impl<'gc> VM<'gc> {
                 m.insert("__bound_this__".to_string(), this_arg);
                 m.insert(
                     "__bound_args__".to_string(),
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(bound_args))),
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(bound_args))),
                 );
                 m.insert("__type__".to_string(), Value::from("Function"));
                 let proto = {
@@ -38015,7 +38009,7 @@ impl<'gc> VM<'gc> {
 
     /// Create an iterator object from a Vec of values
     fn make_iterator(&self, ctx: &GcContext<'gc>, items: &[Value<'gc>]) -> Value<'gc> {
-        let arr = new_gc_cell_ptr(ctx, VmArrayData::new(items.to_vec()));
+        let arr = new_gc_cell_ptr(ctx, ArrayData::new(items.to_vec()));
         let mut obj = IndexMap::new();
         obj.insert("__items__".to_string(), Value::Array(arr));
         obj.insert("__index__".to_string(), Value::Number(0.0));
@@ -38375,7 +38369,7 @@ impl<'gc> VM<'gc> {
         borrow.insert("__helper_chunk_size__".to_string(), Value::Number(chunk_size as f64));
         borrow.insert(
             "__helper_buffer__".to_string(),
-            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(Vec::new()))),
+            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(Vec::new()))),
         );
         borrow.insert("__helper_undersized__".to_string(), Value::from(undersized));
         drop(borrow);
@@ -38872,7 +38866,7 @@ impl<'gc> VM<'gc> {
                             }
                             return self.create_iterator_result_object(
                                 ctx,
-                                Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(chunk))),
+                                Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(chunk))),
                                 false,
                             );
                         }
@@ -38882,7 +38876,7 @@ impl<'gc> VM<'gc> {
                         }
                     }
                 }
-                self.create_iterator_result_object(ctx, Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(chunk))), false)
+                self.create_iterator_result_object(ctx, Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(chunk))), false)
             }
             "windows" => {
                 let (iterator, next_method, window_size, undersized, buffer) = {
@@ -38916,7 +38910,7 @@ impl<'gc> VM<'gc> {
                                 buffer.borrow_mut(ctx).elements = values;
                                 return self.create_iterator_result_object(
                                     ctx,
-                                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(window))),
+                                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(window))),
                                     false,
                                 );
                             }
@@ -38927,7 +38921,7 @@ impl<'gc> VM<'gc> {
                                 obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
                                 return self.create_iterator_result_object(
                                     ctx,
-                                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(values))),
+                                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(values))),
                                     false,
                                 );
                             }
@@ -39363,7 +39357,7 @@ impl<'gc> VM<'gc> {
                 let result = if is_keyed {
                     self.build_zip_keyed_result(ctx, &keys_arr, &results)
                 } else {
-                    Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(results)))
+                    Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(results)))
                 };
                 self.create_iterator_result_object(ctx, result, false)
             }
@@ -40150,7 +40144,7 @@ impl<'gc> VM<'gc> {
         ip: usize,
         stack_args: &[Value<'gc>],
         saved_args: Option<Vec<Value<'gc>>>,
-        upvalues: &[VmUpvalueCell<'gc>],
+        upvalues: &[UpvalueCell<'gc>],
     ) -> Result<Value<'gc>, JSError> {
         let module_key = self.chunk.fn_source_paths.get(&ip).cloned();
         let active_module_key = module_key.clone();
@@ -40541,13 +40535,7 @@ impl<'gc> VM<'gc> {
         ordered
     }
 
-    fn collect_array_keys(
-        &self,
-        ctx: &GcContext<'gc>,
-        array: &VmArrayData<'gc>,
-        enumerable_only: bool,
-        include_length: bool,
-    ) -> Vec<String> {
+    fn collect_array_keys(&self, ctx: &GcContext<'gc>, array: &ArrayData<'gc>, enumerable_only: bool, include_length: bool) -> Vec<String> {
         let mut keys: Vec<String> = Vec::new();
         let _ = ctx;
 
@@ -41157,7 +41145,7 @@ impl<'gc> VM<'gc> {
         true
     }
 
-    fn array_length_u64(&self, arr: &VmArrayData<'gc>) -> u64 {
+    fn array_length_u64(&self, arr: &ArrayData<'gc>) -> u64 {
         if let Some(Value::Number(n)) = arr.props.get("__array_length__")
             && *n >= 0.0
         {
@@ -41166,7 +41154,7 @@ impl<'gc> VM<'gc> {
         arr.elements.len() as u64
     }
 
-    fn set_array_length_u64(&self, arr: &mut VmArrayData<'gc>, len: u64) {
+    fn set_array_length_u64(&self, arr: &mut ArrayData<'gc>, len: u64) {
         arr.props.insert("__array_length__".to_string(), Value::Number(len as f64));
         if let Some(length_prop) = arr.props.get_mut("length") {
             match length_prop {
@@ -44398,7 +44386,7 @@ impl<'gc> VM<'gc> {
         result
     }
 
-    fn vm_array_logical_length_u64(&self, arr: &VmArrayData<'gc>) -> u64 {
+    fn vm_array_logical_length_u64(&self, arr: &ArrayData<'gc>) -> u64 {
         let max_safe_len: u64 = 9_007_199_254_740_991;
         let parse_array_index = |key: &str| -> Option<u64> {
             let idx = key.parse::<u64>().ok()?;
@@ -44427,7 +44415,7 @@ impl<'gc> VM<'gc> {
         len.min(max_safe_len)
     }
 
-    fn vm_array_present_indices(&self, arr: &VmArrayData<'gc>) -> Vec<usize> {
+    fn vm_array_present_indices(&self, arr: &ArrayData<'gc>) -> Vec<usize> {
         let logical_len = self.vm_array_logical_length_u64(arr).min(usize::MAX as u64) as usize;
         let parse_array_index = |key: &str| -> Option<usize> {
             let idx = key.parse::<u64>().ok()?;
@@ -45640,7 +45628,7 @@ impl<'gc> VM<'gc> {
         func_ip: usize,
         arity: u8,
         args: &[Value<'gc>],
-        upvals: &[VmUpvalueCell<'gc>],
+        upvals: &[UpvalueCell<'gc>],
         this_val: &Value<'gc>,
     ) -> Result<GeneratorState<'gc>, JSError> {
         let module_key = self.chunk.fn_source_paths.get(&func_ip).cloned();
@@ -45745,7 +45733,7 @@ impl<'gc> VM<'gc> {
         func_ip: usize,
         arity: u8,
         args: &[Value<'gc>],
-        upvals: &[VmUpvalueCell<'gc>],
+        upvals: &[UpvalueCell<'gc>],
         this_val: &Value<'gc>,
         is_async: bool,
     ) -> Result<Value<'gc>, JSError> {
@@ -46135,7 +46123,7 @@ impl<'gc> VM<'gc> {
                     } else {
                         ob.insert(
                             "__then_queue__".to_string(),
-                            Value::Array(new_gc_cell_ptr(ctx, VmArrayData::new(vec![entry_val]))),
+                            Value::Array(new_gc_cell_ptr(ctx, ArrayData::new(vec![entry_val]))),
                         );
                     }
                     return;

@@ -81,6 +81,7 @@ pub struct Compiler<'gc> {
     /// External module exports: source_specifier -> HashMap<export_name, resolved_module_path>.
     /// Populated by the module loader before compilation so the compiler can resolve external imports.
     loaded_module_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    resolved_module_requests: std::collections::HashMap<(String, Option<String>), String>,
     /// After compiling an anonymous class expression, holds the constructor's IP
     /// so callers can apply NamedEvaluation (e.g. `let C = class {}`  → name "C").
     last_class_ctor_ip: Option<usize>,
@@ -165,6 +166,10 @@ impl<'gc> Compiler<'gc> {
     /// Register exports from a loaded external module so the compiler can resolve imports.
     pub fn set_loaded_module_exports(&mut self, resolved_path: String, export_info: std::collections::HashMap<String, String>) {
         self.loaded_module_exports.insert(resolved_path, export_info);
+    }
+
+    pub(crate) fn set_module_resolution(&mut self, specifier: String, import_type: Option<String>, resolved_key: String) {
+        self.resolved_module_requests.insert((specifier, import_type), resolved_key);
     }
 
     pub fn set_strict_mode(&mut self, strict: bool) {
@@ -820,20 +825,21 @@ impl<'gc> Compiler<'gc> {
 
     /// Resolve an import specifier to a loaded module path, if available.
     fn resolve_import_path(&self, source: &str, import_type: Option<&str>) -> Option<String> {
-        if let Some(ref fname) = self.script_filename {
-            let base_path = std::path::Path::new(fname);
-            let resolved_str = crate::core::resolve_module_request_key(source, base_path, import_type);
-            if self.loaded_module_exports.contains_key(&resolved_str) {
-                Some(resolved_str)
-            } else {
-                None
-            }
+        let resolved = self.resolve_source_import_path(source, import_type)?;
+        if self.loaded_module_exports.contains_key(&resolved) {
+            Some(resolved)
         } else {
             None
         }
     }
 
     fn resolve_source_import_path(&self, source: &str, import_type: Option<&str>) -> Option<String> {
+        if let Some(resolved) = self
+            .resolved_module_requests
+            .get(&(source.to_string(), import_type.map(str::to_string)))
+        {
+            return Some(resolved.clone());
+        }
         self.script_filename
             .as_ref()
             .map(|fname| crate::core::resolve_module_request_key(source, std::path::Path::new(fname), import_type))

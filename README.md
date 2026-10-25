@@ -172,6 +172,65 @@ fn main() {
 }
 ```
 
+Hosts can provide in-memory module sources, own timer scheduling, redirect console output, and settle promises from external work:
+
+```rust
+use javascript::{HostHooks, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};
+
+struct Modules;
+
+impl ModuleLoader for Modules {
+    fn resolve(&mut self, specifier: &str, _referrer: Option<&str>) -> Result<String, javascript::JSError> {
+        match specifier {
+            "./math.js" => Ok("app/math.js".to_string()),
+            _ => Err(javascript::JSError::new(
+                javascript::JSErrorKind::EvaluationError {
+                    message: format!("Unknown module: {specifier}"),
+                },
+                file!().to_string(),
+                "Modules::resolve".to_string(),
+                None,
+            )),
+        }
+    }
+
+    fn load(&mut self, key: &str) -> Result<ModuleSource, javascript::JSError> {
+        match key {
+            "app/math.js" => Ok(ModuleSource::Text("export const answer = 42;".to_string())),
+            _ => Err(javascript::JSError::new(
+                javascript::JSErrorKind::EvaluationError {
+                    message: format!("Missing module: {key}"),
+                },
+                file!().to_string(),
+                "Modules::load".to_string(),
+                None,
+            )),
+        }
+    }
+}
+
+fn run_hosted() -> Result<(), javascript::JSError> {
+    let mut runtime = JsRuntime::new();
+    runtime.set_module_loader(Modules);
+
+    let mut hooks = HostHooks::default();
+    hooks.set_console_handler(|message| eprintln!("{:?}: {}", message.level, message.text));
+    runtime.set_host_hooks(hooks);
+
+    runtime.eval_module(
+        "import { answer } from './math.js'; console.log(answer);",
+        "app/main.js",
+    )?;
+
+    runtime.start_eval("setTimeout(() => console.log('timer'), 100);")?;
+    while matches!(runtime.run_slice(1024)?, JsRunStatus::Yielded) {}
+    runtime.step_timers(100.0)?;
+    Ok(())
+}
+```
+
+`start_eval` / `run_slice` let the host decide when execution advances; after the script completes, call `drain_microtasks` and `step_timers(monotonic_ms)` from the host event loop as needed. `create_promise` returns a JS promise and a resolver that the host can use to resolve/reject after I/O. Each `JsRuntime` owns its `$262.agent` state; parser and RegExp thread-local state remains scoped to the executing thread. The `os` and `std` Cargo features remain optional; build the core without them using `cargo check --no-default-features --lib`.
+
 Other exported APIs include tokenize, parse_statement, parse_statements, read_script_file, and value/string helpers.
 
 ## Testing and quality checks

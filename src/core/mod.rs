@@ -138,6 +138,10 @@ pub(crate) fn parse_program_statements(script: &str, run_as_module: bool) -> Res
 pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JSError> {
     let path = path.as_ref();
     let bytes = std::fs::read(path).map_err(|e| raise_eval_error!(format!("Failed to read script file '{}': {e}", path.display())))?;
+    decode_script_bytes(&bytes)
+}
+
+pub(crate) fn decode_script_bytes(bytes: &[u8]) -> Result<String, JSError> {
     if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
         // UTF-8 with BOM
         let s = std::str::from_utf8(&bytes[3..]).map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))?;
@@ -145,7 +149,7 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
     }
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         // UTF-16LE
-        if (bytes.len() - 2) % 2 != 0 {
+        if !(bytes.len() - 2).is_multiple_of(2) {
             return Err(raise_eval_error!("Invalid UTF-16LE script file length"));
         }
         let mut u16s = Vec::with_capacity((bytes.len() - 2) / 2);
@@ -158,7 +162,7 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
     }
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
         // UTF-16BE
-        if (bytes.len() - 2) % 2 != 0 {
+        if !(bytes.len() - 2).is_multiple_of(2) {
             return Err(raise_eval_error!("Invalid UTF-16BE script file length"));
         }
         let mut u16s = Vec::with_capacity((bytes.len() - 2) / 2);
@@ -170,7 +174,7 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
         return String::from_utf16(&u16s).map_err(|e| raise_eval_error!(format!("Invalid UTF-16BE script file contents: {e}")));
     }
     // Otherwise assume UTF-8 without BOM
-    std::str::from_utf8(&bytes)
+    std::str::from_utf8(bytes)
         .map(|s| s.to_string())
         .map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))
 }
@@ -2946,6 +2950,19 @@ impl crate::runtime::JsRuntime {
         script_path: Option<P>,
         unwrap_top_level_promise: bool,
     ) -> Result<String, JSError> {
+        let context_id = self.agent_context_id();
+        crate::js_agent::with_context(context_id, || {
+            self.eval_script_with_unwrap_scoped(script, run_as_module, script_path, unwrap_top_level_promise)
+        })
+    }
+
+    fn eval_script_with_unwrap_scoped<T: AsRef<str>, P: AsRef<std::path::Path>>(
+        &mut self,
+        script: T,
+        run_as_module: bool,
+        script_path: Option<P>,
+        unwrap_top_level_promise: bool,
+    ) -> Result<String, JSError> {
         let script_str = script.as_ref();
         let statements = parse_program_statements(script_str, run_as_module)?;
         let script_path_buf = script_path.as_ref().map(|p| p.as_ref().to_path_buf());
@@ -3051,6 +3068,9 @@ impl crate::runtime::JsRuntime {
                         }
                     }
 
+                    if let Some((_, _, _, _, _, _, entry_path)) = &main_module_record {
+                        vm.apply_module_resolution_overrides(&mut compiler, entry_path);
+                    }
                     let chunk = compiler.compile(&statements)?;
                     if let Some((_, _, main_export_name_to_local, _, _, _, _)) = &main_module_record {
                         let hoisted_locals = collect_hoisted_function_names(&statements);

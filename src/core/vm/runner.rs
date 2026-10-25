@@ -36,6 +36,13 @@ impl<'gc> VM<'gc> {
         }
     }
 
+    pub(crate) fn run_slice_nonblocking(&mut self, ctx: &GcContext<'gc>, opcode_budget: usize) -> Result<Option<Value<'gc>>, JSError> {
+        match self.run_inner_slice(ctx, 0, Some(opcode_budget))? {
+            RunInnerStatus::Yielded => Ok(None),
+            RunInnerStatus::Complete(result) => self.finish_run_nonblocking(ctx, result).map(Some),
+        }
+    }
+
     fn finish_run(&mut self, ctx: &GcContext<'gc>, result: Value<'gc>) -> Result<Value<'gc>, JSError> {
         self.flush_async_atomics_waits(ctx, true);
         self.drain_microtasks(ctx);
@@ -44,6 +51,16 @@ impl<'gc> VM<'gc> {
         }
         self.drain_timers(ctx)?;
         self.flush_async_atomics_waits(ctx, true);
+        self.drain_microtasks(ctx);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        self.collect_garbage(ctx);
+        Ok(result)
+    }
+
+    fn finish_run_nonblocking(&mut self, ctx: &GcContext<'gc>, result: Value<'gc>) -> Result<Value<'gc>, JSError> {
+        self.flush_async_atomics_waits(ctx, false);
         self.drain_microtasks(ctx);
         if let Some(thrown) = self.pending_throw.take() {
             return Err(self.vm_error_to_js_error(ctx, &thrown));

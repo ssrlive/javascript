@@ -432,6 +432,7 @@ struct PendingTimer<'gc> {
     callback: Value<'gc>,
     args: Vec<Value<'gc>>,
     delay_ms: u64,
+    due_at_ms: f64,
     is_interval: bool,
 }
 
@@ -745,7 +746,8 @@ pub struct VM<'gc> {
     this_stack: Vec<Value<'gc>>,       // this binding stack
     new_target_stack: Vec<Value<'gc>>, // new.target binding stack
     super_called_stack: Vec<bool>,     // tracks whether super() was called in derived ctors
-    output: Vec<String>,               // captured output for console.log etc.
+    output: Vec<crate::runtime::ConsoleMessage>,
+    console_stdout: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
     // Maps Function IPs from child realms to their realm_id so get_fn_props
@@ -773,6 +775,7 @@ pub struct VM<'gc> {
     pending_timers: Vec<PendingTimer<'gc>>,
     next_timer_id: usize,
     cleared_timers: std::collections::HashSet<usize>,
+    host_time_ms: f64,
     // Microtask queue for deferred .then() on settled promises
     microtask_queue: Vec<Microtask<'gc>>,
     // Main-thread async Atomics.waitAsync registrations.
@@ -894,6 +897,9 @@ pub struct VM<'gc> {
     deferred_module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
     /// Parsed/compiled module records, including modules that are linked but not yet evaluated.
     module_records: std::collections::HashMap<String, StoredModuleRecord>,
+    module_loader: Option<Rc<RefCell<Box<dyn crate::runtime::ModuleLoader>>>>,
+    module_resolutions: HashMap<(String, String, Option<String>), String>,
+    module_resolution_errors: HashMap<(String, String, Option<String>), String>,
     /// Nesting depth for module-request evaluation walks so suspended TLA modules
     /// are only resumed after the outermost dependency walk finishes.
     module_request_depth: usize,
@@ -1159,6 +1165,7 @@ impl<'gc> VM<'gc> {
             new_target_stack: Vec::new(),
             super_called_stack: Vec::new(),
             output: Vec::new(),
+            console_stdout: true,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
             native_fn_props: HashMap::new(),
@@ -1178,6 +1185,7 @@ impl<'gc> VM<'gc> {
             pending_timers: Vec::new(),
             next_timer_id: 1,
             cleared_timers: std::collections::HashSet::new(),
+            host_time_ms: 0.0,
             microtask_queue: Vec::new(),
             async_atomics_waits: Vec::new(),
             generator_states: HashMap::new(),
@@ -1229,6 +1237,9 @@ impl<'gc> VM<'gc> {
             module_import_meta_objects: std::collections::HashMap::new(),
             deferred_module_ns_objects: std::collections::HashMap::new(),
             module_records: std::collections::HashMap::new(),
+            module_loader: None,
+            module_resolutions: HashMap::new(),
+            module_resolution_errors: HashMap::new(),
             module_request_depth: 0,
             intrinsic_promise_ctor: Value::Undefined,
             restricted_thrower_intrinsic: Value::Undefined,
@@ -1541,7 +1552,7 @@ impl<'gc> VM<'gc> {
 
         let mut resolved_reexports = Vec::new();
         for (source, specs) in reexport_sources {
-            let resolved = crate::core::resolve_module_path(source, base_path).to_string_lossy().to_string();
+            let resolved = self.module_path_for_request(source, base_path, None).to_string_lossy().to_string();
             for spec in specs {
                 match spec {
                     crate::core::ReexportSpec::Named(name, alias) => {
@@ -1832,8 +1843,7 @@ impl<'gc> VM<'gc> {
             return false;
         }
         for request in &record.requests {
-            let required_module =
-                crate::core::resolve_module_request_key(&request.specifier, &record.resolved_path, request.import_type.as_deref());
+            let required_module = self.module_key_for_request(&request.specifier, &record.resolved_path, request.import_type.as_deref());
             if !self.ready_for_sync_execution(&required_module, seen) {
                 return false;
             }
@@ -2102,15 +2112,14 @@ impl<'gc> VM<'gc> {
             return;
         }
         for request in &record.requests {
-            let dep_key =
-                crate::core::resolve_module_request_key(&request.specifier, &record.resolved_path, request.import_type.as_deref());
+            let dep_key = self.module_key_for_request(&request.specifier, &record.resolved_path, request.import_type.as_deref());
             self.collect_async_transitive_dependencies(&dep_key, seen, out);
         }
     }
 
     fn module_has_async_dependency(&self, entry_path: &std::path::Path, requests: &[crate::core::ModuleRequest]) -> bool {
         requests.iter().any(|request| {
-            let dep_key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
+            let dep_key = self.module_key_for_request(&request.specifier, entry_path, request.import_type.as_deref());
             self.module_records
                 .get(&dep_key)
                 .is_some_and(|record| record.status == ModuleStatus::EvaluatingAsync)
@@ -2128,8 +2137,7 @@ impl<'gc> VM<'gc> {
             return false;
         };
         record.requests.iter().any(|request| {
-            let dep_key =
-                crate::core::resolve_module_request_key(&request.specifier, &record.resolved_path, request.import_type.as_deref());
+            let dep_key = self.module_key_for_request(&request.specifier, &record.resolved_path, request.import_type.as_deref());
             self.module_reaches_module(&dep_key, target_key, visited)
         })
     }
@@ -2156,9 +2164,127 @@ impl<'gc> VM<'gc> {
         requests: &[crate::core::ModuleRequest],
     ) -> bool {
         requests.iter().any(|request| {
-            let dep_key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
+            let dep_key = self.module_key_for_request(&request.specifier, entry_path, request.import_type.as_deref());
             !self.modules_share_async_cycle(module_key, &dep_key) && self.module_cycle_has_evaluating_async(&dep_key)
         })
+    }
+
+    pub(crate) fn set_module_loader(&mut self, loader: Option<Rc<RefCell<Box<dyn crate::runtime::ModuleLoader>>>>) {
+        self.module_loader = loader;
+    }
+
+    fn module_resolution_cache_key(
+        specifier: &str,
+        referrer: &std::path::Path,
+        import_type: Option<&str>,
+    ) -> (String, String, Option<String>) {
+        (
+            referrer.to_string_lossy().into_owned(),
+            specifier.to_string(),
+            import_type.map(str::to_string),
+        )
+    }
+
+    fn module_path_for_request(&self, specifier: &str, referrer: &std::path::Path, import_type: Option<&str>) -> std::path::PathBuf {
+        let cache_key = Self::module_resolution_cache_key(specifier, referrer, import_type);
+        self.module_resolutions
+            .get(&cache_key)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::core::resolve_module_path(specifier, referrer))
+    }
+
+    fn module_key_for_request(&self, specifier: &str, referrer: &std::path::Path, import_type: Option<&str>) -> String {
+        let resolved_path = self.module_path_for_request(specifier, referrer, import_type);
+        crate::core::module_request_key_from_resolved_path(&resolved_path, import_type)
+    }
+
+    fn resolve_module_for_load(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        specifier: &str,
+        referrer: &std::path::Path,
+        import_type: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
+        let cache_key = Self::module_resolution_cache_key(specifier, referrer, import_type);
+        if let Some(path) = self.module_resolutions.get(&cache_key) {
+            return Some(std::path::PathBuf::from(path));
+        }
+        if self.module_resolution_errors.contains_key(&cache_key) {
+            return None;
+        }
+
+        let default_path = crate::core::resolve_module_path(specifier, referrer);
+        let result = match &self.module_loader {
+            Some(loader) => loader
+                .borrow_mut()
+                .resolve(specifier, Some(&referrer.to_string_lossy()))
+                .map(std::path::PathBuf::from),
+            None => Ok(default_path.clone()),
+        };
+        match result {
+            Ok(path) => {
+                self.module_resolutions.insert(cache_key, path.to_string_lossy().into_owned());
+                Some(path)
+            }
+            Err(error) => {
+                let default_key = crate::core::module_request_key_from_resolved_path(&default_path, import_type);
+                let error_value = self.vm_value_from_error(ctx, &error);
+                self.record_module_load_error(&default_key, error_value);
+                self.module_resolution_errors.insert(cache_key, error.to_string());
+                None
+            }
+        }
+    }
+
+    pub(crate) fn apply_module_resolution_overrides(&self, compiler: &mut crate::core::Compiler<'gc>, referrer: &std::path::Path) {
+        let referrer_key = referrer.to_string_lossy();
+        for ((base, specifier, import_type), resolved) in &self.module_resolutions {
+            if base == referrer_key.as_ref() {
+                let resolved = crate::core::module_request_key_from_resolved_path(std::path::Path::new(resolved), import_type.as_deref());
+                compiler.set_module_resolution(specifier.clone(), import_type.clone(), resolved);
+            }
+        }
+    }
+
+    fn load_module_source(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        resolved_path: &std::path::Path,
+        key: &str,
+    ) -> Option<crate::runtime::ModuleSource> {
+        let result = match &self.module_loader {
+            Some(loader) => loader.borrow_mut().load(&resolved_path.to_string_lossy()),
+            None => std::fs::read(resolved_path)
+                .map(crate::runtime::ModuleSource::Bytes)
+                .map_err(|error| crate::raise_eval_error!(format!("Failed to read script file '{}': {error}", resolved_path.display()))),
+        };
+        match result {
+            Ok(source) => Some(source),
+            Err(error) => {
+                let error_value = self.vm_value_from_error(ctx, &error);
+                self.record_module_load_error(key, error_value);
+                None
+            }
+        }
+    }
+
+    fn load_module_text(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) -> Option<String> {
+        let source = self.load_module_source(ctx, resolved_path, key)?;
+        match Self::module_source_to_text(source) {
+            Ok(text) => Some(text),
+            Err(error) => {
+                let error_value = self.vm_value_from_error(ctx, &error);
+                self.record_module_load_error(key, error_value);
+                None
+            }
+        }
+    }
+
+    fn module_source_to_text(source: crate::runtime::ModuleSource) -> Result<String, JSError> {
+        match source {
+            crate::runtime::ModuleSource::Text(text) => Ok(text),
+            crate::runtime::ModuleSource::Bytes(bytes) => crate::core::decode_script_bytes(&bytes),
+        }
     }
 
     pub(crate) fn load_module_graph(
@@ -2168,10 +2294,18 @@ impl<'gc> VM<'gc> {
         requests: &[crate::core::ModuleRequest],
     ) {
         for request in requests {
-            let resolved_key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
             if request.phase == crate::core::ModuleRequestPhase::Source {
+                let resolved = if request.specifier == "<module source>" {
+                    std::path::PathBuf::from(&request.specifier)
+                } else {
+                    let Some(resolved) = self.resolve_module_for_load(ctx, &request.specifier, entry_path, request.import_type.as_deref())
+                    else {
+                        continue;
+                    };
+                    resolved
+                };
+                let resolved_key = crate::core::module_request_key_from_resolved_path(&resolved, request.import_type.as_deref());
                 if request.specifier != "<module source>" {
-                    let resolved = crate::core::resolve_module_path(&request.specifier, entry_path);
                     self.load_single_module(ctx, &resolved, request.import_type.as_deref());
                 }
                 if !self.module_load_errors.contains_key(&resolved_key) {
@@ -2180,7 +2314,9 @@ impl<'gc> VM<'gc> {
                 }
                 continue;
             }
-            let resolved = crate::core::resolve_module_path(&request.specifier, entry_path);
+            let Some(resolved) = self.resolve_module_for_load(ctx, &request.specifier, entry_path, request.import_type.as_deref()) else {
+                continue;
+            };
             self.load_single_module(ctx, &resolved, request.import_type.as_deref());
         }
     }
@@ -2229,13 +2365,8 @@ impl<'gc> VM<'gc> {
             return;
         }
 
-        let dep_source = match crate::core::read_script_file(resolved_path) {
-            Ok(s) => s,
-            Err(err) => {
-                let error_value = self.vm_value_from_error(ctx, &err);
-                self.record_module_load_error(&key, error_value);
-                return;
-            }
+        let Some(dep_source) = self.load_module_text(ctx, resolved_path, &key) else {
+            return;
         };
         let dep_stmts = match crate::core::parse_program_statements(&dep_source, true) {
             Ok(s) => s,
@@ -2273,6 +2404,7 @@ impl<'gc> VM<'gc> {
 
         let mut dep_compiler = crate::core::Compiler::new();
         dep_compiler.set_script_filename(key.clone());
+        self.apply_module_resolution_overrides(&mut dep_compiler, resolved_path);
         for (path, exports) in &self.loaded_modules {
             let mut info = std::collections::HashMap::new();
             for k in exports.keys() {
@@ -2363,13 +2495,8 @@ impl<'gc> VM<'gc> {
     }
 
     fn load_single_json_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
-        let dep_source = match crate::core::read_script_file(resolved_path) {
-            Ok(s) => s,
-            Err(err) => {
-                let error_value = self.vm_value_from_error(ctx, &err);
-                self.record_module_load_error(key, error_value);
-                return;
-            }
+        let Some(dep_source) = self.load_module_text(ctx, resolved_path, key) else {
+            return;
         };
 
         let parsed = match serde_json::from_str::<serde_json::Value>(&dep_source) {
@@ -2385,27 +2512,20 @@ impl<'gc> VM<'gc> {
     }
 
     fn load_single_text_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
-        let dep_source = match crate::core::read_script_file(resolved_path) {
-            Ok(s) => s,
-            Err(err) => {
-                let error_value = self.vm_value_from_error(ctx, &err);
-                self.record_module_load_error(key, error_value);
-                return;
-            }
+        let Some(dep_source) = self.load_module_text(ctx, resolved_path, key) else {
+            return;
         };
         let default_value = Value::from(dep_source.as_str());
         self.load_single_synthetic_default_module(ctx, resolved_path, key, dep_source, default_value);
     }
 
     fn load_single_bytes_module(&mut self, ctx: &GcContext<'gc>, resolved_path: &std::path::Path, key: &str) {
-        let dep_bytes = match std::fs::read(resolved_path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                let error = crate::raise_eval_error!(format!("Failed to read script file '{}': {err}", resolved_path.display()));
-                let error_value = self.vm_value_from_error(ctx, &error);
-                self.record_module_load_error(key, error_value);
-                return;
-            }
+        let Some(source) = self.load_module_source(ctx, resolved_path, key) else {
+            return;
+        };
+        let dep_bytes = match source {
+            crate::runtime::ModuleSource::Text(text) => text.into_bytes(),
+            crate::runtime::ModuleSource::Bytes(bytes) => bytes,
         };
         let source = String::from_utf8_lossy(&dep_bytes).into_owned();
         let default_value = self.create_immutable_uint8array_from_bytes(ctx, dep_bytes);
@@ -2413,7 +2533,6 @@ impl<'gc> VM<'gc> {
     }
 
     fn finalize_dependency_module_record(&mut self, ctx: &GcContext<'gc>, record: &StoredModuleRecord) {
-        use crate::core::resolve_module_path;
         use crate::core::statement::{ImportSpecifier, StatementKind};
 
         let key = record.resolved_path.to_string_lossy().to_string();
@@ -2422,7 +2541,7 @@ impl<'gc> VM<'gc> {
 
         for stmt in &record.statements {
             if let crate::core::statement::StatementKind::Import(specs, source, import_type) = &*stmt.kind {
-                let imp_resolved = crate::core::resolve_module_request_key(source, &record.resolved_path, import_type.as_deref());
+                let imp_resolved = self.module_key_for_request(source, &record.resolved_path, import_type.as_deref());
                 for spec in specs {
                     match spec {
                         crate::core::statement::ImportSpecifier::Namespace(local_name) => {
@@ -2475,14 +2594,15 @@ impl<'gc> VM<'gc> {
             }
         }
 
-        fn extract_imports(
+        fn extract_imports<'gc>(
+            vm: &VM<'gc>,
             stmts: &[crate::core::Statement],
             base_path: &std::path::Path,
         ) -> std::collections::HashMap<String, (String, String)> {
             let mut map = std::collections::HashMap::new();
             for stmt in stmts {
                 if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
-                    let resolved = crate::core::resolve_module_request_key(source, base_path, import_type.as_deref());
+                    let resolved = vm.module_key_for_request(source, base_path, import_type.as_deref());
                     for spec in specs {
                         match spec {
                             ImportSpecifier::Named(import_name, Some(local_name)) => {
@@ -2517,14 +2637,16 @@ impl<'gc> VM<'gc> {
 
         for (module_key, stored) in &self.module_records {
             local_exports.insert(module_key.clone(), stored.export_name_to_local.keys().cloned().collect());
-            import_bindings.insert(module_key.clone(), extract_imports(&stored.statements, &stored.resolved_path));
+            import_bindings.insert(module_key.clone(), extract_imports(self, &stored.statements, &stored.resolved_path));
             export_to_local.insert(module_key.clone(), stored.export_name_to_local.clone());
             let resolved_reexports: Vec<(String, Vec<crate::core::ReexportSpec>)> = stored
                 .reexport_sources
                 .iter()
                 .map(|(source, specs)| {
                     (
-                        resolve_module_path(source, &stored.resolved_path).to_string_lossy().to_string(),
+                        self.module_path_for_request(source, &stored.resolved_path, None)
+                            .to_string_lossy()
+                            .to_string(),
                         specs.clone(),
                     )
                 })
@@ -2545,7 +2667,7 @@ impl<'gc> VM<'gc> {
         let mut ambiguous_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut runtime_reexport_deps: Vec<(String, Vec<crate::core::ReexportSpec>)> = Vec::new();
         for (reexport_src, reexport_specs) in &record.reexport_sources {
-            let reexport_resolved = resolve_module_path(reexport_src, &record.resolved_path);
+            let reexport_resolved = self.module_path_for_request(reexport_src, &record.resolved_path, None);
             let reexport_key = reexport_resolved.to_string_lossy().to_string();
             runtime_reexport_deps.push((reexport_key.clone(), reexport_specs.clone()));
             if let Some(source_exports) = self.loaded_modules.get(&reexport_key).cloned() {
@@ -2869,7 +2991,7 @@ impl<'gc> VM<'gc> {
         let mut evaluation_list = Vec::new();
         let mut scheduled = std::collections::HashSet::new();
         for request in requests {
-            let key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
+            let key = self.module_key_for_request(&request.specifier, entry_path, request.import_type.as_deref());
             match request.phase {
                 crate::core::ModuleRequestPhase::Evaluation => {
                     if scheduled.insert(key.clone()) {
@@ -2917,7 +3039,7 @@ impl<'gc> VM<'gc> {
         // Propagate load errors (e.g. SyntaxError) for all requested modules,
         // including deferred ones whose evaluation is skipped.
         for request in requests {
-            let key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
+            let key = self.module_key_for_request(&request.specifier, entry_path, request.import_type.as_deref());
             if let Some(error) = self.module_load_errors.get(&key).cloned() {
                 self.pending_throw = Some(error);
                 return;
@@ -2935,7 +3057,7 @@ impl<'gc> VM<'gc> {
         requests: &[crate::core::ModuleRequest],
     ) -> Result<(), JSError> {
         for request in requests {
-            let key = crate::core::resolve_module_request_key(&request.specifier, entry_path, request.import_type.as_deref());
+            let key = self.module_key_for_request(&request.specifier, entry_path, request.import_type.as_deref());
             if let Some(error) = self.module_load_errors.get(&key).cloned() {
                 return Err(self.vm_error_to_js_error(ctx, &error));
             }
@@ -3033,7 +3155,6 @@ impl<'gc> VM<'gc> {
         main_reexport_sources: &[(String, Vec<crate::core::ReexportSpec>)],
         entry_path: &std::path::Path,
     ) -> Result<(), JSError> {
-        use crate::core::resolve_module_path;
         use crate::core::statement::{ImportSpecifier, StatementKind};
 
         // Build per-module data structures needed for spec-compliant ResolveExport
@@ -3046,14 +3167,15 @@ impl<'gc> VM<'gc> {
             std::collections::HashMap::new();
 
         // Helper: extract import bindings from statements
-        fn extract_imports(
+        fn extract_imports<'gc>(
+            vm: &VM<'gc>,
             stmts: &[crate::core::Statement],
             base_path: &std::path::Path,
         ) -> std::collections::HashMap<String, (String, String)> {
             let mut map = std::collections::HashMap::new();
             for stmt in stmts {
                 if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
-                    let resolved = crate::core::resolve_module_request_key(source, base_path, import_type.as_deref());
+                    let resolved = vm.module_key_for_request(source, base_path, import_type.as_deref());
                     for spec in specs {
                         match spec {
                             ImportSpecifier::Named(import_name, Some(local_name)) => {
@@ -3086,7 +3208,7 @@ impl<'gc> VM<'gc> {
                 set.insert(k.clone());
             }
             local_exports.insert(key.clone(), set);
-            import_bindings.insert(key.clone(), extract_imports(&record.statements, &record.resolved_path));
+            import_bindings.insert(key.clone(), extract_imports(self, &record.statements, &record.resolved_path));
             export_to_local.insert(key.clone(), record.export_name_to_local.clone());
         }
         // Add main module's exports and import bindings
@@ -3096,7 +3218,7 @@ impl<'gc> VM<'gc> {
                 set.insert(k.clone());
             }
             local_exports.insert(main_module_key.to_string(), set);
-            import_bindings.insert(main_module_key.to_string(), extract_imports(main_statements, entry_path));
+            import_bindings.insert(main_module_key.to_string(), extract_imports(self, main_statements, entry_path));
             export_to_local.insert(main_module_key.to_string(), main_export_name_to_local.clone());
         }
 
@@ -3106,7 +3228,7 @@ impl<'gc> VM<'gc> {
         {
             let mut resolved_reexports = Vec::new();
             for (source, specs) in main_reexport_sources {
-                let resolved = resolve_module_path(source, entry_path).to_string_lossy().to_string();
+                let resolved = self.module_path_for_request(source, entry_path, None).to_string_lossy().to_string();
                 resolved_reexports.push((resolved, specs.clone()));
             }
             if !resolved_reexports.is_empty() {
@@ -3159,7 +3281,7 @@ impl<'gc> VM<'gc> {
         // Validate import bindings in main module
         for stmt in main_statements {
             if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
-                let resolved = crate::core::resolve_module_request_key(source, entry_path, import_type.as_deref());
+                let resolved = self.module_key_for_request(source, entry_path, import_type.as_deref());
                 Self::validate_import_specs_static(specs, &resolved, source, &ctx)?;
             }
         }
@@ -3167,7 +3289,7 @@ impl<'gc> VM<'gc> {
         for record in self.module_records.values() {
             for stmt in &record.statements {
                 if let StatementKind::Import(specs, source, import_type) = &*stmt.kind {
-                    let resolved = crate::core::resolve_module_request_key(source, &record.resolved_path, import_type.as_deref());
+                    let resolved = self.module_key_for_request(source, &record.resolved_path, import_type.as_deref());
                     Self::validate_import_specs_static(specs, &resolved, source, &ctx)?;
                 }
             }
@@ -3595,6 +3717,14 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
+    pub(crate) fn set_console_stdout(&mut self, enabled: bool) {
+        self.console_stdout = enabled;
+    }
+
+    pub(crate) fn take_console_output(&mut self) -> Vec<crate::runtime::ConsoleMessage> {
+        std::mem::take(&mut self.output)
+    }
+
     pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedJsCallback) {
         let host_key = format!("host_callback.{name}");
         self.host_callbacks.insert(name.to_string(), Rc::new(RefCell::new(callback)));
@@ -3638,6 +3768,45 @@ impl<'gc> VM<'gc> {
         self.next_host_root_id = self.next_host_root_id.saturating_add(1);
         self.host_roots.insert(id, value);
         crate::runtime::JsObjectHandle(id)
+    }
+
+    pub(crate) fn create_host_promise(
+        &mut self,
+        ctx: &GcContext<'gc>,
+    ) -> Result<(crate::runtime::JsValue, crate::runtime::JsPromiseResolver), JSError> {
+        let constructor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
+        let (promise, resolve, reject) = self.new_promise_capability(ctx, &constructor)?;
+        let promise = self.value_to_host_value(&promise);
+        let resolve = self.store_host_root(resolve);
+        let reject = self.store_host_root(reject);
+        Ok((promise, crate::runtime::JsPromiseResolver::new(resolve, reject)))
+    }
+
+    pub(crate) fn call_host_root_function(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        handle: crate::runtime::JsObjectHandle,
+        argument: crate::runtime::JsValue,
+    ) -> Result<(), JSError> {
+        let function = self
+            .host_roots
+            .get(&handle.id())
+            .cloned()
+            .ok_or_else(|| crate::raise_eval_error!(format!("Invalid or released JsObjectHandle({})", handle.id())))?;
+        if !self.is_value_callable(&function) {
+            return Err(crate::raise_type_error!("Promise resolver is not callable"));
+        }
+        let argument = self.host_value_to_value(ctx, &argument)?;
+        self.vm_call_function_value(ctx, &function, &Value::Undefined, &[argument])?;
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        self.flush_async_atomics_waits(ctx, false);
+        self.drain_microtasks(ctx);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        Ok(())
     }
 
     pub(crate) fn value_to_host_value(&mut self, value: &Value<'gc>) -> crate::runtime::JsValue {
@@ -5265,7 +5434,13 @@ impl<'gc> VM<'gc> {
         };
 
         let base_path = std::path::Path::new(&base_source);
-        let module_key = crate::core::resolve_module_request_key(&specifier_string, base_path, import_type.as_deref());
+        let module_key = match self.resolve_module_for_load(ctx, &specifier_string, base_path, import_type.as_deref()) {
+            Some(resolved_path) => crate::core::module_request_key_from_resolved_path(&resolved_path, import_type.as_deref()),
+            None => {
+                let default_path = crate::core::resolve_module_path(&specifier_string, base_path);
+                crate::core::module_request_key_from_resolved_path(&default_path, import_type.as_deref())
+            }
+        };
 
         if !self.loaded_modules.contains_key(&module_key)
             || self
@@ -5373,7 +5548,7 @@ impl<'gc> VM<'gc> {
         };
 
         let base_path = std::path::Path::new(&base_source);
-        let module_key = crate::core::resolve_module_request_key(&specifier_string, base_path, None);
+        let module_key = self.module_key_for_request(&specifier_string, base_path, None);
         let request = crate::core::ModuleRequest {
             specifier: specifier_string,
             phase: crate::core::ModuleRequestPhase::Defer,
@@ -5441,7 +5616,7 @@ impl<'gc> VM<'gc> {
         };
 
         let base_path = std::path::Path::new(&base_source);
-        let module_key = crate::core::resolve_module_request_key(&specifier_string, base_path, None);
+        let module_key = self.module_key_for_request(&specifier_string, base_path, None);
 
         if !self.loaded_modules.contains_key(&module_key)
             || self
@@ -13973,12 +14148,16 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 }
             },
+            #[cfg(feature = "std")]
             "std.sprintf" => match crate::js_std::sprintf::handle_sprintf_call(args) {
                 Ok(v) => v,
                 Err(_) => Value::Undefined,
             },
+            #[cfg(feature = "std")]
             "std.tmpfile" => crate::js_std::tmpfile::vm_create_tmpfile(ctx),
+            #[cfg(feature = "std")]
             "std.gc" => Value::Undefined,
+            #[cfg(feature = "std")]
             "tmp.puts" | "tmp.readAsString" | "tmp.seek" | "tmp.close" | "tmp.getline" => {
                 crate::js_std::tmpfile::vm_dispatch_file_method(name, receiver, args)
             }
@@ -23401,6 +23580,7 @@ impl<'gc> VM<'gc> {
                     callback,
                     args: timer_args,
                     delay_ms: delay,
+                    due_at_ms: self.host_time_ms + delay as f64,
                     is_interval: id == BUILTIN_SETINTERVAL,
                 });
                 Value::Number(timer_id as f64)
@@ -25490,9 +25670,15 @@ impl<'gc> VM<'gc> {
             BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
                 let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(ctx, v)).collect();
                 let msg = parts.join(" ");
-                self.output.push(msg.clone());
-                // Match existing console behavior: print to stdout
-                println!("{}", msg);
+                let level = match id {
+                    BUILTIN_CONSOLE_WARN => crate::runtime::ConsoleLevel::Warn,
+                    BUILTIN_CONSOLE_ERROR => crate::runtime::ConsoleLevel::Error,
+                    _ => crate::runtime::ConsoleLevel::Log,
+                };
+                self.output.push(crate::runtime::ConsoleMessage { level, text: msg.clone() });
+                if self.console_stdout {
+                    println!("{msg}");
+                }
                 Value::Undefined
             }
             BUILTIN_MATH_FLOOR
@@ -46018,16 +46204,19 @@ impl<'gc> VM<'gc> {
     }
 
     /// Drain microtask queue (deferred .then callbacks on settled promises).
-    fn drain_microtasks(&mut self, ctx: &GcContext<'gc>) {
+    fn drain_microtasks(&mut self, ctx: &GcContext<'gc>) -> usize {
+        let mut executed = 0;
         for _round in 0..1000 {
             if self.microtask_queue.is_empty() {
                 break;
             }
             let batch = std::mem::take(&mut self.microtask_queue);
+            executed += batch.len();
             for task in batch {
                 self.run_then_microtask(ctx, task);
             }
         }
+        executed
     }
 
     /// Synchronously resolve a value that may be a promise.
@@ -46138,19 +46327,35 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    /// Execute all pending timers (setTimeout / setInterval callbacks).
-    /// Runs in a loop until no more timers remain, supporting chained timers.
-    fn drain_timers(&mut self, ctx: &GcContext<'gc>) -> Result<(), JSError> {
-        // Sort by delay so shorter delays fire first
+    fn run_due_timers(&mut self, ctx: &GcContext<'gc>, advance_to_next: bool) -> Result<usize, JSError> {
+        let mut executed = 0;
         for _round in 0..1000 {
             if self.pending_timers.is_empty() {
                 break;
             }
-            // Take current batch, sorted by delay
-            let mut batch: Vec<PendingTimer<'gc>> = std::mem::take(&mut self.pending_timers);
-            batch.sort_by_key(|t| t.delay_ms);
+            if advance_to_next && let Some(next_due) = self.pending_timers.iter().map(|timer| timer.due_at_ms).min_by(f64::total_cmp) {
+                self.host_time_ms = self.host_time_ms.max(next_due);
+            }
 
-            for timer in batch {
+            let mut due = Vec::new();
+            let mut pending = Vec::new();
+            for timer in std::mem::take(&mut self.pending_timers) {
+                if self.cleared_timers.contains(&timer.id) {
+                    continue;
+                }
+                if timer.due_at_ms <= self.host_time_ms {
+                    due.push(timer);
+                } else {
+                    pending.push(timer);
+                }
+            }
+            self.pending_timers = pending;
+            if due.is_empty() {
+                break;
+            }
+            due.sort_by(|left, right| left.due_at_ms.total_cmp(&right.due_at_ms));
+
+            for timer in due {
                 if self.cleared_timers.contains(&timer.id) {
                     continue;
                 }
@@ -46158,21 +46363,47 @@ impl<'gc> VM<'gc> {
                 if self.is_value_callable(&timer.callback) {
                     let _ = self.vm_call_function_value(ctx, &timer.callback, &Value::Undefined, &cb_args)?;
                 }
+                executed += 1;
                 self.flush_async_atomics_waits(ctx, true);
                 self.drain_microtasks(ctx);
-                // Re-queue intervals
                 if timer.is_interval && !self.cleared_timers.contains(&timer.id) {
                     self.pending_timers.push(PendingTimer {
                         id: timer.id,
                         callback: timer.callback,
                         args: timer.args,
                         delay_ms: timer.delay_ms,
+                        due_at_ms: self.host_time_ms + timer.delay_ms as f64,
                         is_interval: true,
                     });
                 }
             }
         }
         self.cleared_timers.clear();
-        Ok(())
+        Ok(executed)
+    }
+
+    fn drain_timers(&mut self, ctx: &GcContext<'gc>) -> Result<(), JSError> {
+        self.run_due_timers(ctx, true).map(|_| ())
+    }
+
+    pub(crate) fn drain_microtasks_for_host(&mut self, ctx: &GcContext<'gc>) -> Result<usize, JSError> {
+        let executed = self.drain_microtasks(ctx);
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        Ok(executed)
+    }
+
+    pub(crate) fn step_timers_for_host(&mut self, ctx: &GcContext<'gc>, now_ms: f64) -> Result<usize, JSError> {
+        if !now_ms.is_finite() || now_ms < 0.0 {
+            return Err(crate::raise_range_error!("Timer clock must be a finite non-negative number"));
+        }
+        self.host_time_ms = self.host_time_ms.max(now_ms);
+        let executed = self.run_due_timers(ctx, false)?;
+        if let Some(thrown) = self.pending_throw.take() {
+            return Err(self.vm_error_to_js_error(ctx, &thrown));
+        }
+        self.collect_garbage(ctx);
+        Ok(executed)
     }
 }

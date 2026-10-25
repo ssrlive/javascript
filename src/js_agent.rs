@@ -1,4 +1,4 @@
-/// $262.agent support for test262 multi-agent (multi-threaded) tests.
+/// `$262.agent` support for Test262 multi-agent tests.
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 thread_local! {
+    static CURRENT_CONTEXT: std::cell::RefCell<Option<(u64, Arc<AgentContext>)>> = const { std::cell::RefCell::new(None) };
     static IS_AGENT_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LAST_BROADCAST_SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
@@ -31,21 +32,77 @@ struct SharedBuffer {
     waiters: Mutex<HashMap<usize, VecDeque<Arc<SharedWaiter>>>>,
 }
 
-static AGENT_REPORTS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
-static AGENT_HANDLES: LazyLock<Mutex<Vec<thread::JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-static SHARED_BUFFERS: LazyLock<Mutex<HashMap<u64, Arc<SharedBuffer>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+struct AgentContext {
+    reports: Mutex<VecDeque<String>>,
+    handles: Mutex<Vec<thread::JoinHandle<()>>>,
+    shared_buffers: Mutex<HashMap<u64, Arc<SharedBuffer>>>,
+    broadcast_data: Mutex<Option<BroadcastInfo>>,
+    broadcast_cv: (Mutex<u32>, Condvar),
+    agent_count: AtomicU32,
+    start_time: Instant,
+}
+
+impl AgentContext {
+    fn new() -> Self {
+        Self {
+            reports: Mutex::new(VecDeque::new()),
+            handles: Mutex::new(Vec::new()),
+            shared_buffers: Mutex::new(HashMap::new()),
+            broadcast_data: Mutex::new(None),
+            broadcast_cv: (Mutex::new(0), Condvar::new()),
+            agent_count: AtomicU32::new(0),
+            start_time: Instant::now(),
+        }
+    }
+}
+
+static CONTEXTS: LazyLock<Mutex<HashMap<u64, Arc<AgentContext>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_CONTEXT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SHARED_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
-static BROADCAST_DATA: LazyLock<Mutex<Option<BroadcastInfo>>> = LazyLock::new(|| Mutex::new(None));
-static BROADCAST_CV: LazyLock<(Mutex<u32>, Condvar)> = LazyLock::new(|| (Mutex::new(0), Condvar::new()));
-static AGENT_COUNT: AtomicU32 = AtomicU32::new(0);
-static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn context_for(id: u64) -> Arc<AgentContext> {
+    let mut contexts = CONTEXTS.lock().unwrap();
+    contexts.entry(id).or_insert_with(|| Arc::new(AgentContext::new())).clone()
+}
+
+fn current_context() -> Arc<AgentContext> {
+    CURRENT_CONTEXT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .map(|(_, context)| context.clone())
+            .unwrap_or_else(|| context_for(0))
+    })
+}
+
+pub(crate) fn new_context_id() -> u64 {
+    NEXT_CONTEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn current_context_id() -> u64 {
+    CURRENT_CONTEXT.with(|current| current.borrow().as_ref().map(|(id, _)| *id).unwrap_or(0))
+}
+
+pub(crate) fn with_context<T>(id: u64, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(u64, Arc<AgentContext>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT_CONTEXT.with(|current| *current.borrow_mut() = self.0.take());
+        }
+    }
+
+    let context = context_for(id);
+    let previous = CURRENT_CONTEXT.with(|current| current.borrow_mut().replace((id, context)));
+    let _restore = Restore(previous);
+    f()
+}
 
 pub fn is_agent_thread() -> bool {
     IS_AGENT_THREAD.with(|c| c.get())
 }
 
 pub fn monotonic_now_ms() -> f64 {
-    START_TIME.elapsed().as_secs_f64() * 1000.0
+    current_context().start_time.elapsed().as_secs_f64() * 1000.0
 }
 
 pub fn sleep_ms(ms: f64) {
@@ -54,25 +111,26 @@ pub fn sleep_ms(ms: f64) {
 }
 
 pub fn push_report(report: String) {
-    AGENT_REPORTS.lock().unwrap().push_back(report);
+    current_context().reports.lock().unwrap().push_back(report);
 }
 
 pub fn pop_report() -> Option<String> {
-    AGENT_REPORTS.lock().unwrap().pop_front()
+    current_context().reports.lock().unwrap().pop_front()
 }
 
 pub fn register_shared_buffer(initial_bytes: Vec<u8>) -> u64 {
-    let id = NEXT_SHARED_BUFFER_ID.fetch_add(1, Ordering::SeqCst);
+    let context = current_context();
+    let id = NEXT_SHARED_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
     let buffer = Arc::new(SharedBuffer {
         bytes: Mutex::new(initial_bytes),
         waiters: Mutex::new(HashMap::new()),
     });
-    SHARED_BUFFERS.lock().unwrap().insert(id, buffer);
+    context.shared_buffers.lock().unwrap().insert(id, buffer);
     id
 }
 
 fn get_shared_buffer(id: u64) -> Option<Arc<SharedBuffer>> {
-    SHARED_BUFFERS.lock().unwrap().get(&id).cloned()
+    current_context().shared_buffers.lock().unwrap().get(&id).cloned()
 }
 
 pub fn shared_buffer_len(id: u64) -> Option<usize> {
@@ -198,14 +256,12 @@ pub fn atomics_notify(id: u64, byte_index: usize, count: usize) -> Option<usize>
 }
 
 pub fn broadcast_shared_buffer(shared_buffer_id: u64) -> bool {
-    let Some(_byte_length) = shared_buffer_len(shared_buffer_id) else {
+    let context = current_context();
+    if shared_buffer_len(shared_buffer_id).is_none() {
         return false;
-    };
-    {
-        let mut data = BROADCAST_DATA.lock().unwrap();
-        *data = Some(BroadcastInfo { shared_buffer_id });
     }
-    let (lock, cv) = &*BROADCAST_CV;
+    *context.broadcast_data.lock().unwrap() = Some(BroadcastInfo { shared_buffer_id });
+    let (lock, cv) = &context.broadcast_cv;
     let mut generation = lock.lock().unwrap();
     *generation = generation.wrapping_add(1);
     cv.notify_all();
@@ -213,44 +269,86 @@ pub fn broadcast_shared_buffer(shared_buffer_id: u64) -> bool {
 }
 
 pub fn wait_for_broadcast() -> Option<BroadcastInfo> {
-    let (lock, cv) = &*BROADCAST_CV;
+    let context = current_context();
+    let (lock, cv) = &context.broadcast_cv;
     let mut generation = lock.lock().unwrap();
-    let last_seen = LAST_BROADCAST_SEEN.with(|cell| cell.get());
+    let last_seen = LAST_BROADCAST_SEEN.with(std::cell::Cell::get);
     while *generation <= last_seen {
         generation = cv.wait(generation).unwrap();
     }
     let seen_generation = *generation;
     LAST_BROADCAST_SEEN.with(|cell| cell.set(seen_generation));
-    BROADCAST_DATA.lock().unwrap().clone()
+    context.broadcast_data.lock().unwrap().clone()
 }
 
 pub fn start_agent(script: String) {
-    AGENT_COUNT.fetch_add(1, Ordering::SeqCst);
+    let context_id = current_context_id();
+    let context = context_for(context_id);
+    context.agent_count.fetch_add(1, Ordering::SeqCst);
     let handle = thread::spawn(move || {
-        IS_AGENT_THREAD.with(|c| c.set(true));
-        LAST_BROADCAST_SEEN.with(|c| c.set(0));
-        use crate::core::DEFAULT_GC_OPCODE_BUDGET as B;
-        let result = crate::core::evaluate_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false, B);
-        if let Err(err) = result {
-            push_report(format!("__agent_error__:{err}"));
-        }
+        with_context(context_id, || {
+            IS_AGENT_THREAD.with(|c| c.set(true));
+            LAST_BROADCAST_SEEN.with(|c| c.set(0));
+            use crate::core::DEFAULT_GC_OPCODE_BUDGET as B;
+            let result = crate::core::evaluate_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false, B);
+            if let Err(err) = result {
+                push_report(format!("__agent_error__:{err}"));
+            }
+        });
     });
-    AGENT_HANDLES.lock().unwrap().push(handle);
+    context.handles.lock().unwrap().push(handle);
 }
 
 pub fn reset_agent_state() {
-    let mut handles = AGENT_HANDLES.lock().unwrap();
-    let pending = std::mem::take(&mut *handles);
-    drop(handles);
+    let context_id = current_context_id();
+    let context = context_for(context_id);
+    let pending = {
+        let mut handles = context.handles.lock().unwrap();
+        std::mem::take(&mut *handles)
+    };
     for handle in pending {
         let _ = handle.join();
     }
 
-    AGENT_REPORTS.lock().unwrap().clear();
-    SHARED_BUFFERS.lock().unwrap().clear();
-    *BROADCAST_DATA.lock().unwrap() = None;
-    AGENT_COUNT.store(0, Ordering::SeqCst);
-    NEXT_SHARED_BUFFER_ID.store(1, Ordering::SeqCst);
-    let (lock, _) = &*BROADCAST_CV;
+    context.reports.lock().unwrap().clear();
+    context.shared_buffers.lock().unwrap().clear();
+    *context.broadcast_data.lock().unwrap() = None;
+    context.agent_count.store(0, Ordering::SeqCst);
+    let (lock, cv) = &context.broadcast_cv;
     *lock.lock().unwrap() = 0;
+    cv.notify_all();
+}
+
+pub(crate) fn release_context(id: u64) {
+    if id != 0
+        && let Some(context) = CONTEXTS.lock().unwrap().remove(&id)
+    {
+        drop(std::mem::take(&mut *context.handles.lock().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_state_is_scoped_to_runtime_context() {
+        let first = new_context_id();
+        let second = new_context_id();
+        let first_buffer = with_context(first, || register_shared_buffer(vec![1]));
+        let second_buffer = with_context(second, || register_shared_buffer(vec![2]));
+
+        assert_eq!(with_context(first, || shared_buffer_read(first_buffer, 0, 1)), Some(vec![1]));
+        assert_eq!(with_context(second, || shared_buffer_read(second_buffer, 0, 1)), Some(vec![2]));
+        assert_eq!(with_context(first, || shared_buffer_read(second_buffer, 0, 1)), None);
+        assert_eq!(with_context(second, || shared_buffer_read(first_buffer, 0, 1)), None);
+
+        with_context(first, || push_report("first".to_string()));
+        with_context(second, || push_report("second".to_string()));
+        assert_eq!(with_context(first, pop_report), Some("first".to_string()));
+        assert_eq!(with_context(second, pop_report), Some("second".to_string()));
+
+        release_context(first);
+        release_context(second);
+    }
 }

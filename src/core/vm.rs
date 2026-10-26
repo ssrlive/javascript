@@ -30828,7 +30828,7 @@ impl<'gc> VM<'gc> {
                         let items = if args.len() > 2 { &args[2..] } else { &[] };
                         let new_len = len - actual_delete + items.len();
                         // Step 12: newLen > 2^53 - 1 → TypeError
-                        if new_len > 9007199254740991 {
+                        if new_len as u128 > 9_007_199_254_740_991 {
                             self.throw_type_error(ctx, "Invalid array length");
                             return Value::Undefined;
                         }
@@ -43915,7 +43915,10 @@ impl<'gc> VM<'gc> {
     /// Remaps the IP to a unique range per realm to avoid collisions,
     /// eagerly resolves fn_props from the child VM, and returns the
     /// modified Value with the remapped IP.
+    #[cfg(target_pointer_width = "64")]
     const REALM_IP_OFFSET: usize = 0x100_0000_0000;
+    #[cfg(target_pointer_width = "32")]
+    const REALM_IP_OFFSET: usize = 0x0100_0000;
     fn realm_ip_offset(realm_id: usize) -> usize {
         (realm_id + 1) * Self::REALM_IP_OFFSET
     }

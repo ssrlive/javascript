@@ -11,7 +11,6 @@ fn object_literal_named_function_has_name() {
     let script = r#"
         (function(){
             let o = { x: function foo() { return 1; } };
-            console.log(o.x());
             return o.x.name;
         })()
     "#;
@@ -25,9 +24,6 @@ fn assigned_generator_named_function_has_name() {
         (function(){
             let o = {};
             o.x = function* foo() { yield 1; };
-            console.log(o.x());
-            console.log(o.x().next());
-            console.log(o.x().next().value);
             return o.x.name;
         })()
     "#;
@@ -41,8 +37,6 @@ fn assigned_async_named_function_has_name() {
         (async function () {
           let o = {};
           o.x = async function foo() { return 99; };
-          console.log(await o.x());
-          o.x().then(v => console.log(v));
           return o.x.name;
         })();
     "#;

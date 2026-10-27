@@ -14,31 +14,31 @@ mod comment_tests {
     #[test]
     fn test_comment_removal() {
         // Test single-line comments
-        let script = "// This is a comment\nconsole.log('Hello');";
+        let script = "// This is a comment\n'Hello';";
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(result.is_ok());
 
         // Test multi-line comments
-        let script = "/* Multi-line\ncomment */ console.log('World');";
+        let script = "/* Multi-line\ncomment */ 'World';";
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(result.is_ok());
 
         // Test comments in strings are preserved
-        let script = "console.log('// Not a comment'); console.log('/* Not a comment */');";
+        let script = "'// Not a comment'; '/* Not a comment */';";
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(result.is_ok());
 
         // Test mixed comments
         let script = r#"
 // Single line comment
-console.log('Line 1 /* not a comment */' /* this is a comment */);
+'Line 1 /* not a comment */' /* this is a comment */;
 
 /* Multi-line
    comment */
-console.log('Line 2'); // just a space
+'Line 2'; // just a space
 
 // Inline comment
-console.log('Line 3 // not a comment in line 3'); // Another comment
+'Line 3 // not a comment in line 3'; // Another comment
 "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         assert!(result.is_ok());

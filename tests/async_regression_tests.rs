@@ -18,8 +18,9 @@ fn test_async_n_throw_async_tests_regression() {
 
             // Execute the script, await its exposed top-level completion promise,
             // then extract the exposed summary as the final async result.
+            let console_binding = "({ log() {} })";
             let wrapped = format!(
-                "(async function() {{\n{}\nawait globalThis.__async_regression_done;\nreturn JSON.stringify(globalThis.__async_regression_summary);\n}})()",
+                "(async function(console) {{\n{}\nawait globalThis.__async_regression_done;\nreturn JSON.stringify(globalThis.__async_regression_summary);\n}})({console_binding})",
                 script
             );
 

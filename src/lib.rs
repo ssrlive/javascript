@@ -18,7 +18,7 @@ pub use error::{JSError, JSErrorKind};
 // pub use js_promise::set_short_timer_threshold_ms;
 // pub use js_promise::set_wait_for_active_handles;
 pub use repl::Repl;
-pub use runtime::{
-    ConsoleLevel, ConsoleMessage, HostHooks, JsObjectHandle, JsPromiseResolver, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource,
-};
+#[cfg(feature = "console")]
+pub use runtime::{ConsoleLevel, ConsoleMessage};
+pub use runtime::{HostHooks, JsObjectHandle, JsPromiseResolver, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};
 pub use unicode::{utf8_to_utf16, utf16_to_utf8};

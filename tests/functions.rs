@@ -576,6 +576,7 @@ mod function_tests {
     }
 
     #[test]
+    #[cfg(feature = "console")]
     fn test_function_with_console_log() {
         let script = "function greet(name) { console.log('Hello', name); return 'done'; } greet('World')";
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();
@@ -662,8 +663,6 @@ mod function_tests {
                 return n < 2 ? 1 : n * fac(n - 1);
             };
 
-            console.log(factorial(3));
-
             factorial(8)
         "#;
         // Run evaluation on a dedicated thread with increased stack to avoid stack overflow
@@ -701,7 +700,6 @@ mod function_tests {
 
             const numbers = [0, 1, 2, 5, 10];
             var result = map(cube, numbers);
-            console.log(result); // [0, 1, 8, 125, 1000]
             assert(
                 JSON.stringify(result) === JSON.stringify([0, 1, 8, 125, 1000]),
                 "Higher-order function map is not working correctly"
@@ -778,7 +776,6 @@ mod function_tests {
                 return;
               }
               // do something with node
-              console.log(node.nodeName);
               for (let i = 0; i < node.childNodes.length; i++) {
                 walkTree(node.childNodes[i]);
               }

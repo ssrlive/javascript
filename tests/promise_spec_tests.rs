@@ -185,7 +185,7 @@ fn spec_async_finally_override_matches_cli_script_pattern() {
 
         function $DONE(err) {
             if (err) {
-                console.error("Test failed:", err);
+                globalThis.doneError = err;
             }
         }
 

@@ -51,7 +51,7 @@ fn private_field_access_within_class_succeeds() {
         #values;
         constructor(r,g,b) { this.#values = [r,g,b]; }
         log() {
-            console.log(this.#values);
+            return this.#values;
         }
     }
     let tmp = new Color(1,2,3);

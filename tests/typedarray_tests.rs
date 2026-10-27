@@ -160,6 +160,34 @@ fn test_js_arraybuffer_dataview_integration_via_script() {
 }
 
 #[test]
+fn test_dataview_accessors_return_zero_when_detached_or_out_of_bounds() {
+    let script = r#"
+        const detachedBuffer = new ArrayBuffer(8);
+        const detachedView = new DataView(detachedBuffer, 2, 4);
+        __detachArrayBuffer__(detachedBuffer);
+
+        const fixedBuffer = new ArrayBuffer(8, { maxByteLength: 16 });
+        const fixedView = new DataView(fixedBuffer, 2, 4);
+        fixedBuffer.resize(5);
+
+        const trackingBuffer = new ArrayBuffer(8, { maxByteLength: 16 });
+        const trackingView = new DataView(trackingBuffer, 6);
+        trackingBuffer.resize(5);
+
+        JSON.stringify([
+            detachedView.byteLength,
+            detachedView.byteOffset,
+            fixedView.byteLength,
+            fixedView.byteOffset,
+            trackingView.byteLength,
+            trackingView.byteOffset
+        ]);
+    "#;
+    let result = evaluate_script(script, false, None::<&std::path::Path>, DEFAULT_GC_OPCODE_BUDGET).unwrap();
+    assert_eq!(result, "\"[0,0,0,0,0,0]\"");
+}
+
+#[test]
 fn test_js_typedarray_different_construction_patterns_via_script() {
     // Test different ways to construct TypedArrays
     let script = r#"

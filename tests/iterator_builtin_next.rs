@@ -19,7 +19,6 @@ fn builtin_next_function_iterator() {
         }
         let out = [];
         for (let v of makeIterable(3)) { out.push(v); }
-        console.log(out);
         JSON.stringify(out)
     "#;
 

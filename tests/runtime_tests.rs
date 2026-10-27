@@ -1,6 +1,8 @@
-use javascript::{
-    ConsoleLevel, ConsoleMessage, HostHooks, JSError, JSErrorKind, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource,
-};
+#[cfg(feature = "console")]
+use javascript::HostHooks;
+#[cfg(feature = "console")]
+use javascript::{ConsoleLevel, ConsoleMessage};
+use javascript::{JSError, JSErrorKind, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -138,8 +140,14 @@ fn runtime_runs_host_controlled_slices_and_timers() {
 }
 
 #[test]
+#[cfg(feature = "console")]
 fn runtime_redirects_console_output_to_host_hook() {
     let mut rt = JsRuntime::new();
+    assert_eq!(rt.eval("typeof console").unwrap(), JsValue::String("object".to_string()));
+    assert_eq!(
+        rt.eval("console.log.name + ':' + console.warn.length").unwrap(),
+        JsValue::String("log:0".to_string())
+    );
     let messages = Rc::new(std::cell::RefCell::new(Vec::<ConsoleMessage>::new()));
     let messages_ref = Rc::clone(&messages);
     let mut hooks = HostHooks::default();
@@ -166,6 +174,13 @@ fn runtime_redirects_console_output_to_host_hook() {
             }
         ]
     );
+}
+
+#[test]
+#[cfg(not(feature = "console"))]
+fn runtime_does_not_install_console_without_feature() {
+    let mut rt = JsRuntime::new();
+    assert_eq!(rt.eval("typeof console").unwrap(), JsValue::String("undefined".to_string()));
 }
 
 #[test]

@@ -13,9 +13,10 @@ keywords = ["javascript", "js", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
 [features]
-default = ["os", "std"]
+default = ["os", "std", "console"]
 os = ["libc", "windows-sys"]
 std = []
+console = []
 
 [dependencies]
 base64easy = "0.1.7"

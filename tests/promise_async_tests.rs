@@ -77,9 +77,9 @@ fn test_promise_allsettled() {
     // Test Promise.allSettled with mixed resolve/reject
     let script = r#"
         Promise.allSettled([
-            new Promise(function(resolve, reject) { resolve(1); console.log("executor 1 called"); }),
-            new Promise(function(resolve, reject) { reject(2); console.log("executor 2 called"); }),
-            new Promise(function(resolve, reject) { resolve(3); console.log("executor 3 called"); })
+            new Promise(function(resolve, reject) { resolve(1); }),
+            new Promise(function(resolve, reject) { reject(2); }),
+            new Promise(function(resolve, reject) { resolve(3); })
         ])
     "#;
     std::thread::Builder::new()

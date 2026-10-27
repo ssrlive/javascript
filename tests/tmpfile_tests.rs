@@ -1,3 +1,4 @@
+#[cfg(feature = "std")]
 use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.

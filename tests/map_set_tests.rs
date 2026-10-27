@@ -56,7 +56,6 @@ fn test_map_delete() {
         map.set("key", "value");
         let deleted = map.delete("key");
         let has = map.has("key");
-        console.log(JSON.stringify([deleted, has]));
         [deleted, has]
     "#;
     let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).unwrap();

@@ -10,6 +10,7 @@ use crate::core::property_descriptor::{
 use crate::core::value::{ArrayData, MapData, SetData, SymbolData, value_to_string};
 use crate::core::{Collect, Expr, GcTrace, JSError, Value, new_gc_cell_ptr};
 use crate::core::{Gc, GcCell, GcContext, GcWeak};
+
 use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -746,8 +747,8 @@ pub struct VM<'gc> {
     this_stack: Vec<Value<'gc>>,       // this binding stack
     new_target_stack: Vec<Value<'gc>>, // new.target binding stack
     super_called_stack: Vec<bool>,     // tracks whether super() was called in derived ctors
-    output: Vec<crate::runtime::ConsoleMessage>,
-    console_stdout: bool,
+    #[cfg(feature = "console")]
+    pub(crate) console: crate::runtime::console::ConsoleState,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
     // Maps Function IPs from child realms to their realm_id so get_fn_props
@@ -1164,8 +1165,8 @@ impl<'gc> VM<'gc> {
             this_stack: vec![Value::Object(global_this)],
             new_target_stack: Vec::new(),
             super_called_stack: Vec::new(),
-            output: Vec::new(),
-            console_stdout: true,
+            #[cfg(feature = "console")]
+            console: crate::runtime::console::ConsoleState::default(),
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
             native_fn_props: HashMap::new(),
@@ -3717,12 +3718,9 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
-    pub(crate) fn set_console_stdout(&mut self, enabled: bool) {
-        self.console_stdout = enabled;
-    }
-
-    pub(crate) fn take_console_output(&mut self) -> Vec<crate::runtime::ConsoleMessage> {
-        std::mem::take(&mut self.output)
+    #[cfg(feature = "console")]
+    pub(crate) fn register_host_global(&mut self, name: &str, value: Value<'gc>) {
+        self.globals.insert(name.to_string(), value);
     }
 
     pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedJsCallback) {
@@ -4337,7 +4335,13 @@ impl<'gc> VM<'gc> {
         Self::make_host_fn_with_name_len(ctx, name, display_name, 0.0, false)
     }
 
-    fn make_host_fn_with_name_len(ctx: &GcContext<'gc>, name: &str, display_name: &str, length: f64, constructible: bool) -> Value<'gc> {
+    pub(crate) fn make_host_fn_with_name_len(
+        ctx: &GcContext<'gc>,
+        name: &str,
+        display_name: &str,
+        length: f64,
+        constructible: bool,
+    ) -> Value<'gc> {
         let mut map = IndexMap::new();
         map.insert("__host_fn__".to_string(), Value::from(name));
         Self::insert_property_with_attributes(&mut map, "length", &Value::Number(length), false, false, true);
@@ -5661,6 +5665,10 @@ impl<'gc> VM<'gc> {
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         if let Some(callback_name) = name.strip_prefix("host_callback.") {
             return self.invoke_registered_host_callback(ctx, callback_name, args);
+        }
+        #[cfg(feature = "console")]
+        if let Some(value) = crate::runtime::console::call_named(self, ctx, name, args) {
+            return value;
         }
         if name.starts_with("temporal.") {
             return self.temporal_handle_host_fn(ctx, name, receiver, args);
@@ -14236,6 +14244,11 @@ impl<'gc> VM<'gc> {
     }
 
     fn call_named_host_function(&mut self, ctx: &GcContext<'gc>, name: &str, args: &[Value<'gc>]) -> Value<'gc> {
+        #[cfg(feature = "console")]
+        if let Some(value) = crate::runtime::console::call_named(self, ctx, name, args) {
+            return value;
+        }
+
         match name {
             "Function.prototype.restrictedThrow" => {
                 self.throw_type_error(
@@ -14282,9 +14295,6 @@ impl<'gc> VM<'gc> {
                 buf_borrow.insert("__detached__".to_string(), Value::Boolean(true));
                 Value::Undefined
             }
-            "console.log" => self.call_builtin(ctx, BUILTIN_CONSOLE_LOG, args),
-            "console.warn" => self.call_builtin(ctx, BUILTIN_CONSOLE_WARN, args),
-            "console.error" => self.call_builtin(ctx, BUILTIN_CONSOLE_ERROR, args),
             "AbstractModuleSource.prototype.@@toStringTag" => Value::Undefined,
             "os.getcwd" => {
                 let cwd = std::env::current_dir()
@@ -17674,21 +17684,8 @@ impl<'gc> VM<'gc> {
         None
     }
 
-    /// Register built-in global objects (console, Math, isNaN, parseInt, etc.)
+    /// Register ECMAScript built-in global objects (Math, isNaN, parseInt, etc.)
     fn register_builtins(&mut self, ctx: &GcContext<'gc>) {
-        // console object
-        let mut console_map = IndexMap::new();
-        Self::insert_native_properties(
-            &mut console_map,
-            &[
-                ("log", BUILTIN_CONSOLE_LOG),
-                ("warn", BUILTIN_CONSOLE_WARN),
-                ("error", BUILTIN_CONSOLE_ERROR),
-            ],
-        );
-        self.globals
-            .insert("console".to_string(), Value::Object(new_gc_cell_ptr(ctx, console_map)));
-
         // Math object
         let mut math_map = IndexMap::new();
         Self::insert_native_properties(
@@ -20326,7 +20323,7 @@ impl<'gc> VM<'gc> {
     }
 
     /// Convert a value to string, calling toString() on VmObjects if available
-    fn is_error_type_name(name: &str) -> bool {
+    pub(crate) fn is_error_type_name(name: &str) -> bool {
         matches!(
             name,
             "Error"
@@ -20341,7 +20338,7 @@ impl<'gc> VM<'gc> {
         )
     }
 
-    fn format_error_name_message(name: &str, message: &str) -> String {
+    pub(crate) fn format_error_name_message(name: &str, message: &str) -> String {
         if name.is_empty() {
             message.to_string()
         } else if message.is_empty() {
@@ -20349,17 +20346,6 @@ impl<'gc> VM<'gc> {
         } else {
             format!("{}: {}", name, message)
         }
-    }
-
-    fn format_vm_error_object(borrow: &IndexMap<String, Value<'gc>>) -> Option<String> {
-        if let Some(Value::String(t)) = borrow.get("__type__") {
-            let name = crate::unicode::utf16_to_utf8(t);
-            if Self::is_error_type_name(&name) {
-                let message = borrow.get("message").map(value_to_string).unwrap_or_default();
-                return Some(Self::format_error_name_message(&name, &message));
-            }
-        }
-        None
     }
 
     fn error_type_name_from_builtin(id: FunctionID) -> Option<&'static str> {
@@ -22123,46 +22109,6 @@ impl<'gc> VM<'gc> {
             }
             _ => Value::Undefined,
         }
-    }
-
-    /// Display a value for console.log (uses inspect-style format for arrays/objects)
-    fn vm_display_string(&mut self, ctx: &GcContext<'gc>, val: &Value<'gc>) -> String {
-        if let Some(symbol_string) = self.symbol_display_string(val) {
-            return symbol_string;
-        }
-        if let Value::Object(map) = val {
-            let borrow = map.borrow();
-            if let Some(formatted) = Self::format_vm_error_object(&borrow) {
-                return formatted;
-            }
-            // RegExp display: /pattern/flags
-            if borrow.get("__type__").map(value_to_string) == Some("RegExp".to_string()) {
-                let pattern_u16 = match borrow.get("__regex_pattern__") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(v) => crate::unicode::utf8_to_utf16(&value_to_string(v)),
-                    None => Vec::new(),
-                };
-                let flags = borrow.get("__regex_flags__").map(value_to_string).unwrap_or_default();
-                return format!("/{}/{}", crate::unicode::utf16_to_utf8(&pattern_u16), flags);
-            }
-            drop(borrow);
-            let ts = map.borrow().get("toString").cloned();
-            if let Some(ts_val) = ts {
-                match ts_val {
-                    Value::Function(ip, _arity) | Value::Closure(ip, _arity, _) => {
-                        let result = self.call_vm_function_result(ctx, ip, &[], None, &[]).unwrap_or(Value::Undefined);
-                        return value_to_string(&result);
-                    }
-                    Value::NativeFunction(_) => return value_to_string(val),
-                    _ => {}
-                }
-            }
-            let inner = map.borrow().get("__value__").cloned();
-            if let Some(v) = inner {
-                return value_to_string(&v);
-            }
-        }
-        value_to_string(val)
     }
 
     fn current_script_file(&self) -> &str {
@@ -25667,20 +25613,6 @@ impl<'gc> VM<'gc> {
             | BUILTIN_CTOR_BIGINT64ARRAY
             | BUILTIN_CTOR_BIGUINT64ARRAY => self.typedarray_call_builtin(ctx, id, args),
             BUILTIN_DATE_NOW | BUILTIN_DATE_PARSE => self.date_call_builtin(ctx, id, args),
-            BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
-                let parts: Vec<String> = args.iter().map(|v| self.vm_display_string(ctx, v)).collect();
-                let msg = parts.join(" ");
-                let level = match id {
-                    BUILTIN_CONSOLE_WARN => crate::runtime::ConsoleLevel::Warn,
-                    BUILTIN_CONSOLE_ERROR => crate::runtime::ConsoleLevel::Error,
-                    _ => crate::runtime::ConsoleLevel::Log,
-                };
-                self.output.push(crate::runtime::ConsoleMessage { level, text: msg.clone() });
-                if self.console_stdout {
-                    println!("{msg}");
-                }
-                Value::Undefined
-            }
             BUILTIN_MATH_FLOOR
             | BUILTIN_MATH_CEIL
             | BUILTIN_MATH_ROUND
@@ -31202,10 +31134,6 @@ impl<'gc> VM<'gc> {
             BUILTIN_GEN_RETURN => {
                 let ret_val = args.iter().next().unwrap_or(&Value::Undefined);
                 return self.resume_generator(ctx, receiver, ret_val, 2);
-            }
-            // Also handle global builtins called as methods (e.g. console.log)
-            BUILTIN_CONSOLE_LOG | BUILTIN_CONSOLE_WARN | BUILTIN_CONSOLE_ERROR => {
-                return self.call_builtin(ctx, id, args);
             }
             BUILTIN_ARRAY_OF | BUILTIN_ARRAY_FROM | BUILTIN_ARRAY_FROMASYNC => {
                 self.this_stack.push(receiver.clone());
@@ -40325,7 +40253,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn call_vm_function_result(
+    pub(crate) fn call_vm_function_result(
         &mut self,
         ctx: &GcContext<'gc>,
         ip: usize,
@@ -43436,7 +43364,7 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn symbol_display_string(&self, val: &Value<'gc>) -> Option<String> {
+    pub(crate) fn symbol_display_string(&self, val: &Value<'gc>) -> Option<String> {
         self.symbol_description(val)
             .map(|desc| format!("Symbol({})", crate::unicode::utf16_to_utf8(&desc)))
             .or_else(|| val.is_symbol_value().then(|| "Symbol()".to_string()))

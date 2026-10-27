@@ -337,8 +337,6 @@ fn stage1_integration_all_features() {
         });
         let proxyValue = proxy.value;
 
-        console.log(mapSize, setSum, genType, canCallNext, proxyValue);
-
         // Combine results
         mapSize === 2 && setSum === 6 && genType === 'object' && canCallNext && proxyValue === 84
     "#;

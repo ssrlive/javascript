@@ -151,7 +151,7 @@ mod promise_tests {
         let code = r#"
             var finalResult = "not set";
             new Promise(function(resolve, reject) { resolve(42); })
-                .finally(function() { console.log('finally executed'); })
+                .finally(function() {})
                 .then(function(v) { finalResult = v; });
             finalResult
         "#;
@@ -170,15 +170,12 @@ mod promise_tests {
     fn test_promise_allsettled_mixed() {
         let code = r#"
             let p1 = new Promise(function(resolve, reject) {
-                console.log("Resolving p1");
                 resolve(1);
             });
             let p2 = new Promise(function(resolve, reject) {
-                console.log("Rejecting p2");
                 reject("error");
             });
             let p3 = new Promise(function(resolve, reject) {
-                console.log("Resolving p3");
                 resolve(3);
             });
             Promise.allSettled([p1, p2, p3])
@@ -642,6 +639,7 @@ mod promise_tests {
     }
 
     #[test]
+    #[cfg(feature = "console")]
     fn then_calls_native_callback_and_prints() {
         let script = r#"
         let printed = "";

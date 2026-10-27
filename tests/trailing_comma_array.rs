@@ -13,7 +13,6 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
             var arr = ["a", "b", "c",];
             for (var i = 0; i < arr.length; i++) {
                 if (arr[i] === undefined) { throw new Error('Bad'); }
-                console.log(arr[i]);
             }
             return arr.length;
         }
@@ -28,7 +27,6 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
             var arr = ["a", "b", "c",];
             for (var i = 0; i < arr.length; i++) {
                 if (arr[i] === undefined) throw new Error('Bad');
-                console.log(arr[i]);
             }
             return arr.length;
         }

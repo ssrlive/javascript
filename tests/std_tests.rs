@@ -1,3 +1,4 @@
+#[cfg(feature = "std")]
 use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -7,7 +8,7 @@ fn __init_test_logger() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod std_tests {
     use super::*;
 

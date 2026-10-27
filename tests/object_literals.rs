@@ -47,6 +47,7 @@ mod object_literal_tests {
     }
 
     #[test]
+    #[cfg(feature = "console")]
     fn test_console_log_with_object() {
         // This test verifies that console.log works with objects
         // We can't easily capture stdout in tests, so we just ensure it doesn't crash
@@ -240,7 +241,6 @@ mod object_literal_tests {
                 __proto__: theProtoObj,
                 handler,
             };
-            console.log(obj);
         "#;
         let result = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
         match result {

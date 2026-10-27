@@ -172,7 +172,7 @@ fn main() {
 }
 ```
 
-Hosts can provide in-memory module sources, own timer scheduling, redirect console output, and settle promises from external work:
+`console` is not an ECMAScript intrinsic. The default Cargo feature set enables `console`, so `JsRuntime` supplies it as a host global (writing to stdout); disable it with `--no-default-features` or enable it explicitly with `--features console`. Hosts can redirect its output, provide in-memory module sources, own timer scheduling, and settle promises from external work:
 
 ```rust
 use javascript::{HostHooks, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};
@@ -214,6 +214,7 @@ fn run_hosted() -> Result<(), javascript::JSError> {
     runtime.set_module_loader(Modules);
 
     let mut hooks = HostHooks::default();
+    #[cfg(feature = "console")]
     hooks.set_console_handler(|message| eprintln!("{:?}: {}", message.level, message.text));
     runtime.set_host_hooks(hooks);
 

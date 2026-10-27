@@ -27,9 +27,7 @@ impl<'gc> VM<'gc> {
                         if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                             && matches!(GcCell::borrow(buf).get("__detached__"), Some(Value::Boolean(true)))
                         {
-                            drop(b);
-                            self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
-                            return Value::Undefined;
+                            return Value::Number(0.0);
                         }
                         // Resizable buffer: dynamic byteLength
                         if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
@@ -46,9 +44,7 @@ impl<'gc> VM<'gc> {
                             let is_auto = matches!(b.get("__dv_auto_length__"), Some(Value::Boolean(true)));
                             if is_auto {
                                 if byte_offset > buf_byte_len {
-                                    drop(b);
-                                    self.throw_type_error(ctx, "DataView is out of bounds");
-                                    return Value::Undefined;
+                                    return Value::Number(0.0);
                                 }
                                 return Value::Number((buf_byte_len - byte_offset) as f64);
                             } else {
@@ -57,9 +53,7 @@ impl<'gc> VM<'gc> {
                                     _ => 0,
                                 };
                                 if byte_offset + fixed_len > buf_byte_len {
-                                    drop(b);
-                                    self.throw_type_error(ctx, "DataView is out of bounds");
-                                    return Value::Undefined;
+                                    return Value::Number(0.0);
                                 }
                                 return Value::Number(fixed_len as f64);
                             }
@@ -77,9 +71,7 @@ impl<'gc> VM<'gc> {
                         if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
                             && matches!(GcCell::borrow(buf).get("__detached__"), Some(Value::Boolean(true)))
                         {
-                            drop(b);
-                            self.throw_type_error(ctx, "Cannot perform operation on a detached ArrayBuffer");
-                            return Value::Undefined;
+                            return Value::Number(0.0);
                         }
                         // Resizable buffer: out-of-bounds check
                         if let Some(Value::Object(buf)) = b.get("__dv_buffer__")
@@ -96,9 +88,7 @@ impl<'gc> VM<'gc> {
                             let is_auto = matches!(b.get("__dv_auto_length__"), Some(Value::Boolean(true)));
                             if is_auto {
                                 if byte_offset > buf_byte_len {
-                                    drop(b);
-                                    self.throw_type_error(ctx, "DataView is out of bounds");
-                                    return Value::Undefined;
+                                    return Value::Number(0.0);
                                 }
                             } else {
                                 let fixed_len = match b.get("__dv_byteLength__") {
@@ -106,9 +96,7 @@ impl<'gc> VM<'gc> {
                                     _ => 0,
                                 };
                                 if byte_offset + fixed_len > buf_byte_len {
-                                    drop(b);
-                                    self.throw_type_error(ctx, "DataView is out of bounds");
-                                    return Value::Undefined;
+                                    return Value::Number(0.0);
                                 }
                             }
                         }

@@ -11,10 +11,6 @@ pub fn get_function_id<'gc>(obj: ObjectHandle<'gc>) -> Option<FunctionID> {
 }
 
 // Builtin function IDs
-// ── Console (0–9) ───────────────────────────────────────────────────
-pub(crate) const BUILTIN_CONSOLE_LOG: FunctionID = 0;
-pub(crate) const BUILTIN_CONSOLE_WARN: FunctionID = 1;
-pub(crate) const BUILTIN_CONSOLE_ERROR: FunctionID = 2;
 // ── Math (10–49) ────────────────────────────────────────────────────
 pub(crate) const BUILTIN_MATH_FLOOR: FunctionID = 10;
 pub(crate) const BUILTIN_MATH_CEIL: FunctionID = 11;

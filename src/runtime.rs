@@ -1,5 +1,9 @@
+#[cfg(feature = "console")]
+pub(crate) mod console;
 use crate::core::{Chunk, DEFAULT_GC_OPCODE_BUDGET, JsArenaVm, VM};
 use crate::error::JSError;
+#[cfg(feature = "console")]
+pub use console::{ConsoleLevel, ConsoleMessage};
 use indexmap::IndexMap;
 use num_bigint::BigInt;
 use std::cell::RefCell;
@@ -65,26 +69,15 @@ pub enum JsRunStatus {
     Complete(JsValue),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsoleLevel {
-    Log,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConsoleMessage {
-    pub level: ConsoleLevel,
-    pub text: String,
-}
-
 /// Optional host integrations for runtime operations.
 #[derive(Default)]
 pub struct HostHooks {
+    #[cfg(feature = "console")]
     console: Option<Box<dyn FnMut(ConsoleMessage) + 'static>>,
 }
 
 impl HostHooks {
+    #[cfg(feature = "console")]
     pub fn set_console_handler<F>(&mut self, handler: F)
     where
         F: FnMut(ConsoleMessage) + 'static,
@@ -293,7 +286,13 @@ impl JsRuntime {
         } else {
             crate::js_agent::new_context_id()
         };
-        let arena = JsArenaVm::new(|ctx| VM::new(Chunk::new(), ctx));
+        let arena = JsArenaVm::new(|ctx| {
+            #[allow(unused_mut)]
+            let mut vm = VM::new(Chunk::new(), ctx);
+            #[cfg(feature = "console")]
+            console::install(&mut vm, ctx);
+            vm
+        });
         Self {
             arena,
             gc_opcode_budget: DEFAULT_GC_OPCODE_BUDGET,
@@ -357,26 +356,33 @@ impl JsRuntime {
 
     /// Replace the host callbacks used by this runtime.
     pub fn set_host_hooks(&mut self, hooks: HostHooks) {
-        let redirect_console = hooks.console.is_some();
-        self.mutate_root(|_ctx, vm| vm.set_console_stdout(!redirect_console));
+        #[cfg(feature = "console")]
+        {
+            let redirect_console = hooks.console.is_some();
+            self.mutate_root(|_ctx, vm| vm.console.set_stdout(!redirect_console));
+        }
         self.host_hooks = hooks;
     }
 
     /// Take console messages that have not been delivered to a configured host hook.
+    #[cfg(feature = "console")]
     pub fn take_console_output(&mut self) -> Vec<ConsoleMessage> {
-        self.mutate_root(|_ctx, vm| vm.take_console_output())
+        self.mutate_root(|_ctx, vm| vm.console.take_output())
     }
 
     fn dispatch_console_output(&mut self) {
-        if self.host_hooks.console.is_none() {
-            return;
-        }
-        let messages = self.mutate_root(|_ctx, vm| vm.take_console_output());
-        let Some(handler) = self.host_hooks.console.as_mut() else {
-            return;
-        };
-        for message in messages {
-            handler(message);
+        #[cfg(feature = "console")]
+        {
+            if self.host_hooks.console.is_none() {
+                return;
+            }
+            let messages = self.mutate_root(|_ctx, vm| vm.console.take_output());
+            let Some(handler) = self.host_hooks.console.as_mut() else {
+                return;
+            };
+            for message in messages {
+                handler(message);
+            }
         }
     }
 

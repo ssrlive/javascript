@@ -67,7 +67,6 @@ fn string_iterator_simple() {
 fn string_iterator_unicode() {
     let script = r#"
         let s = "a𠮷b";
-        console.log(s);
         let out = [];
         out.push(s.length);
         out.push(s.charCodeAt(0)); out.push(s.charCodeAt(1)); out.push(s.charCodeAt(2)); out.push(s.charCodeAt(3));

@@ -1,5 +1,13 @@
 #[cfg(feature = "console")]
 pub(crate) mod console;
+#[cfg(feature = "fs")]
+pub(crate) mod fs;
+#[cfg(any(feature = "process", feature = "os", feature = "fs"))]
+mod node_common;
+#[cfg(feature = "os")]
+pub(crate) mod os;
+#[cfg(feature = "process")]
+pub(crate) mod process;
 use crate::core::{Chunk, DEFAULT_GC_OPCODE_BUDGET, JsArenaVm, VM};
 use crate::error::JSError;
 #[cfg(feature = "console")]
@@ -8,6 +16,26 @@ use indexmap::IndexMap;
 use num_bigint::BigInt;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+pub(crate) fn builtin_module_global(_specifier: &str) -> Option<&'static str> {
+    #[cfg(feature = "process")]
+    if let Some(global) = process::builtin_global(_specifier) {
+        return Some(global);
+    }
+    #[cfg(feature = "os")]
+    if let Some(global) = os::builtin_global(_specifier) {
+        return Some(global);
+    }
+    #[cfg(feature = "fs")]
+    if let Some(global) = fs::builtin_global(_specifier) {
+        return Some(global);
+    }
+    None
+}
+
+pub(crate) fn is_builtin_host_module(specifier: &str) -> bool {
+    builtin_module_global(specifier).is_some()
+}
 
 pub(crate) type BoxedJsCallback = Box<dyn FnMut(&[JsValue]) -> Result<JsValue, JSError>>;
 
@@ -291,6 +319,12 @@ impl JsRuntime {
             let mut vm = VM::new(Chunk::new(), ctx);
             #[cfg(feature = "console")]
             console::install(&mut vm, ctx);
+            #[cfg(feature = "process")]
+            process::install(&mut vm, ctx);
+            #[cfg(feature = "os")]
+            os::install(&mut vm, ctx);
+            #[cfg(feature = "fs")]
+            fs::install(&mut vm, ctx);
             vm
         });
         Self {
@@ -334,6 +368,29 @@ impl JsRuntime {
         }
         self.gc_opcode_budget = gc_opcode_budget;
         Ok(())
+    }
+
+    /// Returns the integer value currently assigned to `process.exitCode`.
+    #[cfg(feature = "process")]
+    pub fn process_exit_code(&mut self) -> Option<i32> {
+        self.mutate_root(|_, vm| {
+            let Some(crate::core::Value::Object(process)) = vm.host_global("process") else {
+                return None;
+            };
+            match process.borrow().get("exitCode") {
+                Some(crate::core::Value::Number(code)) => Some(*code as i32),
+                _ => None,
+            }
+        })
+    }
+
+    /// Returns whether JavaScript called `process.exit()` in this runtime.
+    ///
+    /// The request stops JavaScript execution but never terminates the embedding
+    /// process. Hosts can inspect the exit code and decide how to handle it.
+    #[cfg(feature = "process")]
+    pub fn process_exit_requested(&mut self) -> bool {
+        self.mutate_root(|_, vm| vm.host_stop_requested())
     }
 
     /// Explicitly run incremental garbage collection on the underlying arena.

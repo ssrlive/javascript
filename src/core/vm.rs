@@ -33,13 +33,12 @@ use typedarray::{coerce_bigint_for_ta, is_bigint_typed_array};
 use typedarray::{f16_bits_to_f64, f16round, f64_to_f16_bits};
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{LazyLock, Mutex};
 use unicode_normalization::UnicodeNormalization;
 
 type VmStrong<'gc, T> = Gc<'gc, GcCell<T>>;
 type VmWeak<'gc, T> = GcWeak<'gc, GcCell<T>>;
+pub(crate) type HostFunctionHandler =
+    for<'gc> fn(&mut VM<'gc>, &GcContext<'gc>, &str, Option<&Value<'gc>>, &[Value<'gc>]) -> Option<Value<'gc>>;
 
 pub type UpvalueCell<'gc> = VmStrong<'gc, Value<'gc>>;
 pub type UpvalueCellContainer<'gc> = Gc<'gc, Vec<UpvalueCell<'gc>>>;
@@ -51,17 +50,8 @@ pub type SetHandle<'gc> = VmStrong<'gc, SetData<'gc>>;
 pub type SymbolHandle<'gc> = VmStrong<'gc, SymbolData>;
 pub type SymbolWeakHandle<'gc> = VmWeak<'gc, SymbolData>;
 
-static VM_OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static VM_NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
 const OWN_DUNDER_PROTO_DATA_KEY: &str = "__own_data___proto__";
 const IMPORT_META_SENTINEL_KEY: &str = "__import_meta_sentinel__";
-
-fn vm_next_os_file_id() -> u64 {
-    let mut id = VM_NEXT_OS_FILE_ID.lock().unwrap();
-    let current = *id;
-    *id += 1;
-    current
-}
 
 #[derive(Debug, Clone)]
 pub struct CallFrame<'gc> {
@@ -440,6 +430,8 @@ struct PendingTimer<'gc> {
 /// A queued microtask (.then on an already-settled promise).
 struct Microtask<'gc> {
     callback: Option<Value<'gc>>,
+    callback_args: Option<Vec<Value<'gc>>>,
+    direct: bool,
     value: Value<'gc>,
     rejected: bool,
     resolve: Value<'gc>,
@@ -749,6 +741,8 @@ pub struct VM<'gc> {
     super_called_stack: Vec<bool>,     // tracks whether super() was called in derived ctors
     #[cfg(feature = "console")]
     pub(crate) console: crate::runtime::console::ConsoleState,
+    host_function_handlers: Vec<HostFunctionHandler>,
+    host_stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
     // Maps Function IPs from child realms to their realm_id so get_fn_props
@@ -1167,6 +1161,8 @@ impl<'gc> VM<'gc> {
             super_called_stack: Vec::new(),
             #[cfg(feature = "console")]
             console: crate::runtime::console::ConsoleState::default(),
+            host_function_handlers: Vec::new(),
+            host_stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
             native_fn_props: HashMap::new(),
@@ -3718,9 +3714,99 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
-    #[cfg(feature = "console")]
-    pub(crate) fn register_host_global(&mut self, name: &str, value: Value<'gc>) {
+    #[cfg(any(feature = "console", feature = "process", feature = "fs"))]
+    pub(crate) fn register_host_global(&mut self, ctx: &GcContext<'gc>, name: &str, value: Value<'gc>) {
+        self.globals.insert(name.to_string(), value.clone());
+        self.global_this.borrow_mut(ctx).insert(name.to_string(), value);
+    }
+
+    #[cfg(any(feature = "os", feature = "fs"))]
+    pub(crate) fn register_host_module(&mut self, name: &str, value: Value<'gc>) {
         self.globals.insert(name.to_string(), value);
+    }
+
+    #[cfg(any(feature = "process", feature = "fs"))]
+    pub(crate) fn host_global(&self, name: &str) -> Option<Value<'gc>> {
+        self.globals.get(name).cloned()
+    }
+
+    #[cfg(any(feature = "console", feature = "process", feature = "os", feature = "fs"))]
+    pub(crate) fn register_host_function_handler(&mut self, handler: HostFunctionHandler) {
+        self.host_function_handlers.push(handler);
+    }
+
+    #[cfg(feature = "process")]
+    pub(crate) fn request_host_stop(&mut self) {
+        self.host_stop_requested = true;
+    }
+
+    #[cfg(feature = "process")]
+    pub(crate) fn host_stop_requested(&self) -> bool {
+        self.host_stop_requested
+    }
+
+    #[cfg(any(feature = "process", feature = "fs"))]
+    pub(crate) fn queue_host_callback(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        callback: Value<'gc>,
+        args: Vec<Value<'gc>>,
+        error_message: &str,
+    ) -> bool {
+        if !self.is_value_callable(&callback) {
+            self.throw_type_error(ctx, error_message);
+            return false;
+        }
+
+        self.microtask_queue.push(Microtask {
+            callback: Some(callback),
+            callback_args: Some(args),
+            direct: true,
+            value: Value::Undefined,
+            rejected: false,
+            resolve: Value::Undefined,
+            reject: Value::Undefined,
+        });
+        true
+    }
+
+    #[cfg(feature = "fs")]
+    pub(crate) fn is_host_callable(&self, value: &Value<'gc>) -> bool {
+        self.is_value_callable(value)
+    }
+
+    #[cfg(feature = "fs")]
+    pub(crate) fn throw_host_type_error(&mut self, ctx: &GcContext<'gc>, message: &str) {
+        self.throw_type_error(ctx, message);
+    }
+
+    #[cfg(feature = "fs")]
+    pub(crate) fn throw_host_value(&mut self, value: Value<'gc>) {
+        self.pending_throw = Some(value);
+    }
+
+    #[cfg(feature = "fs")]
+    pub(crate) fn settle_host_promise(&mut self, ctx: &GcContext<'gc>, result: Result<Value<'gc>, Value<'gc>>) -> Value<'gc> {
+        let Some(constructor) = self.host_global("Promise") else {
+            self.throw_type_error(ctx, "Promise is unavailable");
+            return Value::Undefined;
+        };
+        let (promise, resolve, reject) = match self.new_promise_capability(ctx, &constructor) {
+            Ok(capability) => capability,
+            Err(error) => {
+                self.set_pending_throw_from_error(&error);
+                return Value::Undefined;
+            }
+        };
+        let (settler, value) = match result {
+            Ok(value) => (resolve, value),
+            Err(value) => (reject, value),
+        };
+        if let Err(error) = self.call_promise_capability_function(ctx, &settler, &value) {
+            self.set_pending_throw_from_error(&error);
+            return Value::Undefined;
+        }
+        promise
     }
 
     pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedJsCallback) {
@@ -5186,6 +5272,8 @@ impl<'gc> VM<'gc> {
                         let callback = if rejected { on_rejected } else { on_fulfilled };
                         self.microtask_queue.push(Microtask {
                             callback,
+                            callback_args: None,
+                            direct: false,
                             value: value.clone(),
                             rejected,
                             resolve,
@@ -5260,6 +5348,8 @@ impl<'gc> VM<'gc> {
                 );
                 self.microtask_queue.push(Microtask {
                     callback: Some(job),
+                    callback_args: None,
+                    direct: false,
                     value: Value::Undefined,
                     rejected: false,
                     resolve: Value::NativeFunction(BUILTIN_PROMISE_NOOP),
@@ -5662,9 +5752,23 @@ impl<'gc> VM<'gc> {
         promise
     }
 
+    fn dispatch_host_function_handler(
+        &mut self,
+        ctx: &GcContext<'gc>,
+        name: &str,
+        receiver: Option<&Value<'gc>>,
+        args: &[Value<'gc>],
+    ) -> Option<Value<'gc>> {
+        let handlers = self.host_function_handlers.clone();
+        handlers.into_iter().find_map(|handler| handler(self, ctx, name, receiver, args))
+    }
+
     fn call_host_fn(&mut self, ctx: &GcContext<'gc>, name: &str, receiver: Option<&Value<'gc>>, args: &[Value<'gc>]) -> Value<'gc> {
         if let Some(callback_name) = name.strip_prefix("host_callback.") {
             return self.invoke_registered_host_callback(ctx, callback_name, args);
+        }
+        if let Some(value) = self.dispatch_host_function_handler(ctx, name, receiver, args) {
+            return value;
         }
         #[cfg(feature = "console")]
         if let Some(value) = crate::runtime::console::call_named(self, ctx, name, args) {
@@ -10172,8 +10276,6 @@ impl<'gc> VM<'gc> {
                     }
                 }
             }
-            "os.getcwd" | "os.getpid" | "os.getppid" | "os.open" | "os.write" | "os.read" | "os.seek" | "os.close" | "os.path.basename"
-            | "os.path.dirname" | "os.path.join" | "os.path.extname" => self.call_named_host_function(ctx, name, args),
             _ if name.starts_with("date.") => self.date_handle_host_fn(ctx, name, receiver, args),
             "string.iterator" => {
                 let this_val = receiver.unwrap_or(&Value::Undefined);
@@ -14156,19 +14258,6 @@ impl<'gc> VM<'gc> {
                     Value::Undefined
                 }
             },
-            #[cfg(feature = "std")]
-            "std.sprintf" => match crate::js_std::sprintf::handle_sprintf_call(args) {
-                Ok(v) => v,
-                Err(_) => Value::Undefined,
-            },
-            #[cfg(feature = "std")]
-            "std.tmpfile" => crate::js_std::tmpfile::vm_create_tmpfile(ctx),
-            #[cfg(feature = "std")]
-            "std.gc" => Value::Undefined,
-            #[cfg(feature = "std")]
-            "tmp.puts" | "tmp.readAsString" | "tmp.seek" | "tmp.close" | "tmp.getline" => {
-                crate::js_std::tmpfile::vm_dispatch_file_method(name, receiver, args)
-            }
             _ if name.starts_with("typedarray.") => self.typedarray_handle_host_fn(ctx, name, receiver, args),
             _ if name.starts_with("disposableStack.") => self.disposable_stack_dispatch(ctx, name, receiver, args, false),
             _ if name.starts_with("asyncDisposableStack.") => self.disposable_stack_dispatch(ctx, name, receiver, args, true),
@@ -14183,6 +14272,10 @@ impl<'gc> VM<'gc> {
         receiver: Option<&Value<'gc>>,
         args: &[Value<'gc>],
     ) -> Value<'gc> {
+        if let Some(value) = self.dispatch_host_function_handler(ctx, name, receiver, args) {
+            return value;
+        }
+
         if name == "Function.prototype.restrictedThrow" {
             self.throw_type_error(
                 ctx,
@@ -14244,6 +14337,9 @@ impl<'gc> VM<'gc> {
     }
 
     fn call_named_host_function(&mut self, ctx: &GcContext<'gc>, name: &str, args: &[Value<'gc>]) -> Value<'gc> {
+        if let Some(value) = self.dispatch_host_function_handler(ctx, name, None, args) {
+            return value;
+        }
         #[cfg(feature = "console")]
         if let Some(value) = crate::runtime::console::call_named(self, ctx, name, args) {
             return value;
@@ -14296,132 +14392,6 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
             "AbstractModuleSource.prototype.@@toStringTag" => Value::Undefined,
-            "os.getcwd" => {
-                let cwd = std::env::current_dir()
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                Value::from(&cwd)
-            }
-            "os.getpid" => Value::Number(std::process::id() as f64),
-            "os.getppid" => Value::Number(std::process::id() as f64),
-            "os.open" => {
-                let filename = args.first().map(value_to_string).unwrap_or_default();
-                let flags = args.get(1).map(to_number).unwrap_or(0.0) as i32;
-
-                let mut options = std::fs::OpenOptions::new();
-                if flags & 2 != 0 {
-                    options.read(true).write(true);
-                } else if flags & 1 != 0 {
-                    options.write(true);
-                } else {
-                    options.read(true);
-                }
-                if flags & 64 != 0 {
-                    options.create(true);
-                }
-                if flags & 512 != 0 {
-                    options.truncate(true);
-                }
-
-                match options.open(&filename) {
-                    Ok(file) => {
-                        let fd = vm_next_os_file_id();
-                        VM_OS_FILE_STORE.lock().unwrap().insert(fd, file);
-                        Value::Number(fd as f64)
-                    }
-                    Err(_) => Value::Number(-1.0),
-                }
-            }
-            "os.close" => {
-                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
-                if VM_OS_FILE_STORE.lock().unwrap().remove(&fd).is_some() {
-                    Value::Number(0.0)
-                } else {
-                    Value::Number(-1.0)
-                }
-            }
-            "os.write" => {
-                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
-                let data = args.get(1).map(value_to_string).unwrap_or_default();
-                let mut store = VM_OS_FILE_STORE.lock().unwrap();
-                if let Some(file) = store.get_mut(&fd) {
-                    match file.write(data.as_bytes()) {
-                        Ok(n) => Value::Number(n as f64),
-                        Err(_) => Value::Number(-1.0),
-                    }
-                } else {
-                    Value::Number(-1.0)
-                }
-            }
-            "os.read" => {
-                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
-                let count = args.get(1).map(to_number).unwrap_or(0.0).max(0.0) as usize;
-                let mut store = VM_OS_FILE_STORE.lock().unwrap();
-                if let Some(file) = store.get_mut(&fd) {
-                    let mut buf = vec![0u8; count];
-                    match file.read(&mut buf) {
-                        Ok(n) => {
-                            buf.truncate(n);
-                            Value::from(&*String::from_utf8_lossy(&buf))
-                        }
-                        Err(_) => Value::from(""),
-                    }
-                } else {
-                    Value::from("")
-                }
-            }
-            "os.seek" => {
-                let fd = args.first().map(to_number).unwrap_or(-1.0) as u64;
-                let offset = args.get(1).map(to_number).unwrap_or(0.0) as i64;
-                let whence = args.get(2).map(to_number).unwrap_or(0.0) as i32;
-                let mut store = VM_OS_FILE_STORE.lock().unwrap();
-                if let Some(file) = store.get_mut(&fd) {
-                    let seek_from = match whence {
-                        0 => SeekFrom::Start(offset.max(0) as u64),
-                        1 => SeekFrom::Current(offset),
-                        2 => SeekFrom::End(offset),
-                        _ => SeekFrom::Start(offset.max(0) as u64),
-                    };
-                    match file.seek(seek_from) {
-                        Ok(pos) => Value::Number(pos as f64),
-                        Err(_) => Value::Number(-1.0),
-                    }
-                } else {
-                    Value::Number(-1.0)
-                }
-            }
-            "os.path.basename" => {
-                let p = args.first().map(value_to_string).unwrap_or_default();
-                let base = std::path::Path::new(&p)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                Value::from(&base)
-            }
-            "os.path.dirname" => {
-                let p = args.first().map(value_to_string).unwrap_or_default();
-                let dir = std::path::Path::new(&p)
-                    .parent()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                Value::from(&dir)
-            }
-            "os.path.join" => {
-                let mut pb = std::path::PathBuf::new();
-                for a in args {
-                    pb.push(value_to_string(a));
-                }
-                Value::from(&*pb.to_string_lossy())
-            }
-            "os.path.extname" => {
-                let p = args.first().map(value_to_string).unwrap_or_default();
-                let ext = std::path::Path::new(&p)
-                    .extension()
-                    .map(|s| format!(".{}", s.to_string_lossy()))
-                    .unwrap_or_default();
-                Value::from(&ext)
-            }
             _ => Value::Undefined,
         }
     }
@@ -19821,32 +19791,6 @@ impl<'gc> VM<'gc> {
                 }
             }
         }
-
-        // Minimal `os` namespace for VM module import interop
-        let mut os_path_map = IndexMap::new();
-        os_path_map.insert("basename".to_string(), Self::make_host_fn(ctx, "os.path.basename"));
-        os_path_map.insert("dirname".to_string(), Self::make_host_fn(ctx, "os.path.dirname"));
-        os_path_map.insert("join".to_string(), Self::make_host_fn(ctx, "os.path.join"));
-        os_path_map.insert("extname".to_string(), Self::make_host_fn(ctx, "os.path.extname"));
-
-        let mut os_map = IndexMap::new();
-        os_map.insert("getcwd".to_string(), Self::make_host_fn(ctx, "os.getcwd"));
-        os_map.insert("getpid".to_string(), Self::make_host_fn(ctx, "os.getpid"));
-        os_map.insert("getppid".to_string(), Self::make_host_fn(ctx, "os.getppid"));
-        os_map.insert("open".to_string(), Self::make_host_fn(ctx, "os.open"));
-        os_map.insert("write".to_string(), Self::make_host_fn(ctx, "os.write"));
-        os_map.insert("read".to_string(), Self::make_host_fn(ctx, "os.read"));
-        os_map.insert("seek".to_string(), Self::make_host_fn(ctx, "os.seek"));
-        os_map.insert("close".to_string(), Self::make_host_fn(ctx, "os.close"));
-        os_map.insert("path".to_string(), Value::Object(new_gc_cell_ptr(ctx, os_path_map)));
-        self.globals.insert("os".to_string(), Value::Object(new_gc_cell_ptr(ctx, os_map)));
-
-        // Minimal `std` namespace for VM module import interop
-        let mut std_map = IndexMap::new();
-        std_map.insert("sprintf".to_string(), Self::make_host_fn(ctx, "std.sprintf"));
-        std_map.insert("tmpfile".to_string(), Self::make_host_fn(ctx, "std.tmpfile"));
-        std_map.insert("gc".to_string(), Self::make_host_fn(ctx, "std.gc"));
-        self.globals.insert("std".to_string(), Value::Object(new_gc_cell_ptr(ctx, std_map)));
 
         // Function constructor with prototype (call, apply, bind)
         let mut fn_proto = IndexMap::new();
@@ -27025,6 +26969,12 @@ impl<'gc> VM<'gc> {
                                 .callback
                                 .as_ref()
                                 .map(|callback| self.adjust_value_ips(ctx, callback, code_offset, &eval_fn_ips)),
+                            callback_args: task.callback_args.as_ref().map(|args| {
+                                args.iter()
+                                    .map(|arg| self.adjust_value_ips(ctx, arg, code_offset, &eval_fn_ips))
+                                    .collect()
+                            }),
+                            direct: task.direct,
                             value: self.adjust_value_ips(ctx, &task.value, code_offset, &eval_fn_ips),
                             rejected: task.rejected,
                             resolve: self.adjust_value_ips(ctx, &task.resolve, code_offset, &eval_fn_ips),
@@ -31385,6 +31335,8 @@ impl<'gc> VM<'gc> {
             let callback = if is_rejected { args.get(1).cloned() } else { args.first().cloned() };
             let task = Microtask {
                 callback,
+                callback_args: None,
+                direct: false,
                 value: receiver_value,
                 rejected: is_rejected,
                 resolve,
@@ -46138,6 +46090,9 @@ impl<'gc> VM<'gc> {
     fn drain_microtasks(&mut self, ctx: &GcContext<'gc>) -> usize {
         let mut executed = 0;
         for _round in 0..1000 {
+            if self.host_stop_requested {
+                break;
+            }
             if self.microtask_queue.is_empty() {
                 break;
             }
@@ -46194,6 +46149,16 @@ impl<'gc> VM<'gc> {
 
     /// Execute a single .then microtask — mirrors the synchronous .then logic.
     fn run_then_microtask(&mut self, ctx: &GcContext<'gc>, task: Microtask<'gc>) {
+        if task.direct {
+            if let Some(callback) = task.callback
+                && let Err(error) =
+                    self.vm_call_function_value(ctx, &callback, &Value::Undefined, task.callback_args.as_deref().unwrap_or(&[]))
+            {
+                self.set_pending_throw_from_error(&error);
+            }
+            return;
+        }
+
         let mut propagated_rejected = task.rejected;
         let mut callback_result = task.value.clone();
 

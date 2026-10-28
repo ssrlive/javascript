@@ -5,8 +5,6 @@ pub(crate) mod core;
 #[macro_use]
 pub(crate) mod error;
 pub(crate) mod js_agent;
-#[cfg(feature = "std")]
-pub(crate) mod js_std;
 pub(crate) mod repl;
 pub mod runtime;
 pub(crate) mod unicode;

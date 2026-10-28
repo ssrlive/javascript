@@ -47,7 +47,18 @@ pub(crate) fn new_console_object<'gc>(ctx: &GcContext<'gc>) -> Value<'gc> {
 }
 
 pub(crate) fn install<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>) {
-    vm.register_host_global("console", new_console_object(ctx));
+    vm.register_host_global(ctx, "console", new_console_object(ctx));
+    vm.register_host_function_handler(dispatch);
+}
+
+fn dispatch<'gc>(
+    vm: &mut VM<'gc>,
+    ctx: &GcContext<'gc>,
+    name: &str,
+    _receiver: Option<&Value<'gc>>,
+    args: &[Value<'gc>],
+) -> Option<Value<'gc>> {
+    call_named(vm, ctx, name, args)
 }
 
 pub(crate) fn call_named<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>, name: &str, args: &[Value<'gc>]) -> Option<Value<'gc>> {

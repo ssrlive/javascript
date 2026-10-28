@@ -4618,6 +4618,32 @@ impl<'gc> Compiler<'gc> {
                             }
                         }
                     }
+
+                    let node_builtin_global = crate::runtime::builtin_module_global(source);
+                    if let Some(global) = node_builtin_global {
+                        match spec {
+                            ImportSpecifier::Namespace(local)
+                            | ImportSpecifier::DeferredNamespace(local)
+                            | ImportSpecifier::Default(local) => {
+                                let idx = self.chunk.add_constant(Value::from(global));
+                                self.chunk.write_opcode(Opcode::GetGlobal);
+                                self.chunk.write_u16(idx);
+                                define_binding(self, local);
+                            }
+                            ImportSpecifier::Named(name, alias) => {
+                                let global_idx = self.chunk.add_constant(Value::from(global));
+                                self.chunk.write_opcode(Opcode::GetGlobal);
+                                self.chunk.write_u16(global_idx);
+                                let key_idx = self.chunk.add_constant(Value::from(name));
+                                self.chunk.write_opcode(Opcode::GetProperty);
+                                self.chunk.write_u16(key_idx);
+                                define_binding(self, alias.as_deref().unwrap_or(name));
+                            }
+                            ImportSpecifier::Source(_) => {}
+                        }
+                        continue;
+                    }
+
                     match (source.as_str(), spec) {
                         ("math", ImportSpecifier::Named(name, alias)) => {
                             let local = alias.as_deref().unwrap_or(name);
@@ -4652,30 +4678,6 @@ impl<'gc> Compiler<'gc> {
                             let key_idx = self.chunk.add_constant(Value::from(name));
                             self.chunk.write_opcode(Opcode::GetProperty);
                             self.chunk.write_u16(key_idx);
-                            define_binding(self, local);
-                        }
-                        ("os", ImportSpecifier::Namespace(local)) => {
-                            let os_name = self.chunk.add_constant(Value::from("os"));
-                            self.chunk.write_opcode(Opcode::GetGlobal);
-                            self.chunk.write_u16(os_name);
-                            define_binding(self, local);
-                        }
-                        ("os", ImportSpecifier::DeferredNamespace(local)) => {
-                            let os_name = self.chunk.add_constant(Value::from("os"));
-                            self.chunk.write_opcode(Opcode::GetGlobal);
-                            self.chunk.write_u16(os_name);
-                            define_binding(self, local);
-                        }
-                        ("std", ImportSpecifier::Namespace(local)) => {
-                            let std_name = self.chunk.add_constant(Value::from("std"));
-                            self.chunk.write_opcode(Opcode::GetGlobal);
-                            self.chunk.write_u16(std_name);
-                            define_binding(self, local);
-                        }
-                        ("std", ImportSpecifier::DeferredNamespace(local)) => {
-                            let std_name = self.chunk.add_constant(Value::from("std"));
-                            self.chunk.write_opcode(Opcode::GetGlobal);
-                            self.chunk.write_u16(std_name);
                             define_binding(self, local);
                         }
                         ("./es6_module_export.js", ImportSpecifier::Named(name, alias)) => {

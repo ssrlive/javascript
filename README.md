@@ -172,7 +172,7 @@ fn main() {
 }
 ```
 
-`console` is not an ECMAScript intrinsic. The default Cargo feature set enables `console`, so `JsRuntime` supplies it as a host global (writing to stdout); disable it with `--no-default-features` or enable it explicitly with `--features console`. Hosts can redirect its output, provide in-memory module sources, own timer scheduling, and settle promises from external work:
+`console` is not an ECMAScript intrinsic. The default Cargo feature set enables `console`, so `JsRuntime` supplies it as a host global (writing to stdout); disable it with `--no-default-features` or enable it explicitly with `--features console`. The default `node` feature is an umbrella for the independent `process`, `os`, and `fs` features. It provides the Node-style global `process` and the `process`, `os`, `fs`, and `fs/promises` built-in modules, imported using either bare names or `node:` names. These are engine host APIs, not ECMAScript intrinsics. Filesystem operations currently use the host filesystem synchronously; callback APIs schedule callbacks on the VM microtask queue, while `fs/promises` returns promises. `process.exit()` stops JavaScript execution and records an exit request without terminating the embedding process; embedders can inspect `JsRuntime::process_exit_requested()` and `JsRuntime::process_exit_code()`. Build without the host APIs using `--no-default-features`, or enable just selected modules with `--no-default-features --features process` (likewise `os` or `fs`). Hosts can redirect console output, provide in-memory module sources, own timer scheduling, and settle promises from external work:
 
 ```rust
 use javascript::{HostHooks, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};
@@ -230,7 +230,7 @@ fn run_hosted() -> Result<(), javascript::JSError> {
 }
 ```
 
-`start_eval` / `run_slice` let the host decide when execution advances; after the script completes, call `drain_microtasks` and `step_timers(monotonic_ms)` from the host event loop as needed. `create_promise` returns a JS promise and a resolver that the host can use to resolve/reject after I/O. Each `JsRuntime` owns its `$262.agent` state; parser and RegExp thread-local state remains scoped to the executing thread. The `os` and `std` Cargo features remain optional; build the core without them using `cargo check --no-default-features --lib`.
+`start_eval` / `run_slice` let the host decide when execution advances; after the script completes, call `drain_microtasks` and `step_timers(monotonic_ms)` from the host event loop as needed. `create_promise` returns a JS promise and a resolver that the host can use to resolve/reject after I/O. Each `JsRuntime` owns its `$262.agent` state; parser and RegExp thread-local state remains scoped to the executing thread. Build the core without host-provided console or Node-style APIs using `cargo check --no-default-features --lib`.
 
 Other exported APIs include tokenize, parse_statement, parse_statements, read_script_file, and value/string helpers.
 

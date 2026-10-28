@@ -2619,7 +2619,7 @@ pub(crate) fn collect_exports_from_ast(statements: &[Statement]) -> ExportInfo {
 pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &str) -> Vec<ModuleRequest> {
     let mut requests = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let known_builtins = ["math", "console", "os", "std", "./es6_module_export.js"];
+    let known_builtins = ["math", "console", "./es6_module_export.js"];
 
     for stmt in statements {
         let maybe_request = match &*stmt.kind {
@@ -2641,7 +2641,10 @@ pub(crate) fn collect_module_requests(statements: &[Statement], self_basename: &
             continue;
         };
         let import_base = source.strip_prefix("./").unwrap_or(source);
-        if (import_type.is_none() && import_base == self_basename) || known_builtins.contains(&source.as_str()) {
+        if (import_type.is_none() && import_base == self_basename)
+            || known_builtins.contains(&source.as_str())
+            || crate::runtime::is_builtin_host_module(source)
+        {
             continue;
         }
         if seen.insert((source.clone(), phase, import_type.clone())) {

@@ -6,6 +6,7 @@ use crate::core::statement::{
     StatementKind,
 };
 use crate::core::{JSError, Value};
+use crate::host_api::HostModuleRegistry;
 use crate::raise_syntax_error;
 
 pub(crate) const INTERNAL_FOROF_HELPER: &str = "__forOfValues internal";
@@ -82,6 +83,7 @@ pub struct Compiler<'gc> {
     /// Populated by the module loader before compilation so the compiler can resolve external imports.
     loaded_module_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     resolved_module_requests: std::collections::HashMap<(String, Option<String>), String>,
+    host_modules: HostModuleRegistry,
     /// After compiling an anonymous class expression, holds the constructor's IP
     /// so callers can apply NamedEvaluation (e.g. `let C = class {}`  → name "C").
     last_class_ctor_ip: Option<usize>,
@@ -210,6 +212,10 @@ impl<'gc> Compiler<'gc> {
             self.class_privns_counter = max_id + 1;
         }
         self.class_privns_stack = context;
+    }
+
+    pub(crate) fn set_host_modules(&mut self, host_modules: HostModuleRegistry) {
+        self.host_modules = host_modules;
     }
 
     pub fn compile(mut self, statements: &[Statement]) -> Result<Chunk<'gc>, JSError> {
@@ -4619,19 +4625,19 @@ impl<'gc> Compiler<'gc> {
                         }
                     }
 
-                    let node_builtin_global = crate::runtime::builtin_module_global(source);
+                    let node_builtin_global = self.host_modules.global(source).map(str::to_owned);
                     if let Some(global) = node_builtin_global {
                         match spec {
                             ImportSpecifier::Namespace(local)
                             | ImportSpecifier::DeferredNamespace(local)
                             | ImportSpecifier::Default(local) => {
-                                let idx = self.chunk.add_constant(Value::from(global));
+                                let idx = self.chunk.add_constant(Value::from(global.as_str()));
                                 self.chunk.write_opcode(Opcode::GetGlobal);
                                 self.chunk.write_u16(idx);
                                 define_binding(self, local);
                             }
                             ImportSpecifier::Named(name, alias) => {
-                                let global_idx = self.chunk.add_constant(Value::from(global));
+                                let global_idx = self.chunk.add_constant(Value::from(global.as_str()));
                                 self.chunk.write_opcode(Opcode::GetGlobal);
                                 self.chunk.write_u16(global_idx);
                                 let key_idx = self.chunk.add_constant(Value::from(name));

@@ -3,8 +3,29 @@
 use crate::error::JSError;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
+use std::collections::HashMap;
 
 pub(crate) type BoxedJsCallback = Box<dyn FnMut(&[JsValue]) -> Result<JsValue, JSError>>;
+
+#[derive(Clone, Default)]
+pub(crate) struct HostModuleRegistry {
+    globals: HashMap<String, String>,
+}
+
+impl HostModuleRegistry {
+    #[allow(dead_code)]
+    pub(crate) fn register(&mut self, specifier: &str, global: &str) {
+        self.globals.insert(specifier.to_string(), global.to_string());
+    }
+
+    pub(crate) fn global(&self, specifier: &str) -> Option<&str> {
+        self.globals.get(specifier).map(String::as_str)
+    }
+
+    pub(crate) fn contains(&self, specifier: &str) -> bool {
+        self.globals.contains_key(specifier)
+    }
+}
 
 /// Source returned by a host-provided module loader.
 #[derive(Debug, Clone, PartialEq, Eq)]

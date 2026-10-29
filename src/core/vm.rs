@@ -740,6 +740,7 @@ pub struct VM<'gc> {
     new_target_stack: Vec<Value<'gc>>, // new.target binding stack
     super_called_stack: Vec<bool>,     // tracks whether super() was called in derived ctors
     host_function_handlers: Vec<HostFunctionHandler>,
+    host_modules: crate::host_api::HostModuleRegistry,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
@@ -1158,6 +1159,7 @@ impl<'gc> VM<'gc> {
             new_target_stack: Vec::new(),
             super_called_stack: Vec::new(),
             host_function_handlers: Vec::new(),
+            host_modules: crate::host_api::HostModuleRegistry::default(),
             stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
@@ -1249,8 +1251,10 @@ impl<'gc> VM<'gc> {
     }
 
     #[inline]
-    fn spawn_child_vm(chunk: Chunk<'gc>, ctx: &GcContext<'gc>) -> Self {
-        Self::new(chunk, ctx)
+    fn spawn_child_vm(&self, chunk: Chunk<'gc>, ctx: &GcContext<'gc>) -> Self {
+        let mut child = Self::new(chunk, ctx);
+        child.host_modules = self.host_modules.clone();
+        child
     }
 
     pub fn set_source_context(&mut self, script_source: &str, script_path: Option<&std::path::Path>) {
@@ -2371,7 +2375,7 @@ impl<'gc> VM<'gc> {
         };
         let (export_names, export_name_to_local, reexport_sources) = collect_exports_from_ast(&dep_stmts);
         let dep_basename = resolved_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let requests = collect_module_requests(&dep_stmts, dep_basename);
+        let requests = collect_module_requests(&dep_stmts, dep_basename, &self.host_modules);
         let dep_has_tla = module_has_top_level_await(&dep_stmts);
 
         self.pre_create_module_namespace(ctx, &key);
@@ -2395,7 +2399,7 @@ impl<'gc> VM<'gc> {
             self.load_module_graph(ctx, resolved_path, &requests);
         }
 
-        let mut dep_compiler = crate::core::Compiler::new();
+        let mut dep_compiler = self.new_compiler();
         dep_compiler.set_script_filename(key.clone());
         self.apply_module_resolution_overrides(&mut dep_compiler, resolved_path);
         for (path, exports) in &self.loaded_modules {
@@ -3586,9 +3590,9 @@ impl<'gc> VM<'gc> {
         let tokens = crate::core::tokenize(code)?;
         let mut index = 0;
         let statements = crate::core::parse_statements(&tokens, &mut index)?;
-        let compiler = crate::core::Compiler::new();
+        let compiler = self.new_compiler();
         let chunk = compiler.compile(&statements)?;
-        let mut vm = Self::spawn_child_vm(chunk, ctx);
+        let mut vm = self.spawn_child_vm(chunk, ctx);
         vm.set_source_context(code, None);
         vm.run(ctx)
     }
@@ -3599,9 +3603,9 @@ impl<'gc> VM<'gc> {
         let tokens = crate::core::tokenize(code)?;
         let mut index = 0;
         let statements = crate::core::parse_without_strict_binding_checks(|| crate::core::parse_statements(&tokens, &mut index))?;
-        let compiler = crate::core::Compiler::new();
+        let compiler = self.new_compiler();
         let chunk = compiler.compile(&statements)?;
-        let mut vm = Self::spawn_child_vm(chunk, ctx);
+        let mut vm = self.spawn_child_vm(chunk, ctx);
         vm.set_source_context(code, None);
         vm.run(ctx)
     }
@@ -3687,7 +3691,7 @@ impl<'gc> VM<'gc> {
         let tokens = crate::core::tokenize(code)?;
         let mut index = 0;
         let statements = crate::core::parse_statements(&tokens, &mut index)?;
-        let compiler = crate::core::Compiler::new();
+        let compiler = self.new_compiler();
         let chunk = compiler.compile(&statements)?;
         self.validate_script_global_declarations(&chunk)?;
         let (code_offset, _) = self.merge_eval_chunk(&chunk);
@@ -3700,7 +3704,7 @@ impl<'gc> VM<'gc> {
 
     pub(crate) fn prepare_merged_script(&mut self, code: &str) -> Result<(), JSError> {
         let statements = crate::core::parse_program_statements(code, false)?;
-        let mut compiler = crate::core::Compiler::new();
+        let mut compiler = self.new_compiler();
         compiler.set_source_text(code.to_string());
         let chunk = compiler.compile(&statements)?;
         self.validate_script_global_declarations(&chunk)?;
@@ -3719,6 +3723,21 @@ impl<'gc> VM<'gc> {
     #[allow(dead_code)]
     pub(crate) fn register_host_module(&mut self, name: &str, value: Value<'gc>) {
         self.globals.insert(name.to_string(), value);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn register_host_module_alias(&mut self, specifier: &str, global: &str) {
+        self.host_modules.register(specifier, global);
+    }
+
+    pub(crate) fn host_module_registry(&self) -> &crate::host_api::HostModuleRegistry {
+        &self.host_modules
+    }
+
+    pub(crate) fn new_compiler(&self) -> crate::core::Compiler<'gc> {
+        let mut compiler = crate::core::Compiler::new();
+        compiler.set_host_modules(self.host_modules.clone());
+        compiler
     }
 
     #[allow(dead_code)]
@@ -22906,7 +22925,7 @@ impl<'gc> VM<'gc> {
                 return Value::Undefined;
             }
         };
-        let compiler = crate::core::Compiler::new();
+        let compiler = self.new_compiler();
         let chunk = match compiler.compile(&statements) {
             Ok(c) => c,
             Err(err) => {
@@ -23068,7 +23087,7 @@ impl<'gc> VM<'gc> {
                             let tokens = crate::core::tokenize(&source)?;
                             let mut idx = 0;
                             let stmts = crate::core::parse_statements(&tokens, &mut idx)?;
-                            let compiler = crate::core::Compiler::new();
+                            let compiler = child.new_compiler();
                             let chunk = compiler.compile(&stmts)?;
                             let (offset, _) = child.merge_eval_chunk(&chunk);
                             let saved_ip = child.ip;
@@ -26583,7 +26602,7 @@ impl<'gc> VM<'gc> {
                             return Err(crate::raise_syntax_error!("Unexpected eval or arguments in strict mode"));
                         }
                     }
-                    let mut compiler = crate::core::Compiler::new();
+                    let mut compiler = self.new_compiler();
                     compiler.set_strict_mode(is_strict);
                     if let Some(ref ctx) = privns_context {
                         compiler.set_private_name_context(ctx.clone());

@@ -1,5 +1,6 @@
 #[cfg(feature = "console")]
 pub(crate) mod console;
+mod evaluation;
 #[cfg(feature = "fs")]
 pub(crate) mod fs;
 #[cfg(any(feature = "process", feature = "os", feature = "fs"))]
@@ -14,28 +15,9 @@ pub(crate) use crate::host_api::BoxedJsCallback;
 pub use crate::host_api::{JsObjectHandle, JsPromiseResolver, JsValue, ModuleLoader, ModuleSource};
 #[cfg(feature = "console")]
 pub use console::{ConsoleLevel, ConsoleMessage};
+pub use evaluation::{evaluate_script, evaluate_script_with_unwrap};
 use std::cell::RefCell;
 use std::rc::Rc;
-
-pub(crate) fn builtin_module_global(_specifier: &str) -> Option<&'static str> {
-    #[cfg(feature = "process")]
-    if let Some(global) = process::builtin_global(_specifier) {
-        return Some(global);
-    }
-    #[cfg(feature = "os")]
-    if let Some(global) = os::builtin_global(_specifier) {
-        return Some(global);
-    }
-    #[cfg(feature = "fs")]
-    if let Some(global) = fs::builtin_global(_specifier) {
-        return Some(global);
-    }
-    None
-}
-
-pub(crate) fn is_builtin_host_module(specifier: &str) -> bool {
-    builtin_module_global(specifier).is_some()
-}
 
 /// Result of executing one host-controlled VM slice.
 #[derive(Debug, Clone, PartialEq)]

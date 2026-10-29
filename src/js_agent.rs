@@ -290,7 +290,7 @@ pub fn start_agent(script: String) {
             IS_AGENT_THREAD.with(|c| c.set(true));
             LAST_BROADCAST_SEEN.with(|c| c.set(0));
             use crate::core::DEFAULT_GC_OPCODE_BUDGET as B;
-            let result = crate::core::evaluate_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false, B);
+            let result = crate::runtime::evaluate_script_with_unwrap(script, false, Option::<&std::path::Path>::None, false, B);
             if let Err(err) = result {
                 push_report(format!("__agent_error__:{err}"));
             }

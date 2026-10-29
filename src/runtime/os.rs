@@ -30,11 +30,9 @@ pub(crate) fn install<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>) {
         props.insert("constants".to_string(), Value::Object(new_gc_cell_ptr(ctx, IndexMap::new())));
     }
     vm.register_host_module("__node_os", os);
+    vm.register_host_module_alias("os", "__node_os");
+    vm.register_host_module_alias("node:os", "__node_os");
     vm.register_host_function_handler(call_named);
-}
-
-pub(crate) fn builtin_global(specifier: &str) -> Option<&'static str> {
-    matches!(specifier, "os" | "node:os").then_some("__node_os")
 }
 
 pub(crate) fn call_named<'gc>(

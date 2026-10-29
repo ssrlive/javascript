@@ -53,6 +53,10 @@ pub(crate) fn install<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>) {
     }
     vm.register_host_module("__node_fs", fs_module);
     vm.register_host_module("__node_fs_promises", promises);
+    vm.register_host_module_alias("fs", "__node_fs");
+    vm.register_host_module_alias("node:fs", "__node_fs");
+    vm.register_host_module_alias("fs/promises", "__node_fs_promises");
+    vm.register_host_module_alias("node:fs/promises", "__node_fs_promises");
 
     let mut buffer_properties = IndexMap::new();
     buffer_properties.insert(
@@ -61,14 +65,6 @@ pub(crate) fn install<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>) {
     );
     vm.register_host_global(ctx, "Buffer", Value::Object(new_gc_cell_ptr(ctx, buffer_properties)));
     vm.register_host_function_handler(call_named);
-}
-
-pub(crate) fn builtin_global(specifier: &str) -> Option<&'static str> {
-    match specifier {
-        "fs" | "node:fs" => Some("__node_fs"),
-        "fs/promises" | "node:fs/promises" => Some("__node_fs_promises"),
-        _ => None,
-    }
 }
 
 fn make_fs_module<'gc>(ctx: &GcContext<'gc>, module: &str, functions: &[(&str, &str, f64)]) -> Value<'gc> {

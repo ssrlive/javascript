@@ -1,5 +1,7 @@
 use crate::core::{GcContext, VM, Value, new_gc_cell_ptr, value_to_string};
 use indexmap::IndexMap;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleLevel {
@@ -18,6 +20,8 @@ pub(crate) struct ConsoleState {
     output: Vec<ConsoleMessage>,
     writes_stdout: bool,
 }
+
+pub(crate) type ConsoleStateRef = Rc<RefCell<ConsoleState>>;
 
 impl Default for ConsoleState {
     fn default() -> Self {
@@ -46,34 +50,32 @@ pub(crate) fn new_console_object<'gc>(ctx: &GcContext<'gc>) -> Value<'gc> {
     Value::Object(new_gc_cell_ptr(ctx, properties))
 }
 
-pub(crate) fn install<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>) {
+pub(crate) fn new_state() -> ConsoleStateRef {
+    Rc::new(RefCell::new(ConsoleState::default()))
+}
+
+pub(crate) fn install<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>, state: ConsoleStateRef) {
     vm.register_host_global(ctx, "console", new_console_object(ctx));
-    vm.register_host_function_handler(dispatch);
+    vm.register_host_function_handler(move |vm, ctx, name, _receiver, args| call_named(vm, ctx, name, args, &state));
 }
 
-fn dispatch<'gc>(
-    vm: &mut VM<'gc>,
-    ctx: &GcContext<'gc>,
-    name: &str,
-    _receiver: Option<&Value<'gc>>,
-    args: &[Value<'gc>],
-) -> Option<Value<'gc>> {
-    call_named(vm, ctx, name, args)
-}
-
-pub(crate) fn call_named<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>, name: &str, args: &[Value<'gc>]) -> Option<Value<'gc>> {
+fn call_named<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>, name: &str, args: &[Value<'gc>], state: &ConsoleStateRef) -> Option<Value<'gc>> {
     match name {
-        "console.log" => Some(call(vm, ctx, ConsoleLevel::Log, args)),
-        "console.warn" => Some(call(vm, ctx, ConsoleLevel::Warn, args)),
-        "console.error" => Some(call(vm, ctx, ConsoleLevel::Error, args)),
+        "console.log" => Some(call(vm, ctx, ConsoleLevel::Log, args, state)),
+        "console.warn" => Some(call(vm, ctx, ConsoleLevel::Warn, args, state)),
+        "console.error" => Some(call(vm, ctx, ConsoleLevel::Error, args, state)),
         _ => None,
     }
 }
 
-fn call<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>, level: ConsoleLevel, args: &[Value<'gc>]) -> Value<'gc> {
+fn call<'gc>(vm: &mut VM<'gc>, ctx: &GcContext<'gc>, level: ConsoleLevel, args: &[Value<'gc>], state: &ConsoleStateRef) -> Value<'gc> {
     let text = args.iter().map(|value| display_value(vm, ctx, value)).collect::<Vec<_>>().join(" ");
-    vm.console.output.push(ConsoleMessage { level, text: text.clone() });
-    if vm.console.writes_stdout {
+    let writes_stdout = {
+        let mut state = state.borrow_mut();
+        state.output.push(ConsoleMessage { level, text: text.clone() });
+        state.writes_stdout
+    };
+    if writes_stdout {
         println!("{text}");
     }
     Value::Undefined

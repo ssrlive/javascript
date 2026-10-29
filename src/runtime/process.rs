@@ -91,7 +91,7 @@ pub(crate) fn call_named<'gc>(
             if let Some(Value::Object(process)) = vm.host_global("process") {
                 process.borrow_mut(ctx).insert("exitCode".to_string(), Value::Number(code as f64));
             }
-            vm.request_host_stop();
+            vm.request_stop();
             Some(Value::Undefined)
         }
         _ => None,

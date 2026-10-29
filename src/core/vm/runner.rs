@@ -44,7 +44,7 @@ impl<'gc> VM<'gc> {
     }
 
     fn finish_run(&mut self, ctx: &GcContext<'gc>, result: Value<'gc>) -> Result<Value<'gc>, JSError> {
-        if self.host_stop_requested {
+        if self.stop_requested {
             return Ok(result);
         }
         self.flush_async_atomics_waits(ctx, true);
@@ -88,7 +88,7 @@ impl<'gc> VM<'gc> {
     ) -> Result<RunInnerStatus<'gc>, JSError> {
         let mut executed_opcodes = 0;
         loop {
-            if self.host_stop_requested {
+            if self.stop_requested {
                 self.frames.truncate(min_depth);
                 return Ok(RunInnerStatus::Complete(Value::Undefined));
             }

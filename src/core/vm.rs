@@ -38,7 +38,7 @@ use unicode_normalization::UnicodeNormalization;
 type VmStrong<'gc, T> = Gc<'gc, GcCell<T>>;
 type VmWeak<'gc, T> = GcWeak<'gc, GcCell<T>>;
 pub(crate) type HostFunctionHandler =
-    for<'gc> fn(&mut VM<'gc>, &GcContext<'gc>, &str, Option<&Value<'gc>>, &[Value<'gc>]) -> Option<Value<'gc>>;
+    Rc<dyn for<'gc> Fn(&mut VM<'gc>, &GcContext<'gc>, &str, Option<&Value<'gc>>, &[Value<'gc>]) -> Option<Value<'gc>>>;
 
 pub type UpvalueCell<'gc> = VmStrong<'gc, Value<'gc>>;
 pub type UpvalueCellContainer<'gc> = Gc<'gc, Vec<UpvalueCell<'gc>>>;
@@ -739,10 +739,8 @@ pub struct VM<'gc> {
     this_stack: Vec<Value<'gc>>,       // this binding stack
     new_target_stack: Vec<Value<'gc>>, // new.target binding stack
     super_called_stack: Vec<bool>,     // tracks whether super() was called in derived ctors
-    #[cfg(feature = "console")]
-    pub(crate) console: crate::runtime::console::ConsoleState,
     host_function_handlers: Vec<HostFunctionHandler>,
-    host_stop_requested: bool,
+    stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
     // Maps Function IPs from child realms to their realm_id so get_fn_props
@@ -892,7 +890,7 @@ pub struct VM<'gc> {
     deferred_module_ns_objects: std::collections::HashMap<String, Value<'gc>>,
     /// Parsed/compiled module records, including modules that are linked but not yet evaluated.
     module_records: std::collections::HashMap<String, StoredModuleRecord>,
-    module_loader: Option<Rc<RefCell<Box<dyn crate::runtime::ModuleLoader>>>>,
+    module_loader: Option<Rc<RefCell<Box<dyn crate::host_api::ModuleLoader>>>>,
     module_resolutions: HashMap<(String, String, Option<String>), String>,
     module_resolution_errors: HashMap<(String, String, Option<String>), String>,
     /// Nesting depth for module-request evaluation walks so suspended TLA modules
@@ -915,7 +913,7 @@ pub struct VM<'gc> {
     pub(crate) host_roots: HashMap<u64, Value<'gc>>,
     pub(crate) next_host_root_id: u64,
     /// Host callbacks registered by embedding applications via `JsRuntime::register_fn`.
-    host_callbacks: HashMap<String, Rc<RefCell<crate::runtime::BoxedJsCallback>>>,
+    host_callbacks: HashMap<String, Rc<RefCell<crate::host_api::BoxedJsCallback>>>,
 }
 
 impl<'gc> VM<'gc> {
@@ -1159,10 +1157,8 @@ impl<'gc> VM<'gc> {
             this_stack: vec![Value::Object(global_this)],
             new_target_stack: Vec::new(),
             super_called_stack: Vec::new(),
-            #[cfg(feature = "console")]
-            console: crate::runtime::console::ConsoleState::default(),
             host_function_handlers: Vec::new(),
-            host_stop_requested: false,
+            stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),
             native_fn_props: HashMap::new(),
@@ -2166,7 +2162,7 @@ impl<'gc> VM<'gc> {
         })
     }
 
-    pub(crate) fn set_module_loader(&mut self, loader: Option<Rc<RefCell<Box<dyn crate::runtime::ModuleLoader>>>>) {
+    pub(crate) fn set_module_loader(&mut self, loader: Option<Rc<RefCell<Box<dyn crate::host_api::ModuleLoader>>>>) {
         self.module_loader = loader;
     }
 
@@ -2248,11 +2244,11 @@ impl<'gc> VM<'gc> {
         ctx: &GcContext<'gc>,
         resolved_path: &std::path::Path,
         key: &str,
-    ) -> Option<crate::runtime::ModuleSource> {
+    ) -> Option<crate::host_api::ModuleSource> {
         let result = match &self.module_loader {
             Some(loader) => loader.borrow_mut().load(&resolved_path.to_string_lossy()),
             None => std::fs::read(resolved_path)
-                .map(crate::runtime::ModuleSource::Bytes)
+                .map(crate::host_api::ModuleSource::Bytes)
                 .map_err(|error| crate::raise_eval_error!(format!("Failed to read script file '{}': {error}", resolved_path.display()))),
         };
         match result {
@@ -2277,10 +2273,10 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    fn module_source_to_text(source: crate::runtime::ModuleSource) -> Result<String, JSError> {
+    fn module_source_to_text(source: crate::host_api::ModuleSource) -> Result<String, JSError> {
         match source {
-            crate::runtime::ModuleSource::Text(text) => Ok(text),
-            crate::runtime::ModuleSource::Bytes(bytes) => crate::core::decode_script_bytes(&bytes),
+            crate::host_api::ModuleSource::Text(text) => Ok(text),
+            crate::host_api::ModuleSource::Bytes(bytes) => crate::core::decode_script_bytes(&bytes),
         }
     }
 
@@ -2521,8 +2517,8 @@ impl<'gc> VM<'gc> {
             return;
         };
         let dep_bytes = match source {
-            crate::runtime::ModuleSource::Text(text) => text.into_bytes(),
-            crate::runtime::ModuleSource::Bytes(bytes) => bytes,
+            crate::host_api::ModuleSource::Text(text) => text.into_bytes(),
+            crate::host_api::ModuleSource::Bytes(bytes) => bytes,
         };
         let source = String::from_utf8_lossy(&dep_bytes).into_owned();
         let default_value = self.create_immutable_uint8array_from_bytes(ctx, dep_bytes);
@@ -3714,38 +3710,41 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
-    #[cfg(any(feature = "console", feature = "process", feature = "fs"))]
+    #[allow(dead_code)]
     pub(crate) fn register_host_global(&mut self, ctx: &GcContext<'gc>, name: &str, value: Value<'gc>) {
         self.globals.insert(name.to_string(), value.clone());
         self.global_this.borrow_mut(ctx).insert(name.to_string(), value);
     }
 
-    #[cfg(any(feature = "os", feature = "fs"))]
+    #[allow(dead_code)]
     pub(crate) fn register_host_module(&mut self, name: &str, value: Value<'gc>) {
         self.globals.insert(name.to_string(), value);
     }
 
-    #[cfg(any(feature = "process", feature = "fs"))]
+    #[allow(dead_code)]
     pub(crate) fn host_global(&self, name: &str) -> Option<Value<'gc>> {
         self.globals.get(name).cloned()
     }
 
-    #[cfg(any(feature = "console", feature = "process", feature = "os", feature = "fs"))]
-    pub(crate) fn register_host_function_handler(&mut self, handler: HostFunctionHandler) {
-        self.host_function_handlers.push(handler);
+    #[allow(dead_code)]
+    pub(crate) fn register_host_function_handler<F>(&mut self, handler: F)
+    where
+        F: for<'a> Fn(&mut VM<'a>, &GcContext<'a>, &str, Option<&Value<'a>>, &[Value<'a>]) -> Option<Value<'a>> + 'static,
+    {
+        self.host_function_handlers.push(Rc::new(handler));
     }
 
-    #[cfg(feature = "process")]
-    pub(crate) fn request_host_stop(&mut self) {
-        self.host_stop_requested = true;
+    #[allow(dead_code)]
+    pub(crate) fn request_stop(&mut self) {
+        self.stop_requested = true;
     }
 
-    #[cfg(feature = "process")]
-    pub(crate) fn host_stop_requested(&self) -> bool {
-        self.host_stop_requested
+    #[allow(dead_code)]
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.stop_requested
     }
 
-    #[cfg(any(feature = "process", feature = "fs"))]
+    #[allow(dead_code)]
     pub(crate) fn queue_host_callback(
         &mut self,
         ctx: &GcContext<'gc>,
@@ -3770,22 +3769,22 @@ impl<'gc> VM<'gc> {
         true
     }
 
-    #[cfg(feature = "fs")]
+    #[allow(dead_code)]
     pub(crate) fn is_host_callable(&self, value: &Value<'gc>) -> bool {
         self.is_value_callable(value)
     }
 
-    #[cfg(feature = "fs")]
+    #[allow(dead_code)]
     pub(crate) fn throw_host_type_error(&mut self, ctx: &GcContext<'gc>, message: &str) {
         self.throw_type_error(ctx, message);
     }
 
-    #[cfg(feature = "fs")]
+    #[allow(dead_code)]
     pub(crate) fn throw_host_value(&mut self, value: Value<'gc>) {
         self.pending_throw = Some(value);
     }
 
-    #[cfg(feature = "fs")]
+    #[allow(dead_code)]
     pub(crate) fn settle_host_promise(&mut self, ctx: &GcContext<'gc>, result: Result<Value<'gc>, Value<'gc>>) -> Value<'gc> {
         let Some(constructor) = self.host_global("Promise") else {
             self.throw_type_error(ctx, "Promise is unavailable");
@@ -3809,7 +3808,7 @@ impl<'gc> VM<'gc> {
         promise
     }
 
-    pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::runtime::BoxedJsCallback) {
+    pub(crate) fn register_host_callback(&mut self, ctx: &GcContext<'gc>, name: &str, callback: crate::host_api::BoxedJsCallback) {
         let host_key = format!("host_callback.{name}");
         self.host_callbacks.insert(name.to_string(), Rc::new(RefCell::new(callback)));
         let fn_val = Self::make_host_fn_with_name_len(ctx, &host_key, name, 0.0, false);
@@ -3828,7 +3827,7 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, &format!("Host function '{name}' is not registered"));
             return Value::Undefined;
         };
-        let host_args: Vec<crate::runtime::JsValue> = args.iter().map(|v| self.value_to_host_value(v)).collect();
+        let host_args: Vec<crate::host_api::JsValue> = args.iter().map(|v| self.value_to_host_value(v)).collect();
         let outcome = callback_rc.borrow_mut()(&host_args);
         match outcome {
             Ok(host_val) => match self.host_value_to_value(ctx, &host_val) {
@@ -3847,30 +3846,30 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    pub(crate) fn store_host_root(&mut self, value: Value<'gc>) -> crate::runtime::JsObjectHandle {
+    pub(crate) fn store_host_root(&mut self, value: Value<'gc>) -> crate::host_api::JsObjectHandle {
         let id = self.next_host_root_id;
         self.next_host_root_id = self.next_host_root_id.saturating_add(1);
         self.host_roots.insert(id, value);
-        crate::runtime::JsObjectHandle(id)
+        crate::host_api::JsObjectHandle(id)
     }
 
     pub(crate) fn create_host_promise(
         &mut self,
         ctx: &GcContext<'gc>,
-    ) -> Result<(crate::runtime::JsValue, crate::runtime::JsPromiseResolver), JSError> {
+    ) -> Result<(crate::host_api::JsValue, crate::host_api::JsPromiseResolver), JSError> {
         let constructor = self.globals.get("Promise").cloned().unwrap_or(Value::Undefined);
         let (promise, resolve, reject) = self.new_promise_capability(ctx, &constructor)?;
         let promise = self.value_to_host_value(&promise);
         let resolve = self.store_host_root(resolve);
         let reject = self.store_host_root(reject);
-        Ok((promise, crate::runtime::JsPromiseResolver::new(resolve, reject)))
+        Ok((promise, crate::host_api::JsPromiseResolver::new(resolve, reject)))
     }
 
     pub(crate) fn call_host_root_function(
         &mut self,
         ctx: &GcContext<'gc>,
-        handle: crate::runtime::JsObjectHandle,
-        argument: crate::runtime::JsValue,
+        handle: crate::host_api::JsObjectHandle,
+        argument: crate::host_api::JsValue,
     ) -> Result<(), JSError> {
         let function = self
             .host_roots
@@ -3893,8 +3892,8 @@ impl<'gc> VM<'gc> {
         Ok(())
     }
 
-    pub(crate) fn value_to_host_value(&mut self, value: &Value<'gc>) -> crate::runtime::JsValue {
-        use crate::runtime::JsValue;
+    pub(crate) fn value_to_host_value(&mut self, value: &Value<'gc>) -> crate::host_api::JsValue {
+        use crate::host_api::JsValue;
         match value {
             Value::Undefined | Value::Uninitialized => JsValue::Undefined,
             Value::Null => JsValue::Null,
@@ -3906,8 +3905,8 @@ impl<'gc> VM<'gc> {
         }
     }
 
-    pub(crate) fn host_value_to_value(&mut self, ctx: &GcContext<'gc>, value: &crate::runtime::JsValue) -> Result<Value<'gc>, JSError> {
-        use crate::runtime::JsValue;
+    pub(crate) fn host_value_to_value(&mut self, ctx: &GcContext<'gc>, value: &crate::host_api::JsValue) -> Result<Value<'gc>, JSError> {
+        use crate::host_api::JsValue;
         match value {
             JsValue::Undefined => Ok(Value::Undefined),
             JsValue::Null => Ok(Value::Null),
@@ -3948,7 +3947,7 @@ impl<'gc> VM<'gc> {
     pub(crate) fn host_value_to_json(
         &mut self,
         ctx: &GcContext<'gc>,
-        value: &crate::runtime::JsValue,
+        value: &crate::host_api::JsValue,
     ) -> Result<serde_json::Value, JSError> {
         let vm_val = self.host_value_to_value(ctx, value)?;
         let Some(json_text) = self.json_stringify_root(ctx, &vm_val, None, None, "") else {
@@ -3967,8 +3966,8 @@ impl<'gc> VM<'gc> {
         &mut self,
         ctx: &GcContext<'gc>,
         fn_name: &str,
-        args: &[crate::runtime::JsValue],
-    ) -> Result<crate::runtime::JsValue, JSError> {
+        args: &[crate::host_api::JsValue],
+    ) -> Result<crate::host_api::JsValue, JSError> {
         let callee = if let Some(val) = self.globals.get(fn_name).cloned() {
             val
         } else {
@@ -5768,10 +5767,6 @@ impl<'gc> VM<'gc> {
             return self.invoke_registered_host_callback(ctx, callback_name, args);
         }
         if let Some(value) = self.dispatch_host_function_handler(ctx, name, receiver, args) {
-            return value;
-        }
-        #[cfg(feature = "console")]
-        if let Some(value) = crate::runtime::console::call_named(self, ctx, name, args) {
             return value;
         }
         if name.starts_with("temporal.") {
@@ -14340,11 +14335,6 @@ impl<'gc> VM<'gc> {
         if let Some(value) = self.dispatch_host_function_handler(ctx, name, None, args) {
             return value;
         }
-        #[cfg(feature = "console")]
-        if let Some(value) = crate::runtime::console::call_named(self, ctx, name, args) {
-            return value;
-        }
-
         match name {
             "Function.prototype.restrictedThrow" => {
                 self.throw_type_error(
@@ -46090,7 +46080,7 @@ impl<'gc> VM<'gc> {
     fn drain_microtasks(&mut self, ctx: &GcContext<'gc>) -> usize {
         let mut executed = 0;
         for _round in 0..1000 {
-            if self.host_stop_requested {
+            if self.stop_requested {
                 break;
             }
             if self.microtask_queue.is_empty() {

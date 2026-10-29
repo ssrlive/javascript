@@ -4,6 +4,7 @@ pub(crate) mod core;
 
 #[macro_use]
 pub(crate) mod error;
+pub(crate) mod host_api;
 pub(crate) mod js_agent;
 pub(crate) mod repl;
 pub mod runtime;

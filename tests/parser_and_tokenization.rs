@@ -486,3 +486,28 @@ fn parse_rejects_class_field_arguments_and_async_private_method_await() {
         );
     }
 }
+
+#[test]
+fn parse_rejects_escaped_auto_accessor_keyword() {
+    for script in [
+        r"class C { acc\u0065ssor value; }",
+        r"class C { static acc\u0065ssor value; }",
+        r"let C = class { acc\u0065ssor value; };",
+        r"let C = class { static acc\u0065ssor value; };",
+    ] {
+        let res = evaluate_script(script, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET);
+        assert!(res.is_err(), "Expected escaped auto-accessor keyword to be rejected: {script}");
+        let err = res.unwrap_err();
+        assert!(
+            err.message().contains("SyntaxError"),
+            "Expected SyntaxError for {script}, got: {}",
+            err.message()
+        );
+    }
+
+    let valid_method = r"class C { acc\u0065ssor() {} }";
+    assert!(
+        evaluate_script(valid_method, false, None::<&std::path::Path>, javascript::DEFAULT_GC_OPCODE_BUDGET).is_ok(),
+        "An escaped identifier should remain valid as an ordinary method name"
+    );
+}

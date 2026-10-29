@@ -38440,11 +38440,21 @@ impl<'gc> VM<'gc> {
             self.throw_type_error(ctx, "Iterator return is not callable");
             return false;
         }
-        if let Err(err) = self.vm_call_function_value(ctx, &return_method, iterator, &[]) {
-            self.set_pending_throw_from_error(&err);
+        let return_result = match self.vm_call_function_value(ctx, &return_method, iterator, &[]) {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_pending_throw_from_error(&err);
+                return false;
+            }
+        };
+        if self.pending_throw.is_some() {
             return false;
         }
-        self.pending_throw.is_none()
+        if !Self::is_iterator_object_like(&return_result) {
+            self.throw_type_error(ctx, "Iterator return method must return an object");
+            return false;
+        }
+        true
     }
 
     fn validate_iterator_helper_limit(&mut self, ctx: &GcContext<'gc>, value: Option<&Value<'gc>>) -> Result<f64, Value<'gc>> {
@@ -39176,7 +39186,14 @@ impl<'gc> VM<'gc> {
                             borrow.insert("__helper_inner_next__".to_string(), Value::Undefined);
                             continue;
                         }
-                        None => return Value::Undefined,
+                        None => {
+                            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+                            let iterator = obj.borrow().get("__helper_iterator__").cloned().unwrap_or(Value::Undefined);
+                            if let Some(original_error) = self.pending_throw.take() {
+                                self.iterator_close_preserving_error(ctx, &iterator, original_error);
+                            }
+                            return Value::Undefined;
+                        }
                     }
                 }
 
@@ -39515,6 +39532,9 @@ impl<'gc> VM<'gc> {
                 Value::Undefined
             }
         })();
+        if self.pending_throw.is_some() {
+            obj.borrow_mut(ctx).insert("__helper_done__".to_string(), Value::Boolean(true));
+        }
         obj.borrow_mut(ctx)
             .insert("__helper_executing__".to_string(), Value::Boolean(false));
         result
@@ -39581,24 +39601,10 @@ impl<'gc> VM<'gc> {
                 if matches!(current_iterator, Value::Undefined | Value::Null) {
                     return self.create_iterator_result_object(ctx, Value::Undefined, true);
                 }
-                let return_method = self.read_named_property(ctx, &current_iterator, "return");
-                if self.pending_throw.is_some() {
+                if !self.iterator_close_normal(ctx, &current_iterator) {
                     return Value::Undefined;
                 }
-                if matches!(return_method, Value::Undefined | Value::Null) {
-                    return self.create_iterator_result_object(ctx, Value::Undefined, true);
-                }
-                if !self.is_value_callable(&return_method) {
-                    self.throw_type_error(ctx, "Iterator return is not callable");
-                    return Value::Undefined;
-                }
-                return match self.vm_call_function_value(ctx, &return_method, &current_iterator, &[]) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        self.set_pending_throw_from_error(&err);
-                        Value::Undefined
-                    }
-                };
+                return self.create_iterator_result_object(ctx, Value::Undefined, true);
             }
 
             if kind == "zip" || kind == "zipKeyed" {

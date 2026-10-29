@@ -5019,7 +5019,7 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<(Vec<Class
         }
         let is_auto_accessor = matches!(
             t.get(*index).map(|token| &token.token),
-            Some(Token::Identifier(name)) if name == "accessor"
+            Some(Token::Identifier(name)) if name == "accessor" && !raw_identifier_source_has_escape(&t[*index])
         ) && t.get(*index + 1).is_some_and(|next| {
             next.line == t[*index].line
                 && matches!(

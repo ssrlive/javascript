@@ -9,6 +9,8 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use std::collections::{HashMap, HashSet};
 
+mod bytecode;
+
 pub(crate) struct JitEngine {
     module: JITModule,
     fmod_function: FuncId,
@@ -97,6 +99,21 @@ impl JitEngine {
     }
 
     pub(crate) fn compile_functions(&mut self, statements: &[Statement], chunk: &Chunk<'_>) -> Vec<NativeJitRegistration> {
+        let cfg = match bytecode::ControlFlowGraph::build(chunk) {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                log::warn!("JIT skipped script because bytecode CFG construction failed: {error}");
+                return Vec::new();
+            }
+        };
+        log::debug!(
+            "JIT decoded {} bytecode instructions ({} operand bytes) into {} basic blocks and {} exception handlers",
+            cfg.instructions.len(),
+            cfg.instructions.iter().map(|instruction| instruction.operand.len()).sum::<usize>(),
+            cfg.blocks.len(),
+            cfg.exception_handlers.len()
+        );
+
         let declarations = collect_function_declarations(statements);
         let mut candidates = Vec::new();
         let mut name_counts = HashMap::<&str, usize>::new();

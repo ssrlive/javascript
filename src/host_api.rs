@@ -89,15 +89,19 @@ impl JitValue {
 pub(crate) struct NativeJitFrame {
     pub(crate) arguments: *const JitValue,
     pub(crate) argument_count: usize,
+    pub(crate) root_base: usize,
+    pub(crate) root_count: usize,
     pub(crate) result: JitValue,
     pub(crate) exception: JitValue,
 }
 
 impl NativeJitFrame {
-    pub(crate) fn new(arguments: &[JitValue]) -> Self {
+    pub(crate) fn new(arguments: &[JitValue], root_base: usize) -> Self {
         Self {
             arguments: arguments.as_ptr(),
             argument_count: arguments.len(),
+            root_base,
+            root_count: arguments.len(),
             result: JitValue::undefined(),
             exception: JitValue::undefined(),
         }
@@ -129,8 +133,12 @@ impl TryFrom<i32> for NativeJitStatus {
 
 pub(crate) type NativeJitFunction = unsafe extern "C" fn(*mut NativeJitFrame) -> i32;
 
-pub(crate) fn invoke_native_jit(function: NativeJitFunction, arguments: &[JitValue]) -> Result<(NativeJitStatus, JitValue, JitValue), i32> {
-    let mut frame = NativeJitFrame::new(arguments);
+pub(crate) fn invoke_native_jit(
+    function: NativeJitFunction,
+    arguments: &[JitValue],
+    root_base: usize,
+) -> Result<(NativeJitStatus, JitValue, JitValue), i32> {
+    let mut frame = NativeJitFrame::new(arguments, root_base);
     let status = NativeJitStatus::try_from(unsafe { function(&mut frame) })?;
     Ok((status, frame.result, frame.exception))
 }

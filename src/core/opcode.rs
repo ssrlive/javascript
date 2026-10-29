@@ -127,6 +127,172 @@ pub enum Opcode {
     SetComputedClassSetter = 121, // define a non-enumerable class setter on a computed property key
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpcodeOperandLayout {
+    None,
+    U8,
+    ConstantIndex,
+    JumpTarget,
+    CallArguments,
+    SetupTry,
+    ClosureCaptures,
+}
+
+impl Opcode {
+    pub(crate) fn operand_layout(self) -> OpcodeOperandLayout {
+        use Opcode as Op;
+        use OpcodeOperandLayout as Layout;
+        match self {
+            Op::Constant
+            | Op::DefineGlobal
+            | Op::GetGlobal
+            | Op::SetGlobal
+            | Op::GetProperty
+            | Op::SetProperty
+            | Op::GetMethod
+            | Op::DeleteProperty
+            | Op::SetSuperProperty
+            | Op::GetSuperProperty
+            | Op::TypeOfGlobal
+            | Op::DeleteGlobal
+            | Op::DefineGlobalConst
+            | Op::InitProperty
+            | Op::DefineGlobalSoft
+            | Op::FreezeTemplate
+            | Op::MarkPropertyNonEnumerable
+            | Op::MarkPropertyReadonly
+            | Op::AssertGlobalDefined => Layout::ConstantIndex,
+            Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue => Layout::JumpTarget,
+            Op::Call | Op::TailCall => Layout::CallArguments,
+            Op::SetupTry => Layout::SetupTry,
+            Op::MakeClosure => Layout::ClosureCaptures,
+            Op::GetLocal
+            | Op::SetLocal
+            | Op::NewArray
+            | Op::NewObject
+            | Op::CollectRest
+            | Op::GetUpvalue
+            | Op::SetUpvalue
+            | Op::NewCall
+            | Op::ThrowIfNotConstructor
+            | Op::BoxLocal
+            | Op::ReboxLocal
+            | Op::ClearLocalCells
+            | Op::DisposeResources
+            | Op::DisposeResourcesAsync
+            | Op::CallSpread
+            | Op::TailCallSpread => Layout::U8,
+            Op::Return
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Pop
+            | Op::LessThan
+            | Op::GreaterThan
+            | Op::Equal
+            | Op::Negate
+            | Op::Not
+            | Op::TypeOf
+            | Op::Mod
+            | Op::LessEqual
+            | Op::GreaterEqual
+            | Op::NotEqual
+            | Op::StrictNotEqual
+            | Op::GetIndex
+            | Op::SetIndex
+            | Op::Increment
+            | Op::Decrement
+            | Op::Throw
+            | Op::TeardownTry
+            | Op::GetThis
+            | Op::GetKeys
+            | Op::NewError
+            | Op::Dup
+            | Op::In
+            | Op::InstanceOf
+            | Op::DeleteIndex
+            | Op::Swap
+            | Op::ToNumber
+            | Op::GetArguments
+            | Op::Pow
+            | Op::BitwiseAnd
+            | Op::BitwiseOr
+            | Op::BitwiseXor
+            | Op::ShiftLeft
+            | Op::ShiftRight
+            | Op::UnsignedShiftRight
+            | Op::BitwiseNot
+            | Op::ArrayPush
+            | Op::ArraySpread
+            | Op::NewCallSpread
+            | Op::ObjectSpread
+            | Op::ArrayHole
+            | Op::GetNewTarget
+            | Op::SetComputedGetter
+            | Op::SetComputedSetter
+            | Op::InitIndex
+            | Op::GeneratorParamInitDone
+            | Op::ToPropertyKey
+            | Op::ObjectSpreadExcluding
+            | Op::ValidateClassHeritage
+            | Op::GetThisSuper
+            | Op::ClearThisTdz
+            | Op::ValidateProtoValue
+            | Op::GetSuperPropertyComputed
+            | Op::ThrowTypeError
+            | Op::Await
+            | Op::EnterFieldInit
+            | Op::LeaveFieldInit
+            | Op::AllocBrand
+            | Op::ResetPrototype
+            | Op::IteratorClose
+            | Op::AssertIterResult
+            | Op::ToNumeric
+            | Op::SetSuperPropertyComputed
+            | Op::DefineComputedMethod
+            | Op::IteratorCloseAbrupt
+            | Op::ThrowIfNullish
+            | Op::InitNamedFnSelf
+            | Op::Yield
+            | Op::YieldDirect
+            | Op::CheckGeneratorReturn
+            | Op::SetGeneratorReturn
+            | Op::ClearGeneratorReturn
+            | Op::SetArguments
+            | Op::SetComputedClassGetter
+            | Op::SetComputedClassSetter => Layout::None,
+        }
+    }
+
+    pub(crate) fn operand_len(self, code: &[u8], operand_ip: usize) -> Result<usize, String> {
+        let fixed_len = match self.operand_layout() {
+            OpcodeOperandLayout::None => return Ok(0),
+            OpcodeOperandLayout::U8 => 1,
+            OpcodeOperandLayout::ConstantIndex => 2,
+            OpcodeOperandLayout::JumpTarget => 4,
+            OpcodeOperandLayout::CallArguments => {
+                let flags = *code.get(operand_ip).ok_or_else(|| format!("truncated {self:?} operand"))?;
+                if flags & 0x3f == 0x3f { 3 } else { 1 }
+            }
+            OpcodeOperandLayout::SetupTry => 7,
+            OpcodeOperandLayout::ClosureCaptures => {
+                let capture_count = *code
+                    .get(operand_ip + 2)
+                    .ok_or_else(|| format!("truncated {self:?} capture count"))? as usize;
+                3 + capture_count * 2
+            }
+        };
+        let operand_end = operand_ip
+            .checked_add(fixed_len)
+            .ok_or_else(|| format!("{self:?} operand length overflow"))?;
+        if operand_end > code.len() {
+            return Err(format!("truncated {self:?} operand"));
+        }
+        Ok(fixed_len)
+    }
+}
+
 impl TryFrom<u8> for Opcode {
     type Error = JSError;
 
@@ -535,86 +701,23 @@ impl<'gc> Chunk<'gc> {
         let len = code.len();
         let mut i = 0;
         while i < len {
-            let opcode = code[i];
+            let opcode = Opcode::try_from(code[i]).unwrap_or_else(|_| panic!("Unknown opcode {} at offset {i}", code[i]));
             i += 1;
-            match opcode {
-                // No operands
-                0
-                | 2..=6
-                | 12..=14
-                | 18..=25
-                | 31..=35
-                | 37..=39
-                | 41..=44
-                | 47..=49
-                | 51
-                | 56..=65
-                | 67..=68
-                | 72
-                | 74..=77
-                | 79..=95
-                | 97..=100
-                | 102..=103
-                | 105..=107
-                | 117
-                | 120..=121 => {}
-
-                // u8 operand, no adjustment needed
-                16 | 17 | 27 | 28 | 50 | 69 | 70 | 96 | 108 | 109 | 110 => {
-                    i += 1;
+            let operand_ip = i;
+            let operand_len = opcode
+                .operand_len(code, operand_ip)
+                .unwrap_or_else(|error| panic!("{error} at bytecode offset {}", operand_ip - 1));
+            match opcode.operand_layout() {
+                OpcodeOperandLayout::ConstantIndex => Self::adjust_u16_at(code, operand_ip, const_offset),
+                OpcodeOperandLayout::JumpTarget => Self::adjust_u32_at(code, operand_ip, ip_offset),
+                OpcodeOperandLayout::SetupTry => {
+                    Self::adjust_u32_at(code, operand_ip, ip_offset);
+                    Self::adjust_u16_at(code, operand_ip + 4, const_offset);
                 }
-
-                // Call (15) / TailCall (118): u8 flags, conditionally +u16 arg count
-                15 | 118 => {
-                    let flags = code[i];
-                    i += 1;
-                    if (flags & 0x3f) == 0x3f {
-                        i += 2; // extended arg count, no adjustment
-                    }
-                }
-
-                // NewCall (46): u8 arg count
-                46 => {
-                    i += 1;
-                }
-
-                // CallSpread (66) / TailCallSpread (119): u8 flags
-                66 | 119 => {
-                    i += 1;
-                }
-
-                // u16 constant index — add const_offset
-                1 | 7 | 8 | 9 | 29 | 30 | 40 | 45 | 52 | 53 | 54 | 55 | 73 | 78 | 101 | 104 | 112 | 113 | 114 => {
-                    Self::adjust_u16_at(code, i, const_offset);
-                    i += 2;
-                }
-
-                // u32 jump target — add ip_offset
-                10 | 11 | 26 => {
-                    Self::adjust_u32_at(code, i, ip_offset);
-                    i += 4;
-                }
-
-                // SetupTry (36): u32 catch_ip (jump) + u16 binding_idx (const) + u8 flags
-                36 => {
-                    Self::adjust_u32_at(code, i, ip_offset);
-                    i += 4;
-                    Self::adjust_u16_at(code, i, const_offset);
-                    i += 2;
-                    i += 1; // flags byte (no adjustment needed)
-                }
-
-                // MakeClosure (71): u16 const_idx + u8 capture_count + count×2 bytes
-                71 => {
-                    Self::adjust_u16_at(code, i, const_offset);
-                    i += 2;
-                    let capture_count = code[i] as usize;
-                    i += 1;
-                    i += capture_count * 2;
-                }
-
-                _ => panic!("Unhandled opcode {opcode} while adjusting merged bytecode at offset {}", i - 1),
+                OpcodeOperandLayout::ClosureCaptures => Self::adjust_u16_at(code, operand_ip, const_offset),
+                OpcodeOperandLayout::None | OpcodeOperandLayout::U8 | OpcodeOperandLayout::CallArguments => {}
             }
+            i = operand_ip + operand_len;
         }
     }
 

@@ -694,8 +694,12 @@ impl<'gc> VM<'gc> {
                         Value::Number(number) => crate::host_api::JitValue::number(*number),
                         _ => unreachable!("JIT-required arguments were checked as numbers"),
                     }));
-                    let (status, result, exception) = crate::host_api::invoke_native_jit(entry.function, &entry.arguments)
-                        .map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
+                    let root_base = self.jit_roots.len();
+                    self.jit_roots.extend(argument_values.iter().cloned());
+                    let outcome = crate::host_api::invoke_native_jit(entry.function, &entry.arguments, root_base);
+                    self.jit_roots.truncate(root_base);
+                    let (status, result, exception) =
+                        outcome.map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
                     let result = match status {
                         crate::host_api::NativeJitStatus::Returned => result
                             .as_number()
@@ -872,8 +876,12 @@ impl<'gc> VM<'gc> {
                             if entry.calls == 2 {
                                 log::debug!("JIT activated for function at bytecode offset {target_ip}");
                             }
-                            let (status, result, exception) = crate::host_api::invoke_native_jit(entry.function, &entry.arguments)
-                                .map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
+                            let root_base = self.jit_roots.len();
+                            self.jit_roots.extend(argument_values.iter().cloned());
+                            let outcome = crate::host_api::invoke_native_jit(entry.function, &entry.arguments, root_base);
+                            self.jit_roots.truncate(root_base);
+                            let (status, result, exception) =
+                                outcome.map_err(|status| crate::raise_eval_error!(format!("JIT returned invalid status {status}")))?;
                             match status {
                                 crate::host_api::NativeJitStatus::Returned => {
                                     let Some(result) = result.as_number() else {

@@ -127,8 +127,10 @@ an error instead of silently falling back; built-ins continue to use their
 runtime implementations.
 
 JIT entries use a tagged call frame and an explicit return/throw/deopt/suspend
-status ABI. The current backend only emits numeric values; bytecode-level
-compilation and GC root/safepoint integration are not implemented yet.
+status ABI. The current backend only emits numeric values. The VM traces values
+in active JIT argument-root frames, and JIT setup decodes bytecode into a
+validated control-flow graph; bytecode-to-machine-code translation and explicit
+GC safepoint callbacks are not implemented yet.
 
 ```bash
 cargo test --features jit --test jit_tests

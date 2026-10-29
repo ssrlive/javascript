@@ -704,6 +704,7 @@ unsafe impl<'gc> Collect<'gc> for VM<'gc> {
         self.regexp_home_proto_temp.trace(cc);
         self.child_realms.trace(cc);
         self.module_locals.trace(cc);
+        self.jit_roots.trace(cc);
         for state in self.loaded_module_states.values() {
             state.trace(cc);
         }
@@ -751,6 +752,7 @@ pub struct VM<'gc> {
     host_modules: crate::host_api::HostModuleRegistry,
     jit_functions: HashMap<usize, JitFunctionEntry>,
     jit_required: bool,
+    jit_roots: Vec<Value<'gc>>,
     stop_requested: bool,
     // Property storage for Function values, keyed by function IP
     fn_props: HashMap<usize, ObjectHandle<'gc>>,
@@ -1172,6 +1174,7 @@ impl<'gc> VM<'gc> {
             host_modules: crate::host_api::HostModuleRegistry::default(),
             jit_functions: HashMap::new(),
             jit_required: false,
+            jit_roots: Vec::new(),
             stop_requested: false,
             fn_props: HashMap::new(),
             fn_realm: HashMap::new(),

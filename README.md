@@ -8,7 +8,7 @@
 [![Test262](https://img.shields.io/github/actions/workflow/status/ssrlive/javascript/test262-all.yml?label=test262-all)](https://github.com/ssrlive/javascript/actions/workflows/test262-all.yml)
 [![Downloads](https://img.shields.io/crates/d/javascript.svg)](https://crates.io/crates/javascript)
 
-A JavaScript engine written in Rust, with a full pipeline from source text to bytecode execution:
+A JavaScript engine written in Rust. Source text is tokenized, parsed, compiled to bytecode, and executed by a bytecode VM:
 
 Source -> Lexer -> Parser -> Compiler -> VM
 
@@ -21,7 +21,7 @@ The repository contains:
 
 ## Current status
 
-This project is actively developed and already passes a large portion of Test262 in practice.
+This project is actively developed. ECMAScript conformance is measured with the included Test262 runner; support is still incomplete.
 
 Important: decorators are implemented for classes, methods, and fields, while support for advanced decorator semantics continues to expand.
 
@@ -38,6 +38,7 @@ This engine is intentionally not a legacy-web-quirk-compatible sloppy-mode runti
 ## Highlights
 
 - Bytecode VM architecture (not AST tree-walking execution)
+- JavaScript execution currently uses an interpreter; there is no JIT compiler
 - ECMAScript parser and compiler implemented in Rust
 - Supports script and module execution
 - Includes async-related features (Promises, async/await, top-level await in module mode)
@@ -53,9 +54,11 @@ Core source layout:
 - src/core/statement.rs: AST node definitions
 - src/core/compiler.rs: AST to bytecode compilation
 - src/core/opcode.rs: opcode definitions
-- src/core/vm.rs and src/core/vm/: VM runtime and builtins
+- src/core/vm.rs and src/core/vm/: VM execution and ECMAScript builtins
 - src/core/value.rs: runtime value model
-- src/core/mod.rs: top-level compile/run pipeline and public core entry points
+- src/runtime/evaluation.rs: script/module evaluation and module-graph setup
+- src/runtime/mod.rs: embeddable runtime API and host integration
+- src/host_api.rs: host-facing values, callbacks, module loader, and module registry
 - src/lib.rs: crate public API re-exports
 - js/main.rs: CLI entry point and REPL loop
 
@@ -66,6 +69,9 @@ Core source layout:
 ```bash
 cargo build --all-features --release
 cargo build --example js-rs --release
+
+# Install the CLI into ~/.cargo/bin
+cargo install --path . --example js-rs
 ```
 
 ### Run CLI
@@ -91,16 +97,18 @@ cargo run -r --example js-rs
 ### CLI options
 
 ```text
-Usage: js [OPTIONS] [FILE]
+Usage: js-rs [OPTIONS] [FILE]
 
 Options:
   -e, --eval <EVAL>
       --timer-wait-ms <TIMER_WAIT_MS>
-      --gc-opcode-budget <GC_OPCODE_BUDGET>
+  -b, --gc-opcode-budget <GC_OPCODE_BUDGET>
       --module
   -h, --help
   -V, --version
 ```
+
+`--timer-wait-ms` is currently accepted for compatibility but is not wired to runtime behavior.
 
 ## REPL behavior
 
@@ -114,7 +122,7 @@ Add dependency:
 
 ```toml
 [dependencies]
-javascript = "0.1.14"
+javascript = "0.3.4"
 ```
 
 Basic script evaluation:
@@ -172,7 +180,7 @@ fn main() {
 }
 ```
 
-`console` is not an ECMAScript intrinsic. The default Cargo feature set enables `console`, so `JsRuntime` supplies it as a host global (writing to stdout); disable it with `--no-default-features` or enable it explicitly with `--features console`. The default `node` feature is an umbrella for the independent `process`, `os`, and `fs` features. It provides the Node-style global `process` and the `process`, `os`, `fs`, and `fs/promises` built-in modules, imported using either bare names or `node:` names. These are engine host APIs, not ECMAScript intrinsics. Filesystem operations currently use the host filesystem synchronously; callback APIs schedule callbacks on the VM microtask queue, while `fs/promises` returns promises. `process.exit()` stops JavaScript execution and records an exit request without terminating the embedding process; embedders can inspect `JsRuntime::process_exit_requested()` and `JsRuntime::process_exit_code()`. Build without the host APIs using `--no-default-features`, or enable just selected modules with `--no-default-features --features process` (likewise `os` or `fs`). Hosts can redirect console output, provide in-memory module sources, own timer scheduling, and settle promises from external work:
+`console` is not an ECMAScript intrinsic. The default Cargo feature set enables `console`, so `JsRuntime` supplies it as a host global (writing to stdout); disable it with `--no-default-features` or enable it explicitly with `--features console`. The default `node` feature is an umbrella for the independent `process`, `os`, and `fs` features. It provides the Node-style global `process` and the `process`, `os`, `fs`, and `fs/promises` built-in modules, imported using either bare names or `node:` names. These are engine host APIs, not ECMAScript intrinsics. Filesystem operations currently run synchronously on the host thread, including operations exposed through callback and promise APIs; those APIs do not perform background I/O. Callback APIs queue their callback for VM execution, while `fs/promises` returns a promise. `process.exit()` stops JavaScript execution and records an exit request without terminating the embedding process; embedders can inspect `JsRuntime::process_exit_requested()` and `JsRuntime::process_exit_code()`. Build without the host APIs using `--no-default-features`, or enable just selected modules with `--no-default-features --features process` (likewise `os` or `fs`). Hosts can redirect console output, provide in-memory module sources, own timer scheduling, and settle promises from external work:
 
 ```rust
 use javascript::{HostHooks, JsRunStatus, JsRuntime, JsValue, ModuleLoader, ModuleSource};
@@ -272,23 +280,35 @@ node ci/runner.js --limit 1 --focus "language/literals/string/S7.8.4_A4.1_T1.js"
 
 Key runner options:
 
-- --focus (required, supports multiple and comma-separated values)
+- --focus (optional; supports multiple and comma-separated values; defaults to the standard Test262 suite directories)
 - --limit
 - --jobs
 - --timeout
+- --cap-multiplier
 - --fail-on-failure
 - --keep-tmp
 
-The runner builds the engine, composes harness files, runs tests, and writes logs to test262-results.log.
+The runner builds the engine, composes harness files, runs tests, and writes logs to `test262-results.log`. If `--focus` is omitted, it selects from `annexB`, `built-ins`, `intl402`, and `language`.
 
 ## Known gaps
 
-As of current implementation:
+As of this version:
 
+- JIT compilation is not implemented; JavaScript runs on the bytecode interpreter
 - decorators: class, method, and field decorators are supported; advanced semantics may still be incomplete
 - full historical sloppy-mode quirks: intentionally not a compatibility target
 
-These are common gaps across many real-world engines/runtimes as well, but they remain spec-visible differences.
+These remain spec-visible differences or limitations.
+
+## Performance comparison
+
+The standalone comparison script runs the same JavaScript workloads under Node.js and `js-rs`. It requires Python 3 and both executables on `PATH`:
+
+```bash
+./benches/compare_engines.py
+```
+
+Use `--runs`, `--warmup`, and `--iterations` to adjust the workload. It reports in-script and end-to-end timings and verifies matching checksums. The in-script timer uses JavaScript `Date.now()` (millisecond resolution), so increase `--iterations` when Node.js measurements are only a few milliseconds. Results are workload-specific and do not represent general performance.
 
 ## Contributing
 
